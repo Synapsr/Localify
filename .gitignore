@@ -1,7 +1,11 @@
 /target
+/src-tauri/target
 .impl
 demo-recording
 .DS_Store
+node_modules
+desktop-ui/dist
+src-tauri/gen
 
 assets/roxy_404.png
 assets/roxy_error.png
