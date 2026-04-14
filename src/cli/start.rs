@@ -9,6 +9,7 @@ use crate::config::DaemonConfig;
 use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
+use crate::infrastructure::port_check::ensure_daemon_ports_available;
 
 pub fn execute(
     foreground: bool,
@@ -20,6 +21,7 @@ pub fn execute(
     let pid_file = PidFile::new(paths.pid_file.clone());
     let service = StartDaemon::new(&pid_file, daemon_config);
     let ready = service.preflight()?;
+    ensure_daemon_ports_available(ready.http_port, ready.https_port, daemon_config.dns_port)?;
 
     if foreground {
         // Run in foreground (blocking) — daemon module lives in binary crate

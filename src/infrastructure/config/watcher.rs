@@ -133,8 +133,8 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"
-[domains."app.roxy"]
-pattern = "app.roxy"
+[domains."app.localify"]
+pattern = "app.localify"
 routes = [{ path = "/", target = "3000" }]
 "#,
         )
@@ -230,8 +230,8 @@ routes = [{ path = "/", target = "3000" }]
         std::fs::write(
             &config_path,
             r#"
-[domains."fixed.roxy"]
-pattern = "fixed.roxy"
+[domains."fixed.localify"]
+pattern = "fixed.localify"
 routes = [{ path = "/", target = "4000" }]
 "#,
         )

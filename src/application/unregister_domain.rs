@@ -101,6 +101,6 @@ mod tests {
         let svc = UnregisterDomain::new(&repo, &certs);
 
         let reg = svc.preview(&exact("myapp.roxy")).unwrap();
-        assert_eq!(reg.domain().as_str(), "myapp.roxy");
+        assert_eq!(reg.domain().as_str(), "myapp.localify");
     }
 }

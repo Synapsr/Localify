@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use crate::branding::BRANDING;
 use crate::config::{DaemonConfig, RoxyPaths};
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
@@ -474,7 +475,8 @@ impl DaemonConnection for NotRunningDaemonConnection {
 
 /// Build an exact `DomainPattern` from a domain name string.
 pub fn exact(name: &str) -> DomainPattern {
-    DomainPattern::from_name(name, false).unwrap()
+    let normalized = name.replace(".roxy", BRANDING.domain_suffix);
+    DomainPattern::from_name(&normalized, false).unwrap()
 }
 
 /// Build a proxy `Route` from a path prefix and port number.

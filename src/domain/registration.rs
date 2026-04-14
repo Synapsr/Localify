@@ -152,10 +152,12 @@ impl DomainRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::branding::BRANDING;
     use crate::domain::ProxyTarget;
 
     fn make_pattern(name: &str) -> DomainPattern {
-        DomainPattern::Exact(DomainName::new(name).unwrap())
+        let normalized = name.replace(".roxy", BRANDING.domain_suffix);
+        DomainPattern::Exact(DomainName::new(normalized).unwrap())
     }
 
     fn proxy_route(path: &str, port: u16) -> Route {
@@ -172,7 +174,7 @@ mod tests {
         let reg = DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
         assert!(!reg.is_https_enabled());
         assert_eq!(reg.routes().len(), 1);
-        assert_eq!(reg.domain().as_str(), "myapp.roxy");
+        assert_eq!(reg.domain().as_str(), "myapp.localify");
     }
 
     #[test]
@@ -297,12 +299,12 @@ mod tests {
     fn display_pattern_delegates_to_domain_pattern() {
         let exact =
             DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
-        assert_eq!(exact.display_pattern(), "myapp.roxy");
+        assert_eq!(exact.display_pattern(), "myapp.localify");
 
         let wildcard = DomainRegistration::new(
-            DomainPattern::Wildcard(DomainName::new("myapp.roxy").unwrap()),
+            DomainPattern::Wildcard(DomainName::new("myapp.localify").unwrap()),
             vec![proxy_route("/", 3000)],
         );
-        assert_eq!(wildcard.display_pattern(), "*.myapp.roxy");
+        assert_eq!(wildcard.display_pattern(), "*.myapp.localify");
     }
 }

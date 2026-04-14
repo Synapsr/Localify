@@ -106,12 +106,12 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         registry.add(Arc::new(FixedProvider {
             name: "test",
-            registrations: vec![test_reg("app.roxy")],
+            registrations: vec![test_reg("app.localify")],
         }));
 
         let result = registry.load().unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].domain().as_str(), "app.roxy");
+        assert_eq!(result[0].domain().as_str(), "app.localify");
     }
 
     #[test]
@@ -119,11 +119,11 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         registry.add(Arc::new(FixedProvider {
             name: "config",
-            registrations: vec![test_reg("app.roxy")],
+            registrations: vec![test_reg("app.localify")],
         }));
         registry.add(Arc::new(FixedProvider {
             name: "docker",
-            registrations: vec![test_reg("web.myproject.roxy")],
+            registrations: vec![test_reg("web.myproject.localify")],
         }));
 
         let result = registry.load().unwrap();
@@ -135,13 +135,13 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         registry.add(Arc::new(FixedProvider {
             name: "config",
-            registrations: vec![test_reg("app.roxy")],
+            registrations: vec![test_reg("app.localify")],
         }));
         registry.add(Arc::new(FailingProvider));
 
         let result = registry.load().unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].domain().as_str(), "app.roxy");
+        assert_eq!(result[0].domain().as_str(), "app.localify");
     }
 
     #[test]

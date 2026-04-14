@@ -4,11 +4,13 @@ use thiserror::Error;
 use crate::application::ports::DnsConfigError;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crate::application::ports::DnsManager;
+use crate::branding::BRANDING;
 
 #[derive(Error, Debug)]
 pub enum DnsError {
     #[error(
-        "Permission denied. DNS configuration requires root privileges.\nRun with: sudo roxy install"
+        "Permission denied. DNS configuration requires root privileges.\nRun with: sudo {} install",
+        BRANDING.cli_command()
     )]
     PermissionDenied,
 
@@ -33,7 +35,7 @@ pub enum DnsError {
 }
 
 pub trait DnsService {
-    /// Configure wildcard DNS for *.roxy → 127.0.0.1
+    /// Configure wildcard DNS for the configured local suffix → 127.0.0.1
     /// The port parameter specifies which port the DNS server listens on
     fn setup(&self, port: u16) -> Result<(), DnsError>;
 

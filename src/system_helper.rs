@@ -9,13 +9,15 @@ use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
-    AddRouteRequest, AppConfigDto, AvailablePortDto, BootstrapDto, ConfigUpdateRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InstallResultDto,
-    LogsDto, LogsRequest, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
-    RegistrationMutationDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto,
+    AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
+    ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
+    DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateProjectRequest,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,9 +29,13 @@ pub enum HelperCommand {
     UpdateConfig { request: ConfigUpdateRequest },
     GetDaemonStatus,
     ListDomains,
+    ListProjects,
     InstallRoxy,
     GetUninstallPreview,
     UninstallRoxy,
+    CreateProject { request: CreateProjectRequest },
+    UpdateProject { request: UpdateProjectRequest },
+    AssignDomainProject { request: AssignDomainProjectRequest },
     RegisterDomain { request: RegisterDomainRequest },
     UnregisterDomain { request: DomainPatternRequest },
     AddRoute { request: AddRouteRequest },
@@ -86,6 +92,10 @@ impl SystemHelperClient {
         self.send(HelperCommand::ListDomains)
     }
 
+    pub fn list_projects(&self) -> Result<Vec<ProjectInfoDto>> {
+        self.send(HelperCommand::ListProjects)
+    }
+
     pub fn install_roxy(&self) -> Result<InstallResultDto> {
         self.send(HelperCommand::InstallRoxy)
     }
@@ -96,6 +106,21 @@ impl SystemHelperClient {
 
     pub fn uninstall_roxy(&self) -> Result<UninstallResultDto> {
         self.send(HelperCommand::UninstallRoxy)
+    }
+
+    pub fn create_project(&self, request: CreateProjectRequest) -> Result<ProjectInfoDto> {
+        self.send(HelperCommand::CreateProject { request })
+    }
+
+    pub fn update_project(&self, request: UpdateProjectRequest) -> Result<ProjectInfoDto> {
+        self.send(HelperCommand::UpdateProject { request })
+    }
+
+    pub fn assign_domain_project(
+        &self,
+        request: AssignDomainProjectRequest,
+    ) -> Result<DomainInfoDto> {
+        self.send(HelperCommand::AssignDomainProject { request })
     }
 
     pub fn register_domain(
@@ -154,7 +179,8 @@ impl SystemHelperClient {
     {
         let mut stream = UnixStream::connect(&self.socket_path).with_context(|| {
             format!(
-                "Failed to connect to the Roxy system helper at {}",
+                "Failed to connect to the {} system helper at {}",
+                BRANDING.app_name,
                 self.socket_path.display()
             )
         })?;
@@ -172,9 +198,12 @@ impl SystemHelperClient {
         if !response.ok {
             bail!(
                 "{}",
-                response
-                    .error
-                    .unwrap_or_else(|| "Roxy system helper failed without an error message.".into())
+                response.error.unwrap_or_else(|| {
+                    format!(
+                        "{} system helper failed without an error message.",
+                        BRANDING.app_name
+                    )
+                })
             );
         }
 
@@ -184,7 +213,7 @@ impl SystemHelperClient {
 }
 
 pub fn helper_socket_path(uid: u32) -> PathBuf {
-    PathBuf::from(format!("/var/run/roxy-helper-{uid}.sock"))
+    BRANDING.helper_socket_path(uid)
 }
 
 pub fn current_uid() -> Result<u32> {
@@ -236,8 +265,10 @@ fn handle_connection(stream: UnixStream, api: &DesktopApi) -> Result<()> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
-    let command = serde_json::from_str::<HelperCommand>(&line)
-        .context("Failed to parse Roxy helper command")?;
+    let command = serde_json::from_str::<HelperCommand>(&line).context(format!(
+        "Failed to parse {} helper command",
+        BRANDING.app_name
+    ))?;
     let response = match dispatch_command(api, command) {
         Ok(data) => HelperResponse {
             ok: true,
@@ -270,11 +301,23 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
             serde_json::to_value(api.daemon_status()?).map_err(Into::into)
         }
         HelperCommand::ListDomains => serde_json::to_value(api.list_domains()?).map_err(Into::into),
+        HelperCommand::ListProjects => {
+            serde_json::to_value(api.list_projects()?).map_err(Into::into)
+        }
         HelperCommand::InstallRoxy => serde_json::to_value(api.install()?).map_err(Into::into),
         HelperCommand::GetUninstallPreview => {
             serde_json::to_value(api.uninstall_preview()?).map_err(Into::into)
         }
         HelperCommand::UninstallRoxy => serde_json::to_value(api.uninstall()?).map_err(Into::into),
+        HelperCommand::CreateProject { request } => {
+            serde_json::to_value(api.create_project(request)?).map_err(Into::into)
+        }
+        HelperCommand::UpdateProject { request } => {
+            serde_json::to_value(api.update_project(request)?).map_err(Into::into)
+        }
+        HelperCommand::AssignDomainProject { request } => {
+            serde_json::to_value(api.assign_domain_project(request)?).map_err(Into::into)
+        }
         HelperCommand::RegisterDomain { request } => {
             serde_json::to_value(api.register_domain(request)?).map_err(Into::into)
         }

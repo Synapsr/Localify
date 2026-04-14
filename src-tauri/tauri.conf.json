@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Roxy Desktop",
+  "productName": "Localify Desktop",
   "version": "0.1.0",
-  "identifier": "com.roxy.desktop",
+  "identifier": "com.localify.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../desktop-ui/dist"
   },
@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "Roxy Desktop",
+        "title": "Localify Desktop",
         "width": 1280,
         "height": 860,
         "minWidth": 1100,

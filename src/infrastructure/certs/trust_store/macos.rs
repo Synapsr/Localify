@@ -3,8 +3,7 @@ use std::process::Command;
 
 use super::super::CertError;
 use super::TrustStore;
-
-const ROXY_CA_NAME: &str = "Roxy Local Development CA";
+use crate::branding::BRANDING;
 
 /// macOS Keychain trust store implementation
 pub struct MacOsTrustStore;
@@ -86,9 +85,7 @@ impl TrustStore for MacOsTrustStore {
                     return Err(CertError::PermissionDenied);
                 }
 
-                if !stderr.contains("could not be found")
-                    && !stderr.contains("The specified item could not be found")
-                {
+                if !is_missing_macos_certificate_error(&stderr) {
                     return Err(CertError::TrustStoreError(format!(
                         "Failed to delete CA certificate: {}",
                         stderr
@@ -113,12 +110,18 @@ impl Default for MacOsTrustStore {
     }
 }
 
+fn is_missing_macos_certificate_error(message: &str) -> bool {
+    message.contains("could not be found")
+        || message.contains("The specified item could not be found")
+        || message.contains("Unable to delete certificate matching")
+}
+
 fn find_keychain_hashes() -> Result<Vec<String>, CertError> {
     let find_output = Command::new("security")
         .args([
             "find-certificate",
             "-c",
-            ROXY_CA_NAME,
+            BRANDING.ca_name().as_str(),
             "-a",
             "-Z",
             "/Library/Keychains/System.keychain",
@@ -216,7 +219,8 @@ fn normalize_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MacOsTrustStore, parse_openssl_fingerprint, parse_security_find_certificate_hashes,
+        MacOsTrustStore, is_missing_macos_certificate_error, parse_openssl_fingerprint,
+        parse_security_find_certificate_hashes,
     };
 
     #[test]
@@ -255,5 +259,12 @@ SHA-1 hash: AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:00:11:22:33
             parse_openssl_fingerprint(output).unwrap(),
             "AABBCCDDEEFF0011223344556677889900112233"
         );
+    }
+
+    #[test]
+    fn missing_delete_message_is_treated_as_not_found() {
+        assert!(is_missing_macos_certificate_error(
+            "security: SecKeychainSearchCopyNext: Unable to delete certificate matching \"Localify Local Development CA\""
+        ));
     }
 }

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::branding::BRANDING;
 use crate::domain::DomainPattern;
 
 pub mod ca;
@@ -13,15 +14,15 @@ pub use service::CertificateService;
 
 /// Filename prefix for wildcard certificates stored on disk.
 ///
-/// Uses underscores so it can't collide with a valid `.roxy` domain
+/// Uses underscores so it can't collide with a valid local domain
 /// (underscores are rejected by `DomainName` validation).
 pub const WILDCARD_CERT_PREFIX: &str = "__wildcard__.";
 
 /// Certificate file stem used for on-disk certificate naming.
 ///
-/// Exact domains use the domain directly (`myapp.roxy`).
+/// Exact domains use the domain directly (`myapp.localify`).
 /// Wildcard domains use the `__wildcard__.` prefix
-/// (`__wildcard__.myapp.roxy`).
+/// (`__wildcard__.myapp.localify`).
 pub fn cert_name(pattern: &DomainPattern) -> String {
     match pattern {
         DomainPattern::Exact(d) => d.as_str().to_string(),
@@ -58,7 +59,8 @@ pub enum CertError {
     TrustStoreError(String),
 
     #[error(
-        "Permission denied. Trust store modification requires root privileges.\nRun with: sudo roxy register <domain> ..."
+        "Permission denied. Trust store modification requires root privileges.\nRun with: sudo {} register <domain> ...",
+        BRANDING.cli_command()
     )]
     PermissionDenied,
 }
@@ -70,15 +72,15 @@ mod tests {
 
     #[test]
     fn exact_cert_name() {
-        let name = DomainName::new("myapp.roxy").unwrap();
+        let name = DomainName::new("myapp.localify").unwrap();
         let pattern = DomainPattern::Exact(name);
-        assert_eq!(cert_name(&pattern), "myapp.roxy");
+        assert_eq!(cert_name(&pattern), "myapp.localify");
     }
 
     #[test]
     fn wildcard_cert_name() {
-        let name = DomainName::new("myapp.roxy").unwrap();
+        let name = DomainName::new("myapp.localify").unwrap();
         let pattern = DomainPattern::Wildcard(name);
-        assert_eq!(cert_name(&pattern), "__wildcard__.myapp.roxy");
+        assert_eq!(cert_name(&pattern), "__wildcard__.myapp.localify");
     }
 }

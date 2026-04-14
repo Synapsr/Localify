@@ -3,7 +3,7 @@
 ## Task Completion Requirements
 
 - **Rust**: `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` must pass.
-- **Desktop UI**: `npm run typecheck` must pass for any `desktop-ui/` change.
+- **Desktop UI**: `pnpm run typecheck` must pass for any `desktop-ui/` change.
 
 ## Project Snapshot
 

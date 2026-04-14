@@ -2,9 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DaemonConfig, DockerConfig, RoxyPaths};
 
+fn default_project_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentDto {
+    pub app_name: String,
+    pub desktop_name: String,
     pub config_path: String,
     pub binary_path: String,
     pub binary_exists: bool,
@@ -138,8 +144,29 @@ pub struct RegistrationDto {
 #[serde(rename_all = "camelCase")]
 pub struct DomainInfoDto {
     pub registration: RegistrationDto,
+    #[serde(default)]
     pub has_cert: bool,
+    #[serde(default)]
     pub cert_trusted: Option<bool>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default = "default_project_enabled")]
+    pub project_enabled: bool,
+    #[serde(default)]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInfoDto {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_project_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub domain_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +187,10 @@ pub struct BootstrapDto {
     pub environment: EnvironmentDto,
     pub config: AppConfigDto,
     pub daemon: DaemonStatusDto,
+    #[serde(default)]
     pub domains: Vec<DomainInfoDto>,
+    #[serde(default)]
+    pub projects: Vec<ProjectInfoDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +227,29 @@ pub struct RegisterDomainRequest {
     pub domain: String,
     pub wildcard: bool,
     pub routes: Vec<String>,
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignDomainProjectRequest {
+    pub domain: String,
+    pub wildcard: bool,
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProjectRequest {
+    pub id: String,
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::branding::BRANDING;
+
 fn default_http_port() -> u16 {
     80
 }
@@ -78,23 +80,23 @@ impl DaemonConfig {
 }
 
 fn default_data_dir() -> PathBuf {
-    PathBuf::from("/etc/roxy")
+    BRANDING.config_dir()
 }
 
 fn default_pid_file() -> PathBuf {
-    PathBuf::from("/var/run/roxy.pid")
+    BRANDING.pid_file()
 }
 
 fn default_log_file() -> PathBuf {
-    PathBuf::from("/var/log/roxy/roxy.log")
+    BRANDING.log_file()
 }
 
 fn default_certs_dir() -> PathBuf {
-    PathBuf::from("/etc/roxy/certs")
+    BRANDING.certs_dir()
 }
 
 fn default_socket_path() -> PathBuf {
-    PathBuf::from("/etc/roxy/roxy.sock")
+    BRANDING.socket_path()
 }
 
 /// Docker integration configuration.

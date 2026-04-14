@@ -13,6 +13,7 @@ type StepState = "idle" | "running" | "done" | "error";
 export function Onboarding({ bootstrap }: OnboardingProps) {
   const install = useInstall();
   const startDaemon = useStartDaemon();
+  const appName = bootstrap.environment.appName;
 
   const [installState, setInstallState] = useState<StepState>("idle");
   const [startState, setStartState] = useState<StepState>(
@@ -52,10 +53,10 @@ export function Onboarding({ bootstrap }: OnboardingProps) {
       <div className="w-full max-w-xl space-y-10">
         <header className="space-y-3 text-center">
           <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-[--color-ink] text-[--color-bg] font-mono text-sm font-bold">
-            R
+            {appName.charAt(0).toUpperCase()}
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">
-            Welcome to Roxy
+            Welcome to {appName}
           </h1>
           <p className="mx-auto max-w-md text-sm text-[--color-muted]">
             A local development proxy with custom{" "}
@@ -70,7 +71,7 @@ export function Onboarding({ bootstrap }: OnboardingProps) {
           <StepCard
             index={1}
             title="Install system trust"
-            description="Generate a local certificate authority, trust it for this macOS account and its browsers, configure DNS, and install the privileged Roxy helper. macOS asks for administrator approval once, then the desktop app reuses that helper."
+            description={`Generate a local certificate authority, trust it for this macOS account and its browsers, configure DNS, and install the privileged ${appName} helper. macOS asks for administrator approval once, then the desktop app reuses that helper.`}
             state={installState}
             message={installMessage}
             action={

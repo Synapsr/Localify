@@ -1,12 +1,12 @@
 [package]
-name = "roxy-desktop"
+name = "localify-desktop"
 version = "0.1.0"
-description = "Desktop shell for Roxy"
-authors = ["Roxy contributors"]
+description = "Desktop shell for Localify"
+authors = ["Localify contributors"]
 edition = "2024"
 
 [lib]
-name = "roxy_desktop_lib"
+name = "localify_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

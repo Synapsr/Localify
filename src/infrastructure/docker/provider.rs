@@ -79,7 +79,7 @@ mod tests {
 
         // Simulate watcher updating state
         {
-            let name = DomainName::new("web.myproject.roxy").unwrap();
+            let name = DomainName::new("web.myproject.localify").unwrap();
             let pattern = DomainPattern::Exact(name);
             let routes = vec![Route::parse("/=3000").unwrap()];
             let reg = DomainRegistration::new(pattern, routes);
@@ -91,6 +91,6 @@ mod tests {
 
         let result = provider.load().unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].domain().as_str(), "web.myproject.roxy");
+        assert_eq!(result[0].domain().as_str(), "web.myproject.localify");
     }
 }

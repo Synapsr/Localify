@@ -1,5 +1,6 @@
 use super::{DnsError, DnsService, map_dns_error};
 use crate::application::ports::{DnsConfigError, DnsManager};
+use crate::branding::BRANDING;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -7,15 +8,14 @@ use std::thread;
 use std::time::Duration;
 
 const RESOLVED_DROP_IN_DIR: &str = "/etc/systemd/resolved.conf.d";
-const RESOLVED_DROP_IN_FILE: &str = "/etc/systemd/resolved.conf.d/roxy.conf";
 
 /// Linux DNS service using a systemd-resolved drop-in configuration.
 ///
-/// Configures systemd-resolved to route `.roxy` DNS queries to the Roxy DNS
-/// server — the Linux equivalent of macOS's `/etc/resolver/roxy`.
+/// Configures systemd-resolved to route the configured local suffix to the DNS
+/// server — the Linux equivalent of macOS's `/etc/resolver/<suffix>`.
 ///
-/// The `~roxy` routing domain ensures only `.roxy` lookups use this DNS server;
-/// all other queries continue to use the normal per-link DNS servers.
+/// The `~<suffix>` routing domain ensures only matching lookups use this DNS
+/// server; all other queries continue to use the normal per-link DNS servers.
 pub struct LinuxDnsService;
 
 impl LinuxDnsService {
@@ -32,6 +32,9 @@ impl Default for LinuxDnsService {
 
 impl DnsService for LinuxDnsService {
     fn setup(&self, port: u16) -> Result<(), DnsError> {
+        let drop_in_file = BRANDING.resolved_drop_in_file();
+        let routing_domain = BRANDING.domain_label();
+
         // Ensure the drop-in directory exists
         let dir = Path::new(RESOLVED_DROP_IN_DIR);
         if !dir.exists() {
@@ -47,21 +50,22 @@ impl DnsService for LinuxDnsService {
             })?;
         }
 
-        // Write the drop-in config. The `~roxy` routing domain tells
-        // systemd-resolved to send only `.roxy` queries to this DNS server.
+        // Write the drop-in config. The routing domain tells systemd-resolved
+        // to send only matching suffix queries to this DNS server.
         let content = format!(
-            "# Managed by Roxy — do not edit.\n\
+            "# Managed by {} — do not edit.\n\
              [Resolve]\n\
              DNS=127.0.0.1:{port}\n\
-             Domains=~roxy\n"
+             Domains=~{routing_domain}\n",
+            BRANDING.app_name
         );
 
-        fs::write(RESOLVED_DROP_IN_FILE, content).map_err(|e| {
+        fs::write(&drop_in_file, content).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 DnsError::PermissionDenied
             } else {
                 DnsError::WriteError {
-                    path: RESOLVED_DROP_IN_FILE.into(),
+                    path: drop_in_file.clone(),
                     source: e,
                 }
             }
@@ -74,7 +78,8 @@ impl DnsService for LinuxDnsService {
     }
 
     fn cleanup(&self) -> Result<(), DnsError> {
-        let path = Path::new(RESOLVED_DROP_IN_FILE);
+        let drop_in_file = BRANDING.resolved_drop_in_file();
+        let path = drop_in_file.as_path();
         if path.exists() {
             fs::remove_file(path).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -94,10 +99,11 @@ impl DnsService for LinuxDnsService {
 
     fn validate(&self) -> Result<(), DnsError> {
         // Verify the drop-in file exists
-        if !Path::new(RESOLVED_DROP_IN_FILE).exists() {
-            return Err(DnsError::ValidationFailed(
-                "DNS drop-in file does not exist. Run 'sudo roxy install' to set up DNS.".into(),
-            ));
+        if !BRANDING.resolved_drop_in_file().exists() {
+            return Err(DnsError::ValidationFailed(format!(
+                "DNS drop-in file does not exist. Run 'sudo {} install' to set up DNS.",
+                BRANDING.cli_command()
+            )));
         }
 
         // Check that systemd-resolved has picked up the config.
@@ -118,7 +124,7 @@ impl DnsService for LinuxDnsService {
 
                 // Look for our DNS server and routing domain in the global section
                 let has_dns = stdout.contains("127.0.0.1");
-                let has_domain = stdout.contains("~roxy");
+                let has_domain = stdout.contains(&format!("~{}", BRANDING.domain_label()));
 
                 if has_dns && has_domain {
                     return Ok(());
@@ -130,15 +136,16 @@ impl DnsService for LinuxDnsService {
             }
         }
 
-        Err(DnsError::ValidationFailed(
-            "DNS routing for .roxy not found in resolvectl output after multiple attempts.\n\
-             Try running 'sudo roxy install' again."
-                .into(),
-        ))
+        Err(DnsError::ValidationFailed(format!(
+            "DNS routing for {} not found in resolvectl output after multiple attempts.\n\
+                 Try running 'sudo {} install' again.",
+            BRANDING.domain_suffix,
+            BRANDING.cli_command()
+        )))
     }
 
     fn is_configured(&self) -> bool {
-        Path::new(RESOLVED_DROP_IN_FILE).exists()
+        BRANDING.resolved_drop_in_file().exists()
     }
 }
 
@@ -188,15 +195,17 @@ mod tests {
     #[test]
     fn test_dropin_content_format() {
         let port = 1053;
+        let routing_domain = BRANDING.domain_label();
         let content = format!(
-            "# Managed by Roxy — do not edit.\n\
+            "# Managed by {} — do not edit.\n\
              [Resolve]\n\
              DNS=127.0.0.1:{port}\n\
-             Domains=~roxy\n"
+             Domains=~{routing_domain}\n",
+            BRANDING.app_name
         );
         assert!(content.contains("[Resolve]"));
         assert!(content.contains("DNS=127.0.0.1:1053"));
-        assert!(content.contains("Domains=~roxy"));
+        assert!(content.contains(&format!("Domains=~{routing_domain}")));
         assert!(content.starts_with('#'));
     }
 }

@@ -9,16 +9,20 @@ import { createDesktopClient } from "./tauri-client";
 import { queryKeys } from "./query-keys";
 import type {
   AddRouteRequest,
+  AssignDomainProjectRequest,
   BootstrapDto,
   ConfigUpdateRequest,
+  CreateProjectRequest,
   DaemonStatusDto,
   DomainInfoDto,
   DomainPatternRequest,
   LogsDto,
   LogsRequest,
+  ProjectInfoDto,
   RegisterDomainRequest,
   RemoveRouteRequest,
   StartDaemonRequest,
+  UpdateProjectRequest,
 } from "../types/roxy";
 
 const client = createDesktopClient();
@@ -46,6 +50,13 @@ export function useDomains() {
   return useQuery<DomainInfoDto[], Error>({
     queryKey: queryKeys.domains,
     queryFn: () => client.listDomains(),
+  });
+}
+
+export function useProjects() {
+  return useQuery<ProjectInfoDto[], Error>({
+    queryKey: queryKeys.projects,
+    queryFn: () => client.listProjects(),
   });
 }
 
@@ -78,6 +89,7 @@ function useInvalidateAll() {
     qc.invalidateQueries({ queryKey: queryKeys.bootstrap });
     qc.invalidateQueries({ queryKey: queryKeys.daemonStatus });
     qc.invalidateQueries({ queryKey: queryKeys.domains });
+    qc.invalidateQueries({ queryKey: queryKeys.projects });
     qc.invalidateQueries({ queryKey: queryKeys.config });
   };
 }
@@ -129,6 +141,31 @@ export function useRegisterDomain() {
   return useMutation({
     mutationFn: (request: RegisterDomainRequest) =>
       client.registerDomain(request),
+    onSuccess: invalidate,
+  });
+}
+
+export function useCreateProject() {
+  const invalidate = useInvalidateAll();
+  return useMutation({
+    mutationFn: (request: CreateProjectRequest) => client.createProject(request),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateProject() {
+  const invalidate = useInvalidateAll();
+  return useMutation({
+    mutationFn: (request: UpdateProjectRequest) => client.updateProject(request),
+    onSuccess: invalidate,
+  });
+}
+
+export function useAssignDomainProject() {
+  const invalidate = useInvalidateAll();
+  return useMutation({
+    mutationFn: (request: AssignDomainProjectRequest) =>
+      client.assignDomainProject(request),
     onSuccess: invalidate,
   });
 }

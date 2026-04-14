@@ -7,7 +7,7 @@ pub use crate::config::{DaemonConfig, DockerConfig, RoxyPaths};
 use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository, RepositoryError};
 use crate::domain::value_objects::{RouteTarget, RouteTargetError};
 use crate::domain::{DomainPattern, DomainRegistration};
-use dto::RegistrationDto;
+use dto::{ProjectDto, RegistrationDto};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -38,6 +38,36 @@ pub enum ConfigError {
 
     #[error("Invalid domain '{0}': {1}")]
     InvalidDomain(String, String),
+
+    #[allow(dead_code)]
+    #[error("Project already exists: {0}")]
+    ProjectExists(String),
+
+    #[error("Project not found: {0}")]
+    ProjectNotFound(String),
+
+    #[error("Project is still referenced by registered domains: {0}")]
+    ProjectInUse(String),
+
+    #[error("Invalid project '{0}': {1}")]
+    InvalidProject(String, String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ConfiguredDomain {
+    pub registration: DomainRegistration,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub project_enabled: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ConfiguredProject {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -53,6 +83,9 @@ pub struct Config {
 
     #[serde(default)]
     domains: HashMap<String, RegistrationDto>,
+
+    #[serde(default)]
+    projects: HashMap<String, ProjectDto>,
 }
 
 impl Config {
@@ -60,15 +93,73 @@ impl Config {
     pub fn registrations(&self) -> Vec<DomainRegistration> {
         self.domains
             .values()
+            .filter(|dto| self.project_is_enabled(dto.project.as_deref()))
             .cloned()
             .map(DomainRegistration::from)
             .collect()
     }
 
+    #[allow(dead_code)]
+    pub fn configured_domains(&self) -> Vec<ConfiguredDomain> {
+        self.domains
+            .values()
+            .cloned()
+            .map(|dto| {
+                let project_name = dto
+                    .project
+                    .as_ref()
+                    .and_then(|project_id| self.projects.get(project_id))
+                    .map(|project| project.name.clone());
+                let project_enabled = self.project_is_enabled(dto.project.as_deref());
+
+                ConfiguredDomain {
+                    registration: DomainRegistration::from(dto.clone()),
+                    project_id: dto.project,
+                    project_name,
+                    project_enabled,
+                }
+            })
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn configured_projects(&self) -> Vec<ConfiguredProject> {
+        let mut projects = self
+            .projects
+            .iter()
+            .map(|(id, project)| ConfiguredProject {
+                id: id.clone(),
+                name: project.name.clone(),
+                enabled: project.enabled,
+            })
+            .collect::<Vec<_>>();
+        projects.sort_by(|left, right| left.name.cmp(&right.name));
+        projects
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.daemon.validate().map_err(ConfigError::InvalidConfig)?;
 
+        for (project_id, project) in &self.projects {
+            let trimmed_name = project.name.trim();
+            if trimmed_name.is_empty() {
+                return Err(ConfigError::InvalidProject(
+                    project_id.clone(),
+                    "Project name cannot be empty".into(),
+                ));
+            }
+        }
+
         for (name, dto) in &self.domains {
+            if let Some(project_id) = &dto.project
+                && !self.projects.contains_key(project_id)
+            {
+                return Err(ConfigError::InvalidDomain(
+                    name.clone(),
+                    format!("Unknown project '{project_id}'"),
+                ));
+            }
+
             let registration = DomainRegistration::from(dto.clone());
             // Structural validation (invariants enforced at construction)
             registration
@@ -83,6 +174,13 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    fn project_is_enabled(&self, project_id: Option<&str>) -> bool {
+        project_id
+            .and_then(|id| self.projects.get(id))
+            .map(|project| project.enabled)
+            .unwrap_or(true)
     }
 }
 
@@ -139,6 +237,14 @@ impl ConfigStore {
     }
 
     pub fn add_domain(&self, registration: DomainRegistration) -> Result<(), ConfigError> {
+        self.add_domain_with_project(registration, None)
+    }
+
+    pub fn add_domain_with_project(
+        &self,
+        registration: DomainRegistration,
+        project_id: Option<String>,
+    ) -> Result<(), ConfigError> {
         let mut config = self.load()?;
 
         let key = registration.display_pattern();
@@ -146,7 +252,15 @@ impl ConfigStore {
             return Err(ConfigError::DomainExists(key));
         }
 
-        config.domains.insert(key, registration.into());
+        if let Some(project_id) = project_id.as_ref()
+            && !config.projects.contains_key(project_id)
+        {
+            return Err(ConfigError::ProjectNotFound(project_id.clone()));
+        }
+
+        let mut dto = RegistrationDto::from(registration);
+        dto.project = project_id;
+        config.domains.insert(key, dto);
         self.save(&config)
     }
 
@@ -180,6 +294,14 @@ impl ConfigStore {
     }
 
     pub fn update_domain(&self, registration: DomainRegistration) -> Result<(), ConfigError> {
+        self.update_domain_with_project(registration, None)
+    }
+
+    pub fn update_domain_with_project(
+        &self,
+        registration: DomainRegistration,
+        project_id: Option<String>,
+    ) -> Result<(), ConfigError> {
         let mut config = self.load()?;
 
         let key = registration.display_pattern();
@@ -187,7 +309,18 @@ impl ConfigStore {
             return Err(ConfigError::DomainNotFound(key));
         }
 
-        config.domains.insert(key, registration.into());
+        let project_id =
+            project_id.or_else(|| config.domains.get(&key).and_then(|dto| dto.project.clone()));
+
+        if let Some(project_id) = project_id.as_ref()
+            && !config.projects.contains_key(project_id)
+        {
+            return Err(ConfigError::ProjectNotFound(project_id.clone()));
+        }
+
+        let mut dto = RegistrationDto::from(registration);
+        dto.project = project_id;
+        config.domains.insert(key, dto);
         self.save(&config)
     }
 
@@ -204,6 +337,136 @@ impl ConfigStore {
             .map(DomainRegistration::from)
             .collect())
     }
+
+    #[allow(dead_code)]
+    pub fn list_configured_domains(&self) -> Result<Vec<ConfiguredDomain>, ConfigError> {
+        Ok(self.load()?.configured_domains())
+    }
+
+    #[allow(dead_code)]
+    pub fn list_projects(&self) -> Result<Vec<ConfiguredProject>, ConfigError> {
+        Ok(self.load()?.configured_projects())
+    }
+
+    #[allow(dead_code)]
+    pub fn create_project(&self, name: &str) -> Result<ConfiguredProject, ConfigError> {
+        let mut config = self.load()?;
+        let project_name = name.trim();
+        if project_name.is_empty() {
+            return Err(ConfigError::InvalidProject(
+                "new".into(),
+                "Project name cannot be empty".into(),
+            ));
+        }
+
+        let project_id = normalize_project_id(project_name)?;
+        if config.projects.contains_key(&project_id) {
+            return Err(ConfigError::ProjectExists(project_id));
+        }
+
+        config.projects.insert(
+            project_id.clone(),
+            ProjectDto {
+                name: project_name.to_string(),
+                enabled: true,
+            },
+        );
+        self.save(&config)?;
+
+        Ok(ConfiguredProject {
+            id: project_id,
+            name: project_name.to_string(),
+            enabled: true,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn update_project(
+        &self,
+        project_id: &str,
+        name: Option<String>,
+        enabled: Option<bool>,
+    ) -> Result<ConfiguredProject, ConfigError> {
+        let mut config = self.load()?;
+        let project = config
+            .projects
+            .get_mut(project_id)
+            .ok_or_else(|| ConfigError::ProjectNotFound(project_id.to_string()))?;
+
+        if let Some(name) = name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::InvalidProject(
+                    project_id.to_string(),
+                    "Project name cannot be empty".into(),
+                ));
+            }
+            project.name = trimmed.to_string();
+        }
+
+        if let Some(enabled) = enabled {
+            project.enabled = enabled;
+        }
+
+        let result = ConfiguredProject {
+            id: project_id.to_string(),
+            name: project.name.clone(),
+            enabled: project.enabled,
+        };
+        self.save(&config)?;
+        Ok(result)
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_project(&self, project_id: &str) -> Result<(), ConfigError> {
+        let mut config = self.load()?;
+
+        if !config.projects.contains_key(project_id) {
+            return Err(ConfigError::ProjectNotFound(project_id.to_string()));
+        }
+
+        if config
+            .domains
+            .values()
+            .any(|domain| domain.project.as_deref() == Some(project_id))
+        {
+            return Err(ConfigError::ProjectInUse(project_id.to_string()));
+        }
+
+        config.projects.remove(project_id);
+        self.save(&config)
+    }
+}
+
+#[allow(dead_code)]
+fn normalize_project_id(name: &str) -> Result<String, ConfigError> {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+
+    for ch in name.trim().chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_was_dash = false;
+            continue;
+        }
+
+        if slug.is_empty() || previous_was_dash {
+            continue;
+        }
+
+        slug.push('-');
+        previous_was_dash = true;
+    }
+
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        return Err(ConfigError::InvalidProject(
+            "new".into(),
+            "Project name must contain letters or numbers".into(),
+        ));
+    }
+
+    Ok(slug)
 }
 
 fn map_config_error(e: ConfigError) -> ConfigLoadError {
@@ -266,6 +529,21 @@ impl DomainRepository for ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::branding::BRANDING;
+    use crate::domain::Route;
+
+    fn temp_store() -> (tempfile::TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.toml"));
+        (dir, store)
+    }
+
+    fn proxy_registration(domain: &str, port: u16) -> DomainRegistration {
+        let normalized = domain.replace(".roxy", BRANDING.domain_suffix);
+        let pattern = DomainPattern::from_name(&normalized, false).unwrap();
+        let route = Route::parse(&format!("/={port}")).unwrap();
+        DomainRegistration::new(pattern, vec![route])
+    }
 
     // --- DaemonConfig::validate ---
 
@@ -388,5 +666,111 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn create_project_persists_slug_and_enabled_state() {
+        let (_dir, store) = temp_store();
+
+        let project = store.create_project("Test 1").unwrap();
+
+        assert_eq!(project.id, "test-1");
+        assert_eq!(project.name, "Test 1");
+        assert!(project.enabled);
+
+        let persisted = store.list_projects().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id, "test-1");
+        assert!(persisted[0].enabled);
+    }
+
+    #[test]
+    fn create_project_rejects_duplicate_normalized_slug() {
+        let (_dir, store) = temp_store();
+        store.create_project("Test 1").unwrap();
+
+        let error = store.create_project("test-1").unwrap_err();
+
+        assert!(matches!(error, ConfigError::ProjectExists(id) if id == "test-1"));
+    }
+
+    #[test]
+    fn registrations_skip_domains_from_disabled_projects() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Demo").unwrap();
+
+        store
+            .add_domain_with_project(
+                proxy_registration("app.roxy", 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain(proxy_registration("plain.roxy", 4000))
+            .unwrap();
+
+        store
+            .update_project(&project.id, None, Some(false))
+            .unwrap();
+
+        let registrations = store.load().unwrap().registrations();
+        let patterns = registrations
+            .into_iter()
+            .map(|registration| registration.display_pattern())
+            .collect::<Vec<_>>();
+
+        assert_eq!(patterns, vec![format!("plain{}", BRANDING.domain_suffix)]);
+    }
+
+    #[test]
+    fn configured_domains_include_project_metadata() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Client App").unwrap();
+
+        store
+            .add_domain_with_project(
+                proxy_registration("app.roxy", 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let configured_domains = store.list_configured_domains().unwrap();
+
+        assert_eq!(configured_domains.len(), 1);
+        let configured = &configured_domains[0];
+        assert_eq!(configured.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(configured.project_name.as_deref(), Some("Client App"));
+        assert!(configured.project_enabled);
+        assert_eq!(
+            configured.registration.display_pattern(),
+            format!("app{}", BRANDING.domain_suffix)
+        );
+    }
+
+    #[test]
+    fn remove_project_rejects_projects_still_in_use() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Demo").unwrap();
+
+        store
+            .add_domain_with_project(
+                proxy_registration("app.roxy", 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let error = store.remove_project(&project.id).unwrap_err();
+
+        assert!(matches!(error, ConfigError::ProjectInUse(id) if id == project.id));
+    }
+
+    #[test]
+    fn remove_project_deletes_unused_project() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Demo").unwrap();
+
+        store.remove_project(&project.id).unwrap();
+
+        assert!(store.list_projects().unwrap().is_empty());
     }
 }

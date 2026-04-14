@@ -8,7 +8,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info};
 
-/// Resolves .roxy domains to the configured LAN IP.
+use crate::branding::BRANDING;
+
+/// Resolves the configured local suffix to the LAN IP.
 #[derive(Clone)]
 pub struct IpResolver {
     lan_ip: Ipv4Addr,
@@ -142,9 +144,15 @@ fn handle_query(query: &[u8], ttl: u32, response_ip: Ipv4Addr) -> Vec<u8> {
 
     let domain = question.qname.to_string().to_lowercase();
 
-    // Check if domain ends with .roxy
-    if !domain.trim_end_matches('.').ends_with(".roxy") {
-        debug!(domain = %domain, "DNS refused (not .roxy)");
+    if !domain
+        .trim_end_matches('.')
+        .ends_with(BRANDING.domain_suffix)
+    {
+        debug!(
+            domain = %domain,
+            suffix = BRANDING.domain_suffix,
+            "DNS refused (unexpected suffix)"
+        );
         return build_refused_response(&packet);
     }
 
@@ -294,9 +302,9 @@ mod tests {
 
     #[test]
     fn test_query_handler_roxy_domain() {
-        // Build a simple A query for test.roxy
+        // Build a simple A query for test.localify
         let mut packet = Packet::new_query(1234);
-        let name = Name::new_unchecked("test.roxy");
+        let name = Name::new_unchecked("test.localify");
         let question = Question::new(name, TYPE::A.into(), CLASS::IN.into(), false);
         packet.questions.push(question);
 
@@ -327,7 +335,7 @@ mod tests {
     #[test]
     fn test_query_handler_aaaa() {
         let mut packet = Packet::new_query(5678);
-        let name = Name::new_unchecked("test.roxy");
+        let name = Name::new_unchecked("test.localify");
         let question = Question::new(name, TYPE::AAAA.into(), CLASS::IN.into(), false);
         packet.questions.push(question);
 
@@ -341,9 +349,9 @@ mod tests {
 
     #[test]
     fn test_query_handler_subdomain() {
-        // Test nested subdomains like app.test.roxy
+        // Test nested subdomains like app.test.localify
         let mut packet = Packet::new_query(9999);
-        let name = Name::new_unchecked("app.test.roxy");
+        let name = Name::new_unchecked("app.test.localify");
         let question = Question::new(name, TYPE::A.into(), CLASS::IN.into(), false);
         packet.questions.push(question);
 
@@ -358,7 +366,7 @@ mod tests {
     #[test]
     fn test_a_response_uses_configured_ip() {
         let mut packet = Packet::new_query(1111);
-        let name = Name::new_unchecked("test.roxy");
+        let name = Name::new_unchecked("test.localify");
         let question = Question::new(name, TYPE::A.into(), CLASS::IN.into(), false);
         packet.questions.push(question);
 

@@ -15,6 +15,7 @@ export function SettingsScreen() {
   const updateConfig = useUpdateConfig();
   const install = useInstall();
   const uninstall = useUninstall();
+  const appName = data?.environment.appName ?? "Localify";
 
   const daemon = data?.config.daemon;
   const [httpPort, setHttpPort] = useState(daemon?.httpPort ?? 80);
@@ -63,7 +64,7 @@ export function SettingsScreen() {
             <h2 className="text-sm font-semibold">Ports</h2>
             <p className="text-xs text-[--color-muted]">
               Changes take effect on the next daemon restart. In system mode,
-              saves go through the installed Roxy helper instead of writing
+              saves go through the installed helper instead of writing
               directly into system files.
             </p>
           </div>
@@ -145,7 +146,7 @@ export function SettingsScreen() {
               Danger zone
             </h2>
             <p className="text-xs text-[--color-muted]">
-              Remove Roxy, its certificates, DNS resolver changes, and the
+              Remove {appName}, its certificates, DNS resolver changes, and the
               privileged desktop helper.
             </p>
           </div>
@@ -220,7 +221,7 @@ export function SettingsScreen() {
                   setUninstallError(null);
                 }}
               >
-                Uninstall Roxy
+                Uninstall {appName}
               </Button>
             </div>
           )}

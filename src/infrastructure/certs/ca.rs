@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::CertError;
 
-/// Roxy Root Certificate Authority
+/// Localify Root Certificate Authority
 ///
 /// This CA is used to sign all domain certificates. Users only need to trust
 /// the CA once, and all domain certificates will be automatically trusted.
@@ -135,10 +135,11 @@ impl RootCA {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::branding::BRANDING;
 
     #[test]
     fn test_ca_paths() {
-        let ca = RootCA::new(PathBuf::from("/tmp/test-roxy"));
+        let ca = RootCA::new(PathBuf::from(format!("/tmp/test-{}", BRANDING.slug)));
         assert!(ca.cert_path().to_string_lossy().contains("ca.crt"));
         assert!(ca.key_path().to_string_lossy().contains("ca.key"));
     }

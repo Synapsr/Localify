@@ -126,14 +126,14 @@ mod tests {
 
     #[test]
     fn from_name_creates_exact_pattern() {
-        let p = DomainPattern::from_name("myapp.roxy", false).unwrap();
-        assert_eq!(p, exact("myapp.roxy"));
+        let p = DomainPattern::from_name("myapp.localify", false).unwrap();
+        assert_eq!(p, exact("myapp.localify"));
     }
 
     #[test]
     fn from_name_creates_wildcard_pattern() {
-        let p = DomainPattern::from_name("myapp.roxy", true).unwrap();
-        assert_eq!(p, wildcard("myapp.roxy"));
+        let p = DomainPattern::from_name("myapp.localify", true).unwrap();
+        assert_eq!(p, wildcard("myapp.localify"));
     }
 
     #[test]
@@ -145,70 +145,71 @@ mod tests {
 
     #[test]
     fn exact_matches_same_hostname() {
-        assert!(exact("myapp.roxy").matches_hostname("myapp.roxy"));
+        assert!(exact("myapp.localify").matches_hostname("myapp.localify"));
     }
 
     #[test]
     fn exact_does_not_match_subdomain() {
-        assert!(!exact("myapp.roxy").matches_hostname("blog.myapp.roxy"));
+        assert!(!exact("myapp.localify").matches_hostname("blog.myapp.localify"));
     }
 
     #[test]
     fn exact_does_not_match_different_domain() {
-        assert!(!exact("myapp.roxy").matches_hostname("other.roxy"));
+        assert!(!exact("myapp.localify").matches_hostname("other.localify"));
     }
 
     #[test]
     fn wildcard_matches_base_domain() {
-        assert!(wildcard("myapp.roxy").matches_hostname("myapp.roxy"));
+        assert!(wildcard("myapp.localify").matches_hostname("myapp.localify"));
     }
 
     #[test]
     fn wildcard_matches_single_level_subdomain() {
-        assert!(wildcard("myapp.roxy").matches_hostname("blog.myapp.roxy"));
-        assert!(wildcard("myapp.roxy").matches_hostname("api.myapp.roxy"));
+        assert!(wildcard("myapp.localify").matches_hostname("blog.myapp.localify"));
+        assert!(wildcard("myapp.localify").matches_hostname("api.myapp.localify"));
     }
 
     #[test]
     fn wildcard_does_not_match_multi_level_subdomain() {
-        assert!(!wildcard("myapp.roxy").matches_hostname("a.b.myapp.roxy"));
+        assert!(!wildcard("myapp.localify").matches_hostname("a.b.myapp.localify"));
     }
 
     #[test]
     fn wildcard_does_not_match_unrelated_domain() {
-        assert!(!wildcard("myapp.roxy").matches_hostname("other.roxy"));
+        assert!(!wildcard("myapp.localify").matches_hostname("other.localify"));
     }
 
     #[test]
     fn wildcard_does_not_match_suffix_overlap() {
-        // "notmyapp.roxy" should NOT match wildcard for "myapp.roxy"
-        assert!(!wildcard("myapp.roxy").matches_hostname("notmyapp.roxy"));
+        assert!(!wildcard("myapp.localify").matches_hostname("notmyapp.localify"));
     }
 
     #[test]
     fn wildcard_does_not_match_empty_prefix() {
-        // ".myapp.roxy" — empty prefix before the dot
-        assert!(!wildcard("myapp.roxy").matches_hostname(".myapp.roxy"));
+        assert!(!wildcard("myapp.localify").matches_hostname(".myapp.localify"));
     }
 
     // --- display_pattern ---
 
     #[test]
     fn exact_display_pattern() {
-        assert_eq!(exact("myapp.roxy").display_pattern(), "myapp.roxy");
+        assert_eq!(exact("myapp.localify").display_pattern(), "myapp.localify");
     }
 
     #[test]
     fn wildcard_display_pattern() {
-        assert_eq!(wildcard("myapp.roxy").display_pattern(), "*.myapp.roxy");
+        assert_eq!(
+            wildcard("myapp.localify").display_pattern(),
+            "*.myapp.localify"
+        );
     }
 
     // --- specificity ---
 
     #[test]
     fn longer_base_domain_is_more_specific() {
-        let broad = wildcard("myapp.roxy");
-        let specific = wildcard("sub.myapp.roxy");
+        let broad = wildcard("myapp.localify");
+        let specific = wildcard("sub.myapp.localify");
         assert!(specific.specificity() > broad.specificity());
     }
 
@@ -216,7 +217,7 @@ mod tests {
 
     #[test]
     fn display_trait_matches_display_pattern() {
-        let p = wildcard("myapp.roxy");
+        let p = wildcard("myapp.localify");
         assert_eq!(format!("{}", p), p.display_pattern());
     }
 
@@ -224,8 +225,8 @@ mod tests {
 
     #[test]
     fn is_wildcard_returns_correctly() {
-        assert!(!exact("myapp.roxy").is_wildcard());
-        assert!(wildcard("myapp.roxy").is_wildcard());
+        assert!(!exact("myapp.localify").is_wildcard());
+        assert!(wildcard("myapp.localify").is_wildcard());
     }
 
     // --- serde round-trip ---
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn serde_roundtrip_exact() {
         let w = Wrapper {
-            pattern: exact("myapp.roxy"),
+            pattern: exact("myapp.localify"),
         };
         let toml_str = toml::to_string(&w).unwrap();
         let deserialized: Wrapper = toml::from_str(&toml_str).unwrap();
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn serde_roundtrip_wildcard() {
         let w = Wrapper {
-            pattern: wildcard("myapp.roxy"),
+            pattern: wildcard("myapp.localify"),
         };
         let toml_str = toml::to_string(&w).unwrap();
         let deserialized: Wrapper = toml::from_str(&toml_str).unwrap();
@@ -257,15 +258,15 @@ mod tests {
 
     #[test]
     fn serde_deserializes_wildcard_from_string() {
-        let toml_str = r#"pattern = "*.myapp.roxy""#;
+        let toml_str = r#"pattern = "*.myapp.localify""#;
         let w: Wrapper = toml::from_str(toml_str).unwrap();
-        assert_eq!(w.pattern, wildcard("myapp.roxy"));
+        assert_eq!(w.pattern, wildcard("myapp.localify"));
     }
 
     #[test]
     fn serde_deserializes_exact_from_string() {
-        let toml_str = r#"pattern = "myapp.roxy""#;
+        let toml_str = r#"pattern = "myapp.localify""#;
         let w: Wrapper = toml::from_str(toml_str).unwrap();
-        assert_eq!(w.pattern, exact("myapp.roxy"));
+        assert_eq!(w.pattern, exact("myapp.localify"));
     }
 }

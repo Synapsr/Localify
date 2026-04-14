@@ -2,22 +2,33 @@ import { useState, type FormEvent } from "react";
 import { Button } from "./ui/button";
 import { Input, Label } from "./ui/input";
 import { useAvailablePort, useRegisterDomain } from "../lib/queries";
+import type { ProjectInfoDto } from "../types/roxy";
 
 interface AddDomainFormProps {
   suffix: string;
+  projects: ProjectInfoDto[];
+  defaultProjectId?: string | null;
   onClose: () => void;
 }
 
-export function AddDomainForm({ suffix, onClose }: AddDomainFormProps) {
+export function AddDomainForm({
+  suffix,
+  projects,
+  defaultProjectId = null,
+  onClose,
+}: AddDomainFormProps) {
   const registerDomain = useRegisterDomain();
   const availablePort = useAvailablePort();
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
   const [wildcard, setWildcard] = useState(false);
+  const [projectId, setProjectId] = useState<string>(defaultProjectId ?? "");
   const [error, setError] = useState<string | null>(null);
   const [targetError, setTargetError] = useState<string | null>(null);
 
-  const normalizedSuffix = suffix.startsWith(".") ? suffix : `.${suffix || "roxy"}`;
+  const normalizedSuffix = suffix.startsWith(".")
+    ? suffix
+    : `.${suffix || "localify"}`;
   const previewDomain = name
     ? name.endsWith(normalizedSuffix)
       ? name
@@ -38,10 +49,12 @@ export function AddDomainForm({ suffix, onClose }: AddDomainFormProps) {
         domain,
         wildcard,
         routes: [target],
+        projectId: projectId || null,
       });
       setName("");
       setTarget("");
       setWildcard(false);
+      setProjectId(defaultProjectId ?? "");
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -120,6 +133,27 @@ export function AddDomainForm({ suffix, onClose }: AddDomainFormProps) {
             </p>
           )}
         </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="project">Project</Label>
+        <select
+          id="project"
+          value={projectId}
+          onChange={(event) => setProjectId(event.target.value)}
+          className="h-9 w-full rounded-md border border-[--color-border] bg-[--color-surface] px-3 text-sm text-[--color-ink] focus:outline-none focus:border-[--color-border-strong] focus:ring-2 focus:ring-[--color-ink]/10"
+        >
+          <option value="">No project</option>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-[--color-muted]">
+          Optional. Attach this domain to a project so it can be enabled or disabled
+          with the rest of the stack.
+        </p>
       </div>
 
       <label className="flex items-center gap-2 text-sm text-[--color-muted]">

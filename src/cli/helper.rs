@@ -10,10 +10,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use roxy::branding::BRANDING;
 use roxy::desktop::DesktopApi;
 use roxy::system_helper::{SystemHelperClient, helper_socket_path, serve};
-
-const HELPER_SERVICE_PREFIX: &str = "dev.roxy.helper";
 #[cfg(target_os = "macos")]
 const LAUNCHD_PLIST_DIR: &str = "/Library/LaunchDaemons";
 
@@ -28,7 +27,10 @@ pub fn ensure_running(config_path: &Path, socket: PathBuf, uid: u32) -> Result<(
 }
 
 pub fn serve_forever(config_path: &Path, uid: u32, socket: PathBuf) -> Result<()> {
-    let binary_path = env::current_exe().context("Failed to resolve the roxy executable path")?;
+    let binary_path = env::current_exe().context(format!(
+        "Failed to resolve the {} executable path",
+        BRANDING.slug
+    ))?;
     let api = DesktopApi::new_direct(config_path.to_path_buf(), binary_path);
     serve(&socket, uid, &api)
 }
@@ -55,7 +57,10 @@ fn wait_for_helper(client: &SystemHelperClient) -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
 
-    bail!("Roxy system helper did not become ready in time.")
+    bail!(
+        "{} system helper did not become ready in time.",
+        BRANDING.app_name
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -70,7 +75,10 @@ fn start_helper_service(config_path: &Path, socket: &Path, uid: u32) -> Result<(
 
 #[cfg(not(target_os = "macos"))]
 fn spawn_helper_process(config_path: &Path, socket: &Path, uid: u32) -> Result<()> {
-    let executable = env::current_exe().context("Failed to resolve the roxy executable path")?;
+    let executable = env::current_exe().context(format!(
+        "Failed to resolve the {} executable path",
+        BRANDING.slug
+    ))?;
     let child = Command::new(executable)
         .arg("--config")
         .arg(config_path)
@@ -84,22 +92,33 @@ fn spawn_helper_process(config_path: &Path, socket: &Path, uid: u32) -> Result<(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("Failed to launch the Roxy system helper")?;
+        .context(format!(
+            "Failed to launch the {} system helper",
+            BRANDING.app_name
+        ))?;
 
-    println!("Roxy system helper started (PID: {})", child.id());
+    println!(
+        "{} system helper started (PID: {})",
+        BRANDING.app_name,
+        child.id()
+    );
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn install_launchd_service(config_path: &Path, socket: &Path, uid: u32) -> Result<()> {
-    let executable = env::current_exe().context("Failed to resolve the roxy executable path")?;
+    let executable = env::current_exe().context(format!(
+        "Failed to resolve the {} executable path",
+        BRANDING.slug
+    ))?;
     let plist_path = launchd_plist_path(uid);
     let label = helper_service_label(uid);
     let plist = launchd_plist_contents(&label, &executable, config_path, socket, uid);
 
     fs::write(&plist_path, plist).with_context(|| {
         format!(
-            "Failed to write the Roxy helper plist at {}",
+            "Failed to write the {} helper plist at {}",
+            BRANDING.app_name,
             plist_path.display()
         )
     })?;
@@ -128,7 +147,8 @@ fn uninstall_launchd_service(uid: u32) -> Result<()> {
     if plist_path.exists() {
         fs::remove_file(&plist_path).with_context(|| {
             format!(
-                "Failed to remove the Roxy helper plist at {}",
+                "Failed to remove the {} helper plist at {}",
+                BRANDING.app_name,
                 plist_path.display()
             )
         })?;
@@ -143,7 +163,10 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
     let output = Command::new("launchctl")
         .args(args)
         .output()
-        .context("Failed to launch launchctl for the Roxy helper")?;
+        .context(format!(
+            "Failed to launch launchctl for the {} helper",
+            BRANDING.app_name
+        ))?;
 
     if output.status.success() {
         return Ok(());
@@ -170,7 +193,7 @@ fn command_output(output: &std::process::Output) -> Option<String> {
 }
 
 fn helper_service_label(uid: u32) -> String {
-    format!("{HELPER_SERVICE_PREFIX}.{uid}")
+    format!("{}.{uid}", BRANDING.helper_service_prefix())
 }
 
 #[cfg(target_os = "macos")]
@@ -242,27 +265,29 @@ mod tests {
 
     #[test]
     fn helper_service_label_is_uid_scoped() {
-        assert_eq!(helper_service_label(501), "dev.roxy.helper.501");
+        assert_eq!(helper_service_label(501), "dev.localify.helper.501");
     }
 
     #[test]
     fn launchd_plist_contains_expected_program_arguments() {
         let plist = launchd_plist_contents(
-            "dev.roxy.helper.501",
-            Path::new("/Applications/Roxy.app/Contents/MacOS/roxy"),
-            Path::new("/etc/roxy/config.toml"),
-            Path::new("/var/run/roxy-helper-501.sock"),
+            "dev.localify.helper.501",
+            Path::new("/Applications/Localify.app/Contents/MacOS/localify"),
+            Path::new("/etc/localify/config.toml"),
+            Path::new("/var/run/localify-helper-501.sock"),
             501,
         );
 
-        assert!(plist.contains("<string>dev.roxy.helper.501</string>"));
-        assert!(plist.contains("<string>/Applications/Roxy.app/Contents/MacOS/roxy</string>"));
+        assert!(plist.contains("<string>dev.localify.helper.501</string>"));
+        assert!(
+            plist.contains("<string>/Applications/Localify.app/Contents/MacOS/localify</string>")
+        );
         assert!(plist.contains("<string>--config</string>"));
-        assert!(plist.contains("<string>/etc/roxy/config.toml</string>"));
+        assert!(plist.contains("<string>/etc/localify/config.toml</string>"));
         assert!(plist.contains("<string>helper</string>"));
         assert!(plist.contains("<string>serve</string>"));
         assert!(plist.contains("<string>--socket</string>"));
-        assert!(plist.contains("<string>/var/run/roxy-helper-501.sock</string>"));
+        assert!(plist.contains("<string>/var/run/localify-helper-501.sock</string>"));
         assert!(plist.contains("<string>--uid</string>"));
         assert!(plist.contains("<string>501</string>"));
     }

@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{DomainPattern, DomainRegistration, Route};
 
+fn default_project_enabled() -> bool {
+    true
+}
+
 /// Serializable representation of a domain registration in the config
 /// file. Converted to/from `DomainRegistration` at the `ConfigStore`
 /// boundary.
@@ -18,6 +22,15 @@ pub struct RegistrationDto {
     pub routes: Vec<Route>,
     #[serde(default)]
     pub https_enabled: bool,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDto {
+    pub name: String,
+    #[serde(default = "default_project_enabled")]
+    pub enabled: bool,
 }
 
 impl From<DomainRegistration> for RegistrationDto {
@@ -26,6 +39,7 @@ impl From<DomainRegistration> for RegistrationDto {
             pattern: reg.pattern().clone(),
             routes: reg.routes().to_vec(),
             https_enabled: reg.is_https_enabled(),
+            project: None,
         }
     }
 }

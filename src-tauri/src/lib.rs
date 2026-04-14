@@ -2,17 +2,18 @@ mod commands;
 
 use std::path::PathBuf;
 
+use roxy::branding::BRANDING;
 use commands::AppState;
 use roxy::desktop::DesktopApi;
 
 fn default_config_path() -> PathBuf {
-    std::env::var_os("ROXY_CONFIG_PATH")
+    std::env::var_os(BRANDING.env_var("CONFIG_PATH"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/etc/roxy/config.toml"))
+        .unwrap_or_else(|| BRANDING.config_path())
 }
 
 fn default_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("ROXY_CLI_PATH") {
+    if let Some(path) = std::env::var_os(BRANDING.env_var("CLI_PATH")) {
         return PathBuf::from(path);
     }
 
@@ -23,9 +24,9 @@ fn default_binary_path() -> PathBuf {
     };
 
     let binary_name = if cfg!(target_os = "windows") {
-        "roxy.exe"
+        "localify.exe"
     } else {
-        "roxy"
+        BRANDING.cli_command()
     };
 
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -47,10 +48,14 @@ pub fn run() {
             commands::update_config,
             commands::get_daemon_status,
             commands::list_domains,
+            commands::list_projects,
             commands::get_available_port,
             commands::install_roxy,
             commands::get_uninstall_preview,
             commands::uninstall_roxy,
+            commands::create_project,
+            commands::update_project,
+            commands::assign_domain_project,
             commands::register_domain,
             commands::unregister_domain,
             commands::add_route,

@@ -12,7 +12,10 @@ impl ProcessControl for UnixProcessControl {
         Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
-            .map(|o| o.status.success())
+            .map(|output| {
+                output.status.success()
+                    || String::from_utf8_lossy(&output.stderr).contains("Operation not permitted")
+            })
             .unwrap_or(false)
     }
 

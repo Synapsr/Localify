@@ -1,5 +1,6 @@
 use super::{DnsError, DnsService, map_dns_error};
 use crate::application::ports::{DnsConfigError, DnsManager};
+use crate::branding::BRANDING;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -7,7 +8,6 @@ use std::thread;
 use std::time::Duration;
 
 const RESOLVER_DIR: &str = "/etc/resolver";
-const RESOLVER_FILE: &str = "/etc/resolver/roxy";
 
 pub struct MacOsDnsService;
 
@@ -43,15 +43,16 @@ impl Default for MacOsDnsService {
 impl DnsService for MacOsDnsService {
     fn setup(&self, port: u16) -> Result<(), DnsError> {
         self.ensure_resolver_dir()?;
+        let resolver_file = BRANDING.resolver_file();
 
         let content = format!("nameserver 127.0.0.1\nnameserver ::1\nport {}\n", port);
 
-        fs::write(RESOLVER_FILE, content).map_err(|e| {
+        fs::write(&resolver_file, content).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 DnsError::PermissionDenied
             } else {
                 DnsError::WriteError {
-                    path: RESOLVER_FILE.into(),
+                    path: resolver_file.clone(),
                     source: e,
                 }
             }
@@ -61,7 +62,8 @@ impl DnsService for MacOsDnsService {
     }
 
     fn cleanup(&self) -> Result<(), DnsError> {
-        let path = Path::new(RESOLVER_FILE);
+        let resolver_file = BRANDING.resolver_file();
+        let path = resolver_file.as_path();
         if path.exists() {
             fs::remove_file(path).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -79,11 +81,13 @@ impl DnsService for MacOsDnsService {
 
     fn validate(&self) -> Result<(), DnsError> {
         // First, verify the resolver file exists and has correct content
-        let path = Path::new(RESOLVER_FILE);
+        let resolver_file = BRANDING.resolver_file();
+        let path = resolver_file.as_path();
         if !path.exists() {
-            return Err(DnsError::ValidationFailed(
-                "Resolver file does not exist at /etc/resolver/roxy".into(),
-            ));
+            return Err(DnsError::ValidationFailed(format!(
+                "Resolver file does not exist at {}",
+                resolver_file.display()
+            )));
         }
 
         let content = fs::read_to_string(path).map_err(|e| {
@@ -110,12 +114,12 @@ impl DnsService for MacOsDnsService {
             let stdout = String::from_utf8_lossy(&output.stdout);
 
             // Check if our resolver is listed (flexible spacing check)
-            let has_roxy_resolver = stdout.lines().any(|line| {
+            let has_resolver = stdout.lines().any(|line| {
                 let trimmed = line.trim();
-                trimmed.starts_with("domain") && trimmed.contains("roxy")
+                trimmed.starts_with("domain") && trimmed.contains(BRANDING.domain_label())
             });
 
-            if has_roxy_resolver {
+            if has_resolver {
                 return Ok(());
             }
 
@@ -124,15 +128,15 @@ impl DnsService for MacOsDnsService {
             }
         }
 
-        Err(DnsError::ValidationFailed(
-            "DNS resolver for .roxy not found in scutil output after multiple attempts. \
-             Try running 'sudo killall -HUP mDNSResponder' to refresh DNS."
-                .into(),
-        ))
+        Err(DnsError::ValidationFailed(format!(
+            "DNS resolver for {} not found in scutil output after multiple attempts. \
+                 Try running 'sudo killall -HUP mDNSResponder' to refresh DNS.",
+            BRANDING.domain_suffix
+        )))
     }
 
     fn is_configured(&self) -> bool {
-        Path::new(RESOLVER_FILE).exists()
+        BRANDING.resolver_file().exists()
     }
 }
 

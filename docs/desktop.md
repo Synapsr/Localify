@@ -58,8 +58,8 @@ Build the CLI binary first so the desktop backend can launch the daemon:
 
 ```bash
 cargo build --bin roxy
-npm install
-npm run tauri:dev
+pnpm i
+pnpm tauri:dev
 ```
 
 ## Frontend Files

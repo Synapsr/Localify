@@ -1,4 +1,5 @@
 pub mod application;
+pub mod branding;
 pub mod config;
 pub mod desktop;
 pub mod domain;

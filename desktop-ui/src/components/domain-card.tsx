@@ -5,26 +5,32 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import {
   useAddRoute,
+  useAssignDomainProject,
   useRemoveRoute,
   useUnregisterDomain,
 } from "../lib/queries";
-import type { DomainInfoDto, RouteDto } from "../types/roxy";
+import type { DomainInfoDto, ProjectInfoDto, RouteDto } from "../types/roxy";
 
 interface DomainCardProps {
   domain: DomainInfoDto;
+  projects: ProjectInfoDto[];
 }
 
-export function DomainCard({ domain }: DomainCardProps) {
+export function DomainCard({ domain, projects }: DomainCardProps) {
   const { registration } = domain;
   const addRoute = useAddRoute();
+  const assignProject = useAssignDomainProject();
   const removeRoute = useRemoveRoute();
   const unregister = useUnregisterDomain();
 
   const [addingRoute, setAddingRoute] = useState(false);
+  const [editingProject, setEditingProject] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [projectError, setProjectError] = useState<string | null>(null);
   const [newPath, setNewPath] = useState("/");
   const [newTarget, setNewTarget] = useState("");
+  const [selectedProjectId, setSelectedProjectId] = useState(domain.projectId ?? "");
 
   async function handleAddRoute(e: FormEvent) {
     e.preventDefault();
@@ -61,6 +67,20 @@ export function DomainCard({ domain }: DomainCardProps) {
     }
   }
 
+  async function handleAssignProject() {
+    setProjectError(null);
+    try {
+      await assignProject.mutateAsync({
+        domain: registration.domain,
+        wildcard: registration.wildcard,
+        projectId: selectedProjectId || null,
+      });
+      setEditingProject(false);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   return (
     <Card className="overflow-hidden">
       <div className="flex items-start justify-between gap-4 p-5">
@@ -73,49 +93,98 @@ export function DomainCard({ domain }: DomainCardProps) {
           <div className="flex flex-wrap items-center gap-1.5">
             {registration.httpsEnabled && <Badge tone="accent">HTTPS</Badge>}
             {registration.wildcard && <Badge tone="muted">Wildcard</Badge>}
+            {domain.projectName && <Badge tone="muted">{domain.projectName}</Badge>}
+            {!domain.projectEnabled && <Badge tone="muted">Project disabled</Badge>}
+            {!domain.active && <Badge tone="muted">Inactive</Badge>}
             {registration.source !== "config" && (
               <Badge tone="muted">{registration.source}</Badge>
             )}
           </div>
         </div>
-        {confirmingDelete ? (
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
+        <div className="flex shrink-0 items-center gap-3">
+          {projects.length > 0 && !confirmingDelete && (
+            <button
               type="button"
-              size="sm"
-              variant="ghost"
               onClick={() => {
-                setConfirmingDelete(false);
+                setSelectedProjectId(domain.projectId ?? "");
+                setProjectError(null);
+                setEditingProject((value) => !value);
+              }}
+              className="text-xs text-[--color-muted] hover:text-[--color-ink]"
+            >
+              {editingProject ? "Close" : "Project"}
+            </button>
+          )}
+          {confirmingDelete ? (
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setConfirmingDelete(false);
+                  setDeleteError(null);
+                }}
+                disabled={unregister.isPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="danger"
+                loading={unregister.isPending}
+                onClick={handleDelete}
+              >
+                Confirm
+              </Button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmingDelete(true);
                 setDeleteError(null);
               }}
               disabled={unregister.isPending}
+              className="text-xs text-[--color-muted] hover:text-[--color-danger] disabled:opacity-50"
             >
-              Cancel
-            </Button>
+              Delete
+            </button>
+          )}
+        </div>
+      </div>
+
+      {editingProject && (
+        <div className="border-t border-[--color-border] bg-[--color-bg]/30 px-5 py-3">
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedProjectId}
+              onChange={(event) => setSelectedProjectId(event.target.value)}
+              className="h-8 min-w-44 rounded-md border border-[--color-border] bg-[--color-surface] px-3 text-xs text-[--color-ink] focus:outline-none focus:border-[--color-border-strong] focus:ring-2 focus:ring-[--color-ink]/10"
+            >
+              <option value="">No project</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
             <Button
               type="button"
               size="sm"
-              variant="danger"
-              loading={unregister.isPending}
-              onClick={handleDelete}
+              variant="secondary"
+              loading={assignProject.isPending}
+              onClick={handleAssignProject}
             >
-              Confirm
+              Save
             </Button>
           </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setConfirmingDelete(true);
-              setDeleteError(null);
-            }}
-            disabled={unregister.isPending}
-            className="text-xs text-[--color-muted] hover:text-[--color-danger] disabled:opacity-50"
-          >
-            Delete
-          </button>
-        )}
-      </div>
+          {projectError && (
+            <p className="pt-2 text-xs text-[--color-danger]">{projectError}</p>
+          )}
+        </div>
+      )}
 
       {confirmingDelete && (
         <div className="border-t border-[--color-danger]/20 bg-[--color-danger]/5 px-5 py-3">

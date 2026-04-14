@@ -1,10 +1,11 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
-    AddRouteRequest, AppConfigDto, AvailablePortDto, BootstrapDto, ConfigUpdateRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InstallResultDto,
-    LogsDto, LogsRequest, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
-    RegistrationMutationDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto,
+    AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
+    ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
+    DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateProjectRequest,
 };
 
 pub struct AppState {
@@ -44,6 +45,11 @@ pub fn list_domains(state: tauri::State<'_, AppState>) -> Result<Vec<DomainInfoD
 }
 
 #[tauri::command]
+pub fn list_projects(state: tauri::State<'_, AppState>) -> Result<Vec<ProjectInfoDto>, String> {
+    state.api.list_projects().map_err(map_error)
+}
+
+#[tauri::command]
 pub fn get_available_port(state: tauri::State<'_, AppState>) -> Result<AvailablePortDto, String> {
     state.api.available_port().map_err(map_error)
 }
@@ -63,6 +69,30 @@ pub fn get_uninstall_preview(
 #[tauri::command]
 pub fn uninstall_roxy(state: tauri::State<'_, AppState>) -> Result<UninstallResultDto, String> {
     state.api.uninstall().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn create_project(
+    state: tauri::State<'_, AppState>,
+    request: CreateProjectRequest,
+) -> Result<ProjectInfoDto, String> {
+    state.api.create_project(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn update_project(
+    state: tauri::State<'_, AppState>,
+    request: UpdateProjectRequest,
+) -> Result<ProjectInfoDto, String> {
+    state.api.update_project(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn assign_domain_project(
+    state: tauri::State<'_, AppState>,
+    request: AssignDomainProjectRequest,
+) -> Result<DomainInfoDto, String> {
+    state.api.assign_domain_project(request).map_err(map_error)
 }
 
 #[tauri::command]

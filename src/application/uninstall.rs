@@ -168,6 +168,7 @@ impl<'a> Uninstall<'a> {
 mod tests {
     use super::*;
     use crate::application::testkit::*;
+    use crate::branding::BRANDING;
 
     #[test]
     fn uninstall_stops_daemon_and_cleans_up() {
@@ -176,7 +177,14 @@ mod tests {
         let daemon = InMemoryDaemonControl::running(999);
         let dns = InMemoryDnsManager::already_configured();
         let system = InMemorySystemSetup::with_existing_data();
-        let svc = Uninstall::new(&repo, &certs, &daemon, &dns, &system, "/etc/roxy".into());
+        let svc = Uninstall::new(
+            &repo,
+            &certs,
+            &daemon,
+            &dns,
+            &system,
+            BRANDING.config_dir().display().to_string(),
+        );
 
         let result = svc.execute().unwrap();
 
@@ -195,7 +203,14 @@ mod tests {
         let daemon = InMemoryDaemonControl::stopped();
         let dns = InMemoryDnsManager::new();
         let system = InMemorySystemSetup::new();
-        let svc = Uninstall::new(&repo, &certs, &daemon, &dns, &system, "/etc/roxy".into());
+        let svc = Uninstall::new(
+            &repo,
+            &certs,
+            &daemon,
+            &dns,
+            &system,
+            BRANDING.config_dir().display().to_string(),
+        );
 
         let result = svc.execute().unwrap();
 
@@ -217,11 +232,21 @@ mod tests {
         let daemon = InMemoryDaemonControl::stopped();
         let dns = InMemoryDnsManager::new();
         let system = InMemorySystemSetup::new();
-        let svc = Uninstall::new(&repo, &certs, &daemon, &dns, &system, "/etc/roxy".into());
+        let svc = Uninstall::new(
+            &repo,
+            &certs,
+            &daemon,
+            &dns,
+            &system,
+            BRANDING.config_dir().display().to_string(),
+        );
 
         let preview = svc.preview().unwrap();
         assert_eq!(preview.domain_count, 2);
-        assert_eq!(preview.data_dir, "/etc/roxy");
+        assert_eq!(
+            preview.data_dir,
+            BRANDING.config_dir().display().to_string()
+        );
     }
 
     #[test]
@@ -231,7 +256,14 @@ mod tests {
         let daemon = InMemoryDaemonControl::stopped();
         let dns = InMemoryDnsManager::new();
         let system = InMemorySystemSetup::new();
-        let svc = Uninstall::new(&repo, &certs, &daemon, &dns, &system, "/etc/roxy".into());
+        let svc = Uninstall::new(
+            &repo,
+            &certs,
+            &daemon,
+            &dns,
+            &system,
+            BRANDING.config_dir().display().to_string(),
+        );
 
         let result = svc.execute().unwrap();
 

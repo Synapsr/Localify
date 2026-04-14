@@ -8,11 +8,12 @@ use time::{Duration, OffsetDateTime};
 
 use super::CertError;
 use super::ca::RootCA;
+use crate::branding::BRANDING;
 use crate::domain::DomainPattern;
 
 /// Represents a generated certificate with its key pair
 pub struct Certificate {
-    /// File stem used for saving (e.g. "myapp.roxy" or "__wildcard__.myapp.roxy")
+    /// File stem used for saving (e.g. "myapp.localify" or "__wildcard__.myapp.localify")
     pub file_stem: String,
     pub cert_pem: String,
     pub key_pem: String,
@@ -27,7 +28,7 @@ pub(crate) fn build_leaf_cert_params(common_name: &str, sans: Vec<SanType>) -> C
 
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, common_name);
-    dn.push(DnType::OrganizationName, "Roxy Local Development");
+    dn.push(DnType::OrganizationName, BRANDING.local_org_name());
     params.distinguished_name = dn;
 
     let now = OffsetDateTime::now_utc();
@@ -45,13 +46,13 @@ pub(crate) fn build_leaf_cert_params(common_name: &str, sans: Vec<SanType>) -> C
     params
 }
 
-/// Build the standard Roxy CA certificate parameters.
+/// Build the standard Localify CA certificate parameters.
 pub(crate) fn build_ca_cert_params() -> CertificateParams {
     let mut params = CertificateParams::default();
 
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, "Roxy Local Development CA");
-    dn.push(DnType::OrganizationName, "Roxy");
+    dn.push(DnType::CommonName, BRANDING.ca_name());
+    dn.push(DnType::OrganizationName, BRANDING.app_name);
     params.distinguished_name = dn;
 
     let now = OffsetDateTime::now_utc();
@@ -85,9 +86,10 @@ impl CertificateGenerator {
         let ca = RootCA::new(self.base_dir.clone());
 
         if !ca.exists() {
-            return Err(CertError::GenerationError(
-                "Root CA not found. Run 'sudo roxy install' first.".to_string(),
-            ));
+            return Err(CertError::GenerationError(format!(
+                "Root CA not found. Run 'sudo {} install' first.",
+                BRANDING.cli_command()
+            )));
         }
 
         // Generate ECDSA P-256 key pair
@@ -210,13 +212,13 @@ mod tests {
         let ca = RootCA::new(base_dir.clone());
         ca.generate().expect("Failed to generate test CA");
 
-        let domain = DomainName::new("test.roxy").unwrap();
+        let domain = DomainName::new("test.localify").unwrap();
         let pattern = DomainPattern::Exact(domain);
         let generator = CertificateGenerator::new(base_dir, certs_dir);
 
         let cert = generator.generate(&pattern).unwrap();
 
-        assert_eq!(cert.file_stem, "test.roxy");
+        assert_eq!(cert.file_stem, "test.localify");
         assert!(cert.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(cert.key_pem.contains("BEGIN PRIVATE KEY"));
     }

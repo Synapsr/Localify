@@ -1,10 +1,13 @@
 pub mod context;
 pub mod helper;
+pub mod init_project;
 pub mod install;
 pub mod list;
+pub mod list_projects;
 pub mod logs;
 pub mod register;
 pub mod reload;
+pub mod remove_project;
 pub mod restart;
 pub mod route;
 pub mod start;

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use tracing::warn;
 
+use crate::branding::BRANDING;
 use crate::domain::value_objects::port::Port;
 use crate::domain::{
     DomainName, DomainPattern, DomainRegistration, ProxyTarget, RegistrationSource, Route,
@@ -30,8 +31,8 @@ pub enum DiscoveryResult {
 /// Evaluate a container and decide whether to register it.
 ///
 /// Container qualification rules:
-/// 1. Has `roxy.enable=false` label --> skip (explicit opt-out)
-/// 2. Has `roxy.enable=true` label --> register (explicit opt-in)
+/// 1. Has `localify.enable=false` label --> skip (explicit opt-out)
+/// 2. Has `localify.enable=true` label --> register (explicit opt-in)
 /// 3. Has compose labels AND at least one exposed port --> register
 /// 4. Otherwise --> skip
 ///
@@ -40,11 +41,18 @@ pub enum DiscoveryResult {
 /// published ports cannot be proxied.
 pub fn evaluate_container(info: &ContainerInfo) -> DiscoveryResult {
     // Check explicit opt-out
-    if info.labels.get("roxy.enable").is_some_and(|v| v == "false") {
-        return DiscoveryResult::Skip("explicitly disabled via roxy.enable=false".into());
+    if info
+        .labels
+        .get("localify.enable")
+        .is_some_and(|v| v == "false")
+    {
+        return DiscoveryResult::Skip("explicitly disabled via localify.enable=false".into());
     }
 
-    let explicit_opt_in = info.labels.get("roxy.enable").is_some_and(|v| v == "true");
+    let explicit_opt_in = info
+        .labels
+        .get("localify.enable")
+        .is_some_and(|v| v == "true");
 
     // Determine domain name
     let domain = match resolve_domain(info) {
@@ -52,12 +60,12 @@ pub fn evaluate_container(info: &ContainerInfo) -> DiscoveryResult {
         None => {
             if explicit_opt_in {
                 return DiscoveryResult::Skip(format!(
-                    "container {} has roxy.enable=true but no domain could be determined \
-                     (set roxy.domain or use docker compose)",
+                    "container {} has localify.enable=true but no domain could be determined \
+                     (set localify.domain or use docker compose)",
                     info.name
                 ));
             }
-            return DiscoveryResult::Skip("no compose labels and no roxy.domain".into());
+            return DiscoveryResult::Skip("no compose labels and no localify.domain".into());
         }
     };
 
@@ -67,7 +75,7 @@ pub fn evaluate_container(info: &ContainerInfo) -> DiscoveryResult {
             && info.labels.contains_key("com.docker.compose.service");
 
         if !has_compose_labels {
-            return DiscoveryResult::Skip("no compose labels and roxy.enable not set".into());
+            return DiscoveryResult::Skip("no compose labels and localify.enable not set".into());
         }
 
         if info.exposed_ports.is_empty() {
@@ -83,7 +91,7 @@ pub fn evaluate_container(info: &ContainerInfo) -> DiscoveryResult {
         Some(p) => p,
         None => {
             return DiscoveryResult::Skip(format!(
-                "container {} has multiple exposed ports ({:?}), set roxy.port to choose one",
+                "container {} has multiple exposed ports ({:?}), set localify.port to choose one",
                 info.name, info.exposed_ports
             ));
         }
@@ -125,7 +133,7 @@ pub fn evaluate_container(info: &ContainerInfo) -> DiscoveryResult {
     // Determine if wildcard
     let is_wildcard = info
         .labels
-        .get("roxy.wildcard")
+        .get("localify.wildcard")
         .is_some_and(|v| v == "true");
 
     let pattern = if is_wildcard {
@@ -144,11 +152,11 @@ pub fn evaluate_container(info: &ContainerInfo) -> DiscoveryResult {
 /// Resolve the domain name for a container.
 ///
 /// Priority:
-/// 1. `roxy.domain` label (explicit override)
-/// 2. `{service}.{project}.roxy` from compose labels
+/// 1. `localify.domain` label (explicit override)
+/// 2. `{service}.{project}.localify` from compose labels
 fn resolve_domain(info: &ContainerInfo) -> Option<DomainName> {
     // Check for explicit domain override
-    if let Some(domain_str) = info.labels.get("roxy.domain") {
+    if let Some(domain_str) = info.labels.get("localify.domain") {
         return match DomainName::new(domain_str) {
             Ok(d) => Some(d),
             Err(e) => {
@@ -156,7 +164,7 @@ fn resolve_domain(info: &ContainerInfo) -> Option<DomainName> {
                     container = %info.name,
                     domain = %domain_str,
                     error = %e,
-                    "Invalid roxy.domain label"
+                    "Invalid localify.domain label"
                 );
                 None
             }
@@ -167,7 +175,7 @@ fn resolve_domain(info: &ContainerInfo) -> Option<DomainName> {
     let project = info.labels.get("com.docker.compose.project")?;
     let service = info.labels.get("com.docker.compose.service")?;
 
-    let domain_str = format!("{service}.{project}.roxy");
+    let domain_str = format!("{service}.{project}{}", BRANDING.domain_suffix);
     match DomainName::new(&domain_str) {
         Ok(d) => Some(d),
         Err(e) => {
@@ -185,12 +193,12 @@ fn resolve_domain(info: &ContainerInfo) -> Option<DomainName> {
 /// Resolve the target port for a container.
 ///
 /// Priority:
-/// 1. `roxy.port` label (explicit)
+/// 1. `localify.port` label (explicit)
 /// 2. Single exposed port (auto-detect)
 /// 3. None (ambiguous — multiple ports without label)
 fn resolve_port(info: &ContainerInfo) -> Option<Port> {
     // Check for explicit port label
-    if let Some(port_str) = info.labels.get("roxy.port") {
+    if let Some(port_str) = info.labels.get("localify.port") {
         return match port_str.parse::<u16>() {
             Ok(p) => match Port::any(p) {
                 Ok(port) => Some(port),
@@ -199,7 +207,7 @@ fn resolve_port(info: &ContainerInfo) -> Option<Port> {
                         container = %info.name,
                         port = %port_str,
                         error = %e,
-                        "Invalid roxy.port label"
+                        "Invalid localify.port label"
                     );
                     None
                 }
@@ -209,7 +217,7 @@ fn resolve_port(info: &ContainerInfo) -> Option<Port> {
                     container = %info.name,
                     port = %port_str,
                     error = %e,
-                    "Cannot parse roxy.port label as number"
+                    "Cannot parse localify.port label as number"
                 );
                 None
             }
@@ -238,7 +246,11 @@ mod tests {
             name: "test-container".into(),
             labels: labels
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| {
+                    let key = k.replace("roxy.", "localify.");
+                    let value = v.replace(".roxy", BRANDING.domain_suffix);
+                    (key, value)
+                })
                 .collect(),
             exposed_ports,
             host_port_mappings,
@@ -277,7 +289,7 @@ mod tests {
         );
         match evaluate_container(&info) {
             DiscoveryResult::Register(reg) => {
-                assert_eq!(reg.domain().as_str(), "custom.roxy");
+                assert_eq!(reg.domain().as_str(), "custom.localify");
                 let route = &reg.routes()[0];
                 assert_eq!(route.target().to_string(), "127.0.0.1:9090");
             }
@@ -297,7 +309,7 @@ mod tests {
         );
         match evaluate_container(&info) {
             DiscoveryResult::Register(reg) => {
-                assert_eq!(reg.domain().as_str(), "web.myproject.roxy");
+                assert_eq!(reg.domain().as_str(), "web.myproject.localify");
                 assert!(reg.is_https_enabled());
                 let route = &reg.routes()[0];
                 assert_eq!(route.target().to_string(), "127.0.0.1:8080");
@@ -346,7 +358,7 @@ mod tests {
         );
         match evaluate_container(&info) {
             DiscoveryResult::Register(reg) => {
-                assert_eq!(reg.domain().as_str(), "custom.roxy");
+                assert_eq!(reg.domain().as_str(), "custom.localify");
             }
             DiscoveryResult::Skip(reason) => panic!("Expected Register, got Skip: {reason}"),
         }
@@ -444,7 +456,7 @@ mod tests {
         match evaluate_container(&info) {
             DiscoveryResult::Register(reg) => {
                 assert!(reg.is_wildcard());
-                assert_eq!(reg.display_pattern(), "*.web.myproject.roxy");
+                assert_eq!(reg.display_pattern(), "*.web.myproject.localify");
             }
             DiscoveryResult::Skip(reason) => panic!("Expected Register, got Skip: {reason}"),
         }

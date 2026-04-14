@@ -1,12 +1,14 @@
 use std::fmt;
 
+use crate::branding::BRANDING;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DomainName(String);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DomainNameError {
-    #[error("Domain must end with '.roxy', got: {0}")]
-    InvalidSuffix(String),
+    #[error("Domain must end with '{}', got: {name}", BRANDING.domain_suffix)]
+    InvalidSuffix { name: String },
 
     #[error("Domain name too short: {0}")]
     TooShort(String),
@@ -18,19 +20,17 @@ pub enum DomainNameError {
 impl DomainName {
     pub fn new(name: impl Into<String>) -> Result<Self, DomainNameError> {
         let name = name.into().to_lowercase();
+        let suffix = BRANDING.domain_suffix;
 
-        // Must end with .roxy
-        if !name.ends_with(".roxy") {
-            return Err(DomainNameError::InvalidSuffix(name));
+        if !name.ends_with(suffix) {
+            return Err(DomainNameError::InvalidSuffix { name });
         }
 
-        // Must have at least one character before .roxy
-        if name.len() < 6 {
+        if name.len() <= suffix.len() {
             return Err(DomainNameError::TooShort(name));
         }
 
-        // Extract prefix (part before .roxy)
-        let prefix = &name[..name.len() - 5];
+        let prefix = &name[..name.len() - suffix.len()];
 
         // Validate characters (alphanumeric, hyphens, dots for subdomains)
         if !prefix
@@ -88,18 +88,18 @@ mod tests {
 
     #[test]
     fn test_valid_domain_names() {
-        assert!(DomainName::new("app.roxy").is_ok());
-        assert!(DomainName::new("my-app.roxy").is_ok());
-        assert!(DomainName::new("sub.domain.roxy").is_ok());
-        assert!(DomainName::new("APP.ROXY").is_ok()); // Should lowercase
+        assert!(DomainName::new("app.localify").is_ok());
+        assert!(DomainName::new("my-app.localify").is_ok());
+        assert!(DomainName::new("sub.domain.localify").is_ok());
+        assert!(DomainName::new("APP.LOCALIFY").is_ok());
     }
 
     #[test]
     fn test_invalid_domain_names() {
-        assert!(DomainName::new("app.local").is_err()); // Wrong suffix
-        assert!(DomainName::new(".roxy").is_err()); // Too short
-        assert!(DomainName::new("-app.roxy").is_err()); // Starts with hyphen
-        assert!(DomainName::new("app-.roxy").is_err()); // Ends with hyphen
-        assert!(DomainName::new("app_name.roxy").is_err()); // Underscore
+        assert!(DomainName::new("app.test").is_err());
+        assert!(DomainName::new(".localify").is_err());
+        assert!(DomainName::new("-app.localify").is_err());
+        assert!(DomainName::new("app-.localify").is_err());
+        assert!(DomainName::new("app_name.localify").is_err());
     }
 }

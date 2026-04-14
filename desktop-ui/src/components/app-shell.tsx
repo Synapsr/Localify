@@ -12,7 +12,7 @@ export function AppShell({ children }: AppShellProps) {
   if (isLoading && !data) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-[--color-muted]">
-        Loading Roxy…
+        Loading…
       </div>
     );
   }
@@ -22,7 +22,7 @@ export function AppShell({ children }: AppShellProps) {
       <div className="flex h-full items-center justify-center px-8 text-center">
         <div className="max-w-md space-y-2">
           <h2 className="text-base font-semibold text-[--color-danger]">
-            Cannot reach the Roxy backend
+            Cannot reach the desktop backend
           </h2>
           <p className="text-sm text-[--color-muted]">{error.message}</p>
         </div>

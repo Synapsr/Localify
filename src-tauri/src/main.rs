@@ -1,3 +1,3 @@
 fn main() {
-    roxy_desktop_lib::run();
+    localify_desktop_lib::run();
 }

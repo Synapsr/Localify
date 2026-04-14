@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use branding::BRANDING;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 mod application;
+mod branding;
 mod cli;
 mod config;
 mod daemon;
@@ -16,12 +18,12 @@ use infrastructure::config::{Config, ConfigStore};
 use infrastructure::paths::RoxyPaths;
 
 #[derive(Parser)]
-#[command(name = "roxy")]
-#[command(about = "Local development proxy with custom .roxy domains and HTTPS")]
+#[command(name = "localify")]
+#[command(about = "Local development proxy with custom .localify domains and HTTPS")]
 #[command(version)]
 struct Cli {
     /// Path to the config file
-    #[arg(short, long, global = true, default_value = "/etc/roxy/config.toml")]
+    #[arg(short, long, global = true, default_value_os_t = BRANDING.config_path())]
     config: PathBuf,
 
     /// Enable verbose output
@@ -34,10 +36,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initial setup - configures DNS and prepares Roxy for use
+    /// Initial setup - configures DNS and prepares Localify for use
     Install,
 
-    /// Remove all Roxy configuration from the system
+    /// Remove all Localify configuration from the system
     Uninstall {
         /// Skip confirmation prompt
         #[arg(long)]
@@ -46,10 +48,10 @@ enum Commands {
 
     /// Register a new domain with routes
     Register {
-        /// Domain name (must end with .roxy)
+        /// Domain name (must end with .localify)
         domain: String,
 
-        /// Register wildcard subdomains for this domain (matches myapp.roxy and *.myapp.roxy)
+        /// Register wildcard subdomains for this domain (matches myapp.localify and *.myapp.localify)
         #[arg(long)]
         wildcard: bool,
 
@@ -59,12 +61,42 @@ enum Commands {
         route: Vec<String>,
     },
 
+    /// Create a project and bootstrap one or more local domains
+    InitProject {
+        /// Project name shown in the desktop app
+        name: String,
+
+        /// Primary domain for the project
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Primary target: local port, host:port, URL, or directory path
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Also create an API domain for the project
+        #[arg(long)]
+        with_api: bool,
+
+        /// API domain to create when --with-api is set
+        #[arg(long)]
+        api_domain: Option<String>,
+
+        /// API target when --with-api is set
+        #[arg(long)]
+        api_target: Option<String>,
+
+        /// Create only the project metadata without any domains
+        #[arg(long)]
+        project_only: bool,
+    },
+
     /// Unregister a domain
     Unregister {
         /// Domain name to unregister
         domain: String,
 
-        /// Unregister wildcard subdomains for this domain (removes *.myapp.roxy registration)
+        /// Unregister wildcard subdomains for this domain (removes *.myapp.localify registration)
         #[arg(long)]
         wildcard: bool,
 
@@ -82,7 +114,24 @@ enum Commands {
     /// List all registered domains
     List,
 
-    /// Start the Roxy daemon
+    /// List all configured projects and their domains
+    ListProjects,
+
+    /// Remove a project
+    RemoveProject {
+        /// Project ID to remove
+        project_id: String,
+
+        /// Also unregister all domains attached to the project
+        #[arg(long)]
+        delete_domains: bool,
+
+        /// Skip the preview and execute immediately
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Start the Localify daemon
     Start {
         /// Run in foreground (don't daemonize)
         #[arg(long)]
@@ -158,7 +207,7 @@ enum HelperCommands {
 enum RouteCommands {
     /// Add a route to an existing domain
     Add {
-        /// Manage wildcard registration for this domain (matches myapp.roxy and *.myapp.roxy)
+        /// Manage wildcard registration for this domain (matches myapp.localify and *.myapp.localify)
         #[arg(long)]
         wildcard: bool,
 
@@ -174,7 +223,7 @@ enum RouteCommands {
 
     /// Remove a route from a domain
     Remove {
-        /// Manage wildcard registration for this domain (matches myapp.roxy and *.myapp.roxy)
+        /// Manage wildcard registration for this domain (matches myapp.localify and *.myapp.localify)
         #[arg(long)]
         wildcard: bool,
 
@@ -187,7 +236,7 @@ enum RouteCommands {
 
     /// List routes for a domain
     List {
-        /// Manage wildcard registration for this domain (matches myapp.roxy and *.myapp.roxy)
+        /// Manage wildcard registration for this domain (matches myapp.localify and *.myapp.localify)
         #[arg(long)]
         wildcard: bool,
 
@@ -211,7 +260,12 @@ fn main() -> Result<()> {
 
     // Handle completions before loading config (works even with malformed config)
     if let Commands::Completions { shell } = &cli.command {
-        clap_complete::generate(*shell, &mut Cli::command(), "roxy", &mut std::io::stdout());
+        clap_complete::generate(
+            *shell,
+            &mut Cli::command(),
+            BRANDING.cli_command(),
+            &mut std::io::stdout(),
+        );
         return Ok(());
     }
 
@@ -226,6 +280,26 @@ fn main() -> Result<()> {
             wildcard,
             route,
         } => cli::register::execute(domain, wildcard, route, &ctx),
+        Commands::InitProject {
+            name,
+            domain,
+            target,
+            with_api,
+            api_domain,
+            api_target,
+            project_only,
+        } => cli::init_project::execute(
+            cli::init_project::InitProjectArgs {
+                name,
+                domain,
+                target,
+                with_api,
+                api_domain,
+                api_target,
+                project_only,
+            },
+            &ctx,
+        ),
         Commands::Unregister {
             domain,
             wildcard,
@@ -246,6 +320,12 @@ fn main() -> Result<()> {
             RouteCommands::List { wildcard, domain } => cli::route::list(domain, wildcard, &ctx),
         },
         Commands::List => cli::list::execute(&ctx),
+        Commands::ListProjects => cli::list_projects::execute(&ctx),
+        Commands::RemoveProject {
+            project_id,
+            delete_domains,
+            force,
+        } => cli::remove_project::execute(project_id, delete_domains, force, &ctx),
         Commands::Start { foreground } => {
             cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
         }

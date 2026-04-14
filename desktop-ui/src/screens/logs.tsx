@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
-import { useLogs } from "../lib/queries";
+import { useBootstrap, useLogs } from "../lib/queries";
 
 export function LogsScreen() {
   const [lines, setLines] = useState(200);
+  const { data: bootstrap } = useBootstrap();
   const { data, isFetching, refetch } = useLogs({ lines, clear: false });
+  const appName = bootstrap?.environment.appName ?? "Localify";
 
   return (
     <section className="space-y-6">
@@ -13,7 +15,7 @@ export function LogsScreen() {
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight">Logs</h1>
           <p className="text-sm text-[--color-muted]">
-            Last {lines} lines from the Roxy daemon.
+            Last {lines} lines from the {appName} daemon.
           </p>
         </div>
         <div className="flex items-center gap-2">

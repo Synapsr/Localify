@@ -8,5 +8,6 @@ pub mod mgmt_client;
 pub mod network;
 pub mod paths;
 pub mod pid;
+pub mod port_check;
 pub mod process;
 pub mod tracing;

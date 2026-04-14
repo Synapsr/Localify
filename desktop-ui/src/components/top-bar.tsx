@@ -19,17 +19,21 @@ export function TopBar() {
 
   const running = data?.daemon.running ?? false;
   const suffix = data?.environment.fixedDomainSuffix ?? "";
+  const appName = data?.environment.appName ?? "Localify";
+  const daemonError = startDaemon.error ?? stopDaemon.error;
+  const daemonErrorMessage =
+    daemonError instanceof Error ? daemonError.message : null;
 
   return (
     <header className="border-b border-[--color-border] bg-[--color-bg]">
       <div className="mx-auto flex h-14 w-full max-w-4xl items-center gap-6 px-8">
         <div className="flex items-center gap-2.5">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[--color-ink] text-[--color-bg] font-mono text-xs font-bold">
-            R
+            {appName.charAt(0).toUpperCase()}
           </div>
           <div className="flex items-baseline gap-1.5">
             <span className="text-sm font-semibold text-[--color-ink]">
-              Roxy
+              {appName}
             </span>
             {suffix && (
               <span className="font-mono text-xs text-[--color-muted]">
@@ -90,6 +94,13 @@ export function TopBar() {
           )}
         </div>
       </div>
+      {daemonErrorMessage && (
+        <div className="border-t border-[--color-border] bg-[--color-surface]">
+          <div className="mx-auto w-full max-w-4xl px-8 py-2">
+            <p className="text-xs text-[--color-danger]">{daemonErrorMessage}</p>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

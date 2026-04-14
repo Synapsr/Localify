@@ -1,4 +1,6 @@
 export interface EnvironmentDto {
+  appName: string;
+  desktopName: string;
   configPath: string;
   binaryPath: string;
   binaryExists: boolean;
@@ -56,6 +58,17 @@ export interface DomainInfoDto {
   registration: RegistrationDto;
   hasCert: boolean;
   certTrusted: boolean | null;
+  projectId: string | null;
+  projectName: string | null;
+  projectEnabled: boolean;
+  active: boolean;
+}
+
+export interface ProjectInfoDto {
+  id: string;
+  name: string;
+  enabled: boolean;
+  domainCount: number;
 }
 
 export interface DaemonStatusDto {
@@ -73,6 +86,7 @@ export interface BootstrapDto {
   config: AppConfigDto;
   daemon: DaemonStatusDto;
   domains: DomainInfoDto[];
+  projects: ProjectInfoDto[];
 }
 
 export interface StepDto {
@@ -99,6 +113,23 @@ export interface RegisterDomainRequest {
   domain: string;
   wildcard: boolean;
   routes: string[];
+  projectId?: string | null;
+}
+
+export interface CreateProjectRequest {
+  name: string;
+}
+
+export interface AssignDomainProjectRequest {
+  domain: string;
+  wildcard: boolean;
+  projectId?: string | null;
+}
+
+export interface UpdateProjectRequest {
+  id: string;
+  name?: string;
+  enabled?: boolean;
 }
 
 export interface AvailablePortDto {

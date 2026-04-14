@@ -3,39 +3,42 @@ use std::fs::OpenOptions;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::application::StepOutcome;
 use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::install::Install;
-use crate::application::list_all_domains::{DomainInfo, ListAllDomains};
 use crate::application::manage_routes::ManageRoutes;
+use crate::application::ports::DaemonConnection;
 use crate::application::register_domain::RegisterDomain;
 use crate::application::restart_daemon::RestartDaemon;
 use crate::application::start_daemon::StartDaemon;
 use crate::application::stop_daemon::StopDaemon;
 use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
+use crate::branding::BRANDING;
 use crate::desktop::dto::{
-    AddRouteRequest, AppConfigDto, AvailablePortDto, BootstrapDto, ConfigUpdateRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
-    InstallResultDto, LogsDto, LogsRequest, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveRouteRequest, RouteDto, StartDaemonRequest,
-    StepDto, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
+    ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
+    DomainPatternRequest, EnvironmentDto, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
 };
 use crate::domain::{DomainPattern, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
-use crate::infrastructure::config::{Config, ConfigStore};
+use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, ConfiguredProject};
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
+use crate::infrastructure::port_check::ensure_daemon_ports_available;
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
-
-const ROXY_CA_NAME: &str = "Roxy Local Development CA";
 
 #[derive(Debug, Clone)]
 pub struct DesktopApi {
@@ -73,15 +76,18 @@ impl DesktopApi {
             config: self.read_config()?,
             daemon: self.daemon_status()?,
             domains: self.list_domains()?,
+            projects: self.list_projects()?,
         })
     }
 
     pub fn environment(&self) -> EnvironmentDto {
         EnvironmentDto {
+            app_name: BRANDING.app_name.into(),
+            desktop_name: BRANDING.desktop_name.into(),
             config_path: self.config_path.display().to_string(),
             binary_path: self.binary_path.display().to_string(),
             binary_exists: self.binary_path.exists(),
-            fixed_domain_suffix: ".roxy".into(),
+            fixed_domain_suffix: BRANDING.domain_suffix.into(),
         }
     }
 
@@ -150,10 +156,148 @@ impl DesktopApi {
 
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
+        let cert_trusted = certs.is_trusted().ok();
+        let configured_domains = self.config_store().list_configured_domains()?;
         let daemon = MgmtSocketClient::new(&paths.socket_path);
-        let result = ListAllDomains::new(&daemon, &self.config_store(), &certs).execute()?;
 
-        Ok(result.domains.into_iter().map(map_domain_info).collect())
+        let (active_config_domains, external_domains) = match daemon.list_registrations() {
+            Ok(registrations) => {
+                let mut active_patterns = std::collections::HashSet::new();
+                let mut external = Vec::new();
+
+                for registration in registrations {
+                    if registration.source().to_string() == "config" {
+                        active_patterns.insert(registration.display_pattern());
+                    } else {
+                        external.push(registration);
+                    }
+                }
+
+                (active_patterns, external)
+            }
+            Err(_) => (std::collections::HashSet::new(), Vec::new()),
+        };
+
+        let mut domains = configured_domains
+            .into_iter()
+            .map(|domain| {
+                let has_cert = certs.exists(domain.registration.pattern());
+                let active = active_config_domains.contains(&domain.registration.display_pattern());
+
+                map_configured_domain_info(domain, has_cert, cert_trusted, active)
+            })
+            .collect::<Vec<_>>();
+
+        domains.extend(external_domains.into_iter().map(|registration| {
+            let has_cert = certs.exists(registration.pattern());
+            map_domain_info(registration, has_cert, cert_trusted, None, None, true, true)
+        }));
+
+        domains.sort_by(|left, right| left.registration.pattern.cmp(&right.registration.pattern));
+        Ok(domains)
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<ProjectInfoDto>> {
+        if let Some(helper) = self.connected_helper_client()? {
+            return helper.list_projects();
+        }
+
+        let configured_domains = self.config_store().list_configured_domains()?;
+        let domain_counts = configured_domains.into_iter().fold(
+            std::collections::HashMap::<String, usize>::new(),
+            |mut counts, domain| {
+                if let Some(project_id) = domain.project_id {
+                    *counts.entry(project_id).or_default() += 1;
+                }
+                counts
+            },
+        );
+
+        let mut projects = self
+            .config_store()
+            .list_projects()?
+            .into_iter()
+            .map(|project| {
+                let domain_count = *domain_counts.get(&project.id).unwrap_or(&0);
+                map_project_info(project, domain_count)
+            })
+            .collect::<Vec<_>>();
+        projects.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(projects)
+    }
+
+    pub fn create_project(&self, request: CreateProjectRequest) -> Result<ProjectInfoDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.create_project(request);
+        }
+
+        self.ensure_config_writable()?;
+        let project = self.config_store().create_project(&request.name)?;
+        Ok(map_project_info(project, 0))
+    }
+
+    pub fn update_project(&self, request: UpdateProjectRequest) -> Result<ProjectInfoDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.update_project(request);
+        }
+
+        self.ensure_config_writable()?;
+        let configured_domains = self.config_store().list_configured_domains()?;
+        let domain_count = configured_domains
+            .iter()
+            .filter(|domain| domain.project_id.as_deref() == Some(request.id.as_str()))
+            .count();
+        let project =
+            self.config_store()
+                .update_project(&request.id, request.name, request.enabled)?;
+        Ok(map_project_info(project, domain_count))
+    }
+
+    pub fn assign_domain_project(
+        &self,
+        request: AssignDomainProjectRequest,
+    ) -> Result<DomainInfoDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.assign_domain_project(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let cert_trusted = certs.is_trusted().ok();
+        let pattern = DomainPattern::from_name(&request.domain, request.wildcard)?;
+        let registration = self
+            .config_store()
+            .get_domain(&pattern)?
+            .ok_or_else(|| anyhow::anyhow!("Domain '{}' not registered", pattern))?;
+
+        self.config_store()
+            .update_domain_with_project(registration, request.project_id)?;
+
+        let configured_domain = self
+            .config_store()
+            .list_configured_domains()?
+            .into_iter()
+            .find(|domain| domain.registration.display_pattern() == pattern.display_pattern())
+            .ok_or_else(|| anyhow::anyhow!("Domain '{}' not registered", pattern))?;
+
+        let daemon = MgmtSocketClient::new(&paths.socket_path);
+        let active = daemon
+            .list_registrations()
+            .map(|registrations| {
+                registrations
+                    .iter()
+                    .any(|registration| registration.display_pattern() == pattern.display_pattern())
+            })
+            .unwrap_or(false);
+
+        let has_cert = certs.exists(configured_domain.registration.pattern());
+        Ok(map_configured_domain_info(
+            configured_domain,
+            has_cert,
+            cert_trusted,
+            active,
+        ))
     }
 
     pub fn available_port(&self) -> Result<AvailablePortDto> {
@@ -255,13 +399,14 @@ impl DesktopApi {
                 Ok(_) => result.steps.push(StepDto {
                     label: Some("Remove privileged helper".into()),
                     status: "success".into(),
-                    message: "Removed the persistent Roxy desktop helper.".into(),
+                    message: format!("Removed the persistent {} desktop helper.", BRANDING.app_name),
                 }),
                 Err(error) => result.steps.push(StepDto {
                     label: Some("Remove privileged helper".into()),
                     status: "warning".into(),
                     message: format!(
-                        "Roxy was uninstalled, but the persistent desktop helper could not be removed: {error}"
+                        "{} was uninstalled, but the persistent desktop helper could not be removed: {error}",
+                        BRANDING.app_name
                     ),
                 }),
             }
@@ -322,6 +467,8 @@ impl DesktopApi {
             .map_err(|error| anyhow::anyhow!("Invalid route: {error}"))?;
 
         let result = RegisterDomain::new(&self.config_store(), &certs).execute(pattern, routes)?;
+        self.config_store()
+            .update_domain_with_project(result.registration.clone(), request.project_id)?;
 
         Ok(RegisterDomainResultDto {
             registration: map_registration(result.registration),
@@ -406,15 +553,16 @@ impl DesktopApi {
         let (config, paths) = self.load_config_and_paths()?;
         let pid_file = PidFile::new(paths.pid_file.clone());
         let ready = StartDaemon::new(&pid_file, &config.daemon).preflight()?;
-
+        ensure_daemon_ports_available(ready.http_port, ready.https_port, config.daemon.dns_port)?;
         let child = self
             .spawn_daemon_process(request.verbose)
             .with_context(|| {
                 format!("Failed to launch daemon via {}", self.binary_path.display())
             })?;
+        let pid = self.wait_for_daemon_start(child, &pid_file, &paths.log_file)?;
 
         Ok(DaemonLaunchDto {
-            pid: child.id(),
+            pid,
             lan_ip: get_lan_ip().to_string(),
             http_port: ready.http_port,
             https_port: ready.https_port,
@@ -442,10 +590,20 @@ impl DesktopApi {
         let (_, paths) = self.load_config_and_paths()?;
         let pid_file = PidFile::new(paths.pid_file);
         let ready = RestartDaemon::new(&pid_file, &config_store).restart()?;
+        ensure_daemon_ports_available(
+            ready.daemon_config.http_port,
+            ready.daemon_config.https_port,
+            ready.daemon_config.dns_port,
+        )?;
         let child = self.spawn_daemon_process(request.verbose)?;
+        let pid = self.wait_for_daemon_start(
+            child,
+            &PidFile::new(ready.paths.pid_file.clone()),
+            &ready.paths.log_file,
+        )?;
 
         Ok(DaemonLaunchDto {
-            pid: child.id(),
+            pid,
             lan_ip: get_lan_ip().to_string(),
             http_port: ready.daemon_config.http_port,
             https_port: ready.daemon_config.https_port,
@@ -462,10 +620,20 @@ impl DesktopApi {
         let (_, paths) = self.load_config_and_paths()?;
         let pid_file = PidFile::new(paths.pid_file);
         let ready = RestartDaemon::new(&pid_file, &config_store).reload()?;
+        ensure_daemon_ports_available(
+            ready.daemon_config.http_port,
+            ready.daemon_config.https_port,
+            ready.daemon_config.dns_port,
+        )?;
         let child = self.spawn_daemon_process(request.verbose)?;
+        let pid = self.wait_for_daemon_start(
+            child,
+            &PidFile::new(ready.paths.pid_file.clone()),
+            &ready.paths.log_file,
+        )?;
 
         Ok(DaemonLaunchDto {
-            pid: child.id(),
+            pid,
             lan_ip: get_lan_ip().to_string(),
             http_port: ready.daemon_config.http_port,
             https_port: ready.daemon_config.https_port,
@@ -514,8 +682,10 @@ impl DesktopApi {
     fn spawn_daemon_process(&self, verbose: bool) -> Result<std::process::Child> {
         if !self.binary_path.exists() {
             bail!(
-                "Roxy CLI binary not found at {}. Build the root CLI first or set ROXY_CLI_PATH.",
-                self.binary_path.display()
+                "{} CLI binary not found at {}. Build the root CLI first or set {}.",
+                BRANDING.app_name,
+                self.binary_path.display(),
+                BRANDING.env_var("CLI_PATH")
             );
         }
 
@@ -529,10 +699,37 @@ impl DesktopApi {
             .stderr(Stdio::null());
 
         if verbose {
-            cmd.env("ROXY_LOG", "debug");
+            cmd.env(BRANDING.env_var("LOG"), "debug");
         }
 
         cmd.spawn().map_err(Into::into)
+    }
+
+    fn wait_for_daemon_start(
+        &self,
+        mut child: std::process::Child,
+        pid_file: &PidFile,
+        log_path: &Path,
+    ) -> Result<u32> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+
+        loop {
+            if let Some(pid) = pid_file.get_running_pid()? {
+                return Ok(pid);
+            }
+
+            if let Some(status) = child.try_wait()? {
+                bail!(daemon_start_failure_message(status, log_path));
+            }
+
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(daemon_start_timeout_message(log_path));
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn load_config_and_paths(&self) -> Result<(Config, RoxyPaths)> {
@@ -586,7 +783,10 @@ impl DesktopApi {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        bail!("Roxy system helper did not become ready in time.")
+        bail!(
+            "{} system helper did not become ready in time.",
+            BRANDING.app_name
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -603,7 +803,10 @@ impl DesktopApi {
             .arg("-e")
             .arg(script)
             .output()
-            .context("Failed to launch macOS administrator prompt for Roxy")?;
+            .context(format!(
+                "Failed to launch macOS administrator prompt for {}",
+                BRANDING.app_name
+            ))?;
 
         if output.status.success() {
             return Ok(command_output(&output));
@@ -616,7 +819,8 @@ impl DesktopApi {
     fn run_cli_command_with_admin(&self, _args: &[String]) -> Result<String> {
         bail!(
             "Desktop system-mode actions currently require macOS administrator integration. \
-             Run the equivalent `roxy` CLI command manually on this platform."
+             Run the equivalent `{}` CLI command manually on this platform.",
+            BRANDING.cli_command()
         )
     }
 
@@ -626,8 +830,10 @@ impl DesktopApi {
         }
 
         bail!(
-            "Roxy CLI binary not found at {}. Build the root CLI first or set ROXY_CLI_PATH.",
-            self.binary_path.display()
+            "{} CLI binary not found at {}. Build the root CLI first or set {}.",
+            BRANDING.app_name,
+            self.binary_path.display(),
+            BRANDING.env_var("CLI_PATH")
         );
     }
 
@@ -675,7 +881,8 @@ impl DesktopApi {
                 label: Some("Remove CA trust from your macOS account".into()),
                 status: "warning".into(),
                 message: format!(
-                    "Roxy removed its system components, but the CA could not be fully removed from your macOS login keychain: {error}"
+                    "{} removed its system components, but the CA could not be fully removed from your macOS login keychain: {error}",
+                    BRANDING.app_name
                 ),
             },
         })
@@ -702,7 +909,11 @@ impl DesktopApi {
             );
         };
 
-        let probe_path = parent.join(format!(".roxy-write-test-{}", std::process::id()));
+        let probe_path = parent.join(format!(
+            ".{}-write-test-{}",
+            BRANDING.slug,
+            std::process::id()
+        ));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -719,10 +930,12 @@ impl DesktopApi {
     fn config_write_guidance(&self) -> String {
         format!(
             "Config file {} is not writable by the current user.\n\
-             Roxy Desktop stores domains and routes in that file.\n\
+             {} stores domains and routes in that file.\n\
              Fix the file permissions, or launch the desktop app with \
-             ROXY_CONFIG_PATH pointing to a user-writable config file.",
-            self.config_path.display()
+             {} pointing to a user-writable config file.",
+            self.config_path.display(),
+            BRANDING.desktop_name,
+            BRANDING.env_var("CONFIG_PATH")
         )
     }
 }
@@ -768,10 +981,71 @@ fn command_output(output: &std::process::Output) -> String {
 fn cli_failure_message(output: &std::process::Output) -> String {
     let message = command_output(output);
     if message.is_empty() {
-        "Roxy CLI command failed without diagnostic output.".into()
+        format!(
+            "{} CLI command failed without diagnostic output.",
+            BRANDING.app_name
+        )
     } else {
         message
     }
+}
+
+fn daemon_start_failure_message(status: std::process::ExitStatus, log_path: &Path) -> String {
+    let exit_detail = status
+        .code()
+        .map(|code| format!(" with exit code {code}"))
+        .unwrap_or_else(|| " after receiving a termination signal".into());
+    let log_excerpt = startup_log_excerpt(log_path);
+
+    if log_excerpt.is_empty() {
+        return format!(
+            "{} daemon exited during startup{}.\nNo startup logs were written yet. Run `{} start --foreground` in a terminal to inspect the failure directly.",
+            BRANDING.app_name,
+            exit_detail,
+            BRANDING.cli_command()
+        );
+    }
+
+    format!(
+        "{} daemon exited during startup{}.\nRecent log output:\n{}",
+        BRANDING.app_name, exit_detail, log_excerpt
+    )
+}
+
+fn daemon_start_timeout_message(log_path: &Path) -> String {
+    let log_excerpt = startup_log_excerpt(log_path);
+
+    if log_excerpt.is_empty() {
+        return format!(
+            "{} did not become ready within 3 seconds.\nRun `{} start --foreground` in a terminal to inspect the startup failure directly.",
+            BRANDING.app_name,
+            BRANDING.cli_command()
+        );
+    }
+
+    format!(
+        "{} did not become ready within 3 seconds.\nRecent log output:\n{}",
+        BRANDING.app_name, log_excerpt
+    )
+}
+
+fn startup_log_excerpt(log_path: &Path) -> String {
+    if !log_path.exists() {
+        return String::new();
+    }
+
+    tail_lines(log_path, 20)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn is_missing_macos_certificate_error(message: &str) -> bool {
+    message.contains("could not be found")
+        || message.contains("The specified item could not be found")
+        || message.contains("The certificate was not found")
+        || message.contains("Unable to delete certificate matching")
 }
 
 fn cli_shell_command(binary_path: &Path, config_path: &Path, args: &[String]) -> String {
@@ -813,7 +1087,10 @@ fn macos_user_ca_is_trusted(cert_path: &Path) -> Result<bool> {
             &keychain_path,
         ])
         .output()
-        .context("Failed to verify the Roxy CA trust in the current macOS account")?;
+        .context(format!(
+            "Failed to verify the {} CA trust in the current macOS account",
+            BRANDING.app_name
+        ))?;
 
     Ok(output.status.success())
 }
@@ -822,7 +1099,8 @@ fn macos_user_ca_is_trusted(cert_path: &Path) -> Result<bool> {
 fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
     if !cert_path.exists() {
         bail!(
-            "Roxy installed its system components, but the CA certificate was not found at {}.",
+            "{} installed its system components, but the CA certificate was not found at {}.",
+            BRANDING.app_name,
             cert_path.display()
         );
     }
@@ -831,7 +1109,10 @@ fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
         return Ok(StepDto {
             label: Some("Trust CA in your macOS account".into()),
             status: "skipped".into(),
-            message: "The Roxy local CA was already trusted in your macOS login keychain.".into(),
+            message: format!(
+                "The {} local CA was already trusted in your macOS login keychain.",
+                BRANDING.app_name
+            ),
         });
     }
 
@@ -855,11 +1136,15 @@ fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
             &cert_path,
         ])
         .output()
-        .context("Failed to trust the Roxy CA in the current macOS account")?;
+        .context(format!(
+            "Failed to trust the {} CA in the current macOS account",
+            BRANDING.app_name
+        ))?;
 
     if !output.status.success() {
         bail!(
-            "Failed to trust the Roxy CA in your macOS login keychain: {}",
+            "Failed to trust the {} CA in your macOS login keychain: {}",
+            BRANDING.app_name,
             cli_failure_message(&output)
         );
     }
@@ -867,9 +1152,10 @@ fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
     Ok(StepDto {
         label: Some("Trust CA in your macOS account".into()),
         status: "success".into(),
-        message:
-            "Trusted the Roxy local CA in your macOS login keychain for browsers and SSL clients."
-                .into(),
+        message: format!(
+            "Trusted the {} local CA in your macOS login keychain for browsers and SSL clients.",
+            BRANDING.app_name
+        ),
     })
 }
 
@@ -883,17 +1169,19 @@ fn macos_remove_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
         let output = Command::new("security")
             .args(["remove-trusted-cert", &cert_path])
             .output()
-            .context("Failed to remove the trusted Roxy CA from the current macOS account")?;
+            .context(format!(
+                "Failed to remove the trusted {} CA from the current macOS account",
+                BRANDING.app_name
+            ))?;
 
         if !output.status.success() {
             let message = cli_failure_message(&output);
-            let not_found = message.contains("could not be found")
-                || message.contains("The specified item could not be found")
-                || message.contains("The certificate was not found");
+            let not_found = is_missing_macos_certificate_error(&message);
 
             if !not_found {
                 bail!(
-                    "Failed to remove the trusted Roxy CA from your macOS login keychain: {}",
+                    "Failed to remove the trusted {} CA from your macOS login keychain: {}",
+                    BRANDING.app_name,
                     message
                 );
             }
@@ -906,15 +1194,20 @@ fn macos_remove_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
         return Ok(StepDto {
             label: Some("Remove CA trust from your macOS account".into()),
             status: "success".into(),
-            message: "Removed the Roxy local CA from your macOS login keychain for this account."
-                .into(),
+            message: format!(
+                "Removed the {} local CA from your macOS login keychain for this account.",
+                BRANDING.app_name
+            ),
         });
     }
 
     Ok(StepDto {
         label: Some("Remove CA trust from your macOS account".into()),
         status: "skipped".into(),
-        message: "No Roxy CA trust entry was present in your macOS login keychain.".into(),
+        message: format!(
+            "No {} CA trust entry was present in your macOS login keychain.",
+            BRANDING.app_name
+        ),
     })
 }
 
@@ -944,9 +1237,17 @@ fn delete_macos_keychain_certificates(keychain_path: &Path) -> Result<usize> {
 
     loop {
         let output = Command::new("security")
-            .args(["delete-certificate", "-c", ROXY_CA_NAME, &keychain_path])
+            .args([
+                "delete-certificate",
+                "-c",
+                BRANDING.ca_name().as_str(),
+                &keychain_path,
+            ])
             .output()
-            .context("Failed to remove a stale Roxy CA from the macOS login keychain")?;
+            .context(format!(
+                "Failed to remove a stale {} CA from the macOS login keychain",
+                BRANDING.app_name
+            ))?;
 
         if output.status.success() {
             removed += 1;
@@ -954,15 +1255,15 @@ fn delete_macos_keychain_certificates(keychain_path: &Path) -> Result<usize> {
         }
 
         let message = cli_failure_message(&output);
-        let not_found = message.contains("could not be found")
-            || message.contains("The specified item could not be found");
+        let not_found = is_missing_macos_certificate_error(&message);
 
         if not_found {
             break;
         }
 
         bail!(
-            "Failed to delete the Roxy CA from your macOS login keychain: {}",
+            "Failed to delete the {} CA from your macOS login keychain: {}",
+            BRANDING.app_name,
             message
         );
     }
@@ -986,11 +1287,49 @@ fn map_config(config_path: &Path, config: Config) -> AppConfigDto {
     }
 }
 
-fn map_domain_info(value: DomainInfo) -> DomainInfoDto {
+fn map_configured_domain_info(
+    value: ConfiguredDomain,
+    has_cert: bool,
+    cert_trusted: Option<bool>,
+    active: bool,
+) -> DomainInfoDto {
+    map_domain_info(
+        value.registration,
+        has_cert,
+        cert_trusted,
+        value.project_id,
+        value.project_name,
+        value.project_enabled,
+        active,
+    )
+}
+
+fn map_domain_info(
+    registration: crate::domain::DomainRegistration,
+    has_cert: bool,
+    cert_trusted: Option<bool>,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    project_enabled: bool,
+    active: bool,
+) -> DomainInfoDto {
     DomainInfoDto {
-        registration: map_registration(value.registration),
-        has_cert: value.has_cert,
-        cert_trusted: value.cert_trusted,
+        registration: map_registration(registration),
+        has_cert,
+        cert_trusted,
+        project_id,
+        project_name,
+        project_enabled,
+        active,
+    }
+}
+
+fn map_project_info(value: ConfiguredProject, domain_count: usize) -> ProjectInfoDto {
+    ProjectInfoDto {
+        id: value.id,
+        name: value.name,
+        enabled: value.enabled,
+        domain_count,
     }
 }
 
@@ -1086,11 +1425,11 @@ mod tests {
     #[test]
     fn cli_shell_command_quotes_all_args() {
         let command = cli_shell_command(
-            Path::new("/tmp/roxy"),
-            Path::new("/etc/roxy/config.toml"),
+            Path::new("/tmp/localify"),
+            Path::new("/etc/localify/config.toml"),
             &[
                 "register".into(),
-                "my app.roxy".into(),
+                "my app.localify".into(),
                 "--route".into(),
                 "/=3000".into(),
             ],
@@ -1098,7 +1437,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "'/tmp/roxy' '--config' '/etc/roxy/config.toml' 'register' 'my app.roxy' '--route' '/=3000'"
+            "'/tmp/localify' '--config' '/etc/localify/config.toml' 'register' 'my app.localify' '--route' '/=3000'"
         );
     }
 }

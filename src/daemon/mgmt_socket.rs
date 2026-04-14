@@ -201,7 +201,8 @@ mod tests {
     use tokio::net::UnixStream;
 
     fn test_reg(domain: &str) -> DomainRegistration {
-        let name = DomainName::new(domain).unwrap();
+        let normalized = domain.replace(".roxy", ".localify");
+        let name = DomainName::new(normalized).unwrap();
         let pattern = DomainPattern::Exact(name);
         let routes = vec![Route::parse("/=3000").unwrap()];
         DomainRegistration::new(pattern, routes)
@@ -315,7 +316,7 @@ mod tests {
         assert_eq!(resp["ok"], true);
         let domains = resp["data"]["domains"].as_array().unwrap();
         assert_eq!(domains.len(), 1);
-        assert_eq!(domains[0]["pattern"], "app.roxy");
+        assert_eq!(domains[0]["pattern"], "app.localify");
         assert_eq!(domains[0]["source"], "config");
         assert_eq!(domains[0]["https"], false);
         let routes = domains[0]["routes"].as_array().unwrap();
