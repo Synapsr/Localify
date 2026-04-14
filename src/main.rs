@@ -121,6 +121,37 @@ enum Commands {
         /// Shell to generate completions for
         shell: Shell,
     },
+
+    /// Internal privileged helper used by the desktop app.
+    #[command(hide = true)]
+    Helper {
+        #[command(subcommand)]
+        command: HelperCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum HelperCommands {
+    EnsureRunning {
+        #[arg(long)]
+        socket: PathBuf,
+
+        #[arg(long)]
+        uid: u32,
+    },
+
+    Serve {
+        #[arg(long)]
+        socket: PathBuf,
+
+        #[arg(long)]
+        uid: u32,
+    },
+
+    UninstallService {
+        #[arg(long)]
+        uid: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -227,6 +258,15 @@ fn main() -> Result<()> {
             follow,
         } => cli::logs::execute(lines, clear, follow, &paths),
         Commands::Reload => cli::reload::execute(cli.verbose, config_path, &ctx),
+        Commands::Helper { command } => match command {
+            HelperCommands::EnsureRunning { socket, uid } => {
+                cli::helper::ensure_running(config_path, socket, uid)
+            }
+            HelperCommands::Serve { socket, uid } => {
+                cli::helper::serve_forever(config_path, uid, socket)
+            }
+            HelperCommands::UninstallService { uid } => cli::helper::uninstall_service(uid),
+        },
         Commands::Completions { .. } => unreachable!(),
     }
 }

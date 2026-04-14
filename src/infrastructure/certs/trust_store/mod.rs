@@ -20,10 +20,10 @@ pub trait TrustStore {
     fn add_ca(&self, cert_path: &Path) -> Result<(), CertError>;
 
     /// Remove the Root CA from the system trust store
-    fn remove_ca(&self) -> Result<(), CertError>;
+    fn remove_ca(&self, cert_path: &Path) -> Result<(), CertError>;
 
     /// Check if the Root CA is trusted
-    fn is_ca_trusted(&self) -> Result<bool, CertError>;
+    fn is_ca_trusted(&self, cert_path: &Path) -> Result<bool, CertError>;
 }
 
 /// Get the trust store for the current platform
@@ -58,14 +58,14 @@ impl TrustStore for UnsupportedTrustStore {
         )))
     }
 
-    fn remove_ca(&self) -> Result<(), CertError> {
+    fn remove_ca(&self, _cert_path: &Path) -> Result<(), CertError> {
         Err(CertError::TrustStoreError(format!(
             "Unsupported platform: {}",
             std::env::consts::OS
         )))
     }
 
-    fn is_ca_trusted(&self) -> Result<bool, CertError> {
+    fn is_ca_trusted(&self, _cert_path: &Path) -> Result<bool, CertError> {
         Err(CertError::TrustStoreError(format!(
             "Unsupported platform: {}",
             std::env::consts::OS

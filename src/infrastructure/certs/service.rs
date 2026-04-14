@@ -22,16 +22,16 @@ impl CertificateService {
 
     /// Initialize the Root CA (called during `roxy install`)
     pub fn init_ca(&self) -> Result<(), CertError> {
-        if self.ca.exists() {
-            return Ok(());
+        if !self.ca.exists() {
+            // Generate CA
+            self.ca.generate()?;
         }
 
-        // Generate CA
-        self.ca.generate()?;
-
-        // Add CA to trust store
+        let cert_path = self.ca.cert_path();
         let trust_store = get_trust_store()?;
-        trust_store.add_ca(&self.ca.cert_path())?;
+        if !trust_store.is_ca_trusted(&cert_path)? {
+            trust_store.add_ca(&cert_path)?;
+        }
 
         Ok(())
     }
@@ -43,7 +43,7 @@ impl CertificateService {
         }
 
         let trust_store = get_trust_store()?;
-        trust_store.is_ca_trusted()
+        trust_store.is_ca_trusted(&self.ca.cert_path())
     }
 
     /// Generate a certificate for a domain pattern (signed by the Root CA).
@@ -80,7 +80,7 @@ impl CertificateService {
     /// Remove the Root CA (for uninstall)
     pub fn remove_ca(&self) -> Result<(), CertError> {
         let trust_store = get_trust_store()?;
-        trust_store.remove_ca()?;
+        trust_store.remove_ca(&self.ca.cert_path())?;
         self.ca.delete()?;
         Ok(())
     }

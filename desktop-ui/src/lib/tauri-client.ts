@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AddRouteRequest,
+  AvailablePortDto,
   AppConfigDto,
   BootstrapDto,
   ConfigUpdateRequest,
@@ -33,6 +34,7 @@ export interface DesktopClient {
   updateConfig(request: ConfigUpdateRequest): Promise<AppConfigDto>;
   getDaemonStatus(): Promise<DaemonStatusDto>;
   listDomains(): Promise<DomainInfoDto[]>;
+  getAvailablePort(): Promise<AvailablePortDto>;
   installRoxy(): Promise<InstallResultDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
   uninstallRoxy(): Promise<UninstallResultDto>;
@@ -55,6 +57,7 @@ export function createDesktopClient(): DesktopClient {
     updateConfig: (request) => tauriInvoke("update_config", { request }),
     getDaemonStatus: () => tauriInvoke("get_daemon_status"),
     listDomains: () => tauriInvoke("list_domains"),
+    getAvailablePort: () => tauriInvoke("get_available_port"),
     installRoxy: () => tauriInvoke("install_roxy"),
     getUninstallPreview: () => tauriInvoke("get_uninstall_preview"),
     uninstallRoxy: () => tauriInvoke("uninstall_roxy"),

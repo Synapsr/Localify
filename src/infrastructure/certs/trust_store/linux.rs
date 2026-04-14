@@ -57,7 +57,7 @@ impl TrustStore for LinuxTrustStore {
         Ok(())
     }
 
-    fn remove_ca(&self) -> Result<(), CertError> {
+    fn remove_ca(&self, _cert_path: &Path) -> Result<(), CertError> {
         let path = Path::new(SYSTEM_CERT_PATH);
         if !path.exists() {
             return Ok(());
@@ -96,7 +96,11 @@ impl TrustStore for LinuxTrustStore {
         Ok(())
     }
 
-    fn is_ca_trusted(&self) -> Result<bool, CertError> {
+    fn is_ca_trusted(&self, cert_path: &Path) -> Result<bool, CertError> {
+        if !cert_path.exists() {
+            return Ok(false);
+        }
+
         Ok(Path::new(SYSTEM_CERT_PATH).exists())
     }
 }

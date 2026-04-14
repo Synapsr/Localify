@@ -1,4 +1,5 @@
 pub mod context;
+pub mod helper;
 pub mod install;
 pub mod list;
 pub mod logs;

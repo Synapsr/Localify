@@ -101,6 +101,10 @@ export interface RegisterDomainRequest {
   routes: string[];
 }
 
+export interface AvailablePortDto {
+  port: number;
+}
+
 export interface DomainPatternRequest {
   domain: string;
   wildcard: boolean;

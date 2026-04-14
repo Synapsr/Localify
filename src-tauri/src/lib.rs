@@ -47,6 +47,7 @@ pub fn run() {
             commands::update_config,
             commands::get_daemon_status,
             commands::list_domains,
+            commands::get_available_port,
             commands::install_roxy,
             commands::get_uninstall_preview,
             commands::uninstall_roxy,

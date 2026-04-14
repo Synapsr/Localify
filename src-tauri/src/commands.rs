@@ -1,10 +1,10 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
-    AddRouteRequest, AppConfigDto, BootstrapDto, ConfigUpdateRequest, DaemonLaunchDto,
-    DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto,
+    AddRouteRequest, AppConfigDto, AvailablePortDto, BootstrapDto, ConfigUpdateRequest,
+    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InstallResultDto,
+    LogsDto, LogsRequest, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
+    RegistrationMutationDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto,
 };
 
 pub struct AppState {
@@ -41,6 +41,11 @@ pub fn get_daemon_status(state: tauri::State<'_, AppState>) -> Result<DaemonStat
 #[tauri::command]
 pub fn list_domains(state: tauri::State<'_, AppState>) -> Result<Vec<DomainInfoDto>, String> {
     state.api.list_domains().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn get_available_port(state: tauri::State<'_, AppState>) -> Result<AvailablePortDto, String> {
+    state.api.available_port().map_err(map_error)
 }
 
 #[tauri::command]

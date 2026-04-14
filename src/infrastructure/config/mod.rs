@@ -16,7 +16,10 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("Failed to read config file: {0}")]
-    ReadError(#[from] std::io::Error),
+    ReadError(std::io::Error),
+
+    #[error("Failed to write config file: {0}")]
+    WriteError(std::io::Error),
 
     #[error("Failed to parse config file: {0}")]
     ParseError(#[from] toml::de::Error),
@@ -112,7 +115,7 @@ impl ConfigStore {
         if let Some(dir) = self.path.parent()
             && !dir.exists()
         {
-            fs::create_dir_all(dir)?;
+            fs::create_dir_all(dir).map_err(ConfigError::WriteError)?;
         }
         Ok(())
     }
@@ -122,7 +125,7 @@ impl ConfigStore {
             return Ok(Config::default());
         }
 
-        let content = fs::read_to_string(&self.path)?;
+        let content = fs::read_to_string(&self.path).map_err(ConfigError::ReadError)?;
         let config = toml::from_str(&content)?;
         Ok(config)
     }
@@ -131,7 +134,7 @@ impl ConfigStore {
         self.ensure_config_dir()?;
 
         let content = toml::to_string_pretty(config)?;
-        fs::write(&self.path, content)?;
+        fs::write(&self.path, content).map_err(ConfigError::WriteError)?;
         Ok(())
     }
 

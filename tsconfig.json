@@ -10,7 +10,10 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"]
   },
-  "include": ["desktop-ui/src/**/*.ts", "vite.config.ts"]
+  "include": ["desktop-ui/src/**/*.ts", "desktop-ui/src/**/*.tsx", "vite.config.ts"]
 }

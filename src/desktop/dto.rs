@@ -201,6 +201,12 @@ pub struct RegisterDomainRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AvailablePortDto {
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DomainPatternRequest {
     pub domain: String,
     pub wildcard: bool,

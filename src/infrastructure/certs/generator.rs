@@ -1,6 +1,6 @@
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
-    SanType,
+    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,
+    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -40,6 +40,7 @@ pub(crate) fn build_leaf_cert_params(common_name: &str, sans: Vec<SanType>) -> C
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::KeyEncipherment,
     ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
     params
 }
@@ -218,5 +219,18 @@ mod tests {
         assert_eq!(cert.file_stem, "test.roxy");
         assert!(cert.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(cert.key_pem.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn leaf_cert_params_include_server_auth_eku() {
+        let params = build_leaf_cert_params(
+            "test.roxy",
+            vec![SanType::DnsName("test.roxy".try_into().unwrap())],
+        );
+
+        assert_eq!(
+            params.extended_key_usages,
+            vec![ExtendedKeyUsagePurpose::ServerAuth]
+        );
     }
 }
