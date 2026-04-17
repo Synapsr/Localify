@@ -102,6 +102,14 @@ export function useInstall() {
   });
 }
 
+export function useSetupCliAccess() {
+  const invalidate = useInvalidateAll();
+  return useMutation({
+    mutationFn: () => client.setupCliAccess(),
+    onSuccess: invalidate,
+  });
+}
+
 export function useUninstall() {
   const invalidate = useInvalidateAll();
   return useMutation({

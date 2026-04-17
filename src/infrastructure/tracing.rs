@@ -16,7 +16,7 @@ pub enum TracingOutput {
 pub fn init_tracing(verbose: bool, output: TracingOutput) {
     let filter = EnvFilter::try_from_env("ROXY_LOG").unwrap_or_else(|_| {
         let level = if verbose { "debug" } else { "info" };
-        EnvFilter::new(format!("roxy={}", level))
+        EnvFilter::new(level)
     });
 
     match output {

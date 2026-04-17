@@ -63,8 +63,8 @@ enum Commands {
 
     /// Create a project and bootstrap one or more local domains
     InitProject {
-        /// Project name shown in the desktop app
-        name: String,
+        /// Project name shown in the desktop app. Defaults to the current folder name.
+        name: Option<String>,
 
         /// Primary domain for the project
         #[arg(long)]
@@ -298,7 +298,7 @@ fn main() -> Result<()> {
                 api_target,
                 project_only,
             },
-            &ctx,
+            config_path,
         ),
         Commands::Unregister {
             domain,

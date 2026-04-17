@@ -6,6 +6,7 @@ import type {
   AvailablePortDto,
   AppConfigDto,
   BootstrapDto,
+  CliAccessDto,
   ConfigUpdateRequest,
   CreateProjectRequest,
   DaemonLaunchDto,
@@ -76,6 +77,7 @@ export interface DesktopClient {
   listProjects(): Promise<ProjectInfoDto[]>;
   getAvailablePort(): Promise<AvailablePortDto>;
   installRoxy(): Promise<InstallResultDto>;
+  setupCliAccess(): Promise<CliAccessDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
   uninstallRoxy(): Promise<UninstallResultDto>;
   createProject(request: CreateProjectRequest): Promise<ProjectInfoDto>;
@@ -103,6 +105,7 @@ export function createDesktopClient(): DesktopClient {
     listProjects: () => tauriInvoke("list_projects"),
     getAvailablePort: () => tauriInvoke("get_available_port"),
     installRoxy: () => tauriInvoke("install_roxy"),
+    setupCliAccess: () => tauriInvoke("setup_cli_access"),
     getUninstallPreview: () => tauriInvoke("get_uninstall_preview"),
     uninstallRoxy: () => tauriInvoke("uninstall_roxy"),
     createProject: (request) => tauriInvoke("create_project", { request }),

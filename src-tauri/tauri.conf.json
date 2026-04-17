@@ -13,7 +13,9 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "Localify Desktop",
+        "title": "",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "width": 1280,
         "height": 860,
         "minWidth": 1100,

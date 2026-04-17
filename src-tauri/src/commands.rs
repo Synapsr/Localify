@@ -1,8 +1,8 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
-    DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto,
+    DomainInfoDto, DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
     RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
     RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
     UnregisterDomainResultDto, UpdateProjectRequest,
@@ -57,6 +57,11 @@ pub fn get_available_port(state: tauri::State<'_, AppState>) -> Result<Available
 #[tauri::command]
 pub fn install_roxy(state: tauri::State<'_, AppState>) -> Result<InstallResultDto, String> {
     state.api.install().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDto, String> {
+    state.api.setup_cli_access().map_err(map_error)
 }
 
 #[tauri::command]

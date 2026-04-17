@@ -22,11 +22,12 @@ use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
-    DomainPatternRequest, EnvironmentDto, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto,
+    DomainInfoDto, DomainPatternRequest, EnvironmentDto, InitProjectRequest, InitProjectResultDto,
+    InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveRouteRequest,
+    RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateProjectRequest,
 };
 use crate::domain::{DomainPattern, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
@@ -68,6 +69,7 @@ impl DesktopApi {
         if let Some(helper) = self.connected_helper_client()? {
             let mut bootstrap = helper.get_bootstrap()?;
             bootstrap.daemon.ca_installed = self.effective_desktop_ca_installed()?;
+            bootstrap.environment.cli_helper_ready = true;
             return Ok(bootstrap);
         }
 
@@ -88,7 +90,17 @@ impl DesktopApi {
             binary_path: self.binary_path.display().to_string(),
             binary_exists: self.binary_path.exists(),
             fixed_domain_suffix: BRANDING.domain_suffix.into(),
+            cli_helper_ready: self.direct_mode || self.cli_helper_ready(),
         }
+    }
+
+    pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
+        if !self.should_use_system_helper() {
+            return Ok(CliAccessDto { ready: true });
+        }
+
+        self.ensure_helper_running()?;
+        Ok(CliAccessDto { ready: true })
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
@@ -234,6 +246,55 @@ impl DesktopApi {
         self.ensure_config_writable()?;
         let project = self.config_store().create_project(&request.name)?;
         Ok(map_project_info(project, 0))
+    }
+
+    pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.init_project(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+        let register_domain = RegisterDomain::new(&config_store, &certs);
+        let unregister_domain = UnregisterDomain::new(&config_store, &certs);
+
+        let project = config_store.create_project(&request.name)?;
+        let mut created_patterns = Vec::new();
+
+        for service in &request.services {
+            let pattern = DomainPattern::from_name(&service.domain, false)?;
+            let route = parse_desktop_route(&service.target).map_err(|error| {
+                anyhow::anyhow!("Invalid target for '{}': {error}", service.domain)
+            })?;
+            let result = register_domain.execute(pattern.clone(), vec![route])?;
+            config_store
+                .update_domain_with_project(result.registration, Some(project.id.clone()))?;
+            created_patterns.push(pattern);
+        }
+
+        let daemon_reloaded = match MgmtSocketClient::new(&paths.socket_path).reload() {
+            Ok(()) => true,
+            Err(crate::application::ports::DaemonConnectionError::NotRunning) => false,
+            Err(error) => {
+                rollback_initialized_project(
+                    &config_store,
+                    &unregister_domain,
+                    &project.id,
+                    &created_patterns,
+                )?;
+                return Err(anyhow::anyhow!(
+                    "Failed to reload the running daemon: {error}"
+                ));
+            }
+        };
+
+        Ok(InitProjectResultDto {
+            project: map_project_info(project, request.services.len()),
+            services: request.services,
+            daemon_reloaded,
+        })
     }
 
     pub fn update_project(&self, request: UpdateProjectRequest) -> Result<ProjectInfoDto> {
@@ -746,6 +807,10 @@ impl DesktopApi {
         !self.direct_mode && self.config_path.starts_with("/etc")
     }
 
+    fn cli_helper_ready(&self) -> bool {
+        self.connected_helper_client().ok().flatten().is_some()
+    }
+
     fn connected_helper_client(&self) -> Result<Option<SystemHelperClient>> {
         if !self.should_use_system_helper() {
             return Ok(None);
@@ -942,6 +1007,25 @@ impl DesktopApi {
 
 fn parse_pattern(request: &DomainPatternRequest) -> Result<DomainPattern> {
     DomainPattern::from_name(&request.domain, request.wildcard).map_err(Into::into)
+}
+
+fn rollback_initialized_project(
+    config_store: &ConfigStore,
+    unregister_domain: &UnregisterDomain<'_>,
+    project_id: &str,
+    created_patterns: &[DomainPattern],
+) -> Result<()> {
+    for pattern in created_patterns.iter().rev() {
+        unregister_domain.execute(pattern).with_context(|| {
+            format!("Failed to roll back domain '{}'", pattern.display_pattern())
+        })?;
+    }
+
+    config_store
+        .remove_project(project_id)
+        .with_context(|| format!("Failed to roll back project '{project_id}'"))?;
+
+    Ok(())
 }
 
 fn parse_desktop_route(route: &str) -> Result<Route> {

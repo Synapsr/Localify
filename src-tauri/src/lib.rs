@@ -51,6 +51,7 @@ pub fn run() {
             commands::list_projects,
             commands::get_available_port,
             commands::install_roxy,
+            commands::setup_cli_access,
             commands::get_uninstall_preview,
             commands::uninstall_roxy,
             commands::create_project,

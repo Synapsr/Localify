@@ -5,6 +5,7 @@ export interface EnvironmentDto {
   binaryPath: string;
   binaryExists: boolean;
   fixedDomainSuffix: string;
+  cliHelperReady: boolean;
 }
 
 export interface DaemonConfigDto {
@@ -98,6 +99,10 @@ export interface StepDto {
 export interface InstallResultDto {
   lanIp: string;
   steps: StepDto[];
+}
+
+export interface CliAccessDto {
+  ready: boolean;
 }
 
 export interface UninstallPreviewDto {

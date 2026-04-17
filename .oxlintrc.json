@@ -13,6 +13,7 @@
   },
   "ignorePatterns": [
     "desktop-ui/dist",
+    "desktop-ui/src/routeTree.gen.ts",
     "dist",
     "target",
     "src-tauri/target"

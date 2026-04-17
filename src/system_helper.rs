@@ -13,11 +13,12 @@ use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
-    DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateProjectRequest,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto,
+    DomainInfoDto, DomainPatternRequest, InitProjectRequest, InitProjectResultDto,
+    InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveRouteRequest,
+    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateProjectRequest,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,7 +35,9 @@ pub enum HelperCommand {
     GetUninstallPreview,
     UninstallRoxy,
     CreateProject { request: CreateProjectRequest },
+    InitProject { request: InitProjectRequest },
     UpdateProject { request: UpdateProjectRequest },
+    SetupCliAccess,
     AssignDomainProject { request: AssignDomainProjectRequest },
     RegisterDomain { request: RegisterDomainRequest },
     UnregisterDomain { request: DomainPatternRequest },
@@ -112,8 +115,16 @@ impl SystemHelperClient {
         self.send(HelperCommand::CreateProject { request })
     }
 
+    pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
+        self.send(HelperCommand::InitProject { request })
+    }
+
     pub fn update_project(&self, request: UpdateProjectRequest) -> Result<ProjectInfoDto> {
         self.send(HelperCommand::UpdateProject { request })
+    }
+
+    pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
+        self.send(HelperCommand::SetupCliAccess)
     }
 
     pub fn assign_domain_project(
@@ -193,6 +204,17 @@ impl SystemHelperClient {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
+        if line.trim().is_empty() {
+            bail!(
+                "{} system helper closed the connection without replying. \
+                 It is likely running an older build.\n\
+                 Restart the helper service and try again:\n\
+                 sudo {} helper uninstall-service --uid {}",
+                BRANDING.app_name,
+                BRANDING.cli_command(),
+                current_uid()?
+            );
+        }
 
         let response: HelperResponse = serde_json::from_str(&line)?;
         if !response.ok {
@@ -312,8 +334,14 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         HelperCommand::CreateProject { request } => {
             serde_json::to_value(api.create_project(request)?).map_err(Into::into)
         }
+        HelperCommand::InitProject { request } => {
+            serde_json::to_value(api.init_project(request)?).map_err(Into::into)
+        }
         HelperCommand::UpdateProject { request } => {
             serde_json::to_value(api.update_project(request)?).map_err(Into::into)
+        }
+        HelperCommand::SetupCliAccess => {
+            serde_json::to_value(api.setup_cli_access()?).map_err(Into::into)
         }
         HelperCommand::AssignDomainProject { request } => {
             serde_json::to_value(api.assign_domain_project(request)?).map_err(Into::into)

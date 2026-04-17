@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
-import { Input, Label } from "../components/ui/input";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
 import {
   useBootstrap,
   useInstall,
+  useSetupCliAccess,
   useUninstall,
   useUninstallPreview,
   useUpdateConfig,
@@ -14,6 +16,7 @@ export function SettingsScreen() {
   const { data } = useBootstrap();
   const updateConfig = useUpdateConfig();
   const install = useInstall();
+  const setupCliAccess = useSetupCliAccess();
   const uninstall = useUninstall();
   const appName = data?.environment.appName ?? "Localify";
 
@@ -53,9 +56,7 @@ export function SettingsScreen() {
     <section className="space-y-8">
       <div className="space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-sm text-[--color-muted]">
-          Daemon configuration and system integration.
-        </p>
+        <p className="text-sm text-[--color-muted]">Daemon configuration and system integration.</p>
       </div>
 
       <Card className="p-5">
@@ -63,9 +64,8 @@ export function SettingsScreen() {
           <div className="space-y-1">
             <h2 className="text-sm font-semibold">Ports</h2>
             <p className="text-xs text-[--color-muted]">
-              Changes take effect on the next daemon restart. In system mode,
-              saves go through the installed helper instead of writing
-              directly into system files.
+              Changes take effect on the next daemon restart. In system mode, saves go through the
+              installed helper instead of writing directly into system files.
             </p>
           </div>
           <div className="grid gap-4 sm:grid-cols-3">
@@ -98,11 +98,7 @@ export function SettingsScreen() {
             </div>
           </div>
           <div className="flex justify-end">
-            <Button
-              variant="primary"
-              loading={updateConfig.isPending}
-              onClick={savePorts}
-            >
+            <Button variant="primary" loading={updateConfig.isPending} onClick={savePorts}>
               Save
             </Button>
           </div>
@@ -123,11 +119,25 @@ export function SettingsScreen() {
               label="CA trusted in this account"
               value={data.daemon.caInstalled ? "Yes" : "No"}
             />
+            <Row
+              label="CLI helper ready"
+              value={data.environment.cliHelperReady ? "Yes" : "No"}
+            />
             <Row label="LAN IP" value={data.daemon.lanIp} />
             <Row label="Config" value={data.environment.configPath} mono />
             <Row label="Log file" value={data.config.paths.logFile} mono />
           </dl>
           <div className="flex justify-end gap-2">
+            <Button
+              variant={data.environment.cliHelperReady ? "secondary" : "primary"}
+              loading={setupCliAccess.isPending}
+              disabled={data.environment.cliHelperReady}
+              onClick={() => setupCliAccess.mutate()}
+            >
+              {data.environment.cliHelperReady
+                ? "CLI access ready"
+                : "Enable CLI access"}
+            </Button>
             <Button
               variant="secondary"
               loading={install.isPending}
@@ -142,55 +152,39 @@ export function SettingsScreen() {
       <Card className="border-[--color-danger]/30 p-5">
         <div className="space-y-4">
           <div>
-            <h2 className="text-sm font-semibold text-[--color-danger]">
-              Danger zone
-            </h2>
+            <h2 className="text-sm font-semibold text-[--color-danger]">Danger zone</h2>
             <p className="text-xs text-[--color-muted]">
-              Remove {appName}, its certificates, DNS resolver changes, and the
-              privileged desktop helper.
+              Remove {appName}, its certificates, DNS resolver changes, and the privileged desktop
+              helper.
             </p>
           </div>
           {confirmingUninstall ? (
             <div className="space-y-4 rounded-lg border border-[--color-danger]/20 bg-[--color-danger]/5 p-4">
               <div className="space-y-1">
-                <p className="text-sm font-medium text-[--color-ink]">
-                  Confirm full uninstall
-                </p>
+                <p className="text-sm font-medium text-[--color-ink]">Confirm full uninstall</p>
                 <p className="text-xs text-[--color-muted]">
-                  This removes certificates, DNS resolver changes, registered
-                  domains, and the privileged desktop helper.
+                  This removes certificates, DNS resolver changes, registered domains, and the
+                  privileged desktop helper.
                 </p>
               </div>
 
               {uninstallPreview.isPending ? (
-                <p className="text-xs text-[--color-muted]">
-                  Checking what will be removed…
-                </p>
+                <p className="text-xs text-[--color-muted]">Checking what will be removed…</p>
               ) : uninstallPreview.data ? (
                 <dl className="grid gap-3 text-sm sm:grid-cols-2">
                   <Row
                     label="Registered domains"
                     value={String(uninstallPreview.data.domainCount)}
                   />
-                  <Row
-                    label="Data directory"
-                    value={uninstallPreview.data.dataDir}
-                    mono
-                  />
+                  <Row label="Data directory" value={uninstallPreview.data.dataDir} mono />
                 </dl>
               ) : null}
 
               {uninstallPreview.error && (
-                <p className="text-xs text-[--color-danger]">
-                  {uninstallPreview.error.message}
-                </p>
+                <p className="text-xs text-[--color-danger]">{uninstallPreview.error.message}</p>
               )}
 
-              {uninstallError && (
-                <p className="text-xs text-[--color-danger]">
-                  {uninstallError}
-                </p>
-              )}
+              {uninstallError && <p className="text-xs text-[--color-danger]">{uninstallError}</p>}
 
               <div className="flex justify-end gap-2">
                 <Button
@@ -203,11 +197,7 @@ export function SettingsScreen() {
                 >
                   Cancel
                 </Button>
-                <Button
-                  variant="danger"
-                  loading={uninstall.isPending}
-                  onClick={handleUninstall}
-                >
+                <Button variant="danger" loading={uninstall.isPending} onClick={handleUninstall}>
                   Confirm uninstall
                 </Button>
               </div>
@@ -231,15 +221,7 @@ export function SettingsScreen() {
   );
 }
 
-function Row({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="min-w-0 space-y-0.5">
       <dt className="text-xs text-[--color-muted]">{label}</dt>

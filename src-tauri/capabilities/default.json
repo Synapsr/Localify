@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the main Localify desktop window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default","core:window:default", "core:window:allow-start-dragging"]
 }

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Button } from "./ui/button";
-import { Input, Label } from "./ui/input";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
 import { useAvailablePort, useRegisterDomain } from "../lib/queries";
 import type { ProjectInfoDto } from "../types/roxy";
 
@@ -26,9 +27,7 @@ export function AddDomainForm({
   const [error, setError] = useState<string | null>(null);
   const [targetError, setTargetError] = useState<string | null>(null);
 
-  const normalizedSuffix = suffix.startsWith(".")
-    ? suffix
-    : `.${suffix || "localify"}`;
+  const normalizedSuffix = suffix.startsWith(".") ? suffix : `.${suffix || "localify"}`;
   const previewDomain = name
     ? name.endsWith(normalizedSuffix)
       ? name
@@ -40,9 +39,7 @@ export function AddDomainForm({
     if (!name || !target) return;
     setError(null);
 
-    const domain = name.endsWith(normalizedSuffix)
-      ? name
-      : `${name}${normalizedSuffix}`;
+    const domain = name.endsWith(normalizedSuffix) ? name : `${name}${normalizedSuffix}`;
 
     try {
       await registerDomain.mutateAsync({
@@ -97,9 +94,7 @@ export function AddDomainForm({
               autoFocus
             />
           </div>
-          <p className="font-mono text-xs text-[--color-muted]">
-            {previewDomain}
-          </p>
+          <p className="font-mono text-xs text-[--color-muted]">{previewDomain}</p>
         </div>
 
         <div className="space-y-1.5">
@@ -128,8 +123,7 @@ export function AddDomainForm({
             <p className="text-xs text-[--color-danger]">{targetError}</p>
           ) : (
             <p className="text-xs text-[--color-muted]">
-              Port number, URL, or path to a directory. Use Free port to fill
-              an unused local port.
+              Port number, URL, or path to a directory. Use Free port to fill an unused local port.
             </p>
           )}
         </div>
@@ -151,8 +145,8 @@ export function AddDomainForm({
           ))}
         </select>
         <p className="text-xs text-[--color-muted]">
-          Optional. Attach this domain to a project so it can be enabled or disabled
-          with the rest of the stack.
+          Optional. Attach this domain to a project so it can be enabled or disabled with the rest
+          of the stack.
         </p>
       </div>
 

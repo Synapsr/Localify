@@ -15,6 +15,7 @@ pub struct EnvironmentDto {
     pub binary_path: String,
     pub binary_exists: bool,
     pub fixed_domain_suffix: String,
+    pub cli_helper_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +211,12 @@ pub struct InstallResultDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CliAccessDto {
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UninstallPreviewDto {
     pub domain_count: usize,
     pub data_dir: String,
@@ -234,6 +241,28 @@ pub struct RegisterDomainRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateProjectRequest {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitProjectServiceRequest {
+    pub domain: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitProjectRequest {
+    pub name: String,
+    pub services: Vec<InitProjectServiceRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitProjectResultDto {
+    pub project: ProjectInfoDto,
+    pub services: Vec<InitProjectServiceRequest>,
+    pub daemon_reloaded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
