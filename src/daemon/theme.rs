@@ -1,5 +1,7 @@
 use std::fmt::Write as FmtWrite;
 
+use crate::branding::BRANDING;
+
 /// Escape HTML special characters for safe rendering.
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -57,7 +59,7 @@ pub const HOME_ICON: &str = concat!(
 
 /// Render a complete themed HTML page.
 ///
-/// Wraps the given body content in the Roxy branded page shell
+/// Wraps the given body content in the branded page shell
 /// with header, footer, and common styles. Pass page-specific
 /// CSS and JS via `extra_css` and `extra_js`.
 pub fn render_page(title: &str, body: &str, extra_css: &str, extra_js: &str) -> String {
@@ -70,7 +72,9 @@ pub fn render_page(title: &str, body: &str, extra_css: &str, extra_js: &str) -> 
     );
     html.push_str("<title>");
     html.push_str(&html_escape(title));
-    html.push_str(" - Roxy</title>\n<style>\n");
+    html.push_str(" - ");
+    html.push_str(BRANDING.app_name);
+    html.push_str("</title>\n<style>\n");
     html.push_str(COMMON_CSS);
     if !extra_css.is_empty() {
         html.push('\n');
@@ -90,6 +94,52 @@ pub fn render_page(title: &str, body: &str, extra_css: &str, extra_js: &str) -> 
     html.push_str("</body>\n</html>");
     html
 }
+
+/// Shared styles for branded daemon error pages.
+pub const ERROR_PAGE_CSS: &str = "\
+.error-container{\
+    display:flex;flex-direction:column;align-items:center;\
+    gap:28px;max-width:700px;margin:40px auto;\
+}\
+.error-image{\
+    animation:fadeInDown .6s ease-out;\
+}\
+.error-image img{\
+    width:100%;max-width:300px;height:auto;\
+    border-radius:12px;\
+    box-shadow:0 8px 24px rgba(156,180,212,.25);\
+}\
+.error-card{\
+    background:var(--card-bg);border-radius:12px;\
+    border:1px solid var(--border);padding:40px;\
+    box-shadow:0 4px 16px rgba(0,0,0,.04);\
+    text-align:center;width:100%;\
+    animation:fadeInUp .6s ease-out;\
+}\
+.error-title{\
+    color:var(--fox-orange);font-size:1.7em;margin-bottom:16px;\
+    font-weight:700;\
+}\
+.error-message{margin-bottom:20px;font-size:1.05em;line-height:1.6}\
+.help-section{margin-top:24px;text-align:left}\
+.help-label{\
+    font-size:.9em;color:var(--text-light);margin-bottom:8px;\
+    font-weight:500;text-transform:uppercase;letter-spacing:.03em;\
+}\
+.command{\
+    background:linear-gradient(135deg,#2D2520 0%,#3D3530 100%);\
+    color:#F8F0E8;padding:16px 20px;\
+    border-radius:10px;margin:12px 0 20px 0;\
+    font-family:'SF Mono',Monaco,'Cascadia Code',Menlo,Consolas,monospace;\
+    font-size:.88em;line-height:1.8;\
+    border:1px solid #4D4540;\
+    box-shadow:0 4px 12px rgba(0,0,0,.15);\
+}\
+.comment{color:#A89C95;font-size:.95em}\
+@keyframes fadeInDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}\
+@keyframes fadeInUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}\
+@media(max-width:600px){.error-image img{max-width:240px}.error-card{padding:28px}}\
+";
 
 // ── Private Constants ───────────────────────────────────────
 
@@ -150,14 +200,14 @@ code{font-family:'SF Mono',Monaco,'Cascadia Code',Menlo,Consolas,monospace;\
 
 const HEADER_HTML: &str = concat!(
     r##"<header class="roxy-header"><div class="roxy-header-inner">"##,
-    r##"<span class="roxy-brand"><span class="roxy-logo">🦊</span>Roxy</span>"##,
+    r##"<span class="roxy-brand"><span class="roxy-logo">🦊</span>Localify</span>"##,
     "</div></header>\n",
 );
 
 const FOOTER_HTML: &str = concat!(
     r##"<footer class="roxy-footer">"##,
     r##"<span class="roxy-fox">🦊</span> "##,
-    r##"<a href="https://github.com/rbas/roxy">Roxy</a>"##,
+    r##"<span>Localify</span>"##,
     r##" &middot; made with ☕ by "##,
     r##"<a href="https://github.com/rbas">@rbas</a>"##,
     "</footer>\n",
@@ -188,7 +238,7 @@ mod tests {
     fn test_render_page_contains_structure() {
         let html = render_page("Test", "<p>body</p>", "", "");
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("<title>Test - Roxy</title>"));
+        assert!(html.contains("<title>Test - Localify</title>"));
         assert!(html.contains("roxy-header"));
         assert!(html.contains("<p>body</p>"));
         assert!(html.contains("roxy-footer"));
@@ -205,12 +255,19 @@ mod tests {
     #[test]
     fn test_render_page_escapes_title() {
         let html = render_page("<script>", "", "", "");
-        assert!(html.contains("&lt;script&gt; - Roxy"));
+        assert!(html.contains("&lt;script&gt; - Localify"));
     }
 
     #[test]
     fn test_render_page_omits_empty_script() {
         let html = render_page("T", "", "", "");
         assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn test_error_page_css_contains_shared_error_classes() {
+        assert!(ERROR_PAGE_CSS.contains(".error-container"));
+        assert!(ERROR_PAGE_CSS.contains(".error-card"));
+        assert!(ERROR_PAGE_CSS.contains(".command"));
     }
 }

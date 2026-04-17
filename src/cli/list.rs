@@ -17,8 +17,8 @@ pub fn execute(ctx: &AppContext) -> Result<()> {
     if result.domains.is_empty() {
         println!("No domains registered.");
         println!("\nRegister a domain with:");
-        println!("  roxy register myapp.roxy --route \"/=3000\"");
-        println!("  roxy register myapp.roxy --route \"/=3000\" --route \"/api=3001\"");
+        println!("  localify register myapp.localify --route \"/=3000\"");
+        println!("  localify register myapp.localify --route \"/=3000\" --route \"/api=3001\"");
         if !result.daemon_reachable && docker_enabled {
             println!("\n  Note: Docker domains are only visible when the daemon is running.");
         }

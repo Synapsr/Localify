@@ -45,7 +45,7 @@ impl<'a> RestartDaemon<'a> {
         let is_running = self.daemon.is_running()?;
 
         if require_running && !is_running {
-            bail!("Roxy daemon is not running.\nStart it with: sudo roxy start");
+            bail!("Localify daemon is not running.\nStart it with: sudo localify start");
         }
 
         if is_running {

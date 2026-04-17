@@ -16,7 +16,7 @@ use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::tracing::{TracingOutput, init_tracing};
 
-/// Run the Roxy daemon server.
+/// Run the Localify daemon server.
 ///
 /// This handles the full daemon lifecycle: tracing initialization,
 /// PID file management, signal handling, and server execution.
@@ -31,12 +31,12 @@ pub async fn run(verbose: bool, config_path: &Path, paths: &RoxyPaths) -> Result
     };
     init_tracing(verbose, output);
 
-    info!("Roxy daemon started");
+    info!("Localify daemon started");
 
     let pid_file = PidFile::new(paths.pid_file.clone());
     pid_file.write()?;
 
-    println!("Starting Roxy daemon...");
+    println!("Starting Localify daemon...");
 
     // Load config fresh from disk (this path is used by the forked
     // subprocess, so it must re-read from the config file)

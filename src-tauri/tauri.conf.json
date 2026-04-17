@@ -27,6 +27,9 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Local HTTPS and custom domains for local development.",
+    "externalBin": ["binaries/localify"]
   }
 }

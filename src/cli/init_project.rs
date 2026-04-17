@@ -466,12 +466,13 @@ fn is_port_target(target: &str) -> bool {
 
 fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
     let trimmed = script.trim();
-    if script_has_explicit_port(trimmed) {
-        return None;
-    }
-
     if trimmed.contains("next dev") {
-        let updated = trimmed.replacen(
+        let normalized = strip_script_flags(
+            trimmed,
+            &["--hostname", "--host", "-H", "--port", "-p"],
+            &[],
+        );
+        let updated = normalized.replacen(
             "next dev",
             &format!("next dev --hostname 127.0.0.1 --port {port}"),
             1,
@@ -479,10 +480,12 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
         return Some(updated);
     }
     if trimmed == "vite" || trimmed.starts_with("vite ") {
-        return Some(format!("{trimmed} --host 127.0.0.1 --port {port}"));
+        let normalized = strip_script_flags(trimmed, &["--host", "-H", "--port", "-p"], &[]);
+        return Some(format!("{normalized} --host 127.0.0.1 --port {port}"));
     }
     if trimmed.contains("astro dev") {
-        let updated = trimmed.replacen(
+        let normalized = strip_script_flags(trimmed, &["--host", "-H", "--port", "-p"], &[]);
+        let updated = normalized.replacen(
             "astro dev",
             &format!("astro dev --host 127.0.0.1 --port {port}"),
             1,
@@ -490,7 +493,8 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
         return Some(updated);
     }
     if trimmed.contains("nuxt dev") {
-        let updated = trimmed.replacen(
+        let normalized = strip_script_flags(trimmed, &["--host", "-H", "--port", "-p"], &[]);
+        let updated = normalized.replacen(
             "nuxt dev",
             &format!("nuxt dev --host 127.0.0.1 --port {port}"),
             1,
@@ -498,21 +502,53 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
         return Some(updated);
     }
     if trimmed.contains("react-scripts start") {
-        return Some(format!("HOST=127.0.0.1 PORT={port} {trimmed}"));
+        let normalized = strip_script_flags(trimmed, &[], &["HOST", "PORT"]);
+        return Some(format!("HOST=127.0.0.1 PORT={port} {normalized}"));
     }
 
     None
 }
 
-fn script_has_explicit_port(script: &str) -> bool {
-    script.contains("--port")
-        || script.contains("--host")
-        || script.contains("--hostname")
-        || script.contains(" -p ")
-        || script.starts_with("HOST=")
-        || script.contains(" HOST=")
-        || script.starts_with("PORT=")
-        || script.contains(" PORT=")
+fn strip_script_flags(script: &str, flags: &[&str], env_vars: &[&str]) -> String {
+    let tokens = script.split_whitespace().collect::<Vec<_>>();
+    let mut cleaned = Vec::with_capacity(tokens.len());
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let token = tokens[index];
+
+        if env_vars.iter().any(|name| {
+            token
+                .strip_prefix(name)
+                .is_some_and(|suffix| suffix.starts_with('='))
+        }) {
+            index += 1;
+            continue;
+        }
+
+        if let Some(flag) = flags.iter().find(|flag| token == **flag) {
+            index += 1;
+            if index < tokens.len() {
+                index += 1;
+            }
+            let _ = flag;
+            continue;
+        }
+
+        if flags.iter().any(|flag| {
+            token
+                .strip_prefix(flag)
+                .is_some_and(|suffix| suffix.starts_with('='))
+        }) {
+            index += 1;
+            continue;
+        }
+
+        cleaned.push(token);
+        index += 1;
+    }
+
+    cleaned.join(" ")
 }
 
 fn apply_package_updates(updates: &[PackageScriptUpdate]) -> PackageUpdateResults {
@@ -744,10 +780,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_dev_script_update_skips_scripts_that_already_set_a_port() {
-        assert!(plan_dev_script_update("next dev --port 3000", "4010").is_none());
-        assert!(plan_dev_script_update("vite --host 127.0.0.1", "4010").is_none());
-        assert!(plan_dev_script_update("PORT=3000 react-scripts start", "4010").is_none());
+    fn plan_dev_script_update_rewrites_existing_port_flags() {
+        assert_eq!(
+            plan_dev_script_update("next dev --port 3000", "4010").as_deref(),
+            Some("next dev --hostname 127.0.0.1 --port 4010")
+        );
+        assert_eq!(
+            plan_dev_script_update("vite dev --host 127.0.0.1 --port 55190", "61342").as_deref(),
+            Some("vite dev --host 127.0.0.1 --port 61342")
+        );
+        assert_eq!(
+            plan_dev_script_update("PORT=3000 react-scripts start", "4010").as_deref(),
+            Some("HOST=127.0.0.1 PORT=4010 react-scripts start")
+        );
     }
 
     #[test]

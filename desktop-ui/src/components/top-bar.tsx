@@ -1,5 +1,7 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { useBootstrap, useStartDaemon, useStopDaemon } from "../lib/queries";
+import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
+import { bootstrapQueries, daemonMutations } from "../lib/queries";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
 import { CogFourIcon, FileTextIcon, HexagonIcon } from "./icons";
@@ -11,9 +13,10 @@ const tabs = [
 ] as const;
 
 export function TopBar() {
-  const { data } = useBootstrap();
-  const startDaemon = useStartDaemon();
-  const stopDaemon = useStopDaemon();
+  const { data } = useQuery(bootstrapQueries.read());
+  const queryClient = useQueryClient();
+  const startDaemon = useMutation(daemonMutations.start(queryClient));
+  const stopDaemon = useMutation(daemonMutations.stop(queryClient));
   const {
     location: { pathname },
   } = useRouterState();
@@ -23,6 +26,7 @@ export function TopBar() {
   const appName = data?.environment.appName ?? "Localify";
   const daemonError = startDaemon.error ?? stopDaemon.error;
   const daemonErrorMessage = daemonError instanceof Error ? daemonError.message : null;
+  const showPortConflicts = Boolean(daemonErrorMessage?.includes("already in use"));
 
   return (
     <div className="fixed dark bottom-12 left-1/2 -translate-x-1/2 w-full max-w-4xl rounded-full bg-background text-foreground">
@@ -80,8 +84,9 @@ export function TopBar() {
       </div>
       {daemonErrorMessage && (
         <div className="border-t border-[--color-border] bg-[--color-surface]">
-          <div className="mx-auto w-full max-w-4xl px-8 py-2">
+          <div className="mx-auto w-full max-w-4xl space-y-3 px-8 py-2">
             <p className="text-xs text-[--color-danger]">{daemonErrorMessage}</p>
+            <DaemonPortConflicts visible={showPortConflicts} />
           </div>
         </div>
       )}

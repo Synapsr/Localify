@@ -1,6 +1,6 @@
 # Rust Conventions
 
-Rules for any Rust code in Roxy. For architecture (module structure, DDD layering, layer boundary rules), see [architecture.md](architecture.md).
+Rules for any Rust code in Localify. For architecture (module structure, DDD layering, layer boundary rules), see [architecture.md](architecture.md).
 
 ## Philosophy
 
@@ -25,7 +25,7 @@ return Err(anyhow!("Domain exists"));
 // Good
 return Err(anyhow!(
     "Failed to register domain '{}': already registered.\n\
-     Use 'roxy unregister {}' first, or choose a different name.",
+     Use 'localify unregister {}' first, or choose a different name.",
     domain, domain
 ));
 ```

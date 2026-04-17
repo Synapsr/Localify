@@ -10,7 +10,7 @@ use crate::infrastructure::network::get_network_info;
 use crate::infrastructure::paths::RoxyPaths;
 
 pub fn execute(ctx: &AppContext, paths: &RoxyPaths, config: &Config) -> Result<()> {
-    println!("Setting up Roxy...\n");
+    println!("Setting up Localify...\n");
 
     let dns_service = get_dns_service()?;
     let network_info = get_network_info();
@@ -39,9 +39,9 @@ pub fn execute(ctx: &AppContext, paths: &RoxyPaths, config: &Config) -> Result<(
         }
     }
 
-    println!("\nRoxy installation complete!");
+    println!("\nLocalify installation complete!");
     println!();
-    println!("Register domains with: roxy register <domain> --port <port>");
+    println!("Register domains with: localify register <domain> --route \"/=3000\"");
 
     Ok(())
 }

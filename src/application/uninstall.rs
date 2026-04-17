@@ -17,7 +17,7 @@ pub struct UninstallResult {
     pub steps: Vec<(String, StepOutcome)>,
 }
 
-/// Use case: remove all Roxy configuration from the system.
+/// Use case: remove all Localify configuration from the system.
 pub struct Uninstall<'a> {
     domains: &'a dyn DomainRepository,
     certs: &'a dyn CertificateManager,

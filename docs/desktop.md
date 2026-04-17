@@ -41,14 +41,14 @@ application code.
 The desktop shell assumes the existing CLI binary is still the process used to
 launch the daemon. By default, the Tauri backend looks for:
 
-- config at `/etc/roxy/config.toml`
-- CLI binary at `target/debug/roxy` in debug builds
+- config at `/etc/localify/config.toml`
+- CLI binary at `target/debug/localify` in debug builds
 
 You can override both when running the desktop app:
 
 ```bash
-ROXY_CONFIG_PATH=/custom/config.toml \
-ROXY_CLI_PATH=/custom/path/to/roxy \
+LOCALIFY_CONFIG_PATH=/custom/config.toml \
+LOCALIFY_CLI_PATH=/custom/path/to/localify \
 npm run tauri:dev
 ```
 
@@ -57,10 +57,28 @@ npm run tauri:dev
 Build the CLI binary first so the desktop backend can launch the daemon:
 
 ```bash
-cargo build --bin roxy
+cargo build --bin localify
 pnpm i
 pnpm tauri:dev
 ```
+
+## Package It
+
+The packaged desktop app needs the `localify` CLI inside the bundle. The
+packaging script now builds that CLI as a Tauri sidecar automatically, then
+produces a macOS app bundle and DMG.
+
+```bash
+pnpm tauri:build
+```
+
+Artifacts are written under:
+
+- `src-tauri/target/release/bundle/macos/`
+- `src-tauri/target/release/bundle/dmg/`
+
+If you need to override the CLI path while testing a packaged build, set
+`LOCALIFY_CLI_PATH`.
 
 ## Frontend Files
 

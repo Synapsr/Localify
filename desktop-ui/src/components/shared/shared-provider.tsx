@@ -2,6 +2,7 @@ import { PropsWithChildren, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { HotkeysProvider } from "@/providers/hotkeys-provider";
 
 const createQueryClient = () =>
   new QueryClient({
@@ -18,9 +19,11 @@ export const SharedProvider = ({ children }: PropsWithChildren) => {
 
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>{children}</TooltipProvider>
-      </QueryClientProvider>
+      <HotkeysProvider>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>{children}</TooltipProvider>
+        </QueryClientProvider>
+      </HotkeysProvider>
     </ThemeProvider>
   );
 };

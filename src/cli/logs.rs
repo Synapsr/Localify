@@ -1,4 +1,5 @@
-use std::fs::{self, File};
+use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::thread;
 use std::time::Duration;
@@ -11,9 +12,15 @@ pub fn execute(lines: usize, clear: bool, follow: bool, paths: &RoxyPaths) -> Re
     let log_path = &paths.log_file;
 
     if clear {
-        if log_path.exists() {
-            fs::remove_file(log_path).context("Failed to clear log file")?;
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to prepare log directory")?;
         }
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_path)
+            .context("Failed to clear log file")?;
         println!("Logs cleared.");
         return Ok(());
     }
@@ -21,7 +28,7 @@ pub fn execute(lines: usize, clear: bool, follow: bool, paths: &RoxyPaths) -> Re
     if !log_path.exists() {
         println!("No logs found.");
         println!("Log file: {}", log_path.display());
-        println!("\nStart the daemon to generate logs: sudo roxy start");
+        println!("\nStart the daemon to generate logs: sudo localify start");
         return Ok(());
     }
 

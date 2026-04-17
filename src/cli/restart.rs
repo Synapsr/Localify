@@ -9,7 +9,7 @@ pub fn execute(verbose: bool, config_path: &Path, ctx: &AppContext) -> Result<()
     let service = RestartDaemon::new(&ctx.pid_file, &ctx.config_store);
     let ready = service.restart()?;
 
-    println!("Starting Roxy daemon...");
+    println!("Starting Localify daemon...");
     super::start::execute(
         false,
         verbose,

@@ -1,7 +1,6 @@
+use anyhow::Result;
 use std::io::ErrorKind;
 use std::net::{TcpListener, UdpSocket};
-
-use anyhow::Result;
 
 fn tcp_probe(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(("0.0.0.0", port))

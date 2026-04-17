@@ -17,7 +17,7 @@ impl<'a> StopDaemon<'a> {
     /// Stop the daemon, or bail if it is not running.
     pub fn execute(&self) -> Result<()> {
         if self.daemon.get_running_pid()?.is_none() {
-            bail!("Roxy daemon is not running.");
+            bail!("Localify daemon is not running.");
         }
 
         self.daemon.stop_gracefully(Duration::from_millis(500))?;

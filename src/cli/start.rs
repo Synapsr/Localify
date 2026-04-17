@@ -5,6 +5,7 @@ use std::env;
 use std::process::{Command, Stdio};
 
 use crate::application::start_daemon::StartDaemon;
+use crate::branding::BRANDING;
 use crate::config::DaemonConfig;
 use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::RoxyPaths;
@@ -39,7 +40,7 @@ pub fn execute(
 
     // Pass verbose flag via environment to subprocess
     if verbose {
-        cmd.env("ROXY_LOG", "debug");
+        cmd.env(BRANDING.env_var("LOG"), "debug");
     }
 
     let child = cmd
@@ -49,17 +50,17 @@ pub fn execute(
         .spawn()?;
 
     let lan_ip = get_lan_ip();
-    println!("Roxy daemon started (PID: {})", child.id());
+    println!("Localify daemon started (PID: {})", child.id());
     println!(
         "Listening on 0.0.0.0:{} (HTTP) and 0.0.0.0:{} (HTTPS)",
         ready.http_port, ready.https_port
     );
     println!("LAN IP: {}", lan_ip);
     if !lan_ip.is_loopback() {
-        println!("\nAccess from other devices: https://yourdomain.roxy");
+        println!("\nAccess from other devices: https://yourdomain.localify");
     }
-    println!("\nUse 'roxy status' to check status");
-    println!("Use 'roxy stop' to stop the daemon");
+    println!("\nUse 'localify status' to check status");
+    println!("Use 'localify stop' to stop the daemon");
 
     Ok(())
 }

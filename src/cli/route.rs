@@ -22,7 +22,7 @@ pub fn add(
     let route = use_case.add_route(&pattern, path_prefix, route_target)?;
 
     println!("Added route: {} -> {}", route.path(), route.target());
-    println!("\nReload the daemon to apply changes: roxy reload");
+    println!("\nReload the daemon to apply changes: localify reload");
 
     Ok(())
 }
@@ -37,7 +37,7 @@ pub fn remove(domain: String, wildcard: bool, path: String, ctx: &AppContext) ->
     use_case.remove_route(&pattern, &path_prefix)?;
 
     println!("Removed route: {}", path_prefix);
-    println!("\nReload the daemon to apply changes: roxy reload");
+    println!("\nReload the daemon to apply changes: localify reload");
 
     Ok(())
 }

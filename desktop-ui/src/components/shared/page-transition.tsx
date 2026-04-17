@@ -2,6 +2,7 @@ import { useMatches, useRouterState } from "@tanstack/react-router";
 import { AnimatePresence, useReducedMotion, type Transition, type Variants } from "motion/react";
 import { useRef } from "react";
 
+import { ScrollProvider, useScrollTargetRef } from "@/hooks/use-scroll";
 import { AnimatedOutlet } from "./animated-outlet";
 
 const ROUTE_ORDER = ["/projects", "/logs", "/settings"] as const;
@@ -89,24 +90,46 @@ export function PageTransition() {
       };
 
   return (
-    <div className="relative h-full w-full overflow-hidden ">
-      <AnimatePresence initial={false} custom={direction}>
-        <AnimatedOutlet
-          key={routeKey}
-          custom={direction}
-          initial="initial"
-          animate="animate"
-          exit="exit"
-          variants={variants}
-          transition={transition}
-          className="absolute inset-0 overflow-y-auto will-change-transform p-6 flex flex-col items-center justify-center"
-          style={{
-            pointerEvents: "auto",
-            willChange: "transform, filter",
-            transformOrigin: direction === 1 ? "right center" : "left center",
-          }}
-        />
-      </AnimatePresence>
-    </div>
+    <ScrollProvider>
+      <div className="relative h-full w-full overflow-hidden ">
+        <AnimatePresence initial={false} custom={direction}>
+          <ScrollableOutlet
+            key={routeKey}
+            direction={direction}
+            variants={variants}
+            transition={transition}
+          />
+        </AnimatePresence>
+      </div>
+    </ScrollProvider>
+  );
+}
+
+function ScrollableOutlet({
+  direction,
+  variants,
+  transition,
+}: {
+  direction: TransitionDirection;
+  variants: Variants;
+  transition: Transition;
+}) {
+  const setScrollTarget = useScrollTargetRef();
+  return (
+    <AnimatedOutlet
+      ref={setScrollTarget}
+      custom={direction}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      variants={variants}
+      transition={transition}
+      className="absolute inset-0 flex flex-col items-center justify-center overflow-y-auto overscroll-none p-6 pt-0 will-change-transform"
+      style={{
+        pointerEvents: "auto",
+        willChange: "transform, filter",
+        transformOrigin: direction === 1 ? "right center" : "left center",
+      }}
+    />
   );
 }

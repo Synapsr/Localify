@@ -33,7 +33,7 @@ pub fn execute(
         StepOutcome::Warning(msg) => {
             eprintln!("  {}", msg);
             eprintln!(
-                "  Run 'sudo roxy register {}{}' to enable HTTPS.",
+                "  Run 'sudo localify register {}{}' to enable HTTPS.",
                 result.registration.domain(),
                 if wildcard { " --wildcard" } else { "" }
             );
@@ -57,7 +57,7 @@ pub fn execute(
             "disabled"
         }
     );
-    println!("\nStart the proxy with: roxy start");
+    println!("\nStart the proxy with: localify start");
 
     Ok(())
 }

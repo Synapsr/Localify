@@ -1,5 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useBootstrap } from "../lib/queries";
+import { bootstrapQueries } from "../lib/queries";
 import { Onboarding } from "./onboarding";
 
 interface AppShellProps {
@@ -7,7 +8,7 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const { data, isLoading, error } = useBootstrap();
+  const { data, isLoading, error } = useQuery(bootstrapQueries.read());
 
   if (isLoading && !data) {
     return (

@@ -1,6 +1,7 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::net::TcpListener;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -22,12 +23,16 @@ use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto,
-    DomainInfoDto, DomainPatternRequest, EnvironmentDto, InitProjectRequest, InitProjectResultDto,
-    InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveRouteRequest,
-    RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateProjectRequest,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
+    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
+    InitProjectRequest, InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto,
+    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
+};
+use crate::desktop::port_conflicts::{
+    PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
 use crate::domain::{DomainPattern, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
@@ -39,7 +44,10 @@ use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
+use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
+
+const CLI_INSTALL_DIR: &str = "/usr/local/bin";
 
 #[derive(Debug, Clone)]
 pub struct DesktopApi {
@@ -91,16 +99,17 @@ impl DesktopApi {
             binary_exists: self.binary_path.exists(),
             fixed_domain_suffix: BRANDING.domain_suffix.into(),
             cli_helper_ready: self.direct_mode || self.cli_helper_ready(),
+            cli_access_ready: self.cli_access_ready(),
+            cli_command_path: self.cli_command_path().display().to_string(),
         }
     }
 
     pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
-        if !self.should_use_system_helper() {
-            return Ok(CliAccessDto { ready: true });
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.setup_cli_access();
         }
 
-        self.ensure_helper_running()?;
-        Ok(CliAccessDto { ready: true })
+        self.install_cli_access()
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
@@ -195,14 +204,27 @@ impl DesktopApi {
             .map(|domain| {
                 let has_cert = certs.exists(domain.registration.pattern());
                 let active = active_config_domains.contains(&domain.registration.display_pattern());
+                let target_reachable = registration_has_reachable_target(&domain.registration);
 
-                map_configured_domain_info(domain, has_cert, cert_trusted, active)
+                map_configured_domain_info(domain, has_cert, cert_trusted, active, target_reachable)
             })
             .collect::<Vec<_>>();
 
         domains.extend(external_domains.into_iter().map(|registration| {
             let has_cert = certs.exists(registration.pattern());
-            map_domain_info(registration, has_cert, cert_trusted, None, None, true, true)
+            let target_reachable = registration_has_reachable_target(&registration);
+            map_domain_info(
+                registration,
+                DomainInfoDetails {
+                    has_cert,
+                    cert_trusted,
+                    project_id: None,
+                    project_name: None,
+                    project_enabled: true,
+                    active: true,
+                    target_reachable,
+                },
+            )
         }));
 
         domains.sort_by(|left, right| left.registration.pattern.cmp(&right.registration.pattern));
@@ -215,13 +237,15 @@ impl DesktopApi {
         }
 
         let configured_domains = self.config_store().list_configured_domains()?;
-        let domain_counts = configured_domains.into_iter().fold(
-            std::collections::HashMap::<String, usize>::new(),
-            |mut counts, domain| {
+        let project_statuses = configured_domains.into_iter().fold(
+            std::collections::HashMap::<String, (usize, bool)>::new(),
+            |mut statuses, domain| {
                 if let Some(project_id) = domain.project_id {
-                    *counts.entry(project_id).or_default() += 1;
+                    let status = statuses.entry(project_id).or_insert((0, false));
+                    status.0 += 1;
+                    status.1 |= registration_has_reachable_target(&domain.registration);
                 }
-                counts
+                statuses
             },
         );
 
@@ -230,8 +254,11 @@ impl DesktopApi {
             .list_projects()?
             .into_iter()
             .map(|project| {
-                let domain_count = *domain_counts.get(&project.id).unwrap_or(&0);
-                map_project_info(project, domain_count)
+                let (domain_count, has_reachable_domain) = project_statuses
+                    .get(&project.id)
+                    .copied()
+                    .unwrap_or((0, false));
+                map_project_info(project, domain_count, has_reachable_domain)
             })
             .collect::<Vec<_>>();
         projects.sort_by(|left, right| left.name.cmp(&right.name));
@@ -245,7 +272,98 @@ impl DesktopApi {
 
         self.ensure_config_writable()?;
         let project = self.config_store().create_project(&request.name)?;
-        Ok(map_project_info(project, 0))
+        Ok(map_project_info(project, 0, false))
+    }
+
+    pub fn create_project_with_domains(
+        &self,
+        request: CreateProjectWithDomainsRequest,
+    ) -> Result<ProjectInfoDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .create_project_with_domains(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+        let register_domain = RegisterDomain::new(&config_store, &certs);
+        let unregister_domain = UnregisterDomain::new(&config_store, &certs);
+
+        let project = config_store.create_project(&request.name)?;
+        let mut created_patterns = Vec::new();
+
+        for domain in &request.domains {
+            let pattern = match DomainPattern::from_name(&domain.domain, domain.wildcard) {
+                Ok(pattern) => pattern,
+                Err(error) => {
+                    rollback_created_project(
+                        &config_store,
+                        &unregister_domain,
+                        &project.id,
+                        &created_patterns,
+                    )?;
+                    return Err(error.into());
+                }
+            };
+
+            let routes = match domain
+                .routes
+                .iter()
+                .map(|route| parse_desktop_route(route))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(routes) => routes,
+                Err(error) => {
+                    rollback_created_project(
+                        &config_store,
+                        &unregister_domain,
+                        &project.id,
+                        &created_patterns,
+                    )?;
+                    return Err(anyhow::anyhow!(
+                        "Invalid route for '{}': {error}",
+                        domain.domain
+                    ));
+                }
+            };
+
+            let result = match register_domain.execute(pattern.clone(), routes) {
+                Ok(result) => result,
+                Err(error) => {
+                    rollback_created_project(
+                        &config_store,
+                        &unregister_domain,
+                        &project.id,
+                        &created_patterns,
+                    )?;
+                    return Err(error);
+                }
+            };
+
+            if let Err(error) = config_store
+                .update_domain_with_project(result.registration, Some(project.id.clone()))
+            {
+                rollback_created_project(
+                    &config_store,
+                    &unregister_domain,
+                    &project.id,
+                    &created_patterns,
+                )?;
+                return Err(error.into());
+            }
+
+            created_patterns.push(pattern);
+        }
+
+        let (_, has_reachable_domain) = project_domain_summary(&config_store, &project.id)?;
+        Ok(map_project_info(
+            project,
+            request.domains.len(),
+            has_reachable_domain,
+        ))
     }
 
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
@@ -278,7 +396,7 @@ impl DesktopApi {
             Ok(()) => true,
             Err(crate::application::ports::DaemonConnectionError::NotRunning) => false,
             Err(error) => {
-                rollback_initialized_project(
+                rollback_created_project(
                     &config_store,
                     &unregister_domain,
                     &project.id,
@@ -290,8 +408,10 @@ impl DesktopApi {
             }
         };
 
+        let has_reachable_domain = project_domain_summary(&config_store, &project.id)?.1;
+
         Ok(InitProjectResultDto {
-            project: map_project_info(project, request.services.len()),
+            project: map_project_info(project, request.services.len(), has_reachable_domain),
             services: request.services,
             daemon_reloaded,
         })
@@ -304,14 +424,78 @@ impl DesktopApi {
 
         self.ensure_config_writable()?;
         let configured_domains = self.config_store().list_configured_domains()?;
-        let domain_count = configured_domains
+        let (domain_count, has_reachable_domain) = configured_domains
             .iter()
             .filter(|domain| domain.project_id.as_deref() == Some(request.id.as_str()))
-            .count();
+            .fold((0, false), |(count, reachable), domain| {
+                (
+                    count + 1,
+                    reachable || registration_has_reachable_target(&domain.registration),
+                )
+            });
         let project =
             self.config_store()
                 .update_project(&request.id, request.name, request.enabled)?;
-        Ok(map_project_info(project, domain_count))
+        Ok(map_project_info(
+            project,
+            domain_count,
+            has_reachable_domain,
+        ))
+    }
+
+    pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.remove_project(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+
+        let project = config_store
+            .list_projects()?
+            .into_iter()
+            .find(|project| project.id == request.id)
+            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found.", request.id))?;
+
+        let attached_domains = config_store
+            .list_configured_domains()?
+            .into_iter()
+            .filter(|domain| domain.project_id.as_deref() == Some(project.id.as_str()))
+            .collect::<Vec<_>>();
+
+        if !attached_domains.is_empty() && !request.delete_domains {
+            anyhow::bail!(
+                "Project '{}' still has domains. Delete the attached domains first, or retry with deleteDomains enabled.",
+                project.id
+            );
+        }
+
+        let domain_count = attached_domains.len();
+        let mut removed_domains = Vec::with_capacity(domain_count);
+
+        if request.delete_domains {
+            let unregister_domain = UnregisterDomain::new(&config_store, &certs);
+            for domain in &attached_domains {
+                unregister_domain.execute(domain.registration.pattern())?;
+                removed_domains.push(domain.registration.display_pattern());
+            }
+        }
+
+        config_store.remove_project(&project.id)?;
+
+        let daemon_reloaded = match MgmtSocketClient::new(&paths.socket_path).reload() {
+            Ok(()) => true,
+            Err(crate::application::ports::DaemonConnectionError::NotRunning) => false,
+            Err(_) => false,
+        };
+
+        Ok(RemoveProjectResultDto {
+            project: map_project_info(project, domain_count, false),
+            removed_domains,
+            daemon_reloaded,
+        })
     }
 
     pub fn assign_domain_project(
@@ -353,11 +537,13 @@ impl DesktopApi {
             .unwrap_or(false);
 
         let has_cert = certs.exists(configured_domain.registration.pattern());
+        let target_reachable = registration_has_reachable_target(&configured_domain.registration);
         Ok(map_configured_domain_info(
             configured_domain,
             has_cert,
             cert_trusted,
             active,
+            target_reachable,
         ))
     }
 
@@ -384,6 +570,10 @@ impl DesktopApi {
                 result.steps.push(step);
             }
 
+            result
+                .steps
+                .push(self.cli_access_step_with(|helper| helper.setup_cli_access()));
+
             return Ok(result);
         }
 
@@ -403,13 +593,16 @@ impl DesktopApi {
         )
         .execute()?;
 
+        let mut steps = result
+            .steps
+            .into_iter()
+            .map(|(label, outcome)| map_step(Some(label), outcome))
+            .collect::<Vec<_>>();
+        steps.push(self.cli_access_step_with(|_| self.install_cli_access()));
+
         Ok(InstallResultDto {
             lan_ip: result.lan_ip.to_string(),
-            steps: result
-                .steps
-                .into_iter()
-                .map(|(label, outcome)| map_step(Some(label), outcome))
-                .collect(),
+            steps,
         })
     }
 
@@ -491,13 +684,14 @@ impl DesktopApi {
         )
         .execute()?;
 
-        Ok(UninstallResultDto {
-            steps: result
-                .steps
-                .into_iter()
-                .map(|(label, outcome)| map_step(Some(label), outcome))
-                .collect(),
-        })
+        let mut steps = result
+            .steps
+            .into_iter()
+            .map(|(label, outcome)| map_step(Some(label), outcome))
+            .collect::<Vec<_>>();
+        steps.push(self.remove_cli_access_step());
+
+        Ok(UninstallResultDto { steps })
     }
 
     pub fn register_domain(
@@ -606,6 +800,39 @@ impl DesktopApi {
         Ok(map_registration(registration))
     }
 
+    pub fn list_port_conflicts(&self) -> Result<Vec<PortConflictDto>> {
+        if let Some(helper) = self.connected_helper_client()? {
+            return helper.list_port_conflicts();
+        }
+
+        let (config, _) = self.load_config_and_paths()?;
+        let conflicts = list_daemon_port_conflicts(
+            config.daemon.http_port,
+            config.daemon.https_port,
+            config.daemon.dns_port,
+        )?;
+
+        Ok(conflicts.into_iter().map(map_port_conflict).collect())
+    }
+
+    pub fn kill_port_conflict(&self, request: KillPortConflictRequest) -> Result<PortConflictDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.kill_port_conflict(request);
+        }
+
+        let (config, _) = self.load_config_and_paths()?;
+        let conflict = kill_daemon_port_conflict(
+            config.daemon.http_port,
+            config.daemon.https_port,
+            config.daemon.dns_port,
+            &request.protocol,
+            request.port,
+            request.pid,
+        )?;
+
+        Ok(map_port_conflict(conflict))
+    }
+
     pub fn start_daemon(&self, request: StartDaemonRequest) -> Result<DaemonLaunchDto> {
         if self.should_use_system_helper() {
             return self.ensure_helper_running()?.start_daemon(request);
@@ -711,13 +938,19 @@ impl DesktopApi {
         let log_path = paths.log_file;
 
         if request.clear {
-            if log_path.exists() {
-                fs::remove_file(&log_path).context("Failed to clear log file")?;
+            if let Some(parent) = log_path.parent() {
+                fs::create_dir_all(parent).context("Failed to prepare log directory")?;
             }
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&log_path)
+                .context("Failed to clear log file")?;
 
             return Ok(LogsDto {
                 path: log_path.display().to_string(),
-                exists: false,
+                exists: true,
                 cleared: true,
                 content: String::new(),
             });
@@ -809,6 +1042,97 @@ impl DesktopApi {
 
     fn cli_helper_ready(&self) -> bool {
         self.connected_helper_client().ok().flatten().is_some()
+    }
+
+    fn cli_access_ready(&self) -> bool {
+        cli_command_points_to_binary(&self.cli_command_path(), &self.binary_path)
+    }
+
+    fn cli_command_path(&self) -> PathBuf {
+        PathBuf::from(CLI_INSTALL_DIR).join(BRANDING.cli_command())
+    }
+
+    fn install_cli_access(&self) -> Result<CliAccessDto> {
+        self.ensure_cli_binary_exists()?;
+
+        let command_path = self.cli_command_path();
+        let already_ready = cli_command_points_to_binary(&command_path, &self.binary_path);
+
+        if !already_ready {
+            ensure_cli_command_link(&command_path, &self.binary_path)?;
+        }
+
+        Ok(CliAccessDto {
+            ready: true,
+            command_path: command_path.display().to_string(),
+            already_ready,
+        })
+    }
+
+    fn cli_access_step_with(
+        &self,
+        setup: impl FnOnce(&SystemHelperClient) -> Result<CliAccessDto>,
+    ) -> StepDto {
+        let label = Some("Install command line access".into());
+
+        if self.should_use_system_helper() {
+            let helper = match self.ensure_helper_running() {
+                Ok(helper) => helper,
+                Err(error) => {
+                    return StepDto {
+                        label,
+                        status: "warning".into(),
+                        message: format!(
+                            "{} finished installing, but the `{}` terminal command could not be enabled: {error}",
+                            BRANDING.app_name,
+                            BRANDING.cli_command(),
+                        ),
+                    };
+                }
+            };
+
+            return map_cli_access_step(label, setup(&helper));
+        }
+
+        map_cli_access_step(label, self.install_cli_access())
+    }
+
+    fn remove_cli_access_step(&self) -> StepDto {
+        let label = Some("Remove command line access".into());
+
+        match remove_cli_command_link(&self.cli_command_path(), &self.binary_path) {
+            Ok(CliRemovalOutcome::Removed(path)) => StepDto {
+                label,
+                status: "success".into(),
+                message: format!("Removed `{}` from {}.", BRANDING.cli_command(), path),
+            },
+            Ok(CliRemovalOutcome::Missing) => StepDto {
+                label,
+                status: "skipped".into(),
+                message: format!(
+                    "The `{}` command was already absent from {}.",
+                    BRANDING.cli_command(),
+                    self.cli_command_path().display(),
+                ),
+            },
+            Ok(CliRemovalOutcome::Unmanaged(path)) => StepDto {
+                label,
+                status: "skipped".into(),
+                message: format!(
+                    "Left {} in place because it is not the symlink managed by {}.",
+                    path, BRANDING.app_name,
+                ),
+            },
+            Err(error) => StepDto {
+                label,
+                status: "warning".into(),
+                message: format!(
+                    "{} was uninstalled, but the `{}` terminal command could not be removed: {error}",
+                    BRANDING.app_name,
+                    BRANDING.cli_command(),
+                ),
+            },
+        }
     }
 
     fn connected_helper_client(&self) -> Result<Option<SystemHelperClient>> {
@@ -1009,7 +1333,7 @@ fn parse_pattern(request: &DomainPatternRequest) -> Result<DomainPattern> {
     DomainPattern::from_name(&request.domain, request.wildcard).map_err(Into::into)
 }
 
-fn rollback_initialized_project(
+fn rollback_created_project(
     config_store: &ConfigStore,
     unregister_domain: &UnregisterDomain<'_>,
     project_id: &str,
@@ -1148,6 +1472,140 @@ fn shell_escape(value: &str) -> String {
 
 fn escape_applescript_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn cli_command_points_to_binary(command_path: &Path, binary_path: &Path) -> bool {
+    match (
+        fs::canonicalize(command_path),
+        fs::canonicalize(binary_path),
+    ) {
+        (Ok(command_target), Ok(binary_target)) => command_target == binary_target,
+        _ => false,
+    }
+}
+
+fn ensure_cli_command_link(command_path: &Path, binary_path: &Path) -> Result<()> {
+    if cli_command_points_to_binary(command_path, binary_path) {
+        return Ok(());
+    }
+
+    if let Ok(metadata) = fs::symlink_metadata(command_path) {
+        if metadata.file_type().is_symlink() {
+            fs::remove_file(command_path).with_context(|| {
+                format!(
+                    "Failed to replace the existing {} CLI link at {}",
+                    BRANDING.app_name,
+                    command_path.display()
+                )
+            })?;
+        } else {
+            bail!(
+                "Cannot install the `{}` command because {} already exists and is not a symlink managed by {}.\nRemove or rename that file, then try again.",
+                BRANDING.cli_command(),
+                command_path.display(),
+                BRANDING.app_name,
+            );
+        }
+    }
+
+    if let Some(parent) = command_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create the CLI install directory at {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    symlink(binary_path, command_path).with_context(|| {
+        format!(
+            "Failed to link `{}` to {}",
+            command_path.display(),
+            binary_path.display(),
+        )
+    })?;
+
+    Ok(())
+}
+
+enum CliRemovalOutcome {
+    Removed(String),
+    Missing,
+    Unmanaged(String),
+}
+
+fn remove_cli_command_link(command_path: &Path, binary_path: &Path) -> Result<CliRemovalOutcome> {
+    let metadata = match fs::symlink_metadata(command_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CliRemovalOutcome::Missing);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect the installed `{}` command at {}",
+                    BRANDING.cli_command(),
+                    command_path.display()
+                )
+            });
+        }
+    };
+
+    if !metadata.file_type().is_symlink() {
+        return Ok(CliRemovalOutcome::Unmanaged(
+            command_path.display().to_string(),
+        ));
+    }
+
+    if !cli_command_points_to_binary(command_path, binary_path) {
+        return Ok(CliRemovalOutcome::Unmanaged(
+            command_path.display().to_string(),
+        ));
+    }
+
+    fs::remove_file(command_path).with_context(|| {
+        format!(
+            "Failed to remove the installed `{}` command at {}",
+            BRANDING.cli_command(),
+            command_path.display()
+        )
+    })?;
+
+    Ok(CliRemovalOutcome::Removed(
+        command_path.display().to_string(),
+    ))
+}
+
+fn map_cli_access_step(label: Option<String>, result: Result<CliAccessDto>) -> StepDto {
+    match result {
+        Ok(access) if access.already_ready => StepDto {
+            label,
+            status: "skipped".into(),
+            message: format!(
+                "The `{}` command was already available at {}.",
+                BRANDING.cli_command(),
+                access.command_path,
+            ),
+        },
+        Ok(access) => StepDto {
+            label,
+            status: "success".into(),
+            message: format!(
+                "Installed `{}` at {}.",
+                BRANDING.cli_command(),
+                access.command_path,
+            ),
+        },
+        Err(error) => StepDto {
+            label,
+            status: "warning".into(),
+            message: format!(
+                "{} finished installing, but the `{}` terminal command could not be enabled: {error}",
+                BRANDING.app_name,
+                BRANDING.cli_command(),
+            ),
+        },
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1376,45 +1834,80 @@ fn map_configured_domain_info(
     has_cert: bool,
     cert_trusted: Option<bool>,
     active: bool,
+    target_reachable: bool,
 ) -> DomainInfoDto {
     map_domain_info(
         value.registration,
-        has_cert,
-        cert_trusted,
-        value.project_id,
-        value.project_name,
-        value.project_enabled,
-        active,
+        DomainInfoDetails {
+            has_cert,
+            cert_trusted,
+            project_id: value.project_id,
+            project_name: value.project_name,
+            project_enabled: value.project_enabled,
+            active,
+            target_reachable,
+        },
     )
 }
 
-fn map_domain_info(
-    registration: crate::domain::DomainRegistration,
+struct DomainInfoDetails {
     has_cert: bool,
     cert_trusted: Option<bool>,
     project_id: Option<String>,
     project_name: Option<String>,
     project_enabled: bool,
     active: bool,
+    target_reachable: bool,
+}
+
+fn map_domain_info(
+    registration: crate::domain::DomainRegistration,
+    details: DomainInfoDetails,
 ) -> DomainInfoDto {
     DomainInfoDto {
         registration: map_registration(registration),
-        has_cert,
-        cert_trusted,
-        project_id,
-        project_name,
-        project_enabled,
-        active,
+        has_cert: details.has_cert,
+        cert_trusted: details.cert_trusted,
+        project_id: details.project_id,
+        project_name: details.project_name,
+        project_enabled: details.project_enabled,
+        active: details.active,
+        target_reachable: details.target_reachable,
     }
 }
 
-fn map_project_info(value: ConfiguredProject, domain_count: usize) -> ProjectInfoDto {
+fn map_project_info(
+    value: ConfiguredProject,
+    domain_count: usize,
+    has_reachable_domain: bool,
+) -> ProjectInfoDto {
     ProjectInfoDto {
         id: value.id,
         name: value.name,
         enabled: value.enabled,
         domain_count,
+        has_reachable_domain,
     }
+}
+
+fn registration_has_reachable_target(registration: &crate::domain::DomainRegistration) -> bool {
+    registration
+        .routes()
+        .iter()
+        .any(|route| is_route_target_reachable(route.target()))
+}
+
+fn project_domain_summary(config_store: &ConfigStore, project_id: &str) -> Result<(usize, bool)> {
+    Ok(config_store
+        .list_configured_domains()?
+        .into_iter()
+        .filter(|domain| domain.project_id.as_deref() == Some(project_id))
+        .fold((0, false), |(count, reachable), domain| {
+            (
+                count + 1,
+                reachable || registration_has_reachable_target(&domain.registration),
+            )
+        }))
 }
 
 fn map_registration(value: crate::domain::DomainRegistration) -> RegistrationDto {
@@ -1438,6 +1931,17 @@ fn map_route(value: &crate::domain::Route) -> RouteDto {
         path: value.path().as_str().to_string(),
         target: value.target().to_string(),
         target_kind: target_kind.into(),
+    }
+}
+
+fn map_port_conflict(value: PortConflictProcess) -> PortConflictDto {
+    PortConflictDto {
+        protocol: value.kind.as_str().into(),
+        port: value.port,
+        pid: value.pid,
+        process_name: value.process_name,
+        user: value.user,
+        command: value.command,
     }
 }
 
@@ -1476,9 +1980,22 @@ fn tail_lines(path: &Path, line_count: usize) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cli_shell_command, normalize_desktop_route, parse_desktop_route, shell_escape};
+    use super::{
+        CliRemovalOutcome, DesktopApi, cli_command_points_to_binary, cli_shell_command,
+        ensure_cli_command_link, normalize_desktop_route, parse_desktop_route,
+        remove_cli_command_link, shell_escape,
+    };
+    use crate::config::RoxyPaths;
+    use crate::desktop::dto::{
+        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, LogsRequest,
+        RemoveProjectRequest,
+    };
     use crate::domain::RouteTarget;
+    use crate::infrastructure::config::{Config, ConfigStore};
+    use std::fs;
+    use std::os::unix::fs::symlink;
     use std::path::Path;
+    use tempfile::TempDir;
 
     #[test]
     fn parse_desktop_route_defaults_bare_target_to_root_path() {
@@ -1523,5 +2040,312 @@ mod tests {
             command,
             "'/tmp/localify' '--config' '/etc/localify/config.toml' 'register' 'my app.localify' '--route' '/=3000'"
         );
+    }
+
+    #[test]
+    fn ensure_cli_command_link_creates_missing_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_path = temp_dir.path().join("localify");
+        let command_path = temp_dir.path().join("bin").join("localify");
+
+        fs::write(&binary_path, "binary").unwrap();
+        ensure_cli_command_link(&command_path, &binary_path).unwrap();
+
+        assert!(command_path.exists());
+        assert!(cli_command_points_to_binary(&command_path, &binary_path));
+    }
+
+    #[test]
+    fn ensure_cli_command_link_replaces_stale_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_path = temp_dir.path().join("localify");
+        let stale_path = temp_dir.path().join("stale-localify");
+        let command_path = temp_dir.path().join("bin").join("localify");
+
+        fs::write(&binary_path, "binary").unwrap();
+        fs::write(&stale_path, "stale").unwrap();
+        fs::create_dir_all(command_path.parent().unwrap()).unwrap();
+        symlink(&stale_path, &command_path).unwrap();
+
+        ensure_cli_command_link(&command_path, &binary_path).unwrap();
+
+        assert!(cli_command_points_to_binary(&command_path, &binary_path));
+    }
+
+    #[test]
+    fn ensure_cli_command_link_rejects_regular_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_path = temp_dir.path().join("localify");
+        let command_path = temp_dir.path().join("bin").join("localify");
+
+        fs::write(&binary_path, "binary").unwrap();
+        fs::create_dir_all(command_path.parent().unwrap()).unwrap();
+        fs::write(&command_path, "occupied").unwrap();
+
+        let error = ensure_cli_command_link(&command_path, &binary_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("already exists and is not a symlink")
+        );
+    }
+
+    #[test]
+    fn remove_cli_command_link_removes_managed_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_path = temp_dir.path().join("localify");
+        let command_path = temp_dir.path().join("bin").join("localify");
+
+        fs::write(&binary_path, "binary").unwrap();
+        ensure_cli_command_link(&command_path, &binary_path).unwrap();
+
+        let outcome = remove_cli_command_link(&command_path, &binary_path).unwrap();
+
+        assert!(matches!(outcome, CliRemovalOutcome::Removed(_)));
+        assert!(!command_path.exists());
+    }
+
+    #[test]
+    fn remove_cli_command_link_skips_missing_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_path = temp_dir.path().join("localify");
+        let command_path = temp_dir.path().join("bin").join("localify");
+
+        fs::write(&binary_path, "binary").unwrap();
+
+        let outcome = remove_cli_command_link(&command_path, &binary_path).unwrap();
+
+        assert!(matches!(outcome, CliRemovalOutcome::Missing));
+    }
+
+    #[test]
+    fn remove_cli_command_link_skips_unmanaged_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary_path = temp_dir.path().join("localify");
+        let other_binary_path = temp_dir.path().join("other-localify");
+        let command_path = temp_dir.path().join("bin").join("localify");
+
+        fs::write(&binary_path, "binary").unwrap();
+        fs::write(&other_binary_path, "other").unwrap();
+        fs::create_dir_all(command_path.parent().unwrap()).unwrap();
+        symlink(&other_binary_path, &command_path).unwrap();
+
+        let outcome = remove_cli_command_link(&command_path, &binary_path).unwrap();
+
+        assert!(matches!(outcome, CliRemovalOutcome::Unmanaged(_)));
+        assert!(command_path.exists());
+    }
+
+    #[test]
+    fn create_project_with_domains_persists_project_and_domains() {
+        let (_temp_dir, api, store) = temp_api();
+
+        let project = api
+            .create_project_with_domains(CreateProjectWithDomainsRequest {
+                name: "Client App".into(),
+                domains: vec![
+                    CreateProjectDomainRequest {
+                        domain: "client.localify".into(),
+                        wildcard: false,
+                        routes: vec!["3000".into()],
+                    },
+                    CreateProjectDomainRequest {
+                        domain: "api.client.localify".into(),
+                        wildcard: false,
+                        routes: vec!["3001".into()],
+                    },
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(project.name, "Client App");
+        assert_eq!(project.domain_count, 2);
+
+        let configured_projects = store.list_projects().unwrap();
+        assert_eq!(configured_projects.len(), 1);
+        assert_eq!(configured_projects[0].id, project.id);
+
+        let configured_domains = store.list_configured_domains().unwrap();
+        assert_eq!(configured_domains.len(), 2);
+        assert!(
+            configured_domains
+                .iter()
+                .all(|domain| domain.project_id.as_deref() == Some(project.id.as_str()))
+        );
+    }
+
+    #[test]
+    fn create_project_with_domains_rolls_back_on_invalid_domain_route() {
+        let (_temp_dir, api, store) = temp_api();
+
+        let error = api
+            .create_project_with_domains(CreateProjectWithDomainsRequest {
+                name: "Broken App".into(),
+                domains: vec![
+                    CreateProjectDomainRequest {
+                        domain: "broken.localify".into(),
+                        wildcard: false,
+                        routes: vec!["3000".into()],
+                    },
+                    CreateProjectDomainRequest {
+                        domain: "api.broken.localify".into(),
+                        wildcard: false,
+                        routes: vec!["not-a-route-target".into()],
+                    },
+                ],
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Invalid route"));
+        assert!(store.list_projects().unwrap().is_empty());
+        assert!(store.list_configured_domains().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_project_deletes_attached_domains() {
+        let (_temp_dir, api, store) = temp_api();
+
+        let project = api
+            .create_project_with_domains(CreateProjectWithDomainsRequest {
+                name: "Client App".into(),
+                domains: vec![
+                    CreateProjectDomainRequest {
+                        domain: "client.localify".into(),
+                        wildcard: false,
+                        routes: vec!["3000".into()],
+                    },
+                    CreateProjectDomainRequest {
+                        domain: "api.client.localify".into(),
+                        wildcard: false,
+                        routes: vec!["3001".into()],
+                    },
+                ],
+            })
+            .unwrap();
+
+        let result = api
+            .remove_project(RemoveProjectRequest {
+                id: project.id.clone(),
+                delete_domains: true,
+            })
+            .unwrap();
+
+        assert_eq!(result.project.id, project.id);
+        assert_eq!(result.removed_domains.len(), 2);
+        assert!(!result.daemon_reloaded);
+        assert!(store.list_projects().unwrap().is_empty());
+        assert!(store.list_configured_domains().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_domains_and_projects_mark_reachable_targets_as_active() {
+        let (_temp_dir, api, _store) = temp_api();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let project = api
+            .create_project_with_domains(CreateProjectWithDomainsRequest {
+                name: "Client App".into(),
+                domains: vec![CreateProjectDomainRequest {
+                    domain: "client.localify".into(),
+                    wildcard: false,
+                    routes: vec![port.to_string()],
+                }],
+            })
+            .unwrap();
+
+        let domain = api
+            .list_domains()
+            .unwrap()
+            .into_iter()
+            .find(|domain| domain.project_id.as_deref() == Some(project.id.as_str()))
+            .unwrap();
+        let listed_project = api
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == project.id)
+            .unwrap();
+
+        assert!(domain.target_reachable);
+        assert!(listed_project.has_reachable_domain);
+    }
+
+    #[test]
+    fn list_domains_and_projects_mark_unreachable_targets_as_inactive() {
+        let (_temp_dir, api, _store) = temp_api();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let project = api
+            .create_project_with_domains(CreateProjectWithDomainsRequest {
+                name: "Client App".into(),
+                domains: vec![CreateProjectDomainRequest {
+                    domain: "client.localify".into(),
+                    wildcard: false,
+                    routes: vec![port.to_string()],
+                }],
+            })
+            .unwrap();
+
+        let domain = api
+            .list_domains()
+            .unwrap()
+            .into_iter()
+            .find(|domain| domain.project_id.as_deref() == Some(project.id.as_str()))
+            .unwrap();
+        let listed_project = api
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == project.id)
+            .unwrap();
+
+        assert!(!domain.target_reachable);
+        assert!(!listed_project.has_reachable_domain);
+    }
+
+    #[test]
+    fn read_logs_clear_truncates_file_without_removing_it() {
+        let (_temp_dir, api, store) = temp_api();
+        let config = store.load().unwrap();
+        let log_path = config.paths.log_file;
+
+        std::fs::write(&log_path, "line one\nline two\n").unwrap();
+
+        let result = api
+            .read_logs(LogsRequest {
+                lines: 50,
+                clear: true,
+            })
+            .unwrap();
+
+        assert!(result.cleared);
+        assert!(result.exists);
+        assert_eq!(result.content, "");
+        assert!(log_path.exists());
+        assert_eq!(std::fs::read_to_string(&log_path).unwrap(), "");
+    }
+
+    fn temp_api() -> (TempDir, DesktopApi, ConfigStore) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        let store = ConfigStore::new(config_path.clone());
+        let paths = RoxyPaths {
+            data_dir: temp_dir.path().join("data"),
+            pid_file: temp_dir.path().join("roxy.pid"),
+            log_file: temp_dir.path().join("roxy.log"),
+            certs_dir: temp_dir.path().join("certs"),
+            socket_path: temp_dir.path().join("roxy.sock"),
+        };
+        let mut config = Config::default();
+        config.paths = paths;
+
+        store.save(&config).unwrap();
+
+        let api = DesktopApi::new_direct(config_path, temp_dir.path().join("roxy"));
+
+        (temp_dir, api, store)
     }
 }

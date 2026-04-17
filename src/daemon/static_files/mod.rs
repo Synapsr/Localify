@@ -176,7 +176,7 @@ fn build_not_found_response(uri_path: &str) -> Response {
     body.push_str("<div class=\"error-image\">\n");
     body.push_str("<img src=\"");
     body.push_str(image_data_uri);
-    body.push_str("\" alt=\"404 - Roxy Fox\" ");
+    body.push_str("\" alt=\"404 - Localify Fox\" ");
     body.push_str("width=\"300\" height=\"225\">\n");
     body.push_str("</div>\n");
     body.push_str("<div class=\"error-card\">\n");

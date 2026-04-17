@@ -1,50 +1,68 @@
 import { z } from "zod";
 
+export const projectDomainEntrySchema = z.object({
+  domain: z.string().trim(),
+  target: z.string().trim(),
+  wildcard: z.boolean(),
+});
+
+export type ProjectDomainEntry = z.infer<typeof projectDomainEntrySchema>;
+
 export const createProjectSchema = z
   .object({
     name: z.string().trim().min(1, "Project name is required"),
-    appDomain: z.string().trim(),
-    appTarget: z.string().trim(),
-    includeApi: z.boolean(),
-    apiDomain: z.string().trim(),
-    apiTarget: z.string().trim(),
+    domains: z.array(projectDomainEntrySchema).min(1),
   })
   .superRefine((value, ctx) => {
-    const hasAppDraft = value.appDomain.length > 0 || value.appTarget.length > 0;
-    if (hasAppDraft && value.appDomain.length === 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["appDomain"],
-        message: "Domain is required when a target is set",
-      });
-    }
-    if (hasAppDraft && value.appTarget.length === 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["appTarget"],
-        message: "Target is required when a domain is set",
-      });
-    }
+    value.domains.forEach((entry, index) => {
+      const hasDraft = entry.domain.length > 0 || entry.target.length > 0;
+      const isPrimary = index === 0;
 
-    if (value.includeApi) {
-      if (value.apiDomain.length === 0) {
+      if (isPrimary && !hasDraft) {
+        return;
+      }
+
+      if (entry.domain.length === 0) {
         ctx.addIssue({
           code: "custom",
-          path: ["apiDomain"],
-          message: "API domain is required",
+          path: ["domains", index, "domain"],
+          message: isPrimary
+            ? "Domain is required when a target is set"
+            : "Domain is required",
         });
       }
-      if (value.apiTarget.length === 0) {
+      if (entry.target.length === 0) {
         ctx.addIssue({
           code: "custom",
-          path: ["apiTarget"],
-          message: "API target is required",
+          path: ["domains", index, "target"],
+          message: isPrimary
+            ? "Target is required when a domain is set"
+            : "Target is required",
         });
       }
-    }
+    });
   });
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
+
+export const createProjectWithDomainsRequestSchema = z.object({
+  name: z.string().trim().min(1, "Project name is required"),
+  domains: z
+    .array(
+      z.object({
+        domain: z.string().trim().min(1, "Domain is required"),
+        wildcard: z.boolean(),
+        routes: z
+          .array(z.string().trim().min(1, "Route target is required"))
+          .min(1, "At least one route is required"),
+      }),
+    )
+    .default([]),
+});
+
+export function emptyDomainEntry(): ProjectDomainEntry {
+  return { domain: "", target: "", wildcard: false };
+}
 
 export function normalizeDomain(value: string, suffix: string): string {
   const trimmed = value.trim();

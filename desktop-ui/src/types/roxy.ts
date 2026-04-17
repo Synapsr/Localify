@@ -6,6 +6,8 @@ export interface EnvironmentDto {
   binaryExists: boolean;
   fixedDomainSuffix: string;
   cliHelperReady: boolean;
+  cliAccessReady: boolean;
+  cliCommandPath: string;
 }
 
 export interface DaemonConfigDto {
@@ -63,6 +65,7 @@ export interface DomainInfoDto {
   projectName: string | null;
   projectEnabled: boolean;
   active: boolean;
+  targetReachable: boolean;
 }
 
 export interface ProjectInfoDto {
@@ -70,6 +73,7 @@ export interface ProjectInfoDto {
   name: string;
   enabled: boolean;
   domainCount: number;
+  hasReachableDomain: boolean;
 }
 
 export interface DaemonStatusDto {
@@ -103,6 +107,23 @@ export interface InstallResultDto {
 
 export interface CliAccessDto {
   ready: boolean;
+  commandPath: string;
+  alreadyReady: boolean;
+}
+
+export interface PortConflictDto {
+  protocol: "http" | "https" | "dns";
+  port: number;
+  pid: number;
+  processName: string;
+  user: string;
+  command: string;
+}
+
+export interface KillPortConflictRequest {
+  protocol: "http" | "https" | "dns";
+  port: number;
+  pid: number;
 }
 
 export interface UninstallPreviewDto {
@@ -125,6 +146,17 @@ export interface CreateProjectRequest {
   name: string;
 }
 
+export interface CreateProjectDomainRequest {
+  domain: string;
+  wildcard: boolean;
+  routes: string[];
+}
+
+export interface CreateProjectWithDomainsRequest {
+  name: string;
+  domains?: CreateProjectDomainRequest[];
+}
+
 export interface AssignDomainProjectRequest {
   domain: string;
   wildcard: boolean;
@@ -135,6 +167,17 @@ export interface UpdateProjectRequest {
   id: string;
   name?: string;
   enabled?: boolean;
+}
+
+export interface RemoveProjectRequest {
+  id: string;
+  deleteDomains: boolean;
+}
+
+export interface RemoveProjectResultDto {
+  project: ProjectInfoDto;
+  removedDomains: string[];
+  daemonReloaded: boolean;
 }
 
 export interface AvailablePortDto {

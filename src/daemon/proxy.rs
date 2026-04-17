@@ -14,7 +14,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+use crate::branding::BRANDING;
 use crate::domain::ProxyTarget;
+
+use super::{embedded_assets, theme};
 
 /// Non-standard (but de facto standard) forwarding header names.
 /// The `http` crate only provides constants for IANA-registered headers,
@@ -23,6 +26,14 @@ const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const X_FORWARDED_HOST: &str = "x-forwarded-host";
 const X_FORWARDED_PROTO: &str = "x-forwarded-proto";
 const KEEP_ALIVE: &str = "keep-alive";
+
+#[derive(Clone, Copy)]
+enum ProxyErrorKind {
+    Connect,
+    InvalidTargetUri,
+    UpstreamIo,
+    WebSocketUpgrade,
+}
 
 /// Scheme of the original client request (injected by server layers).
 #[derive(Clone, Copy)]
@@ -149,13 +160,15 @@ async fn proxy_websocket(
     debug!(target = %target, "Connecting to backend for WebSocket");
     let mut backend = match TcpStream::connect(&backend_addr).await {
         Ok(s) => s,
-        Err(_) => {
-            warn!(target = %target, "WebSocket backend connection failed");
-            return (
+        Err(e) => {
+            warn!(target = %target, error = %e, "WebSocket backend connection failed");
+            return build_proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                format!("Cannot connect to service at {}", target),
-            )
-                .into_response();
+                host,
+                target,
+                ProxyErrorKind::Connect,
+                &e.to_string(),
+            );
         }
     };
     let start_time = Instant::now();
@@ -164,11 +177,13 @@ async fn proxy_websocket(
     let upgrade_request = build_upgrade_request(&request, target, host, scheme, client_ip);
 
     if let Err(e) = backend.write_all(upgrade_request.as_bytes()).await {
-        return (
+        return build_proxy_error_response(
             StatusCode::BAD_GATEWAY,
-            format!("Backend write error: {}", e),
-        )
-            .into_response();
+            host,
+            target,
+            ProxyErrorKind::UpstreamIo,
+            &format!("Backend write error: {e}"),
+        );
     }
     debug!(target = %target, "WebSocket upgrade request sent to backend");
 
@@ -177,11 +192,13 @@ async fn proxy_websocket(
     let n = match backend.read(&mut response_buf).await {
         Ok(n) => n,
         Err(e) => {
-            return (
+            return build_proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                format!("Backend read error: {}", e),
-            )
-                .into_response();
+                host,
+                target,
+                ProxyErrorKind::UpstreamIo,
+                &format!("Backend read error: {e}"),
+            );
         }
     };
 
@@ -193,11 +210,13 @@ async fn proxy_websocket(
         .is_some_and(|line| line.contains("101"));
     if !is_101 {
         warn!(target = %target, "Backend rejected WebSocket upgrade");
-        return (
+        return build_proxy_error_response(
             StatusCode::BAD_GATEWAY,
+            host,
+            target,
+            ProxyErrorKind::WebSocketUpgrade,
             "Backend rejected WebSocket upgrade",
-        )
-            .into_response();
+        );
     }
 
     // Extract Sec-WebSocket-Accept from backend response
@@ -392,7 +411,13 @@ pub async fn proxy_request(
     let uri: Uri = match uri_string.parse() {
         Ok(u) => u,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("Invalid URI: {}", e)).into_response();
+            return build_proxy_error_response(
+                StatusCode::BAD_REQUEST,
+                host,
+                target,
+                ProxyErrorKind::InvalidTargetUri,
+                &format!("Invalid URI: {e}"),
+            );
         }
     };
 
@@ -417,22 +442,181 @@ pub async fn proxy_request(
             Response::from_parts(parts, Body::new(body))
         }
         Err(e) => {
-            // Check if it's a connection error (service not running)
-            let error_msg = e.to_string();
-            if error_msg.contains("Connection refused") {
-                warn!(target = %target, "Service not running");
-                (
+            if e.is_connect() {
+                warn!(target = %target, error = %e, "Backend connection failed");
+                build_proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    format!("Service not running at {}", target),
+                    host,
+                    target,
+                    ProxyErrorKind::Connect,
+                    &e.to_string(),
                 )
-                    .into_response()
             } else {
                 warn!(target = %target, error = %e, "Proxy failed");
-                (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response()
+                build_proxy_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    host,
+                    target,
+                    ProxyErrorKind::UpstreamIo,
+                    &format!("Proxy error: {e}"),
+                )
             }
         }
     }
 }
+
+fn build_proxy_error_response(
+    status: StatusCode,
+    host: &str,
+    target: &ProxyTarget,
+    kind: ProxyErrorKind,
+    error: &str,
+) -> Response {
+    let html = render_proxy_error_page(host, target, kind, error);
+
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(Body::from(html))
+        .unwrap_or_else(|_| {
+            (status, format!("Proxy error for {} at {}", host, target)).into_response()
+        })
+}
+
+fn render_proxy_error_page(
+    host: &str,
+    target: &ProxyTarget,
+    kind: ProxyErrorKind,
+    error: &str,
+) -> String {
+    let domain = host.split(':').next().unwrap_or(host).trim_end_matches('.');
+    let domain = theme::html_escape(domain);
+    let target_display = theme::html_escape(&target.to_string());
+    let error = theme::html_escape(error);
+    let port = target.port().value();
+    let image_data_uri = embedded_assets::roxy_error_data_uri();
+
+    let mut body = String::new();
+    body.push_str("<div class=\"error-container\">\n");
+    body.push_str("<div class=\"error-image\">\n");
+    body.push_str("<img src=\"");
+    body.push_str(image_data_uri);
+    body.push_str("\" alt=\"Service unreachable - Localify Fox\" width=\"300\" height=\"225\">\n");
+    body.push_str("</div>\n");
+    body.push_str("<div class=\"error-card proxy-error-card\">\n");
+    body.push_str("<h1 class=\"error-title\">");
+    body.push_str(proxy_error_title(kind));
+    body.push_str("</h1>\n");
+    body.push_str("<p class=\"error-message\">");
+    body.push_str(&proxy_error_summary(kind, &domain, &target_display));
+    body.push_str("</p>\n");
+    body.push_str("<div class=\"help-section\">\n");
+    body.push_str("<p class=\"help-label\">Possible fixes</p>\n");
+    body.push_str("<ul class=\"proxy-checklist\">");
+    append_proxy_fix_items(&mut body, kind, port);
+    body.push_str("</ul>\n");
+    body.push_str("<p class=\"help-label\">Diagnostics</p>\n");
+    body.push_str("<div class=\"command\">");
+    body.push_str("lsof -nP -iTCP:");
+    body.push_str(&port.to_string());
+    body.push_str(" -sTCP:LISTEN<br>");
+    body.push_str(BRANDING.cli_command());
+    body.push_str(" list");
+    if matches!(kind, ProxyErrorKind::InvalidTargetUri) {
+        body.push_str("<br>");
+        body.push_str(BRANDING.cli_command());
+        body.push_str(" route add ");
+        body.push_str(&domain);
+        body.push_str(" / ");
+        body.push_str(&port.to_string());
+    }
+    body.push_str("</div>\n");
+    body.push_str("<p class=\"help-label\">Proxy error</p>\n");
+    body.push_str("<div class=\"proxy-detail\">");
+    body.push_str(&error);
+    body.push_str("</div>\n");
+    body.push_str("</div></div></div>");
+
+    let css = format!("{}{}", theme::ERROR_PAGE_CSS, PROXY_ERROR_CSS);
+    theme::render_page(proxy_error_title(kind), &body, &css, "")
+}
+
+fn proxy_error_title(kind: ProxyErrorKind) -> &'static str {
+    match kind {
+        ProxyErrorKind::Connect => "Service Unreachable",
+        ProxyErrorKind::InvalidTargetUri => "Invalid Route Target",
+        ProxyErrorKind::UpstreamIo => "Proxy Failed",
+        ProxyErrorKind::WebSocketUpgrade => "WebSocket Upgrade Failed",
+    }
+}
+
+fn proxy_error_summary(kind: ProxyErrorKind, domain: &str, target: &str) -> String {
+    match kind {
+        ProxyErrorKind::Connect => format!(
+            "{} reached <code>{}</code> but could not connect to backend <code>{}</code>.",
+            BRANDING.app_name, domain, target
+        ),
+        ProxyErrorKind::InvalidTargetUri => format!(
+            "{} could not build a valid backend URL for <code>{}</code> from route target <code>{}</code>.",
+            BRANDING.app_name, domain, target
+        ),
+        ProxyErrorKind::UpstreamIo => format!(
+            "{} reached route target <code>{}</code> for <code>{}</code>, but the backend did not return a usable response.",
+            BRANDING.app_name, target, domain
+        ),
+        ProxyErrorKind::WebSocketUpgrade => format!(
+            "{} connected to <code>{}</code> for <code>{}</code>, but the WebSocket upgrade did not complete.",
+            BRANDING.app_name, target, domain
+        ),
+    }
+}
+
+fn append_proxy_fix_items(body: &mut String, kind: ProxyErrorKind, port: u16) {
+    match kind {
+        ProxyErrorKind::Connect => {
+            body.push_str("<li>Start your app or API dev server if it is not running.</li>");
+            body.push_str("<li>Make sure the app listens on <code>127.0.0.1</code> or the exact host configured for this route.</li>");
+            body.push_str("<li>If the app uses another port, update the route or your <code>package.json</code> dev script to use <code>");
+            body.push_str(&port.to_string());
+            body.push_str("</code>.</li>");
+        }
+        ProxyErrorKind::InvalidTargetUri => {
+            body.push_str("<li>Check the route target saved in Localify. A malformed host or port can make the backend URL invalid.</li>");
+            body.push_str("<li>Re-register or update the route with a plain port like <code>");
+            body.push_str(&port.to_string());
+            body.push_str("</code> or a valid <code>host:port</code> target.</li>");
+            body.push_str("<li>If this came from project bootstrap, rerun <code>localify init-project</code> and confirm the selected target.</li>");
+        }
+        ProxyErrorKind::UpstreamIo => {
+            body.push_str("<li>Restart the target service and retry the request.</li>");
+            body.push_str("<li>Inspect the target app logs. The backend may be crashing or closing the connection early.</li>");
+            body.push_str("<li>If a proxy or framework dev server sits in front of your app, verify it still listens on <code>");
+            body.push_str(&port.to_string());
+            body.push_str("</code>.</li>");
+        }
+        ProxyErrorKind::WebSocketUpgrade => {
+            body.push_str("<li>Make sure the backend endpoint actually supports WebSocket upgrades on this path.</li>");
+            body.push_str("<li>Check that the target dev server preserves <code>Upgrade</code> and <code>Connection</code> headers.</li>");
+            body.push_str("<li>If the WebSocket server moved to another port, update the route or dev script to use <code>");
+            body.push_str(&port.to_string());
+            body.push_str("</code>.</li>");
+        }
+    }
+}
+
+const PROXY_ERROR_CSS: &str = "\
+.proxy-error-card{text-align:left}\
+.proxy-checklist{margin:0 0 20px 20px;color:var(--text)}\
+.proxy-checklist li{margin:0 0 10px 0}\
+.proxy-detail{\
+    background:rgba(232,133,58,.08);\
+    border:1px solid rgba(232,133,58,.18);\
+    border-radius:10px;padding:14px 16px;\
+    font-family:'SF Mono',Monaco,'Cascadia Code',Menlo,Consolas,monospace;\
+    font-size:.88em;line-height:1.6;\
+    overflow:auto;\
+}\
+";
 
 #[cfg(test)]
 mod tests {
@@ -779,5 +963,40 @@ mod tests {
         let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
 
         assert!(raw.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn render_proxy_connect_error_page_includes_diagnostics_and_target() {
+        let target = ProxyTarget::parse("3000").unwrap();
+
+        let html = render_proxy_error_page(
+            "demo.localify",
+            &target,
+            ProxyErrorKind::Connect,
+            "client error (Connect)",
+        );
+
+        assert!(html.contains("Service Unreachable"));
+        assert!(html.contains("demo.localify"));
+        assert!(html.contains("127.0.0.1:3000"));
+        assert!(html.contains("lsof -nP -iTCP:3000 -sTCP:LISTEN"));
+        assert!(html.contains("localify list"));
+        assert!(html.contains("client error (Connect)"));
+    }
+
+    #[test]
+    fn render_proxy_invalid_target_page_includes_route_fix_hint() {
+        let target = ProxyTarget::parse("3000").unwrap();
+
+        let html = render_proxy_error_page(
+            "demo.localify",
+            &target,
+            ProxyErrorKind::InvalidTargetUri,
+            "Invalid URI: bad authority",
+        );
+
+        assert!(html.contains("Invalid Route Target"));
+        assert!(html.contains("localify route add demo.localify / 3000"));
+        assert!(html.contains("Invalid URI: bad authority"));
     }
 }

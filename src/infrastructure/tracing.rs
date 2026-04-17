@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+use crate::branding::BRANDING;
+
 /// Output destination for tracing
 pub enum TracingOutput {
     /// Output to stdout (for foreground/development mode)
@@ -12,9 +14,9 @@ pub enum TracingOutput {
 }
 
 /// Initialize tracing based on configuration
-/// Priority: ROXY_LOG env > verbose flag > default (info)
+/// Priority: LOCALIFY_LOG env > verbose flag > default (info)
 pub fn init_tracing(verbose: bool, output: TracingOutput) {
-    let filter = EnvFilter::try_from_env("ROXY_LOG").unwrap_or_else(|_| {
+    let filter = EnvFilter::try_from_env(BRANDING.env_var("LOG")).unwrap_or_else(|_| {
         let level = if verbose { "debug" } else { "info" };
         EnvFilter::new(level)
     });

@@ -1,14 +1,10 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Card } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import {
-  useAddRoute,
-  useAssignDomainProject,
-  useRemoveRoute,
-  useUnregisterDomain,
-} from "../lib/queries";
+import { domainMutations } from "../lib/queries";
 import type { DomainInfoDto, ProjectInfoDto, RouteDto } from "../types/roxy";
 
 interface DomainCardProps {
@@ -18,10 +14,11 @@ interface DomainCardProps {
 
 export function DomainCard({ domain, projects }: DomainCardProps) {
   const { registration } = domain;
-  const addRoute = useAddRoute();
-  const assignProject = useAssignDomainProject();
-  const removeRoute = useRemoveRoute();
-  const unregister = useUnregisterDomain();
+  const queryClient = useQueryClient();
+  const addRoute = useMutation(domainMutations.addRoute(queryClient));
+  const assignProject = useMutation(domainMutations.assignProject(queryClient));
+  const removeRoute = useMutation(domainMutations.removeRoute(queryClient));
+  const unregister = useMutation(domainMutations.unregister(queryClient));
 
   const [addingRoute, setAddingRoute] = useState(false);
   const [editingProject, setEditingProject] = useState(false);

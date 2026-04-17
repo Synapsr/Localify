@@ -1,7 +1,8 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { cn } from "../lib/cn";
-import { useUpdateProject } from "../lib/queries";
+import { projectMutations } from "../lib/queries";
 import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
@@ -39,7 +40,8 @@ export function ProjectRow({
   onDrop,
   onDragEnd,
 }: ProjectRowProps) {
-  const updateProject = useUpdateProject();
+  const queryClient = useQueryClient();
+  const updateProject = useMutation(projectMutations.update(queryClient));
   const [expanded, setExpanded] = useState(false);
 
   async function handleToggle() {

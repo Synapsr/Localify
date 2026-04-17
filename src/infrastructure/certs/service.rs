@@ -20,7 +20,7 @@ impl CertificateService {
         }
     }
 
-    /// Initialize the Root CA (called during `roxy install`)
+    /// Initialize the Root CA (called during `localify install`)
     pub fn init_ca(&self) -> Result<(), CertError> {
         if !self.ca.exists() {
             // Generate CA
@@ -53,7 +53,7 @@ impl CertificateService {
     pub fn create_and_install(&self, pattern: &DomainPattern) -> Result<(), CertError> {
         if !self.ca.exists() {
             return Err(CertError::GenerationError(
-                "Root CA not found. Run 'sudo roxy install' first.".to_string(),
+                "Root CA not found. Run 'sudo localify install' first.".to_string(),
             ));
         }
 

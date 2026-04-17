@@ -1,6 +1,6 @@
-# Rust Architecture — Roxy
+# Rust Architecture — Localify
 
-Module structure, DDD layering, and layer boundary rules for the Rust side of Roxy. For general conventions (YAGNI, error handling, testing, style), see [conventions.md](conventions.md).
+Module structure, DDD layering, and layer boundary rules for the Rust side of Localify. For general conventions (YAGNI, error handling, testing, style), see [conventions.md](conventions.md).
 
 ## Module structure
 

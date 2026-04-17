@@ -1,6 +1,8 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
 import { Button } from "./ui/button";
-import { useInstall, useStartDaemon } from "../lib/queries";
+import { daemonMutations, systemMutations } from "../lib/queries";
 import type { BootstrapDto } from "../types/roxy";
 import { cn } from "../lib/cn";
 
@@ -11,8 +13,9 @@ interface OnboardingProps {
 type StepState = "idle" | "running" | "done" | "error";
 
 export function Onboarding({ bootstrap }: OnboardingProps) {
-  const install = useInstall();
-  const startDaemon = useStartDaemon();
+  const queryClient = useQueryClient();
+  const install = useMutation(systemMutations.install(queryClient));
+  const startDaemon = useMutation(daemonMutations.start(queryClient));
   const appName = bootstrap.environment.appName;
 
   const [installState, setInstallState] = useState<StepState>("idle");
@@ -47,6 +50,7 @@ export function Onboarding({ bootstrap }: OnboardingProps) {
   }
 
   const canStart = installState === "done";
+  const showPortConflicts = Boolean(startMessage?.includes("already in use"));
 
   return (
     <div className="flex h-full items-center justify-center px-6 py-12">
@@ -104,6 +108,8 @@ export function Onboarding({ bootstrap }: OnboardingProps) {
             }
           />
         </ol>
+
+        <DaemonPortConflicts visible={showPortConflicts} />
 
         {startState === "done" && installState === "done" && (
           <div className="text-center text-sm text-[--color-muted]">

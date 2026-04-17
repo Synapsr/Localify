@@ -33,7 +33,7 @@ function reconcile(stored: string[], knownIds: string[]): string[] {
 }
 
 export function useProjectOrder(knownIds: string[]) {
-  const [order, setOrder] = useState<string[]>(() =>
+  const [order, setOrderState] = useState<string[]>(() =>
     reconcile(loadStoredOrder(), knownIds),
   );
   const joinedKnown = knownIds.join("|");
@@ -42,16 +42,20 @@ export function useProjectOrder(knownIds: string[]) {
   useEffect(() => {
     if (previousKey.current === joinedKnown) return;
     previousKey.current = joinedKnown;
-    setOrder((current) => reconcile(current, knownIds));
+    setOrderState((current) => reconcile(current, knownIds));
   }, [joinedKnown, knownIds]);
 
   useEffect(() => {
     saveStoredOrder(order);
   }, [order]);
 
+  function setOrder(nextOrder: string[]) {
+    setOrderState(reconcile(nextOrder, knownIds));
+  }
+
   function reorder(from: number, to: number) {
     if (from === to) return;
-    setOrder((current) => {
+    setOrderState((current) => {
       if (
         from < 0 ||
         to < 0 ||
@@ -67,5 +71,5 @@ export function useProjectOrder(knownIds: string[]) {
     });
   }
 
-  return { order, reorder };
+  return { order, reorder, setOrder };
 }

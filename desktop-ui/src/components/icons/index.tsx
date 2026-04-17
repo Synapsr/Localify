@@ -9,5 +9,8 @@ export {
   ArrowUpDownSolid as ArrowUpDownSolidIcon,
   ArrowUpDown as ArrowUpDownIcon,
   Search as SearchIcon,
+  Spinner as SpinnerIcon,
   X as XIcon,
+  Plus as PlusIcon,
+  PlusSolid as PlusSolidIcon,
 } from "@mynaui/icons-react";

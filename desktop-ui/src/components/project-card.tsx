@@ -1,4 +1,5 @@
-import { useUpdateProject } from "../lib/queries";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { projectMutations } from "../lib/queries";
 import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
 import { DomainCard } from "./domain-card";
 import { Badge } from "./ui/badge";
@@ -18,7 +19,8 @@ export const ProjectCard = ({
   projects,
   onAddDomain,
 }: ProjectCardProps) => {
-  const updateProject = useUpdateProject();
+  const queryClient = useQueryClient();
+  const updateProject = useMutation(projectMutations.update(queryClient));
 
   async function handleToggle() {
     await updateProject.mutateAsync({

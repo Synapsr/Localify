@@ -6,6 +6,7 @@ demo-recording
 node_modules
 desktop-ui/dist
 src-tauri/gen
+src-tauri/binaries/localify-*
 
 assets/roxy_404.png
 assets/roxy_error.png

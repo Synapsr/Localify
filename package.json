@@ -11,9 +11,11 @@
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
+    "desktop:prepare-sidecar": "node scripts/prepare-tauri-sidecar.mjs --release",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "pnpm desktop:prepare-sidecar && tauri build --bundles app,dmg",
+    "tauri:package": "pnpm tauri:build"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.0",

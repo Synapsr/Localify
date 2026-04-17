@@ -10,6 +10,7 @@ use axum::{
 };
 use tracing::{debug, info};
 
+use crate::branding::BRANDING;
 use crate::domain::{DomainRegistration, Route, RouteTarget};
 
 use super::embedded_assets;
@@ -196,38 +197,47 @@ fn build_not_registered_response(domain: &str) -> Response {
     body.push_str("<div class=\"error-image\">\n");
     body.push_str("<img src=\"");
     body.push_str(image_data_uri);
-    body.push_str("\" alt=\"Server Error - Roxy Fox\" ");
+    body.push_str("\" alt=\"Server Error - Localify Fox\" ");
     body.push_str("width=\"300\" height=\"225\">\n");
     body.push_str("</div>\n");
     body.push_str("<div class=\"error-card\">\n");
     body.push_str("<h1 class=\"error-title\">Domain Not Registered</h1>\n");
     body.push_str("<p class=\"error-message\">The domain <code>");
     body.push_str(&domain);
-    body.push_str("</code> is not registered with Roxy.</p>\n");
+    body.push_str("</code> is not registered with ");
+    body.push_str(BRANDING.app_name);
+    body.push_str(".</p>\n");
     body.push_str("<div class=\"help-section\">\n");
     body.push_str("<p class=\"help-label\">To register this domain, run:</p>\n");
     body.push_str("<div class=\"command\">");
-    body.push_str("roxy register ");
+    body.push_str(BRANDING.cli_command());
+    body.push_str(" register ");
     body.push_str(&domain);
     body.push_str(" --route \"/=3000\"<br>");
     // Suggest wildcard registration when the user hits a subdomain.
     if let Some(wildcard_base) = wildcard_base_domain(&domain_raw) {
         let wildcard_base = theme::html_escape(&wildcard_base);
         body.push_str("<span class=\"comment\"># using subdomains? register wildcard:</span><br>");
-        body.push_str("roxy register ");
+        body.push_str(BRANDING.cli_command());
+        body.push_str(" register ");
         body.push_str(&wildcard_base);
         body.push_str(" --wildcard --route \"/=3000\"<br>");
     }
     body.push_str("<span class=\"comment\"># or with multiple routes:</span><br>");
-    body.push_str("roxy register ");
+    body.push_str(BRANDING.cli_command());
+    body.push_str(" register ");
     body.push_str(&domain);
     body.push_str(" --route \"/=3000\" --route \"/api=3001\"");
     body.push_str("</div>\n");
-    body.push_str("<p class=\"help-label\">Then restart the Roxy daemon:</p>\n");
-    body.push_str("<div class=\"command\">roxy restart</div>\n");
+    body.push_str("<p class=\"help-label\">Then restart the ");
+    body.push_str(BRANDING.app_name);
+    body.push_str(" daemon:</p>\n");
+    body.push_str("<div class=\"command\">");
+    body.push_str(BRANDING.cli_command());
+    body.push_str(" restart</div>\n");
     body.push_str("</div></div></div>");
 
-    let html = theme::render_page("Domain Not Registered", &body, ERROR_CSS, "");
+    let html = theme::render_page("Domain Not Registered", &body, theme::ERROR_PAGE_CSS, "");
 
     html_response(StatusCode::NOT_FOUND, html)
 }
@@ -245,7 +255,7 @@ fn build_no_route_response(registration: &DomainRegistration, host: &str, path: 
     body.push_str("<div class=\"error-image\">\n");
     body.push_str("<img src=\"");
     body.push_str(image_data_uri);
-    body.push_str("\" alt=\"404 - Roxy Fox\" ");
+    body.push_str("\" alt=\"404 - Localify Fox\" ");
     body.push_str("width=\"300\" height=\"225\">\n");
     body.push_str("</div>\n");
     body.push_str("<div class=\"error-card\">\n");
@@ -257,7 +267,9 @@ fn build_no_route_response(registration: &DomainRegistration, host: &str, path: 
     body.push_str("</code>.</p>\n");
     body.push_str("<div class=\"help-section\">\n");
     body.push_str("<p class=\"help-label\">To add a route for this path, run:</p>\n");
-    body.push_str("<div class=\"command\">roxy route add ");
+    body.push_str("<div class=\"command\">");
+    body.push_str(BRANDING.cli_command());
+    body.push_str(" route add ");
     if registration.is_wildcard() {
         body.push_str("--wildcard ");
     }
@@ -265,11 +277,15 @@ fn build_no_route_response(registration: &DomainRegistration, host: &str, path: 
     body.push(' ');
     body.push_str(&path);
     body.push_str(" 3000</div>\n");
-    body.push_str("<p class=\"help-label\">Then reload the Roxy daemon:</p>\n");
-    body.push_str("<div class=\"command\">roxy reload</div>\n");
+    body.push_str("<p class=\"help-label\">Then reload the ");
+    body.push_str(BRANDING.app_name);
+    body.push_str(" daemon:</p>\n");
+    body.push_str("<div class=\"command\">");
+    body.push_str(BRANDING.cli_command());
+    body.push_str(" reload</div>\n");
     body.push_str("</div></div></div>");
 
-    let html = theme::render_page("No Route Found", &body, ERROR_CSS, "");
+    let html = theme::render_page("No Route Found", &body, theme::ERROR_PAGE_CSS, "");
 
     html_response(StatusCode::NOT_FOUND, html)
 }
@@ -303,51 +319,6 @@ fn wildcard_base_domain(domain: &str) -> Option<String> {
         parts[parts.len() - 1]
     ))
 }
-
-const ERROR_CSS: &str = "\
-.error-container{\
-    display:flex;flex-direction:column;align-items:center;\
-    gap:28px;max-width:700px;margin:40px auto;\
-}\
-.error-image{\
-    animation:fadeInDown .6s ease-out;\
-}\
-.error-image img{\
-    width:100%;max-width:300px;height:auto;\
-    border-radius:12px;\
-    box-shadow:0 8px 24px rgba(156,180,212,.25);\
-}\
-.error-card{\
-    background:var(--card-bg);border-radius:12px;\
-    border:1px solid var(--border);padding:40px;\
-    box-shadow:0 4px 16px rgba(0,0,0,.04);\
-    text-align:center;width:100%;\
-    animation:fadeInUp .6s ease-out;\
-}\
-.error-title{\
-    color:var(--fox-orange);font-size:1.7em;margin-bottom:16px;\
-    font-weight:700;\
-}\
-.error-message{margin-bottom:20px;font-size:1.05em;line-height:1.6}\
-.help-section{margin-top:24px;text-align:left}\
-.help-label{\
-    font-size:.9em;color:var(--text-light);margin-bottom:8px;\
-    font-weight:500;text-transform:uppercase;letter-spacing:.03em;\
-}\
-.command{\
-    background:linear-gradient(135deg,#2D2520 0%,#3D3530 100%);\
-    color:#F8F0E8;padding:16px 20px;\
-    border-radius:10px;margin:12px 0 20px 0;\
-    font-family:'SF Mono',Monaco,'Cascadia Code',Menlo,Consolas,monospace;\
-    font-size:.88em;line-height:1.8;\
-    border:1px solid #4D4540;\
-    box-shadow:0 4px 12px rgba(0,0,0,.15);\
-}\
-.comment{color:#A89C95;font-size:.95em}\
-@keyframes fadeInDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}\
-@keyframes fadeInUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}\
-@media(max-width:600px){.error-image img{max-width:240px}.error-card{padding:28px}}\
-";
 
 #[cfg(test)]
 mod tests {

@@ -88,7 +88,7 @@ impl<'a> Install<'a> {
                 Err(e) => StepOutcome::Warning(format!(
                     "Failed to create Root CA: {}. \
                      HTTPS certificates will not work. \
-                     Run 'sudo roxy install' to enable HTTPS.",
+                     Run 'sudo localify install' to enable HTTPS.",
                     e
                 )),
             },

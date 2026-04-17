@@ -22,9 +22,9 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &RoxyPaths) -> Result<()> {
 
     if !force {
         let preview = use_case.preview()?;
-        println!("This will remove all Roxy configuration including:");
+        println!("This will remove all Localify configuration including:");
         println!("  - Stop the running daemon");
-        println!("  - DNS configuration for *.roxy domains");
+        println!("  - DNS configuration for *.localify domains");
         println!("  - All registered domains ({})", preview.domain_count);
         println!("  - All SSL certificates from system trust store");
         println!("  - All data in {}/", preview.data_dir);
@@ -32,7 +32,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &RoxyPaths) -> Result<()> {
         return Ok(());
     }
 
-    println!("Uninstalling Roxy...\n");
+    println!("Uninstalling Localify...\n");
 
     let result = use_case.execute()?;
 
@@ -44,7 +44,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &RoxyPaths) -> Result<()> {
         }
     }
 
-    println!("\nRoxy uninstallation complete!");
+    println!("\nLocalify uninstallation complete!");
     println!("All configuration and certificates have been removed.");
 
     Ok(())

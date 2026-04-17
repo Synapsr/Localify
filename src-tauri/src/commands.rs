@@ -1,11 +1,12 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto,
-    DomainInfoDto, DomainPatternRequest, InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
+    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InstallResultDto,
+    KillPortConflictRequest, LogsDto, LogsRequest, PortConflictDto, ProjectInfoDto,
     RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateProjectRequest,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, StartDaemonRequest,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
 };
 
 pub struct AppState {
@@ -65,6 +66,21 @@ pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDt
 }
 
 #[tauri::command]
+pub fn list_port_conflicts(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PortConflictDto>, String> {
+    state.api.list_port_conflicts().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn kill_port_conflict(
+    state: tauri::State<'_, AppState>,
+    request: KillPortConflictRequest,
+) -> Result<PortConflictDto, String> {
+    state.api.kill_port_conflict(request).map_err(map_error)
+}
+
+#[tauri::command]
 pub fn get_uninstall_preview(
     state: tauri::State<'_, AppState>,
 ) -> Result<UninstallPreviewDto, String> {
@@ -85,11 +101,27 @@ pub fn create_project(
 }
 
 #[tauri::command]
+pub fn create_project_with_domains(
+    state: tauri::State<'_, AppState>,
+    request: CreateProjectWithDomainsRequest,
+) -> Result<ProjectInfoDto, String> {
+    state.api.create_project_with_domains(request).map_err(map_error)
+}
+
+#[tauri::command]
 pub fn update_project(
     state: tauri::State<'_, AppState>,
     request: UpdateProjectRequest,
 ) -> Result<ProjectInfoDto, String> {
     state.api.update_project(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn remove_project(
+    state: tauri::State<'_, AppState>,
+    request: RemoveProjectRequest,
+) -> Result<RemoveProjectResultDto, String> {
+    state.api.remove_project(request).map_err(map_error)
 }
 
 #[tauri::command]
@@ -142,23 +174,34 @@ pub fn list_routes(
 
 #[tauri::command]
 pub fn start_daemon(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: StartDaemonRequest,
 ) -> Result<DaemonLaunchDto, String> {
-    state.api.start_daemon(request).map_err(map_error)
+    let result = state.api.start_daemon(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn stop_daemon(state: tauri::State<'_, AppState>) -> Result<DaemonStatusDto, String> {
-    state.api.stop_daemon().map_err(map_error)
+pub fn stop_daemon(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<DaemonStatusDto, String> {
+    let result = state.api.stop_daemon().map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn restart_daemon(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: StartDaemonRequest,
 ) -> Result<DaemonLaunchDto, String> {
-    state.api.restart_daemon(request).map_err(map_error)
+    let result = state.api.restart_daemon(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]

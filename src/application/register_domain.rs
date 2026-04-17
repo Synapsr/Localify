@@ -36,7 +36,7 @@ impl<'a> RegisterDomain<'a> {
         if self.domains.get(&pattern)?.is_some() {
             bail!(
                 "Domain '{}' is already registered. \
-                 Use 'roxy unregister {}{}' first.",
+                 Use 'localify unregister {}{}' first.",
                 pattern,
                 pattern.base_domain(),
                 if pattern.is_wildcard() {

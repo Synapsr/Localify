@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { createProjectWithDomainsRequestSchema } from "./validators/validator.create-project";
+import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
+import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import type {
   AddRouteRequest,
   AssignDomainProjectRequest,
@@ -9,18 +12,23 @@ import type {
   CliAccessDto,
   ConfigUpdateRequest,
   CreateProjectRequest,
+  CreateProjectWithDomainsRequest,
   DaemonLaunchDto,
   DaemonStatusDto,
   DomainInfoDto,
   DomainPatternRequest,
   InstallResultDto,
+  KillPortConflictRequest,
   LogsDto,
   LogsRequest,
+  PortConflictDto,
   ProjectInfoDto,
   RegisterDomainRequest,
   RegisterDomainResultDto,
   RegistrationDto,
   RegistrationMutationDto,
+  RemoveProjectRequest,
+  RemoveProjectResultDto,
   RemoveRouteRequest,
   StartDaemonRequest,
   UninstallPreviewDto,
@@ -78,10 +86,16 @@ export interface DesktopClient {
   getAvailablePort(): Promise<AvailablePortDto>;
   installRoxy(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
+  listPortConflicts(): Promise<PortConflictDto[]>;
+  killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
   uninstallRoxy(): Promise<UninstallResultDto>;
   createProject(request: CreateProjectRequest): Promise<ProjectInfoDto>;
+  createProjectWithDomains(
+    request: CreateProjectWithDomainsRequest,
+  ): Promise<ProjectInfoDto>;
   updateProject(request: UpdateProjectRequest): Promise<ProjectInfoDto>;
+  removeProject(request: RemoveProjectRequest): Promise<RemoveProjectResultDto>;
   assignDomainProject(request: AssignDomainProjectRequest): Promise<DomainInfoDto>;
   registerDomain(request: RegisterDomainRequest): Promise<RegisterDomainResultDto>;
   unregisterDomain(request: DomainPatternRequest): Promise<UnregisterDomainResultDto>;
@@ -106,10 +120,23 @@ export function createDesktopClient(): DesktopClient {
     getAvailablePort: () => tauriInvoke("get_available_port"),
     installRoxy: () => tauriInvoke("install_roxy"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
+    listPortConflicts: () => tauriInvoke("list_port_conflicts"),
+    killPortConflict: (request) =>
+      tauriInvoke("kill_port_conflict", {
+        request: killPortConflictRequestSchema.parse(request),
+      }),
     getUninstallPreview: () => tauriInvoke("get_uninstall_preview"),
     uninstallRoxy: () => tauriInvoke("uninstall_roxy"),
     createProject: (request) => tauriInvoke("create_project", { request }),
+    createProjectWithDomains: (request) =>
+      tauriInvoke("create_project_with_domains", {
+        request: createProjectWithDomainsRequestSchema.parse(request),
+      }),
     updateProject: (request) => tauriInvoke("update_project", { request }),
+    removeProject: (request) =>
+      tauriInvoke("remove_project", {
+        request: removeProjectRequestSchema.parse(request),
+      }),
     assignDomainProject: (request) =>
       tauriInvoke("assign_domain_project", { request }),
     registerDomain: (request) => tauriInvoke("register_domain", { request }),
@@ -124,3 +151,5 @@ export function createDesktopClient(): DesktopClient {
     readLogs: (request) => tauriInvoke("read_logs", { request }),
   };
 }
+
+export const tauriClient = createDesktopClient();

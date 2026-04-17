@@ -7,7 +7,7 @@
 
 ## Project Snapshot
 
-Roxy is a local development proxy written in Rust. It routes custom `.roxy` domains to local services with automatic HTTPS. Ships as a CLI plus a Tauri desktop app (`desktop-ui/`, React + Vite + TanStack).
+Localify is a local development proxy written in Rust. It routes custom `.localify` domains to local services with automatic HTTPS. Ships as a CLI plus a Tauri desktop app (`desktop-ui/`, React + Vite + TanStack).
 
 **Philosophy**: Pragmatic, idiomatic Rust. Build the simplest thing that works. YAGNI throughout.
 

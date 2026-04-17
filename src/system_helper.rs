@@ -13,12 +13,13 @@ use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, DaemonLaunchDto, DaemonStatusDto,
-    DomainInfoDto, DomainPatternRequest, InitProjectRequest, InitProjectResultDto,
-    InstallResultDto, LogsDto, LogsRequest, ProjectInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveRouteRequest,
-    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateProjectRequest,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
+    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InitProjectRequest,
+    InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto, LogsRequest,
+    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateProjectRequest,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,28 +28,66 @@ pub enum HelperCommand {
     Ping,
     GetBootstrap,
     GetConfig,
-    UpdateConfig { request: ConfigUpdateRequest },
+    UpdateConfig {
+        request: ConfigUpdateRequest,
+    },
     GetDaemonStatus,
     ListDomains,
     ListProjects,
     InstallRoxy,
     GetUninstallPreview,
     UninstallRoxy,
-    CreateProject { request: CreateProjectRequest },
-    InitProject { request: InitProjectRequest },
-    UpdateProject { request: UpdateProjectRequest },
+    CreateProject {
+        request: CreateProjectRequest,
+    },
+    CreateProjectWithDomains {
+        request: CreateProjectWithDomainsRequest,
+    },
+    InitProject {
+        request: InitProjectRequest,
+    },
+    UpdateProject {
+        request: UpdateProjectRequest,
+    },
+    RemoveProject {
+        request: RemoveProjectRequest,
+    },
     SetupCliAccess,
-    AssignDomainProject { request: AssignDomainProjectRequest },
-    RegisterDomain { request: RegisterDomainRequest },
-    UnregisterDomain { request: DomainPatternRequest },
-    AddRoute { request: AddRouteRequest },
-    RemoveRoute { request: RemoveRouteRequest },
-    ListRoutes { request: DomainPatternRequest },
-    StartDaemon { request: StartDaemonRequest },
+    ListPortConflicts,
+    KillPortConflict {
+        request: KillPortConflictRequest,
+    },
+    AssignDomainProject {
+        request: AssignDomainProjectRequest,
+    },
+    RegisterDomain {
+        request: RegisterDomainRequest,
+    },
+    UnregisterDomain {
+        request: DomainPatternRequest,
+    },
+    AddRoute {
+        request: AddRouteRequest,
+    },
+    RemoveRoute {
+        request: RemoveRouteRequest,
+    },
+    ListRoutes {
+        request: DomainPatternRequest,
+    },
+    StartDaemon {
+        request: StartDaemonRequest,
+    },
     StopDaemon,
-    RestartDaemon { request: StartDaemonRequest },
-    ReloadDaemon { request: StartDaemonRequest },
-    ReadLogs { request: LogsRequest },
+    RestartDaemon {
+        request: StartDaemonRequest,
+    },
+    ReloadDaemon {
+        request: StartDaemonRequest,
+    },
+    ReadLogs {
+        request: LogsRequest,
+    },
     GetAvailablePort,
 }
 
@@ -115,6 +154,13 @@ impl SystemHelperClient {
         self.send(HelperCommand::CreateProject { request })
     }
 
+    pub fn create_project_with_domains(
+        &self,
+        request: CreateProjectWithDomainsRequest,
+    ) -> Result<ProjectInfoDto> {
+        self.send(HelperCommand::CreateProjectWithDomains { request })
+    }
+
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
         self.send(HelperCommand::InitProject { request })
     }
@@ -123,8 +169,20 @@ impl SystemHelperClient {
         self.send(HelperCommand::UpdateProject { request })
     }
 
+    pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
+        self.send(HelperCommand::RemoveProject { request })
+    }
+
     pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
         self.send(HelperCommand::SetupCliAccess)
+    }
+
+    pub fn list_port_conflicts(&self) -> Result<Vec<PortConflictDto>> {
+        self.send(HelperCommand::ListPortConflicts)
+    }
+
+    pub fn kill_port_conflict(&self, request: KillPortConflictRequest) -> Result<PortConflictDto> {
+        self.send(HelperCommand::KillPortConflict { request })
     }
 
     pub fn assign_domain_project(
@@ -334,14 +392,26 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         HelperCommand::CreateProject { request } => {
             serde_json::to_value(api.create_project(request)?).map_err(Into::into)
         }
+        HelperCommand::CreateProjectWithDomains { request } => {
+            serde_json::to_value(api.create_project_with_domains(request)?).map_err(Into::into)
+        }
         HelperCommand::InitProject { request } => {
             serde_json::to_value(api.init_project(request)?).map_err(Into::into)
         }
         HelperCommand::UpdateProject { request } => {
             serde_json::to_value(api.update_project(request)?).map_err(Into::into)
         }
+        HelperCommand::RemoveProject { request } => {
+            serde_json::to_value(api.remove_project(request)?).map_err(Into::into)
+        }
         HelperCommand::SetupCliAccess => {
             serde_json::to_value(api.setup_cli_access()?).map_err(Into::into)
+        }
+        HelperCommand::ListPortConflicts => {
+            serde_json::to_value(api.list_port_conflicts()?).map_err(Into::into)
+        }
+        HelperCommand::KillPortConflict { request } => {
+            serde_json::to_value(api.kill_port_conflict(request)?).map_err(Into::into)
         }
         HelperCommand::AssignDomainProject { request } => {
             serde_json::to_value(api.assign_domain_project(request)?).map_err(Into::into)

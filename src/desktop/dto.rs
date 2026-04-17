@@ -6,6 +6,14 @@ fn default_project_enabled() -> bool {
     true
 }
 
+fn default_cli_access_ready() -> bool {
+    false
+}
+
+fn default_cli_command_path() -> String {
+    "/usr/local/bin/localify".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentDto {
@@ -16,6 +24,10 @@ pub struct EnvironmentDto {
     pub binary_exists: bool,
     pub fixed_domain_suffix: String,
     pub cli_helper_ready: bool,
+    #[serde(default = "default_cli_access_ready")]
+    pub cli_access_ready: bool,
+    #[serde(default = "default_cli_command_path")]
+    pub cli_command_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +169,8 @@ pub struct DomainInfoDto {
     pub project_enabled: bool,
     #[serde(default)]
     pub active: bool,
+    #[serde(default)]
+    pub target_reachable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +182,8 @@ pub struct ProjectInfoDto {
     pub enabled: bool,
     #[serde(default)]
     pub domain_count: usize,
+    #[serde(default)]
+    pub has_reachable_domain: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +229,27 @@ pub struct InstallResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct CliAccessDto {
     pub ready: bool,
+    pub command_path: String,
+    pub already_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortConflictDto {
+    pub protocol: String,
+    pub port: u16,
+    pub pid: u32,
+    pub process_name: String,
+    pub user: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KillPortConflictRequest {
+    pub protocol: String,
+    pub port: u16,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +278,22 @@ pub struct RegisterDomainRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateProjectRequest {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectDomainRequest {
+    pub domain: String,
+    pub wildcard: bool,
+    pub routes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectWithDomainsRequest {
+    pub name: String,
+    #[serde(default)]
+    pub domains: Vec<CreateProjectDomainRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +332,23 @@ pub struct UpdateProjectRequest {
     pub id: String,
     pub name: Option<String>,
     pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProjectRequest {
+    pub id: String,
+    #[serde(default)]
+    pub delete_domains: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProjectResultDto {
+    pub project: ProjectInfoDto,
+    #[serde(default)]
+    pub removed_domains: Vec<String>,
+    pub daemon_reloaded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

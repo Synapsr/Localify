@@ -1,8 +1,9 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { useAvailablePort, useRegisterDomain } from "../lib/queries";
+import { domainMutations, utilityMutations } from "../lib/queries";
 import type { ProjectInfoDto } from "../types/roxy";
 
 interface AddDomainFormProps {
@@ -18,8 +19,9 @@ export function AddDomainForm({
   defaultProjectId = null,
   onClose,
 }: AddDomainFormProps) {
-  const registerDomain = useRegisterDomain();
-  const availablePort = useAvailablePort();
+  const queryClient = useQueryClient();
+  const registerDomain = useMutation(domainMutations.register(queryClient));
+  const availablePort = useMutation(utilityMutations.availablePort());
   const [name, setName] = useState("");
   const [target, setTarget] = useState("");
   const [wildcard, setWildcard] = useState(false);

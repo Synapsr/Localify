@@ -27,7 +27,7 @@ pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
 
     match status.pid {
         Some(pid) => {
-            println!("Roxy daemon: running (PID: {})", pid);
+            println!("Localify daemon: running (PID: {})", pid);
             println!("  LAN IP: {}{}", status.lan_ip, offline_note);
             println!("  Root CA: {}", ca_label);
             println!("  HTTP:  http://localhost:{}", daemon_config.http_port);
@@ -40,10 +40,10 @@ pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
             }
         }
         None => {
-            println!("Roxy daemon: stopped");
+            println!("Localify daemon: stopped");
             println!("  LAN IP: {}{}", status.lan_ip, offline_note);
             println!("  Root CA: {}", ca_label);
-            println!("\nStart with: sudo roxy start");
+            println!("\nStart with: sudo localify start");
         }
     }
 

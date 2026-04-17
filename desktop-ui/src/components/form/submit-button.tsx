@@ -1,8 +1,11 @@
 import type { ReactNode } from "react";
+import type { ComponentProps } from "react";
 
 import { useFormContext } from "@/hooks/form/form";
 
-interface SubmitButtonProps {
+import { Button } from "../ui/button";
+
+interface SubmitButtonProps extends ComponentProps<typeof Button> {
   children: ReactNode;
   pendingLabel?: string;
 }
@@ -10,6 +13,7 @@ interface SubmitButtonProps {
 export const SubmitButton = ({
   children,
   pendingLabel = "Saving…",
+  ..._props
 }: SubmitButtonProps) => {
   const form = useFormContext();
 
@@ -21,13 +25,9 @@ export const SubmitButton = ({
       })}
     >
       {({ canSubmit, isSubmitting }) => (
-        <button
-          type="submit"
-          disabled={!canSubmit || isSubmitting}
-          className="inline-flex h-9 items-center rounded-md border border-[--color-ink] bg-[--color-ink] px-3 text-sm font-medium text-[--color-bg] transition-colors hover:bg-[--color-ink]/90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
+        <Button type="submit" disabled={!canSubmit} loading={isSubmitting}>
           {isSubmitting ? pendingLabel : children}
-        </button>
+        </Button>
       )}
     </form.Subscribe>
   );

@@ -93,7 +93,7 @@ impl Server {
             https = self.https_port,
             dns = self.dns_port,
             lan_ip = %self.lan_ip,
-            "Roxy daemon starting"
+            "Localify daemon starting"
         );
 
         let dns_handle = spawn_dns_server(self.dns_port, self.lan_ip);

@@ -2,7 +2,7 @@
 pub enum DnsConfigError {
     #[error(
         "Permission denied. DNS configuration requires root privileges.\n\
-         Run with: sudo roxy install"
+         Run with: sudo localify install"
     )]
     PermissionDenied,
 
@@ -18,7 +18,7 @@ pub enum DnsConfigError {
 
 /// Port for DNS resolver configuration.
 pub trait DnsManager {
-    /// Configure wildcard DNS for *.roxy domains.
+    /// Configure wildcard DNS for *.localify domains.
     fn setup(&self, port: u16) -> Result<(), DnsConfigError>;
 
     /// Remove DNS configuration.

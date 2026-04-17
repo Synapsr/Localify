@@ -1,9 +1,11 @@
 "use client";
 
-import { useBootstrap } from "../../lib/queries";
+import { useQuery } from "@tanstack/react-query";
+
+import { bootstrapQueries } from "../../lib/queries";
 
 export const SharedLogo = () => {
-  const { data } = useBootstrap();
+  const { data } = useQuery(bootstrapQueries.read());
   const appName = data?.environment.appName ?? "Localify";
 
   return <div>{appName.charAt(0).toUpperCase()}</div>;

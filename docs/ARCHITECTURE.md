@@ -1,6 +1,6 @@
 # Architecture Reference
 
-**Roxy** — Local development proxy written in Rust. Routes custom `.roxy` domains to local services with automatic HTTPS support. Ships as a CLI plus a Tauri desktop app that drives the same core.
+**Localify** — Local development proxy written in Rust. Routes custom `.localify` domains to local services with automatic HTTPS support. Ships as a CLI plus a Tauri desktop app that drives the same core.
 
 This document is the entry point for all architecture and convention decisions for the desktop UI layer. For Rust conventions (DDD layers, YAGNI, error handling, module boundaries), see [../CLAUDE.md](../CLAUDE.md).
 
@@ -54,7 +54,7 @@ Rust conventions (DDD layer rules, module layout, YAGNI, testing strategy) live 
 
 ## Documents
 
-### Roxy operational guides
+### Localify operational guides
 
 | File | Topic |
 |------|-------|

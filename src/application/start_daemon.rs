@@ -31,7 +31,7 @@ impl<'a> StartDaemon<'a> {
     pub fn preflight(&self) -> Result<StartReady> {
         if let Some(pid) = self.daemon.get_running_pid()? {
             bail!(
-                "Roxy daemon is already running (PID: {})\nUse 'roxy stop' to stop it first.",
+                "Localify daemon is already running (PID: {})\nUse 'localify stop' to stop it first.",
                 pid
             );
         }

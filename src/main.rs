@@ -138,10 +138,10 @@ enum Commands {
         foreground: bool,
     },
 
-    /// Stop the Roxy daemon
+    /// Stop the Localify daemon
     Stop,
 
-    /// Restart the Roxy daemon
+    /// Restart the Localify daemon
     Restart,
 
     /// Show daemon and domain status
