@@ -5,6 +5,7 @@ import {
   detectProjectInitPlanRequestSchema,
   initProjectFromFolderRequestSchema,
 } from "./validators/validator.init-project-from-folder";
+import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import type {
@@ -29,6 +30,7 @@ import type {
   KillPortConflictRequest,
   LogsDto,
   LogsRequest,
+  OpenInEditorRequest,
   PortConflictDto,
   ProjectInfoDto,
   RegisterDomainRequest,
@@ -121,6 +123,7 @@ export interface DesktopClient {
   restartDaemon(request: StartDaemonRequest): Promise<DaemonLaunchDto>;
   reloadDaemon(request: StartDaemonRequest): Promise<DaemonLaunchDto>;
   readLogs(request: LogsRequest): Promise<LogsDto>;
+  openInEditor(request: OpenInEditorRequest): Promise<void>;
 }
 
 export function createDesktopClient(): DesktopClient {
@@ -171,6 +174,10 @@ export function createDesktopClient(): DesktopClient {
     restartDaemon: (request) => tauriInvoke("restart_daemon", { request }),
     reloadDaemon: (request) => tauriInvoke("reload_daemon", { request }),
     readLogs: (request) => tauriInvoke("read_logs", { request }),
+    openInEditor: (request) =>
+      tauriInvoke("open_in_editor", {
+        request: openInEditorRequestSchema.parse(request),
+      }),
   };
 }
 

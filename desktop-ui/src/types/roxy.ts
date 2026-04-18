@@ -74,6 +74,7 @@ export interface ProjectInfoDto {
   enabled: boolean;
   domainCount: number;
   hasReachableDomain: boolean;
+  rootPath: string | null;
 }
 
 export interface DaemonStatusDto {
@@ -167,6 +168,7 @@ export interface UpdateProjectRequest {
   id: string;
   name?: string;
   enabled?: boolean;
+  rootPath?: string | null;
 }
 
 export interface RemoveProjectRequest {
@@ -222,6 +224,10 @@ export interface InitProjectFromFolderRequest {
 export interface InitProjectServiceRequest {
   domain: string;
   target: string;
+}
+
+export interface OpenInEditorRequest {
+  path: string;
 }
 
 export interface InitProjectFromFolderResultDto {

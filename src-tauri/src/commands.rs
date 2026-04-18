@@ -5,10 +5,10 @@ use roxy::desktop::dto::{
     DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
     DomainInfoDto, DomainPatternRequest, InitProjectFromFolderRequest,
     InitProjectFromFolderResultDto, InstallResultDto, KillPortConflictRequest, LogsDto,
-    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateProjectRequest,
+    LogsRequest, OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
 };
 
 pub struct AppState {
@@ -245,4 +245,12 @@ pub fn read_logs(
     request: LogsRequest,
 ) -> Result<LogsDto, String> {
     state.api.read_logs(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn open_in_editor(
+    state: tauri::State<'_, AppState>,
+    request: OpenInEditorRequest,
+) -> Result<(), String> {
+    state.api.open_in_editor(request).map_err(map_error)
 }

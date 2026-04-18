@@ -7,6 +7,7 @@ export const Route = createFileRoute("/logs")({
   validateSearch: z.object({
     projectId: z.string().optional(),
     view: z.enum(["requests", "raw"]).optional(),
+    selectedId: z.number().int().nonnegative().optional(),
   }),
   component: LogsScreen,
 });

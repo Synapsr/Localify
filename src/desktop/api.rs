@@ -21,6 +21,7 @@ use crate::application::stop_daemon::StopDaemon;
 use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
+use crate::desktop::ProjectRootStore;
 use crate::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
     CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
@@ -28,10 +29,10 @@ use crate::desktop::dto::{
     DomainInfoDto, DomainPatternRequest, EnvironmentDto, FolderInitServiceDto,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto, LogsRequest,
-    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
+    OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
 };
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
@@ -84,6 +85,7 @@ impl DesktopApi {
             let mut bootstrap = helper.get_bootstrap()?;
             bootstrap.daemon.ca_installed = self.effective_desktop_ca_installed()?;
             bootstrap.environment.cli_helper_ready = true;
+            bootstrap.projects = self.enrich_projects_with_local_paths(bootstrap.projects)?;
             return Ok(bootstrap);
         }
 
@@ -239,7 +241,7 @@ impl DesktopApi {
 
     pub fn list_projects(&self) -> Result<Vec<ProjectInfoDto>> {
         if let Some(helper) = self.connected_helper_client()? {
-            return helper.list_projects();
+            return self.enrich_projects_with_local_paths(helper.list_projects()?);
         }
 
         let configured_domains = self.config_store().list_configured_domains()?;
@@ -267,6 +269,7 @@ impl DesktopApi {
                 map_project_info(project, domain_count, has_reachable_domain)
             })
             .collect::<Vec<_>>();
+        projects = self.enrich_projects_with_local_paths(projects)?;
         projects.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(projects)
     }
@@ -469,6 +472,7 @@ impl DesktopApi {
         let resolved = resolve_folder_init_selection(&root_path, &request.name, &selections)?;
         let init_result = self.init_project(InitProjectRequest {
             name: request.name,
+            root_path: Some(root_path.display().to_string()),
             services: resolved
                 .services
                 .iter()
@@ -478,10 +482,13 @@ impl DesktopApi {
                 })
                 .collect(),
         })?;
+        self.store_project_root_path(&init_result.project.id, &root_path)?;
+        let mut project = init_result.project;
+        project.root_path = Some(root_path.display().to_string());
         let update_results = apply_package_updates(&resolved.package_updates);
 
         Ok(InitProjectFromFolderResultDto {
-            project: init_result.project,
+            project,
             services: init_result.services,
             daemon_reloaded: init_result.daemon_reloaded,
             updated_scripts: update_results.updated,
@@ -494,25 +501,57 @@ impl DesktopApi {
             return self.ensure_helper_running()?.update_project(request);
         }
 
+        let UpdateProjectRequest {
+            id,
+            name,
+            enabled,
+            root_path: _root_path,
+        } = request;
+
         self.ensure_config_writable()?;
         let configured_domains = self.config_store().list_configured_domains()?;
         let (domain_count, has_reachable_domain) = configured_domains
             .iter()
-            .filter(|domain| domain.project_id.as_deref() == Some(request.id.as_str()))
+            .filter(|domain| domain.project_id.as_deref() == Some(id.as_str()))
             .fold((0, false), |(count, reachable), domain| {
                 (
                     count + 1,
                     reachable || registration_has_reachable_target(&domain.registration),
                 )
             });
-        let project =
-            self.config_store()
-                .update_project(&request.id, request.name, request.enabled)?;
-        Ok(map_project_info(
-            project,
-            domain_count,
-            has_reachable_domain,
-        ))
+        let project = self
+            .config_store()
+            .update_project(&id, name, enabled, None)?;
+        let project = map_project_info(project, domain_count, has_reachable_domain);
+        let mut projects = self.enrich_projects_with_local_paths(vec![project])?;
+        Ok(projects
+            .pop()
+            .expect("enrich_projects_with_local_paths preserves project count"))
+    }
+
+    pub fn open_in_editor(&self, request: OpenInEditorRequest) -> Result<()> {
+        crate::desktop::editor::open_in_editor(Path::new(&request.path))
+    }
+
+    fn enrich_projects_with_local_paths(
+        &self,
+        projects: Vec<ProjectInfoDto>,
+    ) -> Result<Vec<ProjectInfoDto>> {
+        if self.direct_mode {
+            return Ok(projects);
+        }
+
+        let local_projects = self.project_root_store()?.load()?;
+
+        Ok(projects
+            .into_iter()
+            .map(|mut project| {
+                if project.root_path.is_none() {
+                    project.root_path = local_projects.get(&project.id).cloned();
+                }
+                project
+            })
+            .collect())
     }
 
     pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
@@ -556,6 +595,7 @@ impl DesktopApi {
         }
 
         config_store.remove_project(&project.id)?;
+        let _ = self.remove_project_root_path(&project.id);
 
         let daemon_reloaded = match MgmtSocketClient::new(&paths.socket_path).reload() {
             Ok(()) => true,
@@ -1108,6 +1148,26 @@ impl DesktopApi {
         ConfigStore::new(self.config_path.clone())
     }
 
+    fn project_root_store(&self) -> Result<ProjectRootStore> {
+        ProjectRootStore::new_default()
+    }
+
+    fn store_project_root_path(&self, project_id: &str, root_path: &Path) -> Result<()> {
+        if self.direct_mode {
+            return Ok(());
+        }
+
+        self.project_root_store()?.set(project_id, root_path)
+    }
+
+    fn remove_project_root_path(&self, project_id: &str) -> Result<()> {
+        if self.direct_mode {
+            return Ok(());
+        }
+
+        self.project_root_store()?.remove(project_id)
+    }
+
     fn should_use_system_helper(&self) -> bool {
         !self.direct_mode && self.config_path.starts_with("/etc")
     }
@@ -1228,14 +1288,15 @@ impl DesktopApi {
         }
 
         let uid = current_uid()?;
-        self.run_cli_command_with_admin(&[
+        let args = vec![
             "helper".into(),
             "ensure-running".into(),
             "--socket".into(),
             socket_path.display().to_string(),
             "--uid".into(),
             uid.to_string(),
-        ])?;
+        ];
+        self.run_cli_command_with_admin(&args)?;
 
         for _ in 0..50 {
             if client.ping().is_ok() {
@@ -1959,6 +2020,7 @@ fn map_project_info(
         enabled: value.enabled,
         domain_count,
         has_reachable_domain,
+        root_path: value.root_path,
     }
 }
 

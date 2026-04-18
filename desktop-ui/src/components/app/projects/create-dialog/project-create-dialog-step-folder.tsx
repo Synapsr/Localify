@@ -67,6 +67,9 @@ export const ProjectCreateDialogStepFolder = withForm({
             domain: stripSuffix(service.domain, normalizedSuffix),
           })),
         );
+        if (plan.services.length > 0) {
+          setExpandedIds(new Set([plan.services[0].id]));
+        }
       } catch (rawError) {
         const message = rawError instanceof Error ? rawError.message : String(rawError);
         setFolderError(message);

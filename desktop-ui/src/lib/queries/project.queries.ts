@@ -12,6 +12,7 @@ import type {
   DetectProjectInitPlanRequest,
   InitProjectFromFolderRequest,
   InitProjectFromFolderResultDto,
+  OpenInEditorRequest,
   ProjectInfoDto,
   RemoveProjectRequest,
   UpdateProjectRequest,
@@ -74,5 +75,9 @@ export const projectMutations = {
           projectQueryKeys.all(),
           domainQueries.all(),
         ]),
+    }),
+  openInEditor: () =>
+    mutationOptions<void, Error, OpenInEditorRequest>({
+      mutationFn: (request) => tauriClient.openInEditor(request),
     }),
 } as const;

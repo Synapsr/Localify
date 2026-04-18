@@ -237,7 +237,8 @@ pub fn run() {
             commands::stop_daemon,
             commands::restart_daemon,
             commands::reload_daemon,
-            commands::read_logs
+            commands::read_logs,
+            commands::open_in_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -31,6 +31,8 @@ pub struct ProjectDto {
     pub name: String,
     #[serde(default = "default_project_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub root_path: Option<String>,
 }
 
 impl From<DomainRegistration> for RegistrationDto {

@@ -1,6 +1,16 @@
 import type { DomainInfoDto } from "@/types/roxy";
 
 export type RequestKind = "completed" | "no-route" | "domain-not-registered";
+export type RequestNoiseKind =
+  | "vite-internal"
+  | "dependency-asset"
+  | "local-file-asset"
+  | "source-map";
+
+export interface RequestNoise {
+  kind: RequestNoiseKind;
+  label: string;
+}
 
 export interface RequestEntry {
   id: number;
@@ -13,6 +23,8 @@ export interface RequestEntry {
   status: number;
   projectId: string | null;
   projectName: string | null;
+  noise: RequestNoise | null;
+  raw: string;
 }
 
 const HEAD_RE =
@@ -91,6 +103,48 @@ function matchDomain(host: string, domains: DomainInfoDto[]): DomainInfoDto | nu
   return bestMatch;
 }
 
+function classifyNoise({
+  kind,
+  method,
+  path,
+  status,
+}: {
+  kind: RequestKind;
+  method: string | null;
+  path: string | null;
+  status: number;
+}): RequestNoise | null {
+  if (kind !== "completed" || method !== "GET" || status >= 400 || !path) {
+    return null;
+  }
+
+  if (
+    path.startsWith("/@vite") ||
+    path.startsWith("/@id/") ||
+    path.startsWith("/@react-refresh") ||
+    path.startsWith("/__vite")
+  ) {
+    return { kind: "vite-internal", label: "Vite internal" };
+  }
+
+  if (path.endsWith(".map")) {
+    return { kind: "source-map", label: "Source map" };
+  }
+
+  if (path.startsWith("/@fs/")) {
+    if (path.includes("/node_modules/") || path.includes("/.bun/")) {
+      return { kind: "dependency-asset", label: "Dependency asset" };
+    }
+    return { kind: "local-file-asset", label: "Local file asset" };
+  }
+
+  if (path.includes("/node_modules/") || path.includes("/.bun/")) {
+    return { kind: "dependency-asset", label: "Dependency asset" };
+  }
+
+  return null;
+}
+
 export function parseRequests(content: string, domains: DomainInfoDto[]): RequestEntry[] {
   if (!content) return [];
 
@@ -117,6 +171,12 @@ export function parseRequests(content: string, domains: DomainInfoDto[]): Reques
     const match = matchDomain(fields.host, domains);
     const status =
       kind === "completed" && fields.status ? Number.parseInt(fields.status, 10) || 0 : 404;
+    const noise = classifyNoise({
+      kind,
+      method: fields.method ?? null,
+      path: fields.path ?? null,
+      status,
+    });
 
     out.push({
       id: out.length,
@@ -129,6 +189,8 @@ export function parseRequests(content: string, domains: DomainInfoDto[]): Reques
       status,
       projectId: match?.projectId ?? null,
       projectName: match?.projectName ?? null,
+      noise,
+      raw: line,
     });
   }
 

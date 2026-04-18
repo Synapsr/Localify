@@ -3,9 +3,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { DangerTriangleIcon, TrashIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { bootstrapQueries, systemMutations, systemQueries } from "@/lib/queries";
+
+import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
 
 export const SettingsUninstall = () => {
   const { data } = useQuery(bootstrapQueries.read());
@@ -32,26 +43,32 @@ export const SettingsUninstall = () => {
   }
 
   return (
-    <Card className="p-5">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0 space-y-0.5">
-          <p className="text-sm font-medium text-[--color-ink]">Remove {appName}</p>
-          <p className="text-xs text-[--color-muted]">
-            Stops {appName} and removes it from your Mac, along with your registered domains.
-          </p>
-        </div>
-        {!confirming ? (
-          <Button variant="danger" onClick={() => setConfirming(true)}>
-            Remove
-          </Button>
-        ) : null}
-      </div>
+    <SettingsSection label="Danger zone" icon={<DangerTriangleIcon />}>
+      <SettingsGroup className="border-[--color-danger]/20 bg-[--color-danger]/5">
+        <SettingsRow
+          icon={<TrashIcon />}
+          title={`Remove ${appName}`}
+          description={`Stops ${appName} and removes it from your Mac, along with your registered domains.`}
+          danger
+          trailing={
+            <Button variant="danger" size="sm" onClick={() => setConfirming(true)}>
+              Remove
+            </Button>
+          }
+        />
+      </SettingsGroup>
 
-      {confirming ? (
-        <div className="mt-4 space-y-3 rounded-lg border border-[--color-danger]/20 bg-[--color-danger]/5 p-4">
-          <div className="space-y-0.5">
-            <p className="text-sm font-medium text-[--color-ink]">Are you sure?</p>
-            <p className="text-xs text-[--color-muted]">
+      <Dialog
+        open={confirming}
+        onOpenChange={(open) => {
+          setConfirming(open);
+          if (!open) setError(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove {appName}?</DialogTitle>
+            <DialogDescription>
               {preview.isPending
                 ? "Checking what will be removed…"
                 : typeof domainCount === "number"
@@ -59,15 +76,15 @@ export const SettingsUninstall = () => {
                     ? `This will remove ${appName} from your Mac.`
                     : `This will remove ${appName} and ${domainCount} registered ${domainCount === 1 ? "domain" : "domains"}.`
                   : `This will remove ${appName} from your Mac.`}
-            </p>
-          </div>
-
-          {preview.error ? (
-            <p className="text-xs text-[--color-danger]">{preview.error.message}</p>
-          ) : null}
-          {error ? <p className="text-xs text-[--color-danger]">{error}</p> : null}
-
-          <div className="flex justify-end gap-2">
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            {preview.error ? (
+              <p className="text-xs text-[--color-danger]">{preview.error.message}</p>
+            ) : null}
+            {error ? <p className="text-xs text-[--color-danger]">{error}</p> : null}
+          </DialogBody>
+          <DialogFooter>
             <Button
               variant="ghost"
               size="sm"
@@ -87,9 +104,9 @@ export const SettingsUninstall = () => {
             >
               Remove {appName}
             </Button>
-          </div>
-        </div>
-      ) : null}
-    </Card>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </SettingsSection>
   );
 };

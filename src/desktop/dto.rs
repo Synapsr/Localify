@@ -184,6 +184,8 @@ pub struct ProjectInfoDto {
     pub domain_count: usize,
     #[serde(default)]
     pub has_reachable_domain: bool,
+    #[serde(default)]
+    pub root_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,7 +309,15 @@ pub struct InitProjectServiceRequest {
 #[serde(rename_all = "camelCase")]
 pub struct InitProjectRequest {
     pub name: String,
+    #[serde(default)]
+    pub root_path: Option<String>,
     pub services: Vec<InitProjectServiceRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenInEditorRequest {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +342,7 @@ pub struct UpdateProjectRequest {
     pub id: String,
     pub name: Option<String>,
     pub enabled: Option<bool>,
+    pub root_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

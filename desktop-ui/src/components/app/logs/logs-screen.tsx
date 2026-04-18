@@ -1,12 +1,19 @@
+"use client";
+
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { bootstrapQueries, logsQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
-import { formatClock, parseRequests, type RequestEntry } from "./request-parser";
+import { LogsDetail } from "./logs-detail";
+import { useDividers } from "./logs-dividers";
+import { LogsHeader, type LogsRequestDensity, type LogsViewMode } from "./logs-header";
+import { LogsList } from "./logs-list";
+import { parseRequests, type RequestEntry } from "./request-parser";
 
 const TAIL_LINES = 1000;
 const FOLLOW_POLL_MS = 2000;
@@ -14,8 +21,7 @@ const CLEAR_STORAGE_KEY = "roxy.logs.clearedAt";
 const PROJECT_STORAGE_KEY = "roxy.logs.project";
 const FOLLOW_STORAGE_KEY = "roxy.logs.follow";
 const VIEW_STORAGE_KEY = "roxy.logs.view";
-
-type LogsViewMode = "requests" | "raw";
+const DENSITY_STORAGE_KEY = "roxy.logs.density";
 
 function loadStoredNumber(key: string): number | null {
   if (typeof window === "undefined") return null;
@@ -42,8 +48,9 @@ function persist(key: string, value: string | null) {
 export function LogsScreen() {
   const navigate = useNavigate();
   const search = useSearch({ from: "/logs" });
-  const [viewMode, setViewModeState] = useState<LogsViewMode>(() =>
-    search.view ?? (loadStoredString(VIEW_STORAGE_KEY) === "raw" ? "raw" : "requests"),
+
+  const [viewMode, setViewModeState] = useState<LogsViewMode>(
+    () => search.view ?? (loadStoredString(VIEW_STORAGE_KEY) === "raw" ? "raw" : "requests"),
   );
   const [follow, setFollowState] = useState<boolean>(
     () => loadStoredString(FOLLOW_STORAGE_KEY) !== "0",
@@ -53,6 +60,12 @@ export function LogsScreen() {
   );
   const [projectId, setProjectIdState] = useState<string>(
     () => search.projectId ?? loadStoredString(PROJECT_STORAGE_KEY) ?? "all",
+  );
+  const [selectedId, setSelectedIdState] = useState<number | null>(() =>
+    typeof search.selectedId === "number" ? search.selectedId : null,
+  );
+  const [requestDensity, setRequestDensityState] = useState<LogsRequestDensity>(() =>
+    loadStoredString(DENSITY_STORAGE_KEY) === "all" ? "all" : "focus",
   );
 
   const setFollow = (next: boolean) => {
@@ -87,6 +100,21 @@ export function LogsScreen() {
       replace: true,
     });
   };
+  const setSelectedId = (next: number | null) => {
+    setSelectedIdState(next);
+    void navigate({
+      to: "/logs",
+      search: (previous) => ({
+        ...previous,
+        selectedId: next ?? undefined,
+      }),
+      replace: true,
+    });
+  };
+  const setRequestDensity = (next: LogsRequestDensity) => {
+    setRequestDensityState(next);
+    persist(DENSITY_STORAGE_KEY, next);
+  };
 
   const bootstrapQuery = useQuery(bootstrapQueries.read());
   const logsQuery = useQuery({
@@ -108,7 +136,7 @@ export function LogsScreen() {
     return content.split("\n").filter((line) => line.trim().length > 0);
   }, [logsQuery.data?.content]);
 
-  const visible = useMemo(() => {
+  const scopedRequests = useMemo(() => {
     let out = requests;
     if (projectId !== "all") {
       out = out.filter((r) => r.projectId === projectId);
@@ -126,9 +154,29 @@ export function LogsScreen() {
         r.timestamp.getTime() <= clearedAt && (projectId === "all" || r.projectId === projectId),
     ).length;
   }, [requests, clearedAt, projectId]);
-  const renderedLineCount = viewMode === "raw" ? rawLines.length : visible.length;
+  const hiddenNoiseCount = useMemo(() => {
+    if (requestDensity === "all") return 0;
+    return scopedRequests.filter((r) => r.noise !== null).length;
+  }, [requestDensity, scopedRequests]);
+  const visible = useMemo(() => {
+    if (requestDensity === "all") return scopedRequests;
+    return scopedRequests.filter((r) => r.noise === null);
+  }, [requestDensity, scopedRequests]);
+  const issueCount = useMemo(
+    () => visible.filter((request) => request.status >= 400).length,
+    [visible],
+  );
 
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const { dividers, add: addDivider, remove: removeDivider, clear: clearDividers } = useDividers();
+  const visibleDividers = useMemo(() => {
+    if (clearedAt === null) return dividers;
+    return dividers.filter((d) => d.at > clearedAt);
+  }, [dividers, clearedAt]);
+
+  const selectedEntry = useMemo(
+    () => (selectedId === null ? null : (visible.find((r) => r.id === selectedId) ?? null)),
+    [visible, selectedId],
+  );
 
   useEffect(() => {
     const nextProjectId = search.projectId ?? loadStoredString(PROJECT_STORAGE_KEY) ?? "all";
@@ -142,140 +190,191 @@ export function LogsScreen() {
   }, [search.view]);
 
   useEffect(() => {
-    if (!follow) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [renderedLineCount, follow]);
+    const next = typeof search.selectedId === "number" ? search.selectedId : null;
+    setSelectedIdState((current) => (current === next ? current : next));
+  }, [search.selectedId]);
 
-  const handleClear = () => setClearedAt(Date.now());
+  // If the selected request has disappeared from the visible list (cleared,
+  // filtered, etc.), clear the selection so the detail pane doesn't point to
+  // a stale entry.
+  useEffect(() => {
+    if (selectedId === null) return;
+    if (!visible.some((r) => r.id === selectedId)) {
+      setSelectedIdState(null);
+    }
+  }, [visible, selectedId]);
+
+  const handleClear = () => {
+    setClearedAt(Date.now());
+    setSelectedId(null);
+  };
   const handleShowHidden = () => setClearedAt(null);
   const handleRefresh = () => {
     void logsQuery.refetch();
   };
+  const handleMark = () => addDivider(Date.now());
+  const handleToggleFollow = () => setFollow(!follow);
+
+  const reduceMotion = useReducedMotion();
+  const detailOpen = selectedEntry !== null;
+  const detailEnterTransition = reduceMotion
+    ? { duration: 0.12 }
+    : { duration: 0.3, ease: [0.22, 1, 0.36, 1] as const };
 
   return (
-    <div className="-mx-6 -mb-6 flex h-full min-h-0 flex-col bg-background">
-      <header className="flex items-center justify-between gap-3 border-b border-border px-4 pt-4 pb-3">
-        <div className="flex items-center gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Logs</h1>
-            <p className="text-xs text-muted-foreground">
-              {viewMode === "requests" ? "Structured proxy requests" : "Raw daemon output"}
-            </p>
-          </div>
-          <span
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
-              follow
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-neutral-200 bg-neutral-50 text-neutral-600",
-            )}
-          >
-            <span
-              className={cn(
-                "size-1.5 rounded-full",
-                follow ? "animate-pulse bg-emerald-500" : "bg-neutral-400",
-              )}
-            />
-            {follow ? "Live" : "Paused"}
-          </span>
-        </div>
+    <div id="logs-screen" className="mx-auto flex h-full min-h-0 w-full max-w-4xl flex-col">
+      <LogsHeader
+        projects={projects ?? []}
+        projectId={projectId}
+        onProjectChange={setProjectId}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        follow={follow}
+        onToggleFollow={handleToggleFollow}
+        onMark={handleMark}
+        onRefresh={handleRefresh}
+        isRefreshing={logsQuery.isFetching && !follow}
+        onClear={handleClear}
+        onShowHidden={handleShowHidden}
+        canShowHidden={clearedAt !== null}
+        onClearDividers={clearDividers}
+        canClearDividers={dividers.length > 0}
+        requestDensity={requestDensity}
+        onRequestDensityChange={setRequestDensity}
+        visibleRequestCount={visible.length}
+        hiddenNoiseCount={hiddenNoiseCount}
+        issueCount={issueCount}
+      />
 
-        <div className="flex items-center gap-2">
-          <div className="flex items-center rounded-md border border-border p-0.5">
-            <Button
-              variant={viewMode === "requests" ? "primary" : "ghost"}
-              size="sm"
-              onClick={() => setViewMode("requests")}
-            >
-              Requests
-            </Button>
-            <Button
-              variant={viewMode === "raw" ? "primary" : "ghost"}
-              size="sm"
-              onClick={() => setViewMode("raw")}
-            >
-              Raw
-            </Button>
-          </div>
-          {viewMode === "requests" ? (
-            <select
-              value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
-              aria-label="Filter by project"
-              className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-            >
-              <option value="all">All projects</option>
-              {(projects ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          ) : null}
-          <Button
-            variant={follow ? "primary" : "outline"}
-            size="sm"
-            onClick={() => setFollow(!follow)}
-          >
-            {follow ? "Following" : "Follow"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            loading={logsQuery.isFetching && !follow}
-            onClick={handleRefresh}
-          >
-            Refresh
-          </Button>
-          {viewMode === "requests" ? (
-            <Button variant="ghost" size="sm" onClick={handleClear}>
-              Clear
-            </Button>
-          ) : null}
-        </div>
-      </header>
-
-      <div ref={scrollRef} className="flex-1 overflow-auto">
-        {viewMode === "requests" && hiddenByClear > 0 ? (
-          <button
-            type="button"
-            onClick={handleShowHidden}
-            className="flex w-full items-center justify-center gap-2 border-b border-border bg-muted/40 py-2 text-[11px] text-muted-foreground hover:bg-muted/70"
-          >
-            {hiddenByClear} earlier request{hiddenByClear > 1 ? "s" : ""} hidden — show
-          </button>
-        ) : null}
-
+      <div className="-mb-6 flex min-h-0 flex-1 overflow-hidden rounded-t-lg border border-border bg-background">
         {viewMode === "raw" ? (
-          rawLines.length === 0 ? (
-            <RawEmptyState
-              loading={logsQuery.isLoading}
-              logFileExists={logsQuery.data?.exists ?? false}
-              logPath={logsQuery.data?.path ?? null}
-            />
-          ) : (
-            <RawLogList lines={rawLines} />
-          )
-        ) : visible.length === 0 ? (
-          <RequestEmptyState
+          <RawView
+            lines={rawLines}
             loading={logsQuery.isLoading}
-            projectSelected={projectId !== "all"}
-            hasClearCutoff={clearedAt !== null && hiddenByClear === 0}
             logFileExists={logsQuery.data?.exists ?? false}
             logPath={logsQuery.data?.path ?? null}
-            rawLogCount={rawLines.length}
-            onShowRaw={() => setViewMode("raw")}
           />
         ) : (
-          <ul className="divide-y divide-border">
-            {visible.map((r) => (
-              <RequestRow key={r.id} entry={r} showProject={projectId === "all"} />
-            ))}
-          </ul>
+          <>
+            <div
+              className={cn(
+                "flex min-w-0 shrink-0 flex-col border-r transition-[width,border-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
+                detailOpen ? "w-[380px] border-border" : "w-full border-transparent",
+              )}
+            >
+              {hiddenByClear > 0 ? (
+                <button
+                  type="button"
+                  onClick={handleShowHidden}
+                  className="flex w-full items-center justify-center gap-2 border-b border-border bg-muted/40 py-2 text-[11px] text-muted-foreground hover:bg-muted/70"
+                >
+                  {hiddenByClear} earlier request{hiddenByClear > 1 ? "s" : ""} hidden — show
+                </button>
+              ) : null}
+              {hiddenNoiseCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setRequestDensity("all")}
+                  className="flex w-full items-center justify-center gap-2 border-b border-border bg-muted/20 py-2 text-[11px] text-muted-foreground hover:bg-muted/50"
+                >
+                  {hiddenNoiseCount} routine asset request{hiddenNoiseCount > 1 ? "s" : ""} hidden —
+                  show all
+                </button>
+              ) : null}
+              <div className="flex-1 overflow-auto">
+                {visible.length === 0 && visibleDividers.length === 0 ? (
+                  <RequestEmptyState
+                    loading={logsQuery.isLoading}
+                    projectSelected={projectId !== "all"}
+                    hasClearCutoff={clearedAt !== null && hiddenByClear === 0}
+                    logFileExists={logsQuery.data?.exists ?? false}
+                    logPath={logsQuery.data?.path ?? null}
+                    rawLogCount={rawLines.length}
+                    hiddenNoiseCount={hiddenNoiseCount}
+                    onShowRaw={() => setViewMode("raw")}
+                    onShowAllRequests={() => setRequestDensity("all")}
+                  />
+                ) : (
+                  <LogsList
+                    entries={visible}
+                    dividers={visibleDividers}
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
+                    onRemoveDivider={removeDivider}
+                    showProject={projectId === "all"}
+                  />
+                )}
+              </div>
+            </div>
+
+            <AnimatePresence initial={false}>
+              {detailOpen ? (
+                <motion.div
+                  key="logs-detail"
+                  initial={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 24 }}
+                  animate={reduceMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
+                  exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 24 }}
+                  transition={detailEnterTransition}
+                  className="flex min-w-0 flex-1 flex-col overflow-hidden"
+                >
+                  <LogsDetail entry={selectedEntry} onClose={() => setSelectedId(null)} />
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+function RawView({
+  lines,
+  loading,
+  logFileExists,
+  logPath,
+}: {
+  lines: string[];
+  loading: boolean;
+  logFileExists: boolean;
+  logPath: string | null;
+}) {
+  if (lines.length === 0) {
+    let title: string;
+    let description: string;
+    if (loading) {
+      title = "Loading…";
+      description = "";
+    } else if (!logFileExists && logPath) {
+      title = "No logs yet";
+      description = `Nothing has been written to ${logPath} yet.`;
+    } else {
+      title = "No log lines yet";
+      description = "New daemon output will appear here.";
+    }
+
+    return (
+      <div className="flex h-full min-h-[200px] flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        {description ? (
+          <p className="max-w-md text-xs text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-auto">
+      <ul className="divide-y divide-border">
+        {lines.map((line, index) => (
+          <li
+            key={`${index}-${line}`}
+            className="px-4 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap text-foreground"
+          >
+            {line}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -287,7 +386,9 @@ function RequestEmptyState({
   logFileExists,
   logPath,
   rawLogCount,
+  hiddenNoiseCount,
   onShowRaw,
+  onShowAllRequests,
 }: {
   loading: boolean;
   projectSelected: boolean;
@@ -295,13 +396,18 @@ function RequestEmptyState({
   logFileExists: boolean;
   logPath: string | null;
   rawLogCount: number;
+  hiddenNoiseCount: number;
   onShowRaw: () => void;
+  onShowAllRequests: () => void;
 }) {
   let title: string;
   let description: string;
   if (loading) {
     title = "Loading…";
     description = "";
+  } else if (hiddenNoiseCount > 0) {
+    title = "Only routine asset requests are flowing right now";
+    description = "Focus mode is hiding the noisy dev-server traffic so real requests stand out.";
   } else if (hasClearCutoff) {
     title = "No new requests since you cleared";
     description = "New requests to the proxy will appear here.";
@@ -323,6 +429,11 @@ function RequestEmptyState({
     <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-2 px-6 text-center">
       <h3 className="text-sm font-semibold text-foreground">{title}</h3>
       {description ? <p className="max-w-md text-xs text-muted-foreground">{description}</p> : null}
+      {hiddenNoiseCount > 0 ? (
+        <Button variant="outline" size="sm" onClick={onShowAllRequests}>
+          Show all requests
+        </Button>
+      ) : null}
       {rawLogCount > 0 ? (
         <Button variant="outline" size="sm" onClick={onShowRaw}>
           Show raw logs
@@ -330,102 +441,4 @@ function RequestEmptyState({
       ) : null}
     </div>
   );
-}
-
-function RawEmptyState({
-  loading,
-  logFileExists,
-  logPath,
-}: {
-  loading: boolean;
-  logFileExists: boolean;
-  logPath: string | null;
-}) {
-  let title: string;
-  let description: string;
-  if (loading) {
-    title = "Loading…";
-    description = "";
-  } else if (!logFileExists && logPath) {
-    title = "No logs yet";
-    description = `Nothing has been written to ${logPath} yet.`;
-  } else {
-    title = "No log lines yet";
-    description = "New daemon output will appear here.";
-  }
-
-  return (
-    <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-2 px-6 text-center">
-      <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-      {description ? <p className="max-w-md text-xs text-muted-foreground">{description}</p> : null}
-    </div>
-  );
-}
-
-function RawLogList({ lines }: { lines: string[] }) {
-  return (
-    <ul className="divide-y divide-border">
-      {lines.map((line, index) => (
-        <li
-          key={`${index}-${line}`}
-          className="px-4 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap text-foreground"
-        >
-          {line}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function RequestRow({ entry, showProject }: { entry: RequestEntry; showProject: boolean }) {
-  const statusTone = statusColor(entry.status);
-  return (
-    <li className="flex items-center gap-3 px-4 py-2 text-xs hover:bg-muted/40">
-      <span className="w-[64px] shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums select-none">
-        {formatClock(entry.timestamp)}
-      </span>
-      <span
-        className={cn(
-          "inline-flex h-[20px] min-w-[44px] items-center justify-center rounded border px-1.5 font-mono text-[10px] font-semibold tabular-nums",
-          statusTone.badge,
-        )}
-        title={statusTitle(entry.status, entry.kind)}
-      >
-        {entry.status}
-      </span>
-      {entry.method ? (
-        <span className="inline-flex h-[20px] min-w-[44px] items-center justify-center rounded bg-muted px-1.5 font-mono text-[10px] font-semibold text-foreground/80">
-          {entry.method}
-        </span>
-      ) : null}
-      <div className="min-w-0 flex-1 truncate font-mono text-[12px]">
-        <span className="text-foreground">{entry.host}</span>
-        {entry.path ? <span className="text-muted-foreground">{entry.path}</span> : null}
-        {entry.kind !== "completed" ? (
-          <span className="ml-2 text-[11px] text-amber-700">
-            {entry.kind === "no-route" ? "no route" : "not registered"}
-          </span>
-        ) : null}
-      </div>
-      {showProject && entry.projectName ? (
-        <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-          {entry.projectName}
-        </span>
-      ) : null}
-    </li>
-  );
-}
-
-function statusColor(status: number): { badge: string } {
-  if (status >= 500) return { badge: "bg-red-50 text-red-700 border-red-200" };
-  if (status >= 400) return { badge: "bg-amber-50 text-amber-700 border-amber-200" };
-  if (status >= 300) return { badge: "bg-sky-50 text-sky-700 border-sky-200" };
-  if (status >= 200) return { badge: "bg-emerald-50 text-emerald-700 border-emerald-200" };
-  return { badge: "bg-neutral-50 text-neutral-700 border-neutral-200" };
-}
-
-function statusTitle(status: number, kind: RequestEntry["kind"]): string {
-  if (kind === "domain-not-registered") return "Domain not registered";
-  if (kind === "no-route") return "No route found";
-  return `HTTP ${status}`;
 }

@@ -30,6 +30,9 @@
     "active": true,
     "category": "DeveloperTool",
     "shortDescription": "Local HTTPS and custom domains for local development.",
-    "externalBin": ["binaries/localify"]
+    "externalBin": ["binaries/localify"],
+    "macOS": {
+      "hardenedRuntime": true
+    }
   }
 }

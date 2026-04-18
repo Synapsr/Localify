@@ -68,6 +68,7 @@ pub struct ConfiguredProject {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub root_path: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -131,6 +132,7 @@ impl Config {
                 id: id.clone(),
                 name: project.name.clone(),
                 enabled: project.enabled,
+                root_path: project.root_path.clone(),
             })
             .collect::<Vec<_>>();
         projects.sort_by(|left, right| left.name.cmp(&right.name));
@@ -350,6 +352,15 @@ impl ConfigStore {
 
     #[allow(dead_code)]
     pub fn create_project(&self, name: &str) -> Result<ConfiguredProject, ConfigError> {
+        self.create_project_with_root(name, None)
+    }
+
+    #[allow(dead_code)]
+    pub fn create_project_with_root(
+        &self,
+        name: &str,
+        root_path: Option<String>,
+    ) -> Result<ConfiguredProject, ConfigError> {
         let mut config = self.load()?;
         let project_name = name.trim();
         if project_name.is_empty() {
@@ -369,6 +380,7 @@ impl ConfigStore {
             ProjectDto {
                 name: project_name.to_string(),
                 enabled: true,
+                root_path: root_path.clone(),
             },
         );
         self.save(&config)?;
@@ -377,6 +389,7 @@ impl ConfigStore {
             id: project_id,
             name: project_name.to_string(),
             enabled: true,
+            root_path,
         })
     }
 
@@ -386,6 +399,7 @@ impl ConfigStore {
         project_id: &str,
         name: Option<String>,
         enabled: Option<bool>,
+        root_path: Option<String>,
     ) -> Result<ConfiguredProject, ConfigError> {
         let mut config = self.load()?;
         let project = config
@@ -408,10 +422,15 @@ impl ConfigStore {
             project.enabled = enabled;
         }
 
+        if let Some(root_path) = root_path {
+            project.root_path = Some(root_path);
+        }
+
         let result = ConfiguredProject {
             id: project_id.to_string(),
             name: project.name.clone(),
             enabled: project.enabled,
+            root_path: project.root_path.clone(),
         };
         self.save(&config)?;
         Ok(result)
@@ -685,6 +704,35 @@ mod tests {
     }
 
     #[test]
+    fn create_project_with_root_persists_root_path() {
+        let (_dir, store) = temp_store();
+
+        let project = store
+            .create_project_with_root("Test 1", Some("/tmp/test-1".into()))
+            .unwrap();
+
+        assert_eq!(project.root_path.as_deref(), Some("/tmp/test-1"));
+
+        let persisted = store.list_projects().unwrap();
+        assert_eq!(persisted[0].root_path.as_deref(), Some("/tmp/test-1"));
+    }
+
+    #[test]
+    fn update_project_root_path_persists_root_path() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Test 1").unwrap();
+
+        let updated = store
+            .update_project(&project.id, None, None, Some("/tmp/test-1".into()))
+            .unwrap();
+
+        assert_eq!(updated.root_path.as_deref(), Some("/tmp/test-1"));
+
+        let persisted = store.list_projects().unwrap();
+        assert_eq!(persisted[0].root_path.as_deref(), Some("/tmp/test-1"));
+    }
+
+    #[test]
     fn create_project_rejects_duplicate_normalized_slug() {
         let (_dir, store) = temp_store();
         store.create_project("Test 1").unwrap();
@@ -710,7 +758,7 @@ mod tests {
             .unwrap();
 
         store
-            .update_project(&project.id, None, Some(false))
+            .update_project(&project.id, None, Some(false), None)
             .unwrap();
 
         let registrations = store.load().unwrap().registrations();

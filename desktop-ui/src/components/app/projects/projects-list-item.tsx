@@ -11,6 +11,7 @@ import type { DomainInfoDto, ProjectInfoDto } from "@/types/roxy";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -45,11 +46,13 @@ export const ProjectsListItem = ({
   const dragControls = useDragControls();
   const updateProject = useMutation(projectMutations.update(queryClient));
   const removeProject = useMutation(projectMutations.remove(queryClient));
+  const openInEditor = useMutation(projectMutations.openInEditor());
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
 
   const containerClassName = cn(
-    "group/card items- relative flex gap-3 rounded-xl border border-border/30 bg-background bg-neutral-50/50 px-3 py-3 transition-colors",
+    "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
     "hover:border-border",
     !project.enabled && "opacity-60",
   );
@@ -88,6 +91,20 @@ export const ProjectsListItem = ({
     });
   };
 
+  const handleOpenInEditor = async () => {
+    if (!project.rootPath) {
+      return;
+    }
+
+    setEditorError(null);
+
+    try {
+      await openInEditor.mutateAsync({ path: project.rootPath });
+    } catch (error) {
+      setEditorError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const body = (
     <>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -95,6 +112,7 @@ export const ProjectsListItem = ({
           <span className="truncate text-lg font-medium">{project.name}</span>
         </div>
         <ProjectDomainList project={project} domains={domains} />
+        {editorError ? <p className="text-xs text-destructive">{editorError}</p> : null}
       </div>
 
       <DropdownMenu>
@@ -107,6 +125,12 @@ export const ProjectsListItem = ({
           }
         />
         <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onClick={() => void handleOpenInEditor()}
+            disabled={!project.rootPath || openInEditor.isPending || removeProject.isPending}
+          >
+            Open in editor
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={handleViewLogs} disabled={removeProject.isPending}>
             View logs
           </DropdownMenuItem>
@@ -175,7 +199,7 @@ export const ProjectsListItem = ({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-3">
+          <DialogBody className="space-y-3">
             <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
               <p className="text-sm text-foreground">
                 {domains.length === 0
@@ -199,7 +223,7 @@ export const ProjectsListItem = ({
             </div>
 
             {deleteError ? <p className="text-sm text-destructive">{deleteError}</p> : null}
-          </div>
+          </DialogBody>
 
           <DialogFooter>
             <Button

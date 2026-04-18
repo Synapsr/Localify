@@ -7,10 +7,10 @@ export const SettingsHeader = () => {
   const { scrolled } = useScroll(0);
 
   return (
-    <header className="sticky top-0 z-10 space-y-2 bg-white py-4 pt-12">
+    <header className="sticky top-0 z-10 space-y-2 bg-background py-4 pt-12">
       <ProgressiveBlur
         position="top"
-        backgroundColor="#fff"
+        height="100px"
         className={`top-0 transition-opacity duration-200 ${scrolled ? "opacity-100" : "opacity-0"}`}
       />
 

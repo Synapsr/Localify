@@ -5,8 +5,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::branding::BRANDING;
-use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
+use roxy::desktop::{DesktopApi, ProjectRootStore};
 use roxy::project_init::{
     FolderInitSelection, FolderInitServicePlan, PackageScriptUpdate, ServicePlan,
     apply_package_updates, build_init_plan, detect_folder_init_plan, resolve_folder_init_selection,
@@ -30,6 +30,7 @@ struct ResolvedInitProjectArgs {
 
 pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
     let resolved = resolve_args(args)?;
+    let current_dir = env::current_dir().context("Failed to determine the current directory")?;
     let binary_path = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
         BRANDING.cli_command()
@@ -37,6 +38,7 @@ pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
     let api = DesktopApi::new(config_path.to_path_buf(), binary_path);
     let init_result = api.init_project(InitProjectRequest {
         name: resolved.name,
+        root_path: Some(current_dir.display().to_string()),
         services: resolved
             .services
             .iter()
@@ -46,6 +48,7 @@ pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
             })
             .collect(),
     })?;
+    ProjectRootStore::new_default()?.set(&init_result.project.id, &current_dir)?;
 
     println!("Initialized project: {}", init_result.project.name);
     println!("  Project ID: {}", init_result.project.id);
