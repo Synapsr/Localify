@@ -2,6 +2,7 @@
 
 import { RiDraggable, RiMoreLine } from "@remixicon/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { Reorder, useDragControls } from "motion/react";
 import { useState, type PointerEvent } from "react";
 
@@ -39,6 +40,7 @@ export const ProjectsListItem = ({
   domains,
   reorderEnabled = true,
 }: ProjectsListItemProps) => {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const dragControls = useDragControls();
   const updateProject = useMutation(projectMutations.update(queryClient));
@@ -79,6 +81,13 @@ export const ProjectsListItem = ({
     }
   };
 
+  const handleViewLogs = () => {
+    void navigate({
+      to: "/logs",
+      search: { projectId: project.id, view: "requests" },
+    });
+  };
+
   const body = (
     <>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -98,6 +107,9 @@ export const ProjectsListItem = ({
           }
         />
         <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={handleViewLogs} disabled={removeProject.isPending}>
+            View logs
+          </DropdownMenuItem>
           <DropdownMenuItem
             onClick={toggleEnabled}
             disabled={updateProject.isPending || removeProject.isPending}

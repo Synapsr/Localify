@@ -3,10 +3,14 @@
 import { revalidateLogic } from "@tanstack/react-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type PropsWithChildren, useEffect, useState } from "react";
+import { z } from "zod";
+
+import type { ProjectInfoDto } from "@/types/roxy";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
   DialogDescription,
@@ -23,8 +27,8 @@ import {
   normalizeSuffix,
   projectDomainEntrySchema,
 } from "@/lib/validators/validator.create-project";
-import type { ProjectInfoDto } from "@/types/roxy";
-import { z } from "zod";
+
+import { DomainTargetFields } from "./create-dialog/domain-target-fields";
 
 interface ProjectAddDomainDialogProps extends PropsWithChildren {
   project: ProjectInfoDto;
@@ -142,48 +146,25 @@ export const ProjectAddDomainDialog = ({ project, children }: ProjectAddDomainDi
               </DialogDescription>
             </DialogHeader>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <form.AppField name="domain">
-                {(field) => (
-                  <field.TextField
-                    label="Domain"
-                    placeholder="my-app"
-                    inputSuffix={normalizedSuffix}
-                    autoFocus
-                  />
-                )}
+            <DialogBody className="space-y-4">
+              <DomainTargetFields
+                form={form}
+                fields={{ domain: "domain", target: "target" }}
+                domainSuffix={normalizedSuffix}
+                onFillPort={() => void fillPort()}
+                isFindingPort={availablePort.isPending}
+              />
+
+              <form.AppField name="wildcard">
+                {(field) => <field.CheckboxField label="Match all subdomains (wildcard)" />}
               </form.AppField>
 
-              <form.AppField name="target">
-                {(field) => (
-                  <field.TextField
-                    label="Target"
-                    placeholder="3000"
-                    rightAction={
-                      <button
-                        type="button"
-                        onClick={() => void fillPort()}
-                        disabled={availablePort.isPending}
-                        className="text-xs text-[--color-muted] hover:text-[--color-ink] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {availablePort.isPending ? "Finding…" : "Free port"}
-                      </button>
-                    }
-                  />
-                )}
-              </form.AppField>
-            </div>
-
-            <form.AppField name="wildcard">
-              {(field) => <field.CheckboxField label="Match all subdomains (wildcard)" />}
-            </form.AppField>
-
-            {submitError && (
-              <p role="alert" className="text-xs text-[--color-danger]">
-                {submitError}
-              </p>
-            )}
-
+              {submitError && (
+                <p role="alert" className="text-xs text-[--color-danger]">
+                  {submitError}
+                </p>
+              )}
+            </DialogBody>
             <DialogFooter>
               <DialogClose render={<Button variant="outline">Cancel</Button>} />
               <form.SubmitButton pendingLabel="Adding…">Add domain</form.SubmitButton>

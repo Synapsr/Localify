@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -39,8 +40,10 @@ function persist(key: string, value: string | null) {
 }
 
 export function LogsScreen() {
+  const navigate = useNavigate();
+  const search = useSearch({ from: "/logs" });
   const [viewMode, setViewModeState] = useState<LogsViewMode>(() =>
-    loadStoredString(VIEW_STORAGE_KEY) === "raw" ? "raw" : "requests",
+    search.view ?? (loadStoredString(VIEW_STORAGE_KEY) === "raw" ? "raw" : "requests"),
   );
   const [follow, setFollowState] = useState<boolean>(
     () => loadStoredString(FOLLOW_STORAGE_KEY) !== "0",
@@ -49,7 +52,7 @@ export function LogsScreen() {
     loadStoredNumber(CLEAR_STORAGE_KEY),
   );
   const [projectId, setProjectIdState] = useState<string>(
-    () => loadStoredString(PROJECT_STORAGE_KEY) ?? "all",
+    () => search.projectId ?? loadStoredString(PROJECT_STORAGE_KEY) ?? "all",
   );
 
   const setFollow = (next: boolean) => {
@@ -63,10 +66,26 @@ export function LogsScreen() {
   const setProjectId = (next: string) => {
     setProjectIdState(next);
     persist(PROJECT_STORAGE_KEY, next);
+    void navigate({
+      to: "/logs",
+      search: (previous) => ({
+        ...previous,
+        projectId: next === "all" ? undefined : next,
+      }),
+      replace: true,
+    });
   };
   const setViewMode = (next: LogsViewMode) => {
     setViewModeState(next);
     persist(VIEW_STORAGE_KEY, next);
+    void navigate({
+      to: "/logs",
+      search: (previous) => ({
+        ...previous,
+        view: next,
+      }),
+      replace: true,
+    });
   };
 
   const bootstrapQuery = useQuery(bootstrapQueries.read());
@@ -110,6 +129,17 @@ export function LogsScreen() {
   const renderedLineCount = viewMode === "raw" ? rawLines.length : visible.length;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const nextProjectId = search.projectId ?? loadStoredString(PROJECT_STORAGE_KEY) ?? "all";
+    setProjectIdState((current) => (current === nextProjectId ? current : nextProjectId));
+  }, [search.projectId]);
+
+  useEffect(() => {
+    const nextViewMode =
+      search.view ?? (loadStoredString(VIEW_STORAGE_KEY) === "raw" ? "raw" : "requests");
+    setViewModeState((current) => (current === nextViewMode ? current : nextViewMode));
+  }, [search.view]);
 
   useEffect(() => {
     if (!follow) return;

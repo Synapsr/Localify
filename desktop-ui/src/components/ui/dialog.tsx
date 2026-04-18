@@ -5,6 +5,52 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import { ProgressiveBlur } from "../progresive-blur";
+
+const useDialogScrollOverflow = () => {
+  const footerRef = React.useRef<HTMLDivElement | null>(null);
+  const [showFooterBlur, setShowFooterBlur] = React.useState(false);
+
+  React.useEffect(() => {
+    const footerElement = footerRef.current;
+    if (!footerElement) return;
+
+    const dialogContent = footerElement.closest<HTMLElement>('[data-slot="dialog-content"]');
+    if (!dialogContent) return;
+
+    const updateScrollState = () => {
+      const hasScrollOverflow = dialogContent.scrollHeight > dialogContent.clientHeight;
+      const isScrolledToBottom =
+        dialogContent.scrollTop + dialogContent.clientHeight >= dialogContent.scrollHeight - 1;
+
+      setShowFooterBlur(hasScrollOverflow && !isScrolledToBottom);
+    };
+
+    updateScrollState();
+
+    const resizeObserver = new ResizeObserver(updateScrollState);
+    resizeObserver.observe(dialogContent);
+    const mutationObserver = new MutationObserver(updateScrollState);
+    mutationObserver.observe(dialogContent, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+    dialogContent.addEventListener("scroll", updateScrollState, { passive: true });
+    window.addEventListener("resize", updateScrollState);
+
+    return () => {
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      dialogContent.removeEventListener("scroll", updateScrollState);
+      window.removeEventListener("resize", updateScrollState);
+    };
+  }, []);
+
+  return { footerRef, showFooterBlur };
+};
+
 function Dialog({ ...props }: DialogPrimitive.Root.Props) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;
 }
@@ -48,7 +94,7 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-6 rounded-xl bg-popover p-6 text-sm text-popover-foreground ring-1 ring-foreground/10 outline-none [-webkit-app-region:no-drag] duration-100 sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-6  rounded-xl bg-popover  text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none [-webkit-app-region:no-drag] sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className,
         )}
         {...props}
@@ -70,8 +116,16 @@ function DialogContent({
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    <div data-slot="dialog-header" className={cn("flex flex-col gap-2", className)} {...props} />
+    <div
+      data-slot="dialog-header"
+      className={cn("flex flex-col gap-2 p-6 pb-0", className)}
+      {...props}
+    />
   );
+}
+
+function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+  return <div data-slot="dialog-body" className={cn("px-6", className)} {...props} />;
 }
 
 function DialogFooter({
@@ -82,13 +136,26 @@ function DialogFooter({
 }: React.ComponentProps<"div"> & {
   showCloseButton?: boolean;
 }) {
+  const { footerRef, showFooterBlur } = useDialogScrollOverflow();
+
   return (
     <div
+      ref={footerRef}
       data-slot="dialog-footer"
-      className={cn("flex flex-col-reverse justify-between  gap-2 sm:flex-row", className)}
+      className={cn(" sticky bottom-0  px-6 py-4 ", className)}
       {...props}
     >
-      {children}
+      <div className="relative z-10 flex flex-col-reverse justify-between gap-2 sm:flex-row ">
+        {children}
+      </div>
+      {showFooterBlur && (
+        <ProgressiveBlur
+          position="bottom"
+          height="150px"
+          backgroundColor="var(--color-background)"
+          className="absolute !bottom-0 left-0 h-4 w-full"
+        />
+      )}
       {showCloseButton && (
         <DialogPrimitive.Close render={<Button variant="outline" />}>Close</DialogPrimitive.Close>
       )}
@@ -127,6 +194,7 @@ export {
   DialogDescription,
   DialogFooter,
   DialogHeader,
+  DialogBody,
   DialogOverlay,
   DialogPortal,
   DialogTitle,

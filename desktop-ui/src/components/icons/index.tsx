@@ -17,4 +17,10 @@ export {
   Trash as TrashIcon,
   ExternalLink as ExternalLinkIcon,
   Copy as CopyIcon,
+  Folder as FolderIcon,
+  Pen as PenIcon,
+  Edit as EditIcon,
+  Refresh as RefreshIcon,
+  ChevronDown as ChevronDownIcon,
+  InfoCircle as InfoCircleIcon,
 } from "@mynaui/icons-react";
