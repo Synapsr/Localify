@@ -184,6 +184,54 @@ export interface AvailablePortDto {
   port: number;
 }
 
+export interface DetectProjectInitPlanRequest {
+  rootPath: string;
+}
+
+export interface FolderInitServiceDto {
+  id: string;
+  label: string;
+  displayPath: string;
+  domain: string;
+  target: string;
+  enabled: boolean;
+  canUpdateDevScript: boolean;
+  updateDevScript: boolean;
+}
+
+export interface DetectProjectInitPlanDto {
+  rootPath: string;
+  name: string;
+  services: FolderInitServiceDto[];
+}
+
+export interface InitProjectFromFolderServiceRequest {
+  id: string;
+  domain: string;
+  target: string;
+  enabled: boolean;
+  updateDevScript: boolean;
+}
+
+export interface InitProjectFromFolderRequest {
+  rootPath: string;
+  name: string;
+  services: InitProjectFromFolderServiceRequest[];
+}
+
+export interface InitProjectServiceRequest {
+  domain: string;
+  target: string;
+}
+
+export interface InitProjectFromFolderResultDto {
+  project: ProjectInfoDto;
+  services: InitProjectServiceRequest[];
+  daemonReloaded: boolean;
+  updatedScripts: string[];
+  skippedScriptUpdates: string[];
+}
+
 export interface DomainPatternRequest {
   domain: string;
   wildcard: boolean;

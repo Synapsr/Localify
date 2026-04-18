@@ -1,10 +1,12 @@
 "use client";
 
-import { RiCheckLine, RiCloseLine, RiFileCopyLine } from "@remixicon/react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { motion } from "motion/react";
 import { type MouseEvent, type PointerEvent } from "react";
 
 import type { DomainInfoDto } from "@/types/roxy";
 
+import { CheckIcon, CopyIcon, ExternalLinkIcon, TrashIcon } from "@/components/icons";
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
@@ -16,16 +18,37 @@ interface ProjectDomainChipProps {
   domain: DomainInfoDto;
 }
 
+const actionVariants = {
+  rest: { opacity: 0, scale: 0.6, x: -6 },
+  hover: { opacity: 1, scale: 1, x: 0 },
+};
+
 function buildUrl(domain: DomainInfoDto): string {
   const scheme = domain.registration.httpsEnabled ? "https" : "http";
   return `${scheme}://${domain.registration.domain}`;
 }
 
+function extractPort(target: string | undefined): string | null {
+  if (!target) return null;
+  try {
+    const parsed = new URL(target);
+    if (parsed.port) return parsed.port;
+    if (parsed.protocol === "https:") return "443";
+    if (parsed.protocol === "http:") return "80";
+    return null;
+  } catch {
+    const match = target.match(/:(\d+)(?:\/|$)/);
+    return match ? match[1] : null;
+  }
+}
+
 export const ProjectDomainChip = ({ domain }: ProjectDomainChipProps) => {
-  const { copy, copied } = useCopyToClipboard();
-  const { pattern } = domain.registration;
+  const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
+  const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
+  const { pattern, routes } = domain.registration;
   const url = buildUrl(domain);
   const reachable = domain.targetReachable;
+  const port = extractPort(routes[0]?.target);
 
   const stopMousePropagation = (event: MouseEvent) => {
     event.stopPropagation();
@@ -35,33 +58,52 @@ export const ProjectDomainChip = ({ domain }: ProjectDomainChipProps) => {
     event.stopPropagation();
   };
 
-  const handleCopy = async (event: MouseEvent) => {
+  const handleCopyUrl = async (event: MouseEvent) => {
     event.stopPropagation();
-    await copy(pattern);
+    event.preventDefault();
+    await copyUrl(url);
+  };
+
+  const handleCopyPort = async (event: MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!port) return;
+    await copyPort(port);
+  };
+
+  const handleOpen = (event: MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    void openUrl(url);
   };
 
   return (
-    <span
+    <motion.span
       onPointerDown={stopPointerPropagation}
+      initial="rest"
+      animate="rest"
+      whileHover="hover"
+      whileFocus="hover"
       className={cn(
-        "group/chip relative inline-flex h-6 items-center rounded-full border border-border bg-background pl-0.5 font-mono text-xs text-foreground/80 transition-colors",
-        "hover:border-foreground/20 hover:bg-muted",
-        !reachable && "opacity-60",
+        "group/chip inline-flex h-8 items-center gap-1 rounded-full border border-border  pr-1 pl-2  text-sm text-foreground transition-colors",
+        "hover:border-foreground/20 hover:bg-muted/50",
+        !reachable ? "opacity-60" : "opacity-80",
       )}
     >
       <Tooltip>
         <TooltipTrigger
           render={
-            <div
+            <span
               className={cn(
-                "ml-1 size-3 rounded-full bg-neutral-300",
-                reachable ? "bg-success" : "bg-neutral-300",
+                "size-4 shrink-0 rounded-full",
+                reachable ? "bg-success" : "bg-neutral-400",
               )}
             />
           }
         />
         <TooltipContent>{reachable ? "Target reachable" : "Target offline"}</TooltipContent>
       </Tooltip>
+
       <Tooltip>
         <TooltipTrigger
           render={
@@ -69,51 +111,116 @@ export const ProjectDomainChip = ({ domain }: ProjectDomainChipProps) => {
               href={url}
               target="_blank"
               rel="noreferrer"
-              onClick={stopMousePropagation}
-              className="inline-flex h-full items-center rounded-full px-1.5 hover:text-foreground"
+              onClick={handleOpen}
+              className="inline-flex h-full items-center rounded-full px-1 hover:text-foreground"
             />
           }
         >
-          <span className="max-w-[22ch] truncate">{pattern}</span>
+          <span className="truncate">{pattern}</span>
         </TooltipTrigger>
         <TooltipContent>Open {url}</TooltipContent>
       </Tooltip>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <button
-              type="button"
-              onClick={handleCopy}
-              aria-label={copied ? "Copied" : `Copy ${pattern}`}
-              className="mr-0.5 inline-flex size-5 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
-            />
-          }
-        >
-          {copied ? (
-            <RiCheckLine className="size-3 text-emerald-500" />
-          ) : (
-            <RiFileCopyLine className="size-3" />
-          )}
-        </TooltipTrigger>
-        <TooltipContent>{copied ? "Copied" : "Copy"}</TooltipContent>
-      </Tooltip>
-      <ProjectDeleteDomainDialog domain={domain}>
+
+      {port && (
         <Tooltip>
           <TooltipTrigger
             render={
-              <DialogTrigger
+              <button
                 type="button"
-                aria-label={`Remove ${pattern}`}
-                onClick={stopMousePropagation}
-                className="pointer-events-none absolute top-1/2 right-[22px] inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-full bg-foreground/10 text-muted-foreground opacity-0 transition-[opacity,background-color,color] group-hover/chip:pointer-events-auto group-hover/chip:opacity-100 hover:bg-destructive/10 hover:text-destructive focus-visible:pointer-events-auto focus-visible:opacity-100 data-popup-open:pointer-events-auto data-popup-open:opacity-100"
+                onClick={handleCopyPort}
+                aria-label={portCopied ? "Port copied" : `Copy port ${port}`}
+                className="inline-flex h-5 shrink-0 items-center gap-0.5 rounded bg-muted px-1 text-xs text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
               />
             }
           >
-            <RiCloseLine className="size-3" />
+            {portCopied ? <CheckIcon className="size-3 text-emerald-500" /> : <span>:{port}</span>}
           </TooltipTrigger>
-          <TooltipContent>Remove domain</TooltipContent>
+          <TooltipContent>{portCopied ? "Port copied" : `Copy port ${port}`}</TooltipContent>
         </Tooltip>
-      </ProjectDeleteDomainDialog>
-    </span>
+      )}
+
+      <motion.span
+        variants={{
+          rest: { width: 0, opacity: 0 },
+          hover: { width: "auto", opacity: 1 },
+        }}
+        transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.6 }}
+        className="flex items-center gap-1 overflow-hidden"
+      >
+        <span className="mx-0.5 h-4 w-px shrink-0 bg-border" aria-hidden />
+
+        <motion.span
+          variants={actionVariants}
+          transition={{ type: "spring", stiffness: 500, damping: 30 }}
+          className="inline-flex shrink-0"
+        >
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={handleCopyUrl}
+                  aria-label={urlCopied ? "URL copied" : `Copy ${url}`}
+                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+                />
+              }
+            >
+              {urlCopied ? (
+                <CheckIcon className="size-3.5 text-emerald-500" />
+              ) : (
+                <CopyIcon className="size-3.5" />
+              )}
+            </TooltipTrigger>
+            <TooltipContent>{urlCopied ? "URL copied" : "Copy URL"}</TooltipContent>
+          </Tooltip>
+        </motion.span>
+
+        <motion.span
+          variants={actionVariants}
+          transition={{ type: "spring", stiffness: 500, damping: 30, delay: 0.04 }}
+          className="inline-flex shrink-0"
+        >
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={handleOpen}
+                  aria-label={`Open ${url}`}
+                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+                />
+              }
+            >
+              <ExternalLinkIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipContent>Open in browser</TooltipContent>
+          </Tooltip>
+        </motion.span>
+
+        <motion.span
+          variants={actionVariants}
+          transition={{ type: "spring", stiffness: 500, damping: 30, delay: 0.08 }}
+          className="inline-flex shrink-0"
+        >
+          <ProjectDeleteDomainDialog domain={domain}>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <DialogTrigger
+                    type="button"
+                    aria-label={`Remove ${pattern}`}
+                    onClick={stopMousePropagation}
+                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:bg-destructive/10 focus-visible:text-destructive data-popup-open:bg-destructive/10 data-popup-open:text-destructive"
+                  />
+                }
+              >
+                <TrashIcon className="size-3.5" />
+              </TooltipTrigger>
+              <TooltipContent>Remove domain</TooltipContent>
+            </Tooltip>
+          </ProjectDeleteDomainDialog>
+        </motion.span>
+      </motion.span>
+    </motion.span>
   );
 };

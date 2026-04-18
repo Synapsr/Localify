@@ -51,11 +51,10 @@ export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) =>
   }, []);
 
   return (
-    <header className="sticky top-0 z-10 space-y-2 bg-white py-4 pt-12">
+    <header className="sticky top-0 z-10 space-y-2 bg-background py-4 pt-12">
       <ProgressiveBlur
         position="top"
         height="100px"
-        backgroundColor="#fff"
         className={`top-0 transition-opacity duration-200 ${scrolled ? "opacity-100" : "opacity-0"}`}
       />
 
@@ -89,7 +88,7 @@ export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) =>
               </TooltipContent>
             </Tooltip>
           </ProjectsCreateDialog>
-          <InputGroup className="max-w-xs pr-5">
+          <InputGroup className="max-w-xs border-dashed pr-5">
             <InputGroupInput
               ref={inputRef}
               value={query}
@@ -113,9 +112,7 @@ export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) =>
                   <XIcon />
                 </InputGroupButton>
               ) : (
-                <Kbd className="absolute right-2 ">
-                  {formatForDisplay(hotkeys.searchProjects)}
-                </Kbd>
+                <Kbd className="absolute right-2 ">{formatForDisplay(hotkeys.searchProjects)}</Kbd>
               )}
             </InputGroupAddon>
           </InputGroup>

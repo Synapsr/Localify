@@ -186,6 +186,9 @@ pub fn run() {
     let api = DesktopApi::new(default_config_path(), default_binary_path());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState { api })
         .manage(TrayState::default())
         .setup(|app| Ok(setup_tray(app.handle())?))
@@ -212,6 +215,7 @@ pub fn run() {
             commands::list_domains,
             commands::list_projects,
             commands::get_available_port,
+            commands::detect_project_init_plan,
             commands::install_roxy,
             commands::setup_cli_access,
             commands::list_port_conflicts,
@@ -220,6 +224,7 @@ pub fn run() {
             commands::uninstall_roxy,
             commands::create_project,
             commands::create_project_with_domains,
+            commands::init_project_from_folder,
             commands::update_project,
             commands::remove_project,
             commands::assign_domain_project,

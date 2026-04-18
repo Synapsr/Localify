@@ -24,9 +24,11 @@ use crate::branding::BRANDING;
 use crate::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
     CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
-    InitProjectRequest, InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto,
-    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
+    DomainInfoDto, DomainPatternRequest, EnvironmentDto, FolderInitServiceDto,
+    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
+    InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto, LogsRequest,
+    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
     RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
     RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto, UninstallPreviewDto,
     UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
@@ -45,6 +47,10 @@ use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
 use crate::infrastructure::target_probe::is_route_target_reachable;
+use crate::project_init::{
+    FolderInitSelection, apply_package_updates, detect_folder_init_plan,
+    resolve_folder_init_selection,
+};
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
 
 const CLI_INSTALL_DIR: &str = "/usr/local/bin";
@@ -414,6 +420,72 @@ impl DesktopApi {
             project: map_project_info(project, request.services.len(), has_reachable_domain),
             services: request.services,
             daemon_reloaded,
+        })
+    }
+
+    pub fn detect_project_init_plan(
+        &self,
+        request: DetectProjectInitPlanRequest,
+    ) -> Result<DetectProjectInitPlanDto> {
+        let root_path = PathBuf::from(&request.root_path);
+        let plan = detect_folder_init_plan(&root_path, None)?;
+
+        Ok(DetectProjectInitPlanDto {
+            root_path: request.root_path,
+            name: plan.name,
+            services: plan
+                .services
+                .into_iter()
+                .map(|service| FolderInitServiceDto {
+                    id: service.id,
+                    label: service.label,
+                    display_path: service.display_path,
+                    domain: service.domain,
+                    target: service.target,
+                    enabled: service.enabled,
+                    can_update_dev_script: service.can_update_dev_script,
+                    update_dev_script: service.update_dev_script,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn init_project_from_folder(
+        &self,
+        request: InitProjectFromFolderRequest,
+    ) -> Result<InitProjectFromFolderResultDto> {
+        let root_path = PathBuf::from(&request.root_path);
+        let selections = request
+            .services
+            .iter()
+            .map(|service| FolderInitSelection {
+                id: service.id.clone(),
+                domain: service.domain.clone(),
+                target: service.target.clone(),
+                enabled: service.enabled,
+                update_dev_script: service.update_dev_script,
+            })
+            .collect::<Vec<_>>();
+        let resolved = resolve_folder_init_selection(&root_path, &request.name, &selections)?;
+        let init_result = self.init_project(InitProjectRequest {
+            name: request.name,
+            services: resolved
+                .services
+                .iter()
+                .map(|service| crate::desktop::dto::InitProjectServiceRequest {
+                    domain: service.domain.clone(),
+                    target: service.target.clone(),
+                })
+                .collect(),
+        })?;
+        let update_results = apply_package_updates(&resolved.package_updates);
+
+        Ok(InitProjectFromFolderResultDto {
+            project: init_result.project,
+            services: init_result.services,
+            daemon_reloaded: init_result.daemon_reloaded,
+            updated_scripts: update_results.updated,
+            skipped_script_updates: update_results.skipped,
         })
     }
 

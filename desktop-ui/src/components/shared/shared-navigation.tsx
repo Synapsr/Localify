@@ -15,7 +15,7 @@ export function SharedNavigation() {
   } = useRouterState();
 
   return (
-    <div className="dark fixed bottom-4 left-1/2 z-50 w-fit -translate-x-1/2 rounded-full bg-background p-2 text-foreground">
+    <div className="dark fixed bottom-4 left-1/2 z-50 w-fit -translate-x-1/2 rounded-full bg-background/90 p-2 text-foreground backdrop-blur-3xl dark:bg-accent/20">
       <div className="flex items-center gap-1">
         {sharedNavigationTabs.map((tab) => {
           const active = pathname.startsWith(tab.to);

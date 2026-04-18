@@ -39,6 +39,11 @@ export const hotkeysSchema = z
 export type HotkeysInput = z.infer<typeof hotkeysSchema>;
 
 export function parseStoredHotkeys(value: unknown): HotkeysInput {
-  const parsed = hotkeysSchema.safeParse(value);
+  const candidate =
+    typeof value === "object" && value !== null
+      ? { ...defaultAppHotkeys, ...value }
+      : defaultAppHotkeys;
+
+  const parsed = hotkeysSchema.safeParse(candidate);
   return parsed.success ? parsed.data : defaultAppHotkeys;
 }

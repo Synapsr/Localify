@@ -8,6 +8,7 @@ import { domainQueries, projectQueries } from "@/lib/queries";
 import { buildProjectGroups } from "@/lib/util.project-groups";
 import { useProjectOrder } from "@/lib/use-project-order";
 
+import { ProjectsListEmptyState } from "./projects-list-empty-state";
 import { ProjectListItemSkeleton, ProjectsListItem } from "./projects-list-item";
 import { filterProjectGroups } from "./util.project-search";
 
@@ -53,11 +54,11 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
   }
 
   if (groups.length === 0) {
-    return <ProjectListEmptyState query={query} />;
+    return <ProjectsListEmptyState query={query} />;
   }
 
   if (filteredGroups.length === 0) {
-    return <ProjectListEmptyState query={query} />;
+    return <ProjectsListEmptyState query={query} />;
   }
 
   if (hasSearchQuery) {
@@ -99,18 +100,6 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
         );
       })}
     </Reorder.Group>
-  );
-};
-
-const ProjectListEmptyState = ({ query }: { query: string }) => {
-  const hasSearchQuery = query.trim().length > 0;
-
-  return (
-    <div className="rounded-xl border border-dashed border-border bg-background px-6 py-10 text-center text-sm text-muted-foreground">
-      {hasSearchQuery
-        ? `No projects match "${query.trim()}".`
-        : "No projects yet — create one to get started."}
-    </div>
   );
 };
 

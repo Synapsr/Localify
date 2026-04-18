@@ -359,6 +359,61 @@ pub struct AvailablePortDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DetectProjectInitPlanRequest {
+    pub root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderInitServiceDto {
+    pub id: String,
+    pub label: String,
+    pub display_path: String,
+    pub domain: String,
+    pub target: String,
+    pub enabled: bool,
+    pub can_update_dev_script: bool,
+    pub update_dev_script: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectProjectInitPlanDto {
+    pub root_path: String,
+    pub name: String,
+    pub services: Vec<FolderInitServiceDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitProjectFromFolderServiceRequest {
+    pub id: String,
+    pub domain: String,
+    pub target: String,
+    pub enabled: bool,
+    pub update_dev_script: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitProjectFromFolderRequest {
+    pub root_path: String,
+    pub name: String,
+    pub services: Vec<InitProjectFromFolderServiceRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitProjectFromFolderResultDto {
+    pub project: ProjectInfoDto,
+    pub services: Vec<InitProjectServiceRequest>,
+    pub daemon_reloaded: bool,
+    pub updated_scripts: Vec<String>,
+    pub skipped_script_updates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DomainPatternRequest {
     pub domain: String,
     pub wildcard: bool,

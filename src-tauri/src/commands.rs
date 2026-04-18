@@ -2,11 +2,13 @@ use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
     AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
     CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InstallResultDto,
-    KillPortConflictRequest, LogsDto, LogsRequest, PortConflictDto, ProjectInfoDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, StartDaemonRequest,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
+    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
+    DomainInfoDto, DomainPatternRequest, InitProjectFromFolderRequest,
+    InitProjectFromFolderResultDto, InstallResultDto, KillPortConflictRequest, LogsDto,
+    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateProjectRequest,
 };
 
 pub struct AppState {
@@ -53,6 +55,17 @@ pub fn list_projects(state: tauri::State<'_, AppState>) -> Result<Vec<ProjectInf
 #[tauri::command]
 pub fn get_available_port(state: tauri::State<'_, AppState>) -> Result<AvailablePortDto, String> {
     state.api.available_port().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn detect_project_init_plan(
+    state: tauri::State<'_, AppState>,
+    request: DetectProjectInitPlanRequest,
+) -> Result<DetectProjectInitPlanDto, String> {
+    state
+        .api
+        .detect_project_init_plan(request)
+        .map_err(map_error)
 }
 
 #[tauri::command]
@@ -105,7 +118,21 @@ pub fn create_project_with_domains(
     state: tauri::State<'_, AppState>,
     request: CreateProjectWithDomainsRequest,
 ) -> Result<ProjectInfoDto, String> {
-    state.api.create_project_with_domains(request).map_err(map_error)
+    state
+        .api
+        .create_project_with_domains(request)
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn init_project_from_folder(
+    state: tauri::State<'_, AppState>,
+    request: InitProjectFromFolderRequest,
+) -> Result<InitProjectFromFolderResultDto, String> {
+    state
+        .api
+        .init_project_from_folder(request)
+        .map_err(map_error)
 }
 
 #[tauri::command]

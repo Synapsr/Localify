@@ -36,7 +36,7 @@ export const ProjectDomainList = ({ project, domains }: ProjectDomainListProps) 
             animate="animate"
             exit="exit"
             transition={chipTransition}
-            className="text-xs text-muted-foreground"
+            className="text-sm text-muted-foreground"
           >
             No domains yet
           </motion.span>
@@ -64,7 +64,7 @@ export const ProjectDomainList = ({ project, domains }: ProjectDomainListProps) 
             render={
               <DialogTrigger
                 aria-label={`Add domain to ${project.name}`}
-                className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-dashed border-border text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-muted hover:text-foreground"
+                className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-border text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-muted hover:text-foreground"
                 onPointerDown={(event) => event.stopPropagation()}
               />
             }

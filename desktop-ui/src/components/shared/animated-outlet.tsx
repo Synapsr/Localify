@@ -7,6 +7,8 @@ import {
 import { motion, useIsPresent } from "motion/react";
 import { forwardRef, type ComponentProps, useRef } from "react";
 
+import { cn } from "@/lib/utils";
+
 type FrozenStore<T> = {
   state: T;
   get: () => T;
@@ -21,10 +23,14 @@ const createFrozenStore = <T,>(value: T): FrozenStore<T> => {
   };
 };
 
-export const AnimatedOutlet = forwardRef<
-  HTMLDivElement,
-  ComponentProps<typeof motion.div>
->(function AnimatedOutlet({ style, ...props }, ref) {
+interface AnimatedOutletProps extends ComponentProps<typeof motion.div> {
+  scrollClassName?: string;
+}
+
+export const AnimatedOutlet = forwardRef<HTMLDivElement, AnimatedOutletProps>(function AnimatedOutlet(
+  { className, scrollClassName, style, ...props },
+  ref,
+) {
   const isPresent = useIsPresent();
   const matches = useMatches();
   const router = useRouter();
@@ -110,13 +116,18 @@ export const AnimatedOutlet = forwardRef<
 
   return (
     <motion.div
-      ref={ref}
+      className={className}
       style={{ ...style, pointerEvents: isPresent ? "auto" : "none" }}
       {...props}
     >
-      <RouterContextProvider router={renderedRouter}>
-        <Outlet />
-      </RouterContextProvider>
+      <div
+        ref={ref}
+        className={cn("h-full overflow-y-auto overscroll-none", scrollClassName)}
+      >
+        <RouterContextProvider router={renderedRouter}>
+          <Outlet />
+        </RouterContextProvider>
+      </div>
     </motion.div>
   );
 });

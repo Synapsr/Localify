@@ -8,6 +8,10 @@ import { tauriClient } from "../tauri-client";
 
 import type {
   CreateProjectWithDomainsRequest,
+  DetectProjectInitPlanDto,
+  DetectProjectInitPlanRequest,
+  InitProjectFromFolderRequest,
+  InitProjectFromFolderResultDto,
   ProjectInfoDto,
   RemoveProjectRequest,
   UpdateProjectRequest,
@@ -31,10 +35,23 @@ export const projectQueries = {
 } as const;
 
 export const projectMutations = {
+  detectInitPlan: () =>
+    mutationOptions<DetectProjectInitPlanDto, Error, DetectProjectInitPlanRequest>({
+      mutationFn: (request) => tauriClient.detectProjectInitPlan(request),
+    }),
   create: (queryClient: QueryClient) =>
     mutationOptions({
       mutationFn: (request: CreateProjectWithDomainsRequest) =>
         tauriClient.createProjectWithDomains(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [
+          projectQueryKeys.all(),
+          domainQueries.all(),
+        ]),
+    }),
+  initFromFolder: (queryClient: QueryClient) =>
+    mutationOptions<InitProjectFromFolderResultDto, Error, InitProjectFromFolderRequest>({
+      mutationFn: (request) => tauriClient.initProjectFromFolder(request),
       onSuccess: async () =>
         invalidateBootstrapAnd(queryClient, [
           projectQueryKeys.all(),

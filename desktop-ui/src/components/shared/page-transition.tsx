@@ -3,6 +3,7 @@ import { AnimatePresence, useReducedMotion, type Transition, type Variants } fro
 import { useRef } from "react";
 
 import { ScrollProvider, useScrollTargetRef } from "@/hooks/use-scroll";
+
 import { AnimatedOutlet } from "./animated-outlet";
 
 const ROUTE_ORDER = ["/projects", "/logs", "/settings"] as const;
@@ -93,6 +94,8 @@ export function PageTransition() {
     <ScrollProvider>
       <div className="relative h-full w-full overflow-hidden ">
         <AnimatePresence initial={false} custom={direction}>
+          {/* header will be sticky here */}
+          {/* header portal */}
           <ScrollableOutlet
             key={routeKey}
             direction={direction}
@@ -124,9 +127,9 @@ function ScrollableOutlet({
       exit="exit"
       variants={variants}
       transition={transition}
-      className="absolute inset-0 flex flex-col items-center justify-center overflow-y-auto overscroll-none p-6 pt-0 will-change-transform"
+      className="absolute inset-0 origin-left will-change-transform"
+      scrollClassName="h-full p-6 pt-0"
       style={{
-        pointerEvents: "auto",
         willChange: "transform, filter",
         transformOrigin: direction === 1 ? "right center" : "left center",
       }}

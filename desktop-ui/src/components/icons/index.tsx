@@ -13,4 +13,8 @@ export {
   X as XIcon,
   Plus as PlusIcon,
   PlusSolid as PlusSolidIcon,
+  Check as CheckIcon,
+  Trash as TrashIcon,
+  ExternalLink as ExternalLinkIcon,
+  Copy as CopyIcon,
 } from "@mynaui/icons-react";

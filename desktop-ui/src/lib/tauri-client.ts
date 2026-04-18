@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { createProjectWithDomainsRequestSchema } from "./validators/validator.create-project";
+import {
+  detectProjectInitPlanRequestSchema,
+  initProjectFromFolderRequestSchema,
+} from "./validators/validator.init-project-from-folder";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import type {
@@ -15,8 +19,12 @@ import type {
   CreateProjectWithDomainsRequest,
   DaemonLaunchDto,
   DaemonStatusDto,
+  DetectProjectInitPlanDto,
+  DetectProjectInitPlanRequest,
   DomainInfoDto,
   DomainPatternRequest,
+  InitProjectFromFolderRequest,
+  InitProjectFromFolderResultDto,
   InstallResultDto,
   KillPortConflictRequest,
   LogsDto,
@@ -84,6 +92,9 @@ export interface DesktopClient {
   listDomains(): Promise<DomainInfoDto[]>;
   listProjects(): Promise<ProjectInfoDto[]>;
   getAvailablePort(): Promise<AvailablePortDto>;
+  detectProjectInitPlan(
+    request: DetectProjectInitPlanRequest,
+  ): Promise<DetectProjectInitPlanDto>;
   installRoxy(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
   listPortConflicts(): Promise<PortConflictDto[]>;
@@ -94,6 +105,9 @@ export interface DesktopClient {
   createProjectWithDomains(
     request: CreateProjectWithDomainsRequest,
   ): Promise<ProjectInfoDto>;
+  initProjectFromFolder(
+    request: InitProjectFromFolderRequest,
+  ): Promise<InitProjectFromFolderResultDto>;
   updateProject(request: UpdateProjectRequest): Promise<ProjectInfoDto>;
   removeProject(request: RemoveProjectRequest): Promise<RemoveProjectResultDto>;
   assignDomainProject(request: AssignDomainProjectRequest): Promise<DomainInfoDto>;
@@ -118,6 +132,10 @@ export function createDesktopClient(): DesktopClient {
     listDomains: () => tauriInvoke("list_domains"),
     listProjects: () => tauriInvoke("list_projects"),
     getAvailablePort: () => tauriInvoke("get_available_port"),
+    detectProjectInitPlan: (request) =>
+      tauriInvoke("detect_project_init_plan", {
+        request: detectProjectInitPlanRequestSchema.parse(request),
+      }),
     installRoxy: () => tauriInvoke("install_roxy"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),
@@ -131,6 +149,10 @@ export function createDesktopClient(): DesktopClient {
     createProjectWithDomains: (request) =>
       tauriInvoke("create_project_with_domains", {
         request: createProjectWithDomainsRequestSchema.parse(request),
+      }),
+    initProjectFromFolder: (request) =>
+      tauriInvoke("init_project_from_folder", {
+        request: initProjectFromFolderRequestSchema.parse(request),
       }),
     updateProject: (request) => tauriInvoke("update_project", { request }),
     removeProject: (request) =>
