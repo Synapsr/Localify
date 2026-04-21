@@ -1,0 +1,10 @@
+{
+  "identifier": "com.localify.desktop.dev",
+  "productName": "Localify Desktop (Dev)",
+  "bundle": {
+    "icon": [
+      "icons/dev/icon-dev.icns",
+      "icons/dev/icon-dev.png"
+    ]
+  }
+}

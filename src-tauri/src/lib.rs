@@ -53,6 +53,10 @@ fn default_binary_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
+    if cfg!(debug_assertions) && let Some(path) = workspace_binary_path("debug") {
+        return path;
+    }
+
     if let Some(path) = sibling_binary_path() {
         return path;
     }
@@ -74,6 +78,22 @@ fn default_binary_path() -> PathBuf {
         .join("target")
         .join(profile)
         .join(binary_name)
+}
+
+fn workspace_binary_path(profile: &str) -> Option<PathBuf> {
+    let binary_name = if cfg!(target_os = "windows") {
+        "localify.exe"
+    } else {
+        BRANDING.cli_command()
+    };
+
+    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join(profile)
+        .join(binary_name);
+
+    candidate.exists().then_some(candidate)
 }
 
 fn sibling_binary_path() -> Option<PathBuf> {
@@ -99,6 +119,10 @@ pub(crate) fn updater_endpoint() -> Option<&'static str> {
 
 pub(crate) fn updater_public_key() -> &'static str {
     UPDATER_PUBLIC_KEY.trim()
+}
+
+fn runtime_desktop_name() -> String {
+    BRANDING.runtime_desktop_name()
 }
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -406,7 +430,7 @@ fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .tooltip(BRANDING.app_name)
+        .tooltip(runtime_desktop_name())
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
             if let Err(error) = run_tray_action(app, event.id().as_ref()) {
@@ -464,6 +488,9 @@ pub fn run() {
                     .pubkey(updater_public_key())
                     .build(),
             )?;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&runtime_desktop_name());
+            }
             setup_app_menu(app.handle())?;
             setup_tray(app.handle())?;
             Ok(())
@@ -502,6 +529,7 @@ pub fn run() {
             commands::detect_project_init_plan,
             commands::install_roxy,
             commands::setup_cli_access,
+            commands::setup_node_trust,
             commands::list_port_conflicts,
             commands::kill_port_conflict,
             commands::get_uninstall_preview,

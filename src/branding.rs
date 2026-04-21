@@ -81,6 +81,14 @@ impl Branding {
         self.slug
     }
 
+    pub fn runtime_desktop_name(&self) -> String {
+        if cfg!(debug_assertions) {
+            format!("{} (Dev)", self.desktop_name)
+        } else {
+            self.desktop_name.to_string()
+        }
+    }
+
     pub fn env_var(&self, suffix: &str) -> String {
         format!("{}_{}", self.env_prefix, suffix)
     }

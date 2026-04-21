@@ -736,33 +736,149 @@ fn strip_script_flags(script: &str, flags: &[&str], env_vars: &[&str]) -> String
 fn apply_package_update(update: &PackageScriptUpdate) -> Result<()> {
     let content = fs::read_to_string(&update.package_json_path)
         .with_context(|| format!("Failed to read '{}'", update.package_json_path.display()))?;
-    let mut package_json: Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse '{}'", update.package_json_path.display()))?;
-    let scripts = package_json
-        .get_mut("scripts")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| anyhow!("Missing scripts object"))?;
-    let current_script = scripts
-        .get(&update.script_name)
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let updated = update_package_script_content(&content, &update.script_name, &update.script)?;
 
-    if current_script.trim() != update.script.trim() {
-        scripts.insert(
-            update.script_name.clone(),
-            Value::String(update.script.clone()),
-        );
+    if updated == content {
+        return Ok(());
     }
-    let formatted = serde_json::to_string_pretty(&package_json).with_context(|| {
-        format!(
-            "Failed to serialize '{}'",
-            update.package_json_path.display()
-        )
-    })?;
-    fs::write(&update.package_json_path, format!("{formatted}\n"))
+
+    fs::write(&update.package_json_path, updated)
         .with_context(|| format!("Failed to write '{}'", update.package_json_path.display()))?;
 
     Ok(())
+}
+
+fn update_package_script_content(content: &str, script_name: &str, script: &str) -> Result<String> {
+    let Some((object_open, object_close)) = find_json_property_object_bounds(content, "scripts")
+    else {
+        bail!("Missing scripts object");
+    };
+    let object_body = &content[object_open + 1..object_close];
+
+    if let Some(property_offset) = object_body.find(&format!("\"{script_name}\"")) {
+        let property_start = object_open + 1 + property_offset;
+        return update_existing_package_script(
+            content,
+            object_close,
+            property_start,
+            script_name,
+            script,
+        );
+    }
+
+    Ok(insert_package_script_property(
+        content,
+        object_open,
+        object_close,
+        script_name,
+        script,
+    ))
+}
+
+fn find_json_property_object_bounds(content: &str, property_name: &str) -> Option<(usize, usize)> {
+    let property = format!("\"{property_name}\"");
+    let property_start = content.find(&property)?;
+    let tail = &content[property_start + property.len()..];
+    let colon_offset = tail.find(':')?;
+    let object_offset = tail[colon_offset + 1..].find('{')?;
+    let object_open = property_start + property.len() + colon_offset + 1 + object_offset;
+    let object_close = find_matching_delimiter(content, object_open, b'{', b'}')?;
+
+    Some((object_open, object_close))
+}
+
+fn update_existing_package_script(
+    content: &str,
+    object_close: usize,
+    property_start: usize,
+    script_name: &str,
+    script: &str,
+) -> Result<String> {
+    let property_body = &content[property_start..object_close];
+    let property = format!("\"{script_name}\"");
+    let after_property = &property_body[property.len()..];
+    let colon_offset = after_property
+        .find(':')
+        .ok_or_else(|| anyhow!("Found script '{script_name}' but could not locate its value"))?;
+    let value_start = property_start + property.len() + colon_offset + 1;
+    let quote_start = content[value_start..]
+        .find('"')
+        .map(|offset| value_start + offset)
+        .ok_or_else(|| anyhow!("Found script '{script_name}' but could not parse its string"))?;
+    let quote_end = find_json_string_end(content, quote_start)
+        .ok_or_else(|| anyhow!("Found script '{script_name}' but could not parse its string"))?;
+    let serialized_value =
+        serde_json::to_string(script).context("Failed to serialize the updated script command")?;
+
+    if content[quote_start..=quote_end] == serialized_value {
+        return Ok(content.to_string());
+    }
+
+    Ok(format!(
+        "{}{}{}",
+        &content[..quote_start],
+        serialized_value,
+        &content[quote_end + 1..]
+    ))
+}
+
+fn insert_package_script_property(
+    content: &str,
+    object_open: usize,
+    object_close: usize,
+    script_name: &str,
+    script: &str,
+) -> String {
+    let inner = &content[object_open + 1..object_close];
+    let trimmed = inner.trim_end_matches(char::is_whitespace);
+    let trailing = &inner[trimmed.len()..];
+    let closing_indent = line_indent_at(content, object_close);
+    let property_indent = format!("{closing_indent}  ");
+    let serialized_key =
+        serde_json::to_string(script_name).unwrap_or_else(|_| format!("\"{script_name}\""));
+    let serialized_value =
+        serde_json::to_string(script).unwrap_or_else(|_| format!("\"{script}\""));
+
+    let inserted = if trimmed.trim().is_empty() {
+        format!("\n{property_indent}{serialized_key}: {serialized_value}\n{closing_indent}")
+    } else {
+        let mut updated_inner = String::from(trimmed);
+        if !trimmed.ends_with(',') {
+            updated_inner.push(',');
+        }
+        updated_inner.push('\n');
+        updated_inner.push_str(&property_indent);
+        updated_inner.push_str(&format!("{serialized_key}: {serialized_value}"));
+        updated_inner.push_str(trailing);
+        updated_inner
+    };
+
+    format!(
+        "{}{}{}",
+        &content[..object_open + 1],
+        inserted,
+        &content[object_close..]
+    )
+}
+
+fn find_json_string_end(content: &str, quote_start: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut index = quote_start + 1;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+
+        if bytes[index] == b'"' {
+            return Some(index);
+        }
+
+        index += 1;
+    }
+
+    None
 }
 
 fn apply_next_config_update(update: &NextConfigUpdate) -> Result<()> {
@@ -1226,7 +1342,23 @@ mod tests {
     fn apply_package_update_rewrites_scripts_dev() {
         let temp_dir = tempdir().unwrap();
         let package_json_path = temp_dir.path().join("package.json");
-        write_package_json(&package_json_path, "vite");
+        fs::write(
+            &package_json_path,
+            r#"{
+  "name": "test-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "^19.0.0"
+  }
+}
+"#,
+        )
+        .unwrap();
 
         let results = apply_local_app_updates(
             &[PackageScriptUpdate {
@@ -1242,6 +1374,10 @@ mod tests {
         let updated = fs::read_to_string(package_json_path).unwrap();
         assert!(updated.contains(r#""dev": "vite""#));
         assert!(updated.contains(r#""dev-localify": "vite --port 4010""#));
+        assert!(!updated.contains(r#""dev-localify": "vite --port 4010","#));
+        assert!(updated.contains(r#""dependencies": {"#));
+        assert!(updated.find(r#""name": "test-app""#) < updated.find(r#""scripts": {"#));
+        assert!(updated.find(r#""scripts": {"#) < updated.find(r#""dependencies": {"#));
     }
 
     #[test]

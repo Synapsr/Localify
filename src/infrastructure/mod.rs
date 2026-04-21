@@ -2,6 +2,7 @@ pub mod certs;
 pub mod config;
 pub mod dns;
 pub mod docker;
+pub mod editor;
 pub mod file_security;
 pub mod filesystem;
 pub mod licensing;

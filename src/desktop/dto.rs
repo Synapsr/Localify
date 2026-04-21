@@ -17,6 +17,25 @@ fn default_cli_command_path() -> String {
     "/usr/local/bin/localify".into()
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeTrustDto {
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub already_ready: bool,
+    #[serde(default)]
+    pub ca_cert_path: String,
+    #[serde(default)]
+    pub shell_snippet_path: String,
+    #[serde(default)]
+    pub shell_integration_ready: bool,
+    #[serde(default)]
+    pub launchctl_ready: bool,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentDto {
@@ -31,6 +50,8 @@ pub struct EnvironmentDto {
     pub cli_access_ready: bool,
     #[serde(default = "default_cli_command_path")]
     pub cli_command_path: String,
+    #[serde(default)]
+    pub node_trust: NodeTrustDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

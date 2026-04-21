@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -20,8 +22,10 @@ use super::router::{RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
 use crate::application::ports::RegistrationProvider;
 use crate::infrastructure::config::Config;
+use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::RoxyPaths;
+use roxy::desktop::ProjectRootStore;
 
 /// Middleware that copies the client IP from `ConnectInfo` into a `ClientAddr` extension.
 async fn inject_client_addr(
@@ -38,6 +42,7 @@ pub struct Server {
     reload_rx: mpsc::Receiver<()>,
     reload_tx: mpsc::Sender<()>,
     reload_provider: Arc<dyn RegistrationProvider>,
+    config_path: PathBuf,
     socket_path: PathBuf,
     tls_acceptor: Option<TlsAcceptor>,
     http_port: u16,
@@ -49,6 +54,7 @@ pub struct Server {
 impl Server {
     pub fn new(
         config: &Config,
+        config_path: PathBuf,
         paths: &RoxyPaths,
         reload_rx: mpsc::Receiver<()>,
         reload_tx: mpsc::Sender<()>,
@@ -57,7 +63,10 @@ impl Server {
         // Validate config before starting
         config.validate()?;
 
-        let registrations = config.registrations();
+        let registrations = reload_provider
+            .load()
+            .context("Failed to load registrations for daemon startup")?;
+        let project_roots = load_project_root_paths(config);
 
         // Collect patterns for domains with HTTPS enabled
         let https_patterns: Vec<_> = registrations
@@ -66,7 +75,10 @@ impl Server {
             .map(|d| d.pattern().clone())
             .collect();
 
-        let state: SharedState = Arc::new(ArcSwap::from_pointee(RuntimeState::new(registrations)));
+        let state: SharedState = Arc::new(ArcSwap::from_pointee(RuntimeState::with_project_roots(
+            registrations,
+            project_roots,
+        )));
 
         let tls_acceptor = create_tls_acceptor(&https_patterns, &paths.certs_dir, &paths.data_dir)?;
 
@@ -78,6 +90,7 @@ impl Server {
             reload_rx,
             reload_tx,
             reload_provider,
+            config_path,
             socket_path: paths.socket_path.clone(),
             tls_acceptor,
             http_port: config.daemon.http_port,
@@ -101,6 +114,7 @@ impl Server {
             self.state.clone(),
             self.reload_rx,
             self.reload_provider,
+            self.config_path,
             cancel.clone(),
         );
         spawn_mgmt_socket(
@@ -141,6 +155,7 @@ fn spawn_reload_listener(
     state: SharedState,
     mut reload_rx: mpsc::Receiver<()>,
     reload_provider: Arc<dyn RegistrationProvider>,
+    config_path: PathBuf,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -152,7 +167,8 @@ fn spawn_reload_listener(
                         match reload_provider.load() {
                             Ok(regs) => {
                                 let count = regs.len();
-                                let new = Arc::new(RuntimeState::new(regs));
+                                let project_roots = load_project_root_paths_from_store(Path::new(&config_path));
+                                let new = Arc::new(RuntimeState::with_project_roots(regs, project_roots));
                                 state.store(new);
                                 info!(count, "Runtime state reloaded");
                             }
@@ -166,6 +182,46 @@ fn spawn_reload_listener(
             }
         }
     });
+}
+
+fn load_project_root_paths(config: &Config) -> HashMap<String, String> {
+    let mut roots_by_project = load_local_project_root_paths();
+    for project in config.configured_projects() {
+        if let Some(root_path) = project.root_path {
+            roots_by_project.insert(project.id, root_path);
+        }
+    }
+
+    config
+        .configured_domains()
+        .into_iter()
+        .filter_map(|domain| {
+            let project_id = domain.project_id?;
+            let root_path = roots_by_project.get(&project_id)?.clone();
+            Some((domain.registration.display_pattern(), root_path))
+        })
+        .collect()
+}
+
+fn load_project_root_paths_from_store(config_path: &Path) -> HashMap<String, String> {
+    match ConfigStore::new(config_path.to_path_buf()).load() {
+        Ok(config) => load_project_root_paths(&config),
+        Err(error) => {
+            warn!(
+                error = %error,
+                config_path = %config_path.display(),
+                "Failed to load project root metadata during daemon reload"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn load_local_project_root_paths() -> HashMap<String, String> {
+    ProjectRootStore::new_default()
+        .ok()
+        .and_then(|store| store.load().ok())
+        .unwrap_or_default()
 }
 
 fn spawn_mgmt_socket(

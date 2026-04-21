@@ -40,6 +40,7 @@ import type {
   LicensingDto,
   LogsDto,
   LogsRequest,
+  NodeTrustDto,
   OpenInEditorRequest,
   PortConflictDto,
   ProjectInfoDto,
@@ -117,6 +118,7 @@ export interface DesktopClient {
   ): Promise<DetectProjectInitPlanDto>;
   installRoxy(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
+  setupNodeTrust(): Promise<NodeTrustDto>;
   listPortConflicts(): Promise<PortConflictDto[]>;
   killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
@@ -176,6 +178,7 @@ export function createDesktopClient(): DesktopClient {
       }),
     installRoxy: () => tauriInvoke("install_roxy"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
+    setupNodeTrust: () => tauriInvoke("setup_node_trust"),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),
     killPortConflict: (request) =>
       tauriInvoke("kill_port_conflict", {

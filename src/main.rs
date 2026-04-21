@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use branding::BRANDING;
@@ -294,7 +295,28 @@ fn load_config_and_paths(config_path: &Path) -> Result<(Config, RoxyPaths)> {
     Ok((config, paths))
 }
 
+fn ensure_rustls_crypto_provider() -> Result<()> {
+    static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+
+    let result = INIT_RESULT.get_or_init(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_| {
+                "Failed to initialize the rustls crypto provider. \
+                 Localify requires the aws-lc-rs provider before starting TLS."
+                    .to_string()
+            })
+    });
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(message) => Err(anyhow::anyhow!(message.clone())),
+    }
+}
+
 fn main() -> Result<()> {
+    ensure_rustls_crypto_provider()?;
+
     let cli = Cli::parse();
     let config_path = &cli.config;
 

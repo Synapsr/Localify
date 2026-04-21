@@ -1,3 +1,13 @@
+export interface NodeTrustDto {
+  ready: boolean;
+  alreadyReady: boolean;
+  caCertPath: string;
+  shellSnippetPath: string;
+  shellIntegrationReady: boolean;
+  launchctlReady: boolean;
+  lastError: string | null;
+}
+
 export interface EnvironmentDto {
   appName: string;
   desktopName: string;
@@ -8,6 +18,7 @@ export interface EnvironmentDto {
   cliHelperReady: boolean;
   cliAccessReady: boolean;
   cliCommandPath: string;
+  nodeTrust: NodeTrustDto;
 }
 
 export interface DaemonConfigDto {

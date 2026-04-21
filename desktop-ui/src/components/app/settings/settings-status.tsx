@@ -18,6 +18,7 @@ export const SettingsStatus = () => {
   const install = useMutation(systemMutations.install(queryClient));
   const startDaemon = useMutation(daemonMutations.start(queryClient));
   const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
+  const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
 
   if (!data) return null;
 
@@ -39,6 +40,8 @@ export const SettingsStatus = () => {
     startDaemon.error instanceof Error ? startDaemon.error.message : null;
   const cliError =
     setupCliAccess.error instanceof Error ? setupCliAccess.error.message : null;
+  const nodeTrustError =
+    setupNodeTrust.error instanceof Error ? setupNodeTrust.error.message : null;
   const portConflict = Boolean(
     (status === "setup" && installError?.includes("already in use")) ||
       (status === "off" && daemonError?.includes("already in use")),
@@ -100,6 +103,24 @@ export const SettingsStatus = () => {
           }
         />
         <SettingsRow
+          icon={<TerminalIcon />}
+          title="Node.js certificate trust"
+          description="Lets new terminals and restarted apps trust .localify HTTPS automatically."
+          value={data.environment.nodeTrust.ready ? "Enabled" : undefined}
+          trailing={
+            data.environment.nodeTrust.ready ? undefined : (
+              <Button
+                variant="outline"
+                size="sm"
+                loading={setupNodeTrust.isPending}
+                onClick={() => setupNodeTrust.mutate()}
+              >
+                Repair
+              </Button>
+            )
+          }
+        />
+        <SettingsRow
           icon={<ServersIcon />}
           title="Background service"
           description="Routes local domains while the app is open."
@@ -119,9 +140,9 @@ export const SettingsStatus = () => {
         />
       </SettingsGroup>
 
-      {installError || daemonError || cliError ? (
+      {installError || daemonError || cliError || nodeTrustError ? (
         <p className="px-1 text-xs text-[--color-danger]">
-          {installError ?? daemonError ?? cliError}
+          {installError ?? daemonError ?? cliError ?? nodeTrustError}
         </p>
       ) : null}
 

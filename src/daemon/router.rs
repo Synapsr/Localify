@@ -1,10 +1,13 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use axum::{
     Extension, Router,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::any,
 };
@@ -12,20 +15,32 @@ use tracing::{debug, info};
 
 use crate::branding::BRANDING;
 use crate::domain::{DomainRegistration, Route, RouteTarget};
+use crate::infrastructure::editor::open_in_editor;
 
 use super::embedded_assets;
 use super::proxy::{ClientAddr, Scheme, proxy_request};
 use super::static_files::serve_static;
 use super::theme;
 
+const OPEN_IN_EDITOR_PATH: &str = "/.localify/open-in-editor";
+
 /// Immutable snapshot of daemon state. Swapped atomically via `SharedState`.
 pub struct RuntimeState {
     /// All registrations sorted by pattern specificity (most specific first).
     registrations: Vec<DomainRegistration>,
+    project_roots: HashMap<String, String>,
 }
 
 impl RuntimeState {
-    pub fn new(mut registrations: Vec<DomainRegistration>) -> Self {
+    #[cfg(test)]
+    pub fn new(registrations: Vec<DomainRegistration>) -> Self {
+        Self::with_project_roots(registrations, HashMap::new())
+    }
+
+    pub fn with_project_roots(
+        mut registrations: Vec<DomainRegistration>,
+        project_roots: HashMap<String, String>,
+    ) -> Self {
         // Most-specific first: longer base domain wins.
         // At equal specificity, exact patterns come before wildcards.
         registrations.sort_by(|a, b| {
@@ -35,7 +50,10 @@ impl RuntimeState {
                 .then_with(|| a.is_wildcard().cmp(&b.is_wildcard()))
         });
 
-        Self { registrations }
+        Self {
+            registrations,
+            project_roots,
+        }
     }
 
     pub fn get_domain(&self, host: &str) -> Option<&DomainRegistration> {
@@ -50,6 +68,12 @@ impl RuntimeState {
 
     pub fn registrations(&self) -> &[DomainRegistration] {
         &self.registrations
+    }
+
+    pub fn project_root_for_registration(&self, registration: &DomainRegistration) -> Option<&str> {
+        self.project_roots
+            .get(&registration.display_pattern())
+            .map(String::as_str)
     }
 }
 
@@ -130,6 +154,18 @@ async fn handle_request(
     let uri = request.uri().clone();
     let host_header = get_host(&request);
     let path = uri.path();
+    let proto = scheme.map(|Extension(s)| s.as_str()).unwrap_or("http");
+    let client_ip = client_addr.map(|Extension(a)| a.0);
+
+    if method == Method::POST && path == OPEN_IN_EDITOR_PATH {
+        return handle_open_in_editor(
+            &state,
+            host_header.as_deref(),
+            proto,
+            client_ip,
+            request.headers(),
+        );
+    }
 
     match resolve_route(&state, host_header.as_deref(), path) {
         RouteResolution::MissingHost => {
@@ -161,15 +197,20 @@ async fn handle_request(
                 "Routing request"
             );
 
-            let proto = scheme.map(|Extension(s)| s.as_str()).unwrap_or("http");
-            let client_ip = client_addr.map(|Extension(a)| a.0);
-
             let response = match route.target() {
                 RouteTarget::StaticFiles(dir) => {
                     serve_static(route.path().as_str(), dir.clone(), request).await
                 }
                 RouteTarget::Proxy(target) => {
-                    proxy_request(target, request, host, proto, client_ip).await
+                    proxy_request(
+                        target,
+                        request,
+                        host,
+                        proto,
+                        client_ip,
+                        state.project_root_for_registration(registration),
+                    )
+                    .await
                 }
             };
 
@@ -183,6 +224,54 @@ async fn handle_request(
 
             response
         }
+    }
+}
+
+fn handle_open_in_editor(
+    state: &RuntimeState,
+    host_header: Option<&str>,
+    scheme: &str,
+    client_ip: Option<IpAddr>,
+    headers: &HeaderMap,
+) -> Response {
+    let host = match host_header {
+        Some(host) => host,
+        None => return action_error_response(StatusCode::BAD_REQUEST, "Missing Host header."),
+    };
+
+    if !client_ip.is_some_and(|ip| ip.is_loopback()) {
+        return action_error_response(
+            StatusCode::FORBIDDEN,
+            "Open in editor is only available from this machine.",
+        );
+    }
+
+    if !is_same_origin_action(headers, scheme, host) {
+        return action_error_response(
+            StatusCode::FORBIDDEN,
+            "Open in editor requires a same-origin request from the Localify error page.",
+        );
+    }
+
+    let registration = match state.get_domain(host) {
+        Some(registration) => registration,
+        None => {
+            return action_error_response(
+                StatusCode::NOT_FOUND,
+                "This Localify domain is not registered.",
+            );
+        }
+    };
+    let Some(root_path) = state.project_root_for_registration(registration) else {
+        return action_error_response(
+            StatusCode::NOT_FOUND,
+            "No project folder is linked to this domain yet.",
+        );
+    };
+
+    match open_in_editor(Path::new(root_path)) {
+        Ok(()) => redirect_back(headers, scheme, host),
+        Err(error) => action_error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     }
 }
 
@@ -240,6 +329,78 @@ fn build_not_registered_response(domain: &str) -> Response {
     let html = theme::render_page("Domain Not Registered", &body, theme::ERROR_PAGE_CSS, "");
 
     html_response(StatusCode::NOT_FOUND, html)
+}
+
+fn is_same_origin_action(headers: &HeaderMap, scheme: &str, host: &str) -> bool {
+    let expected_origin = format!("{scheme}://{host}");
+
+    if let Some(origin) = header_value(headers, header::ORIGIN) {
+        return origin == expected_origin;
+    }
+
+    header_value(headers, header::REFERER)
+        .map(|referer| {
+            referer == expected_origin || referer.starts_with(&format!("{expected_origin}/"))
+        })
+        .unwrap_or(false)
+}
+
+fn redirect_back(headers: &HeaderMap, scheme: &str, host: &str) -> Response {
+    let location = header_value(headers, header::REFERER)
+        .and_then(|referer| same_origin_path(&referer, scheme, host))
+        .unwrap_or_else(|| "/".to_string());
+
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, location)
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, header::HeaderValue::from_static("/"))],
+            )
+                .into_response()
+        })
+}
+
+fn action_error_response(status: StatusCode, message: &str) -> Response {
+    let message = theme::html_escape(message);
+    let body = format!(
+        "<div class=\"error-container\">\
+            <div class=\"error-card\">\
+                <h1 class=\"error-title\">Open in Editor Unavailable</h1>\
+                <p class=\"error-message\">{message}</p>\
+            </div>\
+        </div>"
+    );
+    html_response(
+        status,
+        theme::render_page(
+            "Open in Editor Unavailable",
+            &body,
+            theme::ERROR_PAGE_CSS,
+            "",
+        ),
+    )
+}
+
+fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+}
+
+fn same_origin_path(url: &str, scheme: &str, host: &str) -> Option<String> {
+    let expected_origin = format!("{scheme}://{host}");
+    let remainder = url.strip_prefix(&expected_origin)?;
+    if remainder.is_empty() {
+        return Some("/".to_string());
+    }
+    if remainder.starts_with('/') {
+        return Some(remainder.to_string());
+    }
+    None
 }
 
 fn build_no_route_response(registration: &DomainRegistration, host: &str, path: &str) -> Response {
@@ -322,6 +483,10 @@ fn wildcard_base_domain(domain: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use axum::http::{HeaderMap, HeaderValue, header};
+
     use super::{RouteResolution, RuntimeState, resolve_route};
     use crate::branding::BRANDING;
     use crate::domain::{DomainName, DomainPattern, DomainRegistration, Route};
@@ -358,6 +523,51 @@ mod tests {
         let found = state.get_domain("blog.myapp.localify").unwrap();
         assert!(found.is_wildcard());
         assert_eq!(found.domain().as_str(), "myapp.localify");
+    }
+
+    #[test]
+    fn runtime_state_returns_project_root_for_registration() {
+        let registration = reg("app.roxy", false);
+        let mut project_roots = HashMap::new();
+        project_roots.insert("app.localify".to_string(), "/tmp/app".to_string());
+
+        let state = RuntimeState::with_project_roots(vec![registration], project_roots);
+        let matched = state.get_domain("app.localify").unwrap();
+
+        assert_eq!(
+            state.project_root_for_registration(matched),
+            Some("/tmp/app")
+        );
+    }
+
+    #[test]
+    fn same_origin_action_accepts_matching_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://app.localify"),
+        );
+
+        assert!(super::is_same_origin_action(
+            &headers,
+            "https",
+            "app.localify"
+        ));
+    }
+
+    #[test]
+    fn same_origin_action_rejects_cross_site_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+
+        assert!(!super::is_same_origin_action(
+            &headers,
+            "https",
+            "app.localify"
+        ));
     }
 
     #[test]

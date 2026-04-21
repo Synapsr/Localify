@@ -1,6 +1,7 @@
 mod api;
 pub mod dto;
 mod editor;
+mod node_trust;
 mod port_conflicts;
 mod project_roots;
 

@@ -6,7 +6,7 @@ use roxy::desktop::dto::{
     DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
     KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto, LogsRequest,
-    OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    NodeTrustDto, OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
     UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
@@ -207,6 +207,11 @@ pub fn install_roxy(state: tauri::State<'_, AppState>) -> Result<InstallResultDt
 #[tauri::command]
 pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDto, String> {
     state.api.setup_cli_access().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn setup_node_trust(state: tauri::State<'_, AppState>) -> Result<NodeTrustDto, String> {
+    state.api.setup_node_trust().map_err(map_error)
 }
 
 #[tauri::command]

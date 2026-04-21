@@ -18,7 +18,7 @@ const LAUNCHD_PLIST_DIR: &str = "/Library/LaunchDaemons";
 
 pub fn ensure_running(config_path: &Path, socket: PathBuf, uid: u32) -> Result<()> {
     let client = SystemHelperClient::new(socket.clone());
-    if client.ping().is_ok() {
+    if client.ping().is_ok() && helper_matches_current_executable(uid)? {
         return Ok(());
     }
 
@@ -249,6 +249,38 @@ fn launchd_plist_contents(
     )
 }
 
+#[cfg(target_os = "macos")]
+fn helper_matches_current_executable(uid: u32) -> Result<bool> {
+    let plist_path = launchd_plist_path(uid);
+    if !plist_path.exists() {
+        return Ok(false);
+    }
+
+    let plist = fs::read_to_string(&plist_path).with_context(|| {
+        format!(
+            "Failed to read the {} helper plist at {}",
+            BRANDING.app_name,
+            plist_path.display()
+        )
+    })?;
+    let executable = env::current_exe().context(format!(
+        "Failed to resolve the {} executable path",
+        BRANDING.slug
+    ))?;
+    let expected = fs::canonicalize(&executable).unwrap_or(executable);
+
+    Ok(plist_contains_executable(&plist, &expected))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn helper_matches_current_executable(_uid: u32) -> Result<bool> {
+    Ok(true)
+}
+
+fn plist_contains_executable(plist: &str, executable: &Path) -> bool {
+    plist.contains(&escape_xml(&executable.display().to_string()))
+}
+
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -260,7 +292,7 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{helper_service_label, launchd_plist_contents};
+    use super::{helper_service_label, launchd_plist_contents, plist_contains_executable};
     use std::path::Path;
 
     #[test]
@@ -290,5 +322,19 @@ mod tests {
         assert!(plist.contains("<string>/var/run/localify-helper-501.sock</string>"));
         assert!(plist.contains("<string>--uid</string>"));
         assert!(plist.contains("<string>501</string>"));
+    }
+
+    #[test]
+    fn plist_contains_executable_matches_xml_escaped_path() {
+        let executable = Path::new("/Applications/Localify & Dev.app/Contents/MacOS/localify");
+        let plist = launchd_plist_contents(
+            "dev.localify.helper.501",
+            executable,
+            Path::new("/etc/localify/config.toml"),
+            Path::new("/var/run/localify-helper-501.sock"),
+            501,
+        );
+
+        assert!(plist_contains_executable(&plist, executable));
     }
 }

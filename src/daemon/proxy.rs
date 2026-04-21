@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use crate::branding::BRANDING;
 use crate::domain::ProxyTarget;
 
-use super::{embedded_assets, theme};
+use super::theme;
 
 /// Non-standard (but de facto standard) forwarding header names.
 /// The `http` crate only provides constants for IANA-registered headers,
@@ -154,6 +154,7 @@ async fn proxy_websocket(
     host: &str,
     scheme: &str,
     client_ip: Option<IpAddr>,
+    project_root_path: Option<&str>,
 ) -> Response {
     // Connect to backend
     let backend_addr = format!("{}:{}", target.host(), target.port());
@@ -168,6 +169,7 @@ async fn proxy_websocket(
                 target,
                 ProxyErrorKind::Connect,
                 &e.to_string(),
+                project_root_path,
             );
         }
     };
@@ -183,6 +185,7 @@ async fn proxy_websocket(
             target,
             ProxyErrorKind::UpstreamIo,
             &format!("Backend write error: {e}"),
+            project_root_path,
         );
     }
     debug!(target = %target, "WebSocket upgrade request sent to backend");
@@ -198,6 +201,7 @@ async fn proxy_websocket(
                 target,
                 ProxyErrorKind::UpstreamIo,
                 &format!("Backend read error: {e}"),
+                project_root_path,
             );
         }
     };
@@ -216,6 +220,7 @@ async fn proxy_websocket(
             target,
             ProxyErrorKind::WebSocketUpgrade,
             "Backend rejected WebSocket upgrade",
+            project_root_path,
         );
     }
 
@@ -378,11 +383,12 @@ pub async fn proxy_request(
     host: &str,
     scheme: &str,
     client_ip: Option<IpAddr>,
+    project_root_path: Option<&str>,
 ) -> Response {
     // Check for WebSocket upgrade
     if is_websocket_upgrade(&request) {
         debug!(target = %target, "Proxying WebSocket request");
-        return proxy_websocket(target, request, host, scheme, client_ip).await;
+        return proxy_websocket(target, request, host, scheme, client_ip, project_root_path).await;
     }
 
     debug!(target = %target, "Proxying HTTP request");
@@ -417,6 +423,7 @@ pub async fn proxy_request(
                 target,
                 ProxyErrorKind::InvalidTargetUri,
                 &format!("Invalid URI: {e}"),
+                project_root_path,
             );
         }
     };
@@ -450,6 +457,7 @@ pub async fn proxy_request(
                     target,
                     ProxyErrorKind::Connect,
                     &e.to_string(),
+                    project_root_path,
                 )
             } else {
                 warn!(target = %target, error = %e, "Proxy failed");
@@ -459,6 +467,7 @@ pub async fn proxy_request(
                     target,
                     ProxyErrorKind::UpstreamIo,
                     &format!("Proxy error: {e}"),
+                    project_root_path,
                 )
             }
         }
@@ -471,8 +480,9 @@ fn build_proxy_error_response(
     target: &ProxyTarget,
     kind: ProxyErrorKind,
     error: &str,
+    project_root_path: Option<&str>,
 ) -> Response {
-    let html = render_proxy_error_page(host, target, kind, error);
+    let html = render_proxy_error_page(host, target, kind, error, project_root_path);
 
     Response::builder()
         .status(status)
@@ -488,62 +498,135 @@ fn render_proxy_error_page(
     target: &ProxyTarget,
     kind: ProxyErrorKind,
     error: &str,
+    project_root_path: Option<&str>,
 ) -> String {
     let domain = host.split(':').next().unwrap_or(host).trim_end_matches('.');
     let domain = theme::html_escape(domain);
     let target_display = theme::html_escape(&target.to_string());
     let error = theme::html_escape(error);
     let port = target.port().value();
-    let image_data_uri = embedded_assets::roxy_error_data_uri();
 
     let mut body = String::new();
-    body.push_str("<div class=\"error-container\">\n");
-    body.push_str("<div class=\"error-image\">\n");
-    body.push_str("<img src=\"");
-    body.push_str(image_data_uri);
-    body.push_str("\" alt=\"Service unreachable - Localify Fox\" width=\"300\" height=\"225\">\n");
-    body.push_str("</div>\n");
-    body.push_str("<div class=\"error-card proxy-error-card\">\n");
-    body.push_str("<h1 class=\"error-title\">");
+    body.push_str("<section class=\"px-error\">\n");
+
+    // Hero
+    body.push_str("<header class=\"px-error__hero\">\n");
+    body.push_str("<span class=\"px-badge px-badge--danger\">");
+    body.push_str(PROXY_ERROR_ICON);
+    body.push_str("<span>");
+    body.push_str(proxy_error_eyebrow(kind));
+    body.push_str("</span></span>\n");
+    body.push_str("<h1 class=\"px-error__title\">");
     body.push_str(proxy_error_title(kind));
     body.push_str("</h1>\n");
-    body.push_str("<p class=\"error-message\">");
+    body.push_str("<p class=\"px-error__lede\">");
     body.push_str(&proxy_error_summary(kind, &domain, &target_display));
     body.push_str("</p>\n");
-    body.push_str("<div class=\"help-section\">\n");
-    body.push_str("<p class=\"help-label\">Possible fixes</p>\n");
-    body.push_str("<ul class=\"proxy-checklist\">");
+
+    body.push_str("<dl class=\"px-meta\">\n");
+    body.push_str("<div class=\"px-meta__item\"><dt>Domain</dt><dd><code>");
+    body.push_str(&domain);
+    body.push_str("</code></dd></div>\n");
+    body.push_str("<div class=\"px-meta__item\"><dt>Route target</dt><dd><code>");
+    body.push_str(&target_display);
+    body.push_str("</code></dd></div>\n");
+    body.push_str("</dl>\n");
+    body.push_str("</header>\n");
+
+    // Possible fixes
+    body.push_str("<section class=\"px-panel\">\n");
+    body.push_str("<div class=\"px-panel__head\">\n");
+    body.push_str("<h2 class=\"px-panel__title\">Possible fixes</h2>\n");
+    body.push_str("<p class=\"px-panel__hint\">Work through these in order &mdash; the first one is usually it.</p>\n");
+    body.push_str("</div>\n");
+    body.push_str("<ol class=\"px-fixes\">");
     append_proxy_fix_items(&mut body, kind, port);
-    body.push_str("</ul>\n");
-    body.push_str("<p class=\"help-label\">Diagnostics</p>\n");
-    body.push_str("<div class=\"command\">");
-    body.push_str("lsof -nP -iTCP:");
+    body.push_str("</ol>\n");
+    body.push_str("</section>\n");
+
+    // Project folder action
+    if let Some(project_root_path) = project_root_path {
+        let project_root_path = theme::html_escape(project_root_path);
+        body.push_str("<section class=\"px-panel px-panel--accent\">\n");
+        body.push_str("<div class=\"px-panel__head\">\n");
+        body.push_str("<h2 class=\"px-panel__title\">Open the project test</h2>\n");
+        body.push_str(
+            "<p class=\"px-panel__hint\">Launch the linked folder in your local editor.</p>\n",
+        );
+        body.push_str("</div>\n");
+        body.push_str("<div class=\"px-action\">\n");
+        body.push_str(
+            "<form method=\"post\" action=\"/.localify/open-in-editor\" class=\"px-action__form\">",
+        );
+        body.push_str("<button type=\"submit\" class=\"px-button px-button--primary\">");
+        body.push_str(EDITOR_ICON);
+        body.push_str("<span>Open in editor</span>");
+        body.push_str("</button>");
+        body.push_str("</form>\n");
+        body.push_str("<code class=\"px-path\">");
+        body.push_str(&project_root_path);
+        body.push_str("</code>\n");
+        body.push_str("</div>\n");
+        body.push_str(
+            "<p class=\"px-action__footnote\">Opens in Cursor or VS Code on this machine.</p>\n",
+        );
+        body.push_str("</section>\n");
+    }
+
+    // Diagnostics
+    body.push_str("<section class=\"px-panel\">\n");
+    body.push_str("<div class=\"px-panel__head\">\n");
+    body.push_str("<h2 class=\"px-panel__title\">Diagnostics</h2>\n");
+    body.push_str(
+        "<p class=\"px-panel__hint\">Run these to confirm what is listening on this port.</p>\n",
+    );
+    body.push_str("</div>\n");
+    body.push_str("<pre class=\"px-terminal\"><code>");
+    body.push_str("<span class=\"px-terminal__prompt\">$</span> lsof -nP -iTCP:");
     body.push_str(&port.to_string());
-    body.push_str(" -sTCP:LISTEN<br>");
+    body.push_str(" -sTCP:LISTEN\n");
+    body.push_str("<span class=\"px-terminal__prompt\">$</span> ");
     body.push_str(BRANDING.cli_command());
     body.push_str(" list");
     if matches!(kind, ProxyErrorKind::InvalidTargetUri) {
-        body.push_str("<br>");
+        body.push_str("\n<span class=\"px-terminal__prompt\">$</span> ");
         body.push_str(BRANDING.cli_command());
         body.push_str(" route add ");
         body.push_str(&domain);
         body.push_str(" / ");
         body.push_str(&port.to_string());
     }
-    body.push_str("</div>\n");
-    body.push_str("<p class=\"help-label\">Proxy error</p>\n");
-    body.push_str("<div class=\"proxy-detail\">");
-    body.push_str(&error);
-    body.push_str("</div>\n");
-    body.push_str("</div></div></div>");
+    body.push_str("</code></pre>\n");
+    body.push_str("</section>\n");
 
-    let css = format!("{}{}", theme::ERROR_PAGE_CSS, PROXY_ERROR_CSS);
-    theme::render_page(proxy_error_title(kind), &body, &css, "")
+    // Raw error
+    body.push_str("<details class=\"px-details\">\n");
+    body.push_str("<summary class=\"px-details__summary\">");
+    body.push_str("<span>Show raw proxy error</span>");
+    body.push_str("<svg class=\"px-details__chevron\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"6 9 12 15 18 9\"/></svg>");
+    body.push_str("</summary>\n");
+    body.push_str("<pre class=\"px-raw\">");
+    body.push_str(&error);
+    body.push_str("</pre>\n");
+    body.push_str("</details>\n");
+
+    body.push_str("</section>\n");
+
+    theme::render_page(proxy_error_title(kind), &body, PROXY_ERROR_CSS, "")
+}
+
+fn proxy_error_eyebrow(kind: ProxyErrorKind) -> &'static str {
+    match kind {
+        ProxyErrorKind::Connect => "Upstream offline",
+        ProxyErrorKind::InvalidTargetUri => "Route misconfigured",
+        ProxyErrorKind::UpstreamIo => "Upstream broke the connection",
+        ProxyErrorKind::WebSocketUpgrade => "WebSocket upgrade failed",
+    }
 }
 
 fn proxy_error_title(kind: ProxyErrorKind) -> &'static str {
     match kind {
-        ProxyErrorKind::Connect => "Service Unreachable",
+        ProxyErrorKind::Connect => "Service Unreachable aze",
         ProxyErrorKind::InvalidTargetUri => "Invalid Route Target",
         ProxyErrorKind::UpstreamIo => "Proxy Failed",
         ProxyErrorKind::WebSocketUpgrade => "WebSocket Upgrade Failed",
@@ -604,17 +687,190 @@ fn append_proxy_fix_items(body: &mut String, kind: ProxyErrorKind, port: u16) {
     }
 }
 
+const PROXY_ERROR_ICON: &str = concat!(
+    "<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" ",
+    "stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">",
+    "<path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/>",
+    "<path d=\"M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z\"/>",
+    "</svg>",
+);
+
+const EDITOR_ICON: &str = concat!(
+    "<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" ",
+    "stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">",
+    "<path d=\"M15 3h6v6\"/><path d=\"M10 14 21 3\"/>",
+    "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/>",
+    "</svg>",
+);
+
 const PROXY_ERROR_CSS: &str = "\
-.proxy-error-card{text-align:left}\
-.proxy-checklist{margin:0 0 20px 20px;color:var(--text)}\
-.proxy-checklist li{margin:0 0 10px 0}\
-.proxy-detail{\
-    background:rgba(232,133,58,.08);\
-    border:1px solid rgba(232,133,58,.18);\
-    border-radius:10px;padding:14px 16px;\
-    font-family:'SF Mono',Monaco,'Cascadia Code',Menlo,Consolas,monospace;\
-    font-size:.88em;line-height:1.6;\
-    overflow:auto;\
+.px-error{\
+    max-width:720px;margin:0 auto;\
+    display:flex;flex-direction:column;gap:20px;\
+    animation:px-fade .5s ease-out;\
+}\
+@keyframes px-fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}\
+\
+.px-error__hero{\
+    padding:32px;\
+    background:var(--surface);\
+    border:1px solid var(--border);\
+    border-radius:var(--radius-lg);\
+    box-shadow:var(--shadow-sm);\
+}\
+.px-error__title{\
+    font-size:clamp(1.6rem,2.4vw,2rem);\
+    line-height:1.15;letter-spacing:-.02em;\
+    color:var(--ink);margin:14px 0 10px;\
+    font-weight:700;\
+}\
+.px-error__lede{\
+    color:var(--ink-soft);font-size:1rem;line-height:1.65;\
+    margin:0 0 18px;max-width:60ch;\
+}\
+.px-error__lede code{font-size:.9em}\
+\
+.px-badge{\
+    display:inline-flex;align-items:center;gap:.45rem;\
+    padding:.35rem .7rem;border-radius:999px;\
+    font-size:.72rem;font-weight:600;\
+    letter-spacing:.08em;text-transform:uppercase;\
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
+}\
+.px-badge--danger{\
+    color:var(--danger-strong);\
+    background:var(--danger-soft);\
+    border:1px solid rgba(177,74,42,.18);\
+}\
+\
+.px-meta{\
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));\
+    gap:10px;margin:0;\
+    border-top:1px solid var(--border);padding-top:18px;\
+}\
+.px-meta__item{margin:0}\
+.px-meta dt{\
+    font-size:.7rem;font-weight:600;\
+    letter-spacing:.12em;text-transform:uppercase;\
+    color:var(--ink-muted);margin:0 0 6px;\
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
+}\
+.px-meta dd{margin:0;font-size:.92rem;color:var(--ink)}\
+.px-meta code{word-break:break-all}\
+\
+.px-panel{\
+    padding:24px 28px;\
+    background:var(--surface);\
+    border:1px solid var(--border);\
+    border-radius:var(--radius-lg);\
+    box-shadow:var(--shadow-sm);\
+}\
+.px-panel--accent{\
+    background:linear-gradient(180deg,rgba(37,111,90,.06),rgba(37,111,90,.02));\
+    border-color:rgba(37,111,90,.18);\
+}\
+.px-panel__head{margin-bottom:16px}\
+.px-panel__title{\
+    font-size:1rem;font-weight:600;color:var(--ink);\
+    letter-spacing:-.01em;margin:0 0 4px;\
+}\
+.px-panel__hint{\
+    margin:0;font-size:.88rem;color:var(--ink-muted);line-height:1.5;\
+}\
+\
+.px-fixes{\
+    list-style:none;padding:0;margin:0;\
+    display:flex;flex-direction:column;gap:10px;\
+    counter-reset:px-fix;\
+}\
+.px-fixes li{\
+    position:relative;\
+    padding:12px 14px 12px 44px;\
+    background:var(--surface-soft);\
+    border:1px solid var(--border);\
+    border-radius:var(--radius-md);\
+    font-size:.94rem;color:var(--ink-soft);line-height:1.55;\
+}\
+.px-fixes li::before{\
+    counter-increment:px-fix;content:counter(px-fix);\
+    position:absolute;left:12px;top:50%;transform:translateY(-50%);\
+    width:22px;height:22px;border-radius:50%;\
+    background:var(--accent-soft);color:var(--accent-strong);\
+    display:flex;align-items:center;justify-content:center;\
+    font-size:.72rem;font-weight:700;\
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
+}\
+.px-fixes li code{font-size:.88em}\
+\
+.px-action{\
+    display:flex;flex-wrap:wrap;align-items:center;gap:12px;\
+}\
+.px-action__form{margin:0}\
+.px-button{\
+    appearance:none;cursor:pointer;\
+    display:inline-flex;align-items:center;gap:.5rem;\
+    padding:10px 16px;border-radius:999px;\
+    font:600 .9rem/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,sans-serif;\
+    transition:transform .15s ease,box-shadow .15s ease,background .15s ease;\
+}\
+.px-button--primary{\
+    background:linear-gradient(135deg,#17342D,#2A6A58);\
+    color:#F9F6EF;border:1px solid rgba(0,0,0,.1);\
+    box-shadow:0 8px 20px rgba(20,46,39,.18);\
+}\
+.px-button--primary:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(20,46,39,.24)}\
+.px-button--primary:active{transform:translateY(0)}\
+.px-path{\
+    font-size:.85rem;padding:.35rem .65rem;\
+    word-break:break-all;\
+}\
+.px-action__footnote{\
+    margin:12px 0 0;font-size:.82rem;color:var(--ink-muted);\
+}\
+\
+.px-terminal{\
+    background:#0F1917;color:#E8F0EC;\
+    padding:16px 18px;\
+    border-radius:var(--radius-md);\
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
+    font-size:.85rem;line-height:1.8;\
+    border:1px solid rgba(255,255,255,.06);\
+    overflow-x:auto;margin:0;\
+}\
+.px-terminal code{background:transparent;color:inherit;padding:0;border:0;font-size:inherit}\
+.px-terminal__prompt{color:#6BAF97;margin-right:.5rem;user-select:none}\
+\
+.px-details{\
+    background:var(--surface);\
+    border:1px solid var(--border);\
+    border-radius:var(--radius-lg);\
+    box-shadow:var(--shadow-sm);\
+    overflow:hidden;\
+}\
+.px-details__summary{\
+    display:flex;align-items:center;justify-content:space-between;\
+    padding:16px 24px;cursor:pointer;\
+    font-size:.88rem;font-weight:600;color:var(--ink-soft);\
+    list-style:none;\
+}\
+.px-details__summary::-webkit-details-marker{display:none}\
+.px-details__chevron{transition:transform .2s ease;color:var(--ink-muted)}\
+.px-details[open] .px-details__chevron{transform:rotate(180deg)}\
+.px-raw{\
+    margin:0;padding:16px 24px 20px;\
+    background:var(--danger-soft);\
+    border-top:1px solid rgba(177,74,42,.14);\
+    color:var(--danger-strong);\
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
+    font-size:.82rem;line-height:1.6;\
+    white-space:pre-wrap;word-break:break-word;\
+}\
+\
+@media(max-width:600px){\
+    .px-error__hero{padding:22px}\
+    .px-panel{padding:18px 20px}\
+    .px-details__summary{padding:14px 18px}\
+    .px-raw{padding:14px 18px 16px}\
 }\
 ";
 
@@ -974,6 +1230,7 @@ mod tests {
             &target,
             ProxyErrorKind::Connect,
             "client error (Connect)",
+            None,
         );
 
         assert!(html.contains("Service Unreachable"));
@@ -993,10 +1250,28 @@ mod tests {
             &target,
             ProxyErrorKind::InvalidTargetUri,
             "Invalid URI: bad authority",
+            None,
         );
 
         assert!(html.contains("Invalid Route Target"));
         assert!(html.contains("localify route add demo.localify / 3000"));
         assert!(html.contains("Invalid URI: bad authority"));
+    }
+
+    #[test]
+    fn render_proxy_error_page_shows_open_in_editor_when_project_root_is_available() {
+        let target = ProxyTarget::parse("3000").unwrap();
+
+        let html = render_proxy_error_page(
+            "demo.localify",
+            &target,
+            ProxyErrorKind::Connect,
+            "client error (Connect)",
+            Some("/tmp/demo"),
+        );
+
+        assert!(html.contains("Open in editor"));
+        assert!(html.contains("/.localify/open-in-editor"));
+        assert!(html.contains("/tmp/demo"));
     }
 }

@@ -77,7 +77,14 @@ pub async fn run(verbose: bool, config_path: &Path, paths: &RoxyPaths) -> Result
 
     let registry = Arc::new(registry);
 
-    let server = Server::new(&config, paths, reload_rx, reload_tx.clone(), registry)?;
+    let server = Server::new(
+        &config,
+        config_path.to_path_buf(),
+        paths,
+        reload_rx,
+        reload_tx.clone(),
+        registry,
+    )?;
     let cancel = CancellationToken::new();
 
     // Spawn config file watcher for hot-reload

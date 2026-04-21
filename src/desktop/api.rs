@@ -29,12 +29,13 @@ use crate::desktop::dto::{
     DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
     FolderInitServiceDto, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
     InitProjectFromFolderResultDto, InitProjectRequest, InitProjectResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LogsDto, LogsRequest,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LogsDto, LogsRequest, NodeTrustDto,
     OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto,
     UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
 };
+use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
@@ -89,8 +90,8 @@ impl DesktopApi {
     pub fn bootstrap(&self) -> Result<BootstrapDto> {
         if let Some(helper) = self.connected_helper_client()? {
             let mut bootstrap = helper.get_bootstrap()?;
+            bootstrap.environment = self.environment();
             bootstrap.daemon.ca_installed = self.effective_desktop_ca_installed()?;
-            bootstrap.environment.cli_helper_ready = true;
             bootstrap.projects = self.enrich_projects_with_local_paths(bootstrap.projects)?;
             return Ok(bootstrap);
         }
@@ -108,7 +109,7 @@ impl DesktopApi {
     pub fn environment(&self) -> EnvironmentDto {
         EnvironmentDto {
             app_name: BRANDING.app_name.into(),
-            desktop_name: BRANDING.desktop_name.into(),
+            desktop_name: BRANDING.runtime_desktop_name(),
             config_path: self.config_path.display().to_string(),
             binary_path: self.binary_path.display().to_string(),
             binary_exists: self.binary_path.exists(),
@@ -116,6 +117,7 @@ impl DesktopApi {
             cli_helper_ready: self.direct_mode || self.cli_helper_ready(),
             cli_access_ready: self.cli_access_ready(),
             cli_command_path: self.cli_command_path().display().to_string(),
+            node_trust: self.node_trust_status_dto(),
         }
     }
 
@@ -125,6 +127,11 @@ impl DesktopApi {
         }
 
         self.install_cli_access()
+    }
+
+    pub fn setup_node_trust(&self) -> Result<NodeTrustDto> {
+        let setup = node_trust::install(&self.ca_cert_path())?;
+        Ok(map_node_trust_dto(setup.status, setup.already_ready, None))
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
@@ -615,11 +622,19 @@ impl DesktopApi {
         let config_store = self.config_store();
         let register_domain = RegisterDomain::new(&config_store, &certs);
         let unregister_domain = UnregisterDomain::new(&config_store, &certs);
-
-        let project = config_store.create_project(&request.name)?;
+        let InitProjectRequest {
+            name,
+            root_path,
+            services,
+        } = request;
+        let project = if let Some(root_path) = root_path.clone() {
+            config_store.create_project_with_root(&name, Some(root_path))?
+        } else {
+            config_store.create_project(&name)?
+        };
         let mut created_patterns = Vec::new();
 
-        for service in &request.services {
+        for service in &services {
             let pattern = DomainPattern::from_name(&service.domain, false)?;
             let route = parse_desktop_route(&service.target).map_err(|error| {
                 anyhow::anyhow!("Invalid target for '{}': {error}", service.domain)
@@ -649,8 +664,8 @@ impl DesktopApi {
         let has_reachable_domain = project_domain_summary(&config_store, &project.id)?.1;
 
         Ok(InitProjectResultDto {
-            project: map_project_info(project, request.services.len(), has_reachable_domain),
-            services: request.services,
+            project: map_project_info(project, services.len(), has_reachable_domain),
+            services,
             daemon_reloaded,
         })
     }
@@ -915,6 +930,9 @@ impl DesktopApi {
             result
                 .steps
                 .push(self.cli_access_step_with(|helper| helper.setup_cli_access()));
+            if let Some(step) = self.node_trust_step() {
+                result.steps.push(step);
+            }
 
             return Ok(result);
         }
@@ -940,7 +958,12 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
-        steps.push(self.cli_access_step_with(|_| self.install_cli_access()));
+        if !self.direct_mode {
+            steps.push(self.cli_access_step_with(|_| self.install_cli_access()));
+            if let Some(step) = self.node_trust_step() {
+                steps.push(step);
+            }
+        }
 
         Ok(InstallResultDto {
             lan_ip: result.lan_ip.to_string(),
@@ -983,6 +1006,9 @@ impl DesktopApi {
             let uid = current_uid()?;
 
             if let Some(step) = desktop_trust_step {
+                result.steps.push(step);
+            }
+            if let Some(step) = self.remove_node_trust_step() {
                 result.steps.push(step);
             }
 
@@ -1031,7 +1057,12 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
-        steps.push(self.remove_cli_access_step());
+        if !self.direct_mode {
+            steps.push(self.remove_cli_access_step());
+            if let Some(step) = self.remove_node_trust_step() {
+                steps.push(step);
+            }
+        }
 
         Ok(UninstallResultDto { steps })
     }
@@ -1497,6 +1528,96 @@ impl DesktopApi {
         }
     }
 
+    fn node_trust_status_dto(&self) -> NodeTrustDto {
+        let ca_cert_path = self.ca_cert_path();
+
+        match node_trust::status(&ca_cert_path) {
+            Ok(status) => {
+                let already_ready = status.ready;
+                map_node_trust_dto(status, already_ready, None)
+            }
+            Err(error) => NodeTrustDto {
+                ready: false,
+                already_ready: false,
+                ca_cert_path: ca_cert_path.display().to_string(),
+                shell_snippet_path: String::new(),
+                shell_integration_ready: false,
+                launchctl_ready: false,
+                last_error: Some(error.to_string()),
+            },
+        }
+    }
+
+    fn node_trust_step(&self) -> Option<StepDto> {
+        if self.direct_mode {
+            return None;
+        }
+
+        let label = Some("Enable Node.js certificate trust".into());
+
+        Some(match self.setup_node_trust() {
+            Ok(status) if status.already_ready => StepDto {
+                label,
+                status: "skipped".into(),
+                message: format!(
+                    "Node.js certificate trust was already enabled via {} and {}.",
+                    status.shell_snippet_path, status.ca_cert_path
+                ),
+            },
+            Ok(status) => StepDto {
+                label,
+                status: "success".into(),
+                message: format!(
+                    "Enabled Node.js certificate trust for new terminals and restarted apps using {}.",
+                    status.ca_cert_path
+                ),
+            },
+            Err(error) => StepDto {
+                label,
+                status: "warning".into(),
+                message: format!(
+                    "{} finished installing, but Node.js certificate trust could not be enabled automatically: {error}",
+                    BRANDING.app_name
+                ),
+            },
+        })
+    }
+
+    fn remove_node_trust_step(&self) -> Option<StepDto> {
+        if self.direct_mode {
+            return None;
+        }
+
+        let label = Some("Remove Node.js certificate trust".into());
+
+        Some(match node_trust::uninstall(&self.ca_cert_path()) {
+            Ok(removal) if removal.removed => StepDto {
+                label,
+                status: "success".into(),
+                message: format!(
+                    "Removed the {} Node.js trust integration from your user shell environment.",
+                    BRANDING.app_name
+                ),
+            },
+            Ok(_) => StepDto {
+                label,
+                status: "skipped".into(),
+                message: format!(
+                    "No {} Node.js trust integration was present for this user.",
+                    BRANDING.app_name
+                ),
+            },
+            Err(error) => StepDto {
+                label,
+                status: "warning".into(),
+                message: format!(
+                    "{} was uninstalled, but the Node.js trust integration could not be fully removed: {error}",
+                    BRANDING.app_name
+                ),
+            },
+        })
+    }
+
     fn connected_helper_client(&self) -> Result<Option<SystemHelperClient>> {
         if !self.should_use_system_helper() {
             return Ok(None);
@@ -1513,7 +1634,7 @@ impl DesktopApi {
     fn ensure_helper_running(&self) -> Result<SystemHelperClient> {
         let socket_path = self.helper_socket_path()?;
         let client = SystemHelperClient::new(socket_path.clone());
-        if client.ping().is_ok() {
+        if client.ping().is_ok() && self.helper_matches_binary_path()? {
             return Ok(client);
         }
 
@@ -1539,6 +1660,37 @@ impl DesktopApi {
             "{} system helper did not become ready in time.",
             BRANDING.app_name
         )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn helper_matches_binary_path(&self) -> Result<bool> {
+        let uid = current_uid()?;
+        let plist_path = PathBuf::from("/Library/LaunchDaemons").join(format!(
+            "{}.{}.plist",
+            BRANDING.helper_service_prefix(),
+            uid
+        ));
+
+        if !plist_path.exists() {
+            return Ok(false);
+        }
+
+        let plist = fs::read_to_string(&plist_path).with_context(|| {
+            format!(
+                "Failed to read the {} helper plist at {}",
+                BRANDING.app_name,
+                plist_path.display()
+            )
+        })?;
+
+        let expected_binary =
+            fs::canonicalize(&self.binary_path).unwrap_or_else(|_| self.binary_path.clone());
+        Ok(plist.contains(&escape_xml(&expected_binary.display().to_string())))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn helper_matches_binary_path(&self) -> Result<bool> {
+        Ok(true)
     }
 
     #[cfg(target_os = "macos")]
@@ -1969,6 +2121,32 @@ fn map_cli_access_step(label: Option<String>, result: Result<CliAccessDto>) -> S
             ),
         },
     }
+}
+
+fn map_node_trust_dto(
+    status: node_trust::NodeTrustStatus,
+    already_ready: bool,
+    last_error: Option<String>,
+) -> NodeTrustDto {
+    NodeTrustDto {
+        ready: status.ready,
+        already_ready,
+        ca_cert_path: status.ca_cert_path.display().to_string(),
+        shell_snippet_path: status.shell_snippet_path.display().to_string(),
+        shell_integration_ready: status.shell_integration_ready,
+        launchctl_ready: status.launchctl_ready,
+        last_error,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(target_os = "macos")]

@@ -694,7 +694,7 @@ function ActivateStep({
       icon: <CheckIcon className="size-4" />,
       title: "Create a local certificate authority",
       description:
-        "A private CA is generated on your machine and trusted by your system keychain so browsers can show a lock on local domains.",
+        "A private CA is generated on your machine and trusted by your system keychain so browsers, Node.js, and local dev tools can trust Localify domains.",
     },
     {
       icon: <ZapIcon className="size-4" />,

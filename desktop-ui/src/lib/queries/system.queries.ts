@@ -1,7 +1,12 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import { tauriClient } from "../tauri-client";
-import type { CliAccessDto, InstallResultDto, UninstallPreviewDto } from "../../types/roxy";
+import type {
+  CliAccessDto,
+  InstallResultDto,
+  NodeTrustDto,
+  UninstallPreviewDto,
+} from "../../types/roxy";
 import { configQueries } from "./config.queries";
 import { daemonQueries } from "./daemon.queries";
 import { domainQueries } from "./domain.queries";
@@ -40,6 +45,12 @@ export const systemMutations = {
   setupCliAccess: (queryClient: QueryClient) =>
     mutationOptions<CliAccessDto, Error, void>({
       mutationFn: () => tauriClient.setupCliAccess(),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
+  setupNodeTrust: (queryClient: QueryClient) =>
+    mutationOptions<NodeTrustDto, Error, void>({
+      mutationFn: () => tauriClient.setupNodeTrust(),
       onSuccess: async () =>
         invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
