@@ -3,7 +3,6 @@
 import { useState } from "react";
 
 import { ProjectsHeader } from "./projects-header";
-import { ProjectsLicenseBanner } from "./projects-license-banner";
 import { ProjectsList } from "./projects-list";
 
 export const ProjectsScreen = () => {
@@ -12,7 +11,7 @@ export const ProjectsScreen = () => {
   return (
     <div id="projects-screen" className="screen-wrapper space-y-6">
       <ProjectsHeader query={query} onQueryChange={setQuery} />
-      <ProjectsLicenseBanner />
+      {/* <ProjectsLicenseBanner /> */}
       <ProjectsList query={query} />
     </div>
   );
