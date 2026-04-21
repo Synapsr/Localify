@@ -37,4 +37,6 @@ export {
   Zap as ZapIcon,
   Code as CodeIcon,
   DangerTriangle as DangerTriangleIcon,
+  Lock as LockIcon,
+  ArrowRight as ArrowRightIcon,
 } from "@mynaui/icons-react";

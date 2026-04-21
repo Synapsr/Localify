@@ -23,12 +23,13 @@ use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::ProjectRootStore;
 use crate::desktop::dto::{
-    AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
-    DomainInfoDto, DomainPatternRequest, EnvironmentDto, FolderInitServiceDto,
-    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
-    InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto, LogsRequest,
+    ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
+    AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
+    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
+    DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
+    FolderInitServiceDto, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
+    InitProjectFromFolderResultDto, InitProjectRequest, InitProjectResultDto, InstallResultDto,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LogsDto, LogsRequest,
     OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto,
@@ -42,6 +43,11 @@ use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, ConfiguredProject};
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
+use crate::infrastructure::licensing::{
+    FREE_MAX_DOMAINS_PER_PROJECT, FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus,
+    build_offline_imported_license, current_machine_fingerprint, mask_license_key,
+    resolve_license_state,
+};
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::RoxyPaths;
@@ -49,7 +55,7 @@ use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::project_init::{
-    FolderInitSelection, apply_package_updates, detect_folder_init_plan,
+    FolderInitSelection, apply_local_app_updates, detect_folder_init_plan,
     resolve_folder_init_selection,
 };
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
@@ -93,6 +99,7 @@ impl DesktopApi {
             environment: self.environment(),
             config: self.read_config()?,
             daemon: self.daemon_status()?,
+            licensing: self.licensing_status()?,
             domains: self.list_domains()?,
             projects: self.list_projects()?,
         })
@@ -150,6 +157,228 @@ impl DesktopApi {
         config.validate()?;
         self.config_store().save(&config)?;
         Ok(map_config(self.config_path.as_path(), config))
+    }
+
+    pub fn licensing_status(&self) -> Result<crate::desktop::dto::LicensingDto> {
+        if let Some(helper) = self.connected_helper_client()? {
+            return helper.get_licensing_status();
+        }
+
+        let config = self.config_store().load()?;
+        let project_count = config.configured_projects().len();
+        let domain_count = config.configured_domains().len();
+        let current_machine = current_machine_fingerprint().ok();
+
+        Ok(map_licensing_status(
+            &config.licensing,
+            project_count,
+            domain_count,
+            None,
+            current_machine.as_ref(),
+        ))
+    }
+
+    pub fn update_keygen_settings(
+        &self,
+        request: KeygenSettingsUpdateRequest,
+    ) -> Result<crate::desktop::dto::LicensingDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .update_keygen_settings(request);
+        }
+
+        self.ensure_config_writable()?;
+        let licensing = self
+            .config_store()
+            .update_keygen_config(crate::config::KeygenConfig {
+                api_url: request.api_url.trim().to_string(),
+                account: request.account.trim().to_string(),
+                product: request
+                    .product
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                public_key: request
+                    .public_key
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            })?;
+        let config = self.config_store().load()?;
+        let current_machine = current_machine_fingerprint().ok();
+
+        Ok(map_licensing_status(
+            &licensing,
+            config.configured_projects().len(),
+            config.configured_domains().len(),
+            None,
+            current_machine.as_ref(),
+        ))
+    }
+
+    pub fn activate_license(
+        &self,
+        request: ActivateLicenseRequest,
+    ) -> Result<crate::desktop::dto::LicensingDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.activate_license(request);
+        }
+
+        self.ensure_config_writable()?;
+        let key = request.key.trim();
+        if key.is_empty() {
+            bail!("License key is required.");
+        }
+
+        let config_store = self.config_store();
+        let current = config_store.load()?;
+        let client = KeygenClient::new()?;
+        let machine = current_machine_fingerprint()
+            .context("Failed to identify this machine for Keygen activation")?;
+        let validation =
+            client.validate_and_activate_license_key(&current.licensing.keygen, key, &machine)?;
+
+        if !validation.valid {
+            bail!(validation.detail);
+        }
+
+        let licensing =
+            config_store.store_licensing(Some(validation.license), validation.offline_license)?;
+        let updated = config_store.load()?;
+
+        Ok(map_licensing_status(
+            &licensing,
+            updated.configured_projects().len(),
+            updated.configured_domains().len(),
+            None,
+            Some(&machine),
+        ))
+    }
+
+    pub fn clear_license(&self) -> Result<crate::desktop::dto::LicensingDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.clear_license();
+        }
+
+        self.ensure_config_writable()?;
+        let licensing = self.config_store().store_licensing(None, None)?;
+        let config = self.config_store().load()?;
+        let current_machine = current_machine_fingerprint().ok();
+
+        Ok(map_licensing_status(
+            &licensing,
+            config.configured_projects().len(),
+            config.configured_domains().len(),
+            None,
+            current_machine.as_ref(),
+        ))
+    }
+
+    pub fn refresh_license(&self) -> Result<crate::desktop::dto::LicensingDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.refresh_license();
+        }
+
+        self.ensure_config_writable()?;
+        let config_store = self.config_store();
+        let current = config_store.load()?;
+        let Some(existing_license) = current.licensing.license.clone() else {
+            let project_count = current.configured_projects().len();
+            let domain_count = current.configured_domains().len();
+            let current_machine = current_machine_fingerprint().ok();
+
+            return Ok(map_licensing_status(
+                &current.licensing,
+                project_count,
+                domain_count,
+                None,
+                current_machine.as_ref(),
+            ));
+        };
+
+        let client = KeygenClient::new()?;
+        let machine = current_machine_fingerprint()
+            .context("Failed to identify this machine for Keygen refresh")?;
+        let validation = client.validate_and_activate_license_key(
+            &current.licensing.keygen,
+            &existing_license.key,
+            &machine,
+        )?;
+
+        let mut stored = validation.license;
+        if stored.machine_id.is_none()
+            && existing_license.machine_fingerprint == stored.machine_fingerprint
+        {
+            stored.machine_id = existing_license.machine_id.clone();
+        }
+        if !validation.valid {
+            stored.validation_code = Some(validation.code.clone());
+            stored.validation_detail = Some(validation.detail.clone());
+        }
+
+        let offline_license = validation
+            .offline_license
+            .or(current.licensing.offline_license.clone());
+        let licensing = config_store.store_licensing(Some(stored), offline_license)?;
+        let updated = config_store.load()?;
+        let last_error = (!validation.valid).then_some(validation.detail);
+
+        Ok(map_licensing_status(
+            &licensing,
+            updated.configured_projects().len(),
+            updated.configured_domains().len(),
+            last_error,
+            Some(&machine),
+        ))
+    }
+
+    pub fn import_offline_license(
+        &self,
+        request: ImportOfflineLicenseRequest,
+    ) -> Result<crate::desktop::dto::LicensingDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .import_offline_license(request);
+        }
+
+        self.ensure_config_writable()?;
+        let certificate = request.certificate.trim();
+        if certificate.is_empty() {
+            bail!("Offline license certificate is required.");
+        }
+
+        let config_store = self.config_store();
+        let current = config_store.load()?;
+        let key = request
+            .key
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                current
+                    .licensing
+                    .license
+                    .as_ref()
+                    .map(|license| license.key.clone())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "A license key is required to import an offline Keygen license file."
+                )
+            })?;
+
+        let (license, offline_license) =
+            build_offline_imported_license(&current.licensing.keygen, certificate, &key)?;
+        let licensing = config_store.store_licensing(Some(license), Some(offline_license))?;
+        let updated = config_store.load()?;
+        let current_machine = current_machine_fingerprint().ok();
+
+        Ok(map_licensing_status(
+            &licensing,
+            updated.configured_projects().len(),
+            updated.configured_domains().len(),
+            None,
+            current_machine.as_ref(),
+        ))
     }
 
     pub fn daemon_status(&self) -> Result<DaemonStatusDto> {
@@ -485,14 +714,15 @@ impl DesktopApi {
         self.store_project_root_path(&init_result.project.id, &root_path)?;
         let mut project = init_result.project;
         project.root_path = Some(root_path.display().to_string());
-        let update_results = apply_package_updates(&resolved.package_updates);
+        let update_results =
+            apply_local_app_updates(&resolved.package_updates, &resolved.next_config_updates);
 
         Ok(InitProjectFromFolderResultDto {
             project,
             services: init_result.services,
             daemon_reloaded: init_result.daemon_reloaded,
-            updated_scripts: update_results.updated,
-            skipped_script_updates: update_results.skipped,
+            updated_files: update_results.updated,
+            skipped_file_updates: update_results.skipped,
         })
     }
 
@@ -1951,6 +2181,93 @@ fn path_as_utf8(path: &Path) -> Result<String> {
     path.to_str()
         .map(|value| value.to_string())
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8: {}", path.display()))
+}
+
+fn map_licensing_status(
+    licensing: &crate::config::LicensingConfig,
+    project_count: usize,
+    domain_count: usize,
+    last_error: Option<String>,
+    current_machine: Option<&crate::infrastructure::licensing::MachineFingerprint>,
+) -> crate::desktop::dto::LicensingDto {
+    let resolved = resolve_license_state(licensing);
+    let active_license =
+        resolved
+            .active_license
+            .as_ref()
+            .map(|license| crate::desktop::dto::ActiveLicenseDto {
+                key_masked: mask_license_key(&license.key),
+                license_id: license.license_id.clone(),
+                name: license.name.clone(),
+                expiry: license.expiry.clone(),
+                last_validated_at: license.last_validated_at.clone(),
+                validation_code: license.validation_code.clone(),
+                validation_detail: license.validation_detail.clone(),
+                machine_id: license.machine_id.clone(),
+                machine_fingerprint: license.machine_fingerprint.clone(),
+                machine_name: license.machine_name.clone(),
+                machine_hostname: license.machine_hostname.clone(),
+                machine_platform: license.machine_platform.clone(),
+                response_signature_verified: license.response_signature_verified,
+                response_signature_date: license.response_signature_date.clone(),
+            });
+    let offline_license =
+        resolved
+            .offline_license
+            .as_ref()
+            .map(|license| crate::desktop::dto::OfflineLicenseDto {
+                algorithm: license.algorithm.clone(),
+                issued: licensing
+                    .offline_license
+                    .as_ref()
+                    .and_then(|value| value.issued.clone()),
+                file_expiry: license.file_expiry.clone(),
+                license_id: Some(license.license_id.clone()),
+                name: license.name.clone(),
+                license_expiry: license.license_expiry.clone(),
+                plan: license.plan.clone(),
+                max_projects: license.max_projects,
+                max_domains_per_project: license.max_domains_per_project,
+            });
+    let configured = licensing.keygen.is_configured();
+    let status = match resolved.status {
+        ResolvedLicenseStatus::NotConfigured => "notConfigured",
+        ResolvedLicenseStatus::Unlicensed => "unlicensed",
+        ResolvedLicenseStatus::Licensed => "licensed",
+        ResolvedLicenseStatus::LicensedOffline => "licensedOffline",
+        ResolvedLicenseStatus::Invalid => "invalid",
+    };
+
+    crate::desktop::dto::LicensingDto {
+        status: status.into(),
+        configured,
+        api_url: licensing.keygen.effective_api_url().to_string(),
+        account: licensing.keygen.effective_account().to_string(),
+        product: licensing.keygen.effective_product().map(str::to_owned),
+        public_key: licensing.keygen.effective_public_key().map(str::to_owned),
+        limits: crate::desktop::dto::LicenseLimitsDto {
+            plan: resolved.limits.plan,
+            max_projects: resolved.limits.max_projects,
+            max_domains_per_project: resolved.limits.max_domains_per_project,
+        },
+        free_limits: crate::desktop::dto::LicenseLimitsDto {
+            plan: "Free".into(),
+            max_projects: Some(FREE_MAX_PROJECTS),
+            max_domains_per_project: Some(FREE_MAX_DOMAINS_PER_PROJECT),
+        },
+        project_count,
+        domain_count,
+        last_error: resolved.last_error.or(last_error),
+        current_machine: current_machine.map(|machine| crate::desktop::dto::MachineDto {
+            fingerprint: machine.fingerprint.clone(),
+            name: machine.name.clone(),
+            hostname: machine.hostname.clone(),
+            platform: machine.platform.clone(),
+        }),
+        active_license,
+        offline_cache_present: licensing.offline_license.is_some(),
+        offline_license,
+    }
 }
 
 fn map_config(config_path: &Path, config: Config) -> AppConfigDto {

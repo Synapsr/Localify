@@ -6,11 +6,11 @@ This document is the entry point for all architecture and convention decisions f
 
 ## Core Principles
 
-1. **Rust-first** — The core is a Rust binary (`src/`). The desktop UI is a thin Tauri shell that calls Rust commands via `invoke`. No business logic lives in the frontend.
-2. **No backend, no database, no network** — The UI talks to the Rust core through Tauri commands only. There is no HTTP client, no SQL driver, no ORM, no auth in `desktop-ui/`.
-3. **Type-safe end-to-end** — TypeScript strict mode in the UI. DTOs in [desktop-ui/src/types/roxy.ts](../desktop-ui/src/types/roxy.ts) mirror the serializable types returned by `DesktopApi` (see [src/desktop/](../src/desktop/)).
+1. **Rust-first desktop core** — The core is a Rust binary (`src/`). The desktop UI is a thin Tauri shell that calls Rust commands via `invoke`. No business logic lives in the desktop frontend.
+2. **Desktop UI stays local-only** — The desktop UI talks to the Rust core through Tauri commands only. There is no HTTP client, no SQL driver, no ORM, no auth in `desktop-ui/`.
+3. **Type-safe end-to-end** — TypeScript strict mode in the desktop UI. DTOs in [desktop-ui/src/types/roxy.ts](../desktop-ui/src/types/roxy.ts) mirror the serializable types returned by `DesktopApi` (see [src/desktop/](../src/desktop/)).
 4. **Minimal abstraction** — No premature helpers or wrappers. Three similar lines beats one clever abstraction.
-5. **Single app, no monorepo** — `desktop-ui/` is a single Vite app. If code needs to be reused, it lives in `desktop-ui/src/lib/`. No `packages/`, no workspaces.
+5. **Minimal workspace, separate apps** — The repo can host multiple app entry points when needed. Today that means the Tauri desktop shell plus a standalone marketing web app under `apps/web`. There are still no shared packages or internal frontend libraries.
 6. **Convention over configuration** — File naming, folder structure, and patterns are standardized so any contributor (or agent) can navigate the code instantly.
 
 ## Imposed Stack
@@ -44,10 +44,19 @@ Rust conventions (DDD layer rules, module layout, YAGNI, testing strategy) live 
 | UI primitives | shadcn/ui on top of Base UI (`@base-ui-components/react`) | Yes |
 | Native bridge | `@tauri-apps/api` via typed wrappers in `lib/tauri-client.ts` | Yes |
 
+### Marketing web app (`apps/web`)
+
+| Concern | Technology | Non-negotiable |
+|---------|-----------|----------------|
+| Framework | Next.js App Router | Yes |
+| Language | TypeScript (strict) | Yes |
+| Styling | App-local CSS / CSS Modules | Yes |
+| Runtime | Static-first marketing pages | Yes |
+
 ### Explicitly excluded
 
 - No database, no ORM, no SQL driver in the UI — persistence belongs to Rust
-- No monorepo, no workspaces, no `packages/` — `desktop-ui/` is a single Vite app
+- No shared internal packages or component libraries — keep the workspace shallow and app boundaries explicit
 - No auth, no network fetches, no HTTP client — the UI only speaks Tauri `invoke`
 - No i18n in v1
 - No shared component library package — shadcn primitives (Base UI under the hood) are copied into `desktop-ui/src/components/ui/` and live in the repo
@@ -88,6 +97,7 @@ When asked to commit or review code:
 1. Run `git diff --staged` (or `git diff` if nothing staged) to see what changed.
 2. Categorize changed files:
    - `desktop-ui/**/*.{ts,tsx,css}` → load the relevant `code-review/` files.
+   - `apps/web/**/*.{ts,tsx,css}` → treat as standalone Next.js marketing code; keep it isolated from desktop concerns.
    - `src/**/*.rs`, `src-tauri/**/*.rs`, `Cargo.toml` → follow [../CLAUDE.md](../CLAUDE.md).
 3. Load **only** the `code-review/` files relevant to the touched domains.
 4. Always load `code-review/08-checklist.md` as a final pass for UI changes.

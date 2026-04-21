@@ -7,9 +7,17 @@ use commands::AppState;
 use roxy::branding::BRANDING;
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::StartDaemonRequest;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Runtime, WindowEvent};
+#[cfg(target_os = "macos")]
+use tauri::{
+    async_runtime,
+    menu::{AboutMetadata, Submenu},
+};
+#[cfg(target_os = "macos")]
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 const TRAY_ID: &str = "localify-tray";
 const TRAY_OPEN: &str = "tray-open";
@@ -17,10 +25,21 @@ const TRAY_START: &str = "tray-start";
 const TRAY_STOP: &str = "tray-stop";
 const TRAY_RESTART: &str = "tray-restart";
 const TRAY_QUIT: &str = "tray-quit";
+#[cfg(target_os = "macos")]
+const MENU_CHECK_UPDATES: &str = "menu-check-updates";
+const TRAY_TEMPLATE_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
+const UPDATER_PUBLIC_KEY: &str = include_str!("../updater.pub");
+const UPDATER_ENDPOINT: Option<&str> = option_env!("LOCALIFY_UPDATER_ENDPOINT");
 
 #[derive(Default)]
 struct TrayState {
     quitting: AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct UpdateMenuState {
+    checking: AtomicBool,
 }
 
 fn default_config_path() -> PathBuf {
@@ -68,6 +87,20 @@ fn sibling_binary_path() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
+pub(crate) fn updater_endpoint() -> Option<&'static str> {
+    if cfg!(debug_assertions) {
+        return None;
+    }
+
+    UPDATER_ENDPOINT
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn updater_public_key() -> &'static str {
+    UPDATER_PUBLIC_KEY.trim()
+}
+
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
@@ -86,6 +119,13 @@ fn daemon_running<R: Runtime>(app: &AppHandle<R>) -> bool {
         .daemon_status()
         .map(|status| status.running)
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn update_check_running<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.state::<UpdateMenuState>()
+        .checking
+        .load(Ordering::Relaxed)
 }
 
 fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -155,6 +195,212 @@ fn run_tray_action<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
     }
 }
 
+#[cfg(target_os = "macos")]
+fn build_about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
+    AboutMetadata {
+        name: Some(BRANDING.app_name.into()),
+        version: Some(app.package_info().version.to_string()),
+        copyright: app.config().bundle.copyright.clone(),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let checking = update_check_running(app);
+    let update_label = if checking {
+        "Checking for Updates…"
+    } else {
+        "Check for Updates…"
+    };
+
+    let check_updates = MenuItem::with_id(
+        app,
+        MENU_CHECK_UPDATES,
+        update_label,
+        !checking,
+        None::<&str>,
+    )?;
+    let app_menu = Submenu::with_items(
+        app,
+        BRANDING.app_name,
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(build_about_metadata(app)))?,
+            &PredefinedMenuItem::separator(app)?,
+            &check_updates,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+}
+
+#[cfg(target_os = "macos")]
+fn sync_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    app.set_menu(build_app_menu(app)?)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_app_menu<R: Runtime>(_app: &AppHandle<R>) -> tauri::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn show_message_dialog<R: Runtime>(
+    app: &AppHandle<R>,
+    title: &str,
+    message: String,
+    kind: MessageDialogKind,
+) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(kind)
+        .buttons(MessageDialogButtons::Ok)
+        .blocking_show();
+}
+
+#[cfg(target_os = "macos")]
+fn confirm_update_install<R: Runtime>(
+    app: &AppHandle<R>,
+    version: &str,
+    current_version: &str,
+) -> bool {
+    let message = format!(
+        "Version {version} is available.\n\nCurrent version: {current_version}\n\nInstall the update now? Localify will restart automatically when it finishes."
+    );
+
+    app.dialog()
+        .message(message)
+        .title("Update Available")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Install".into(),
+            "Not now".into(),
+        ))
+        .blocking_show()
+}
+
+#[cfg(target_os = "macos")]
+fn finish_update_check<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<UpdateMenuState>()
+        .checking
+        .store(false, Ordering::Relaxed);
+    let _ = sync_app_menu(app);
+}
+
+#[cfg(target_os = "macos")]
+async fn run_manual_update_check<R: Runtime>(app: AppHandle<R>) {
+    let result = run_manual_update_check_inner(app.clone()).await;
+    if let Err(error) = result {
+        show_message_dialog(&app, "Update Check Failed", error, MessageDialogKind::Error);
+        finish_update_check(&app);
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn run_manual_update_check_inner<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let current_version = app.package_info().version.to_string();
+    let update_check = commands::check_app_update_with_handle(app.clone()).await?;
+
+    if !update_check.configured {
+        show_message_dialog(
+            &app,
+            "Updates Unavailable",
+            "Desktop updates are not configured for this build.".into(),
+            MessageDialogKind::Info,
+        );
+        finish_update_check(&app);
+        return Ok(());
+    }
+
+    let Some(update) = update_check.update else {
+        show_message_dialog(
+            &app,
+            "You're Up to Date",
+            format!("Localify Desktop {current_version} is already the latest version."),
+            MessageDialogKind::Info,
+        );
+        finish_update_check(&app);
+        return Ok(());
+    };
+
+    if !confirm_update_install(&app, &update.version, &current_version) {
+        finish_update_check(&app);
+        return Ok(());
+    }
+
+    commands::install_app_update_with_handle(app).await
+}
+
+#[cfg(target_os = "macos")]
+fn run_app_menu_action<R: Runtime + 'static>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    if id != MENU_CHECK_UPDATES {
+        return Ok(());
+    }
+
+    if update_check_running(app) {
+        let app = app.clone();
+        async_runtime::spawn(async move {
+            show_message_dialog(
+                &app,
+                "Update Check In Progress",
+                "Localify is already checking for an update.".into(),
+                MessageDialogKind::Info,
+            );
+        });
+        return Ok(());
+    }
+
+    app.state::<UpdateMenuState>()
+        .checking
+        .store(true, Ordering::Relaxed);
+    if let Err(error) = sync_app_menu(app) {
+        finish_update_check(app);
+        return Err(error.to_string());
+    }
+
+    let app = app.clone();
+    async_runtime::spawn(async move {
+        run_manual_update_check(app).await;
+    });
+
+    Ok(())
+}
+
 fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = build_tray_menu(app)?;
 
@@ -168,30 +414,60 @@ fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         });
 
-    if let Some(icon) = app.default_window_icon().cloned() {
-        tray = tray.icon(icon);
-    }
-
     #[cfg(target_os = "macos")]
     {
-        tray = tray.icon_as_template(true);
+        tray = tray
+            .icon(Image::from_bytes(TRAY_TEMPLATE_ICON)?)
+            .icon_as_template(true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
     }
 
     tray.build(app)?;
     Ok(())
 }
 
+fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    sync_app_menu(app)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let api = DesktopApi::new(default_config_path(), default_binary_path());
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        .on_menu_event(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = run_app_menu_action(app, event.id().as_ref()) {
+                eprintln!("app menu action '{}' failed: {error}", event.id().as_ref());
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { api })
-        .manage(TrayState::default())
-        .setup(|app| Ok(setup_tray(app.handle())?))
+        .manage(TrayState::default());
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.manage(UpdateMenuState::default());
+
+    builder
+        .setup(|app| {
+            app.handle().plugin(
+                tauri_plugin_updater::Builder::new()
+                    .pubkey(updater_public_key())
+                    .build(),
+            )?;
+            setup_app_menu(app.handle())?;
+            setup_tray(app.handle())?;
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -209,8 +485,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap,
+            commands::check_app_update,
+            commands::install_app_update,
             commands::get_config,
             commands::update_config,
+            commands::get_licensing_status,
+            commands::update_keygen_settings,
+            commands::activate_license,
+            commands::import_offline_license,
+            commands::clear_license,
+            commands::refresh_license,
             commands::get_daemon_status,
             commands::list_domains,
             commands::list_projects,

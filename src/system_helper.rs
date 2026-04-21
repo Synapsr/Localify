@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
-    AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest, InitProjectRequest,
-    InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LogsDto, LogsRequest,
-    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
+    AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
+    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
+    DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest, InitProjectResultDto,
+    InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto,
+    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
     RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
     RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
     UnregisterDomainResultDto, UpdateProjectRequest,
@@ -43,6 +44,18 @@ pub enum HelperCommand {
     CreateProjectWithDomains {
         request: CreateProjectWithDomainsRequest,
     },
+    GetLicensingStatus,
+    UpdateKeygenSettings {
+        request: KeygenSettingsUpdateRequest,
+    },
+    ActivateLicense {
+        request: ActivateLicenseRequest,
+    },
+    ImportOfflineLicense {
+        request: ImportOfflineLicenseRequest,
+    },
+    ClearLicense,
+    RefreshLicense,
     InitProject {
         request: InitProjectRequest,
     },
@@ -159,6 +172,36 @@ impl SystemHelperClient {
         request: CreateProjectWithDomainsRequest,
     ) -> Result<ProjectInfoDto> {
         self.send(HelperCommand::CreateProjectWithDomains { request })
+    }
+
+    pub fn get_licensing_status(&self) -> Result<LicensingDto> {
+        self.send(HelperCommand::GetLicensingStatus)
+    }
+
+    pub fn update_keygen_settings(
+        &self,
+        request: KeygenSettingsUpdateRequest,
+    ) -> Result<LicensingDto> {
+        self.send(HelperCommand::UpdateKeygenSettings { request })
+    }
+
+    pub fn activate_license(&self, request: ActivateLicenseRequest) -> Result<LicensingDto> {
+        self.send(HelperCommand::ActivateLicense { request })
+    }
+
+    pub fn import_offline_license(
+        &self,
+        request: ImportOfflineLicenseRequest,
+    ) -> Result<LicensingDto> {
+        self.send(HelperCommand::ImportOfflineLicense { request })
+    }
+
+    pub fn clear_license(&self) -> Result<LicensingDto> {
+        self.send(HelperCommand::ClearLicense)
+    }
+
+    pub fn refresh_license(&self) -> Result<LicensingDto> {
+        self.send(HelperCommand::RefreshLicense)
     }
 
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
@@ -394,6 +437,24 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::CreateProjectWithDomains { request } => {
             serde_json::to_value(api.create_project_with_domains(request)?).map_err(Into::into)
+        }
+        HelperCommand::GetLicensingStatus => {
+            serde_json::to_value(api.licensing_status()?).map_err(Into::into)
+        }
+        HelperCommand::UpdateKeygenSettings { request } => {
+            serde_json::to_value(api.update_keygen_settings(request)?).map_err(Into::into)
+        }
+        HelperCommand::ActivateLicense { request } => {
+            serde_json::to_value(api.activate_license(request)?).map_err(Into::into)
+        }
+        HelperCommand::ImportOfflineLicense { request } => {
+            serde_json::to_value(api.import_offline_license(request)?).map_err(Into::into)
+        }
+        HelperCommand::ClearLicense => {
+            serde_json::to_value(api.clear_license()?).map_err(Into::into)
+        }
+        HelperCommand::RefreshLicense => {
+            serde_json::to_value(api.refresh_license()?).map_err(Into::into)
         }
         HelperCommand::InitProject { request } => {
             serde_json::to_value(api.init_project(request)?).map_err(Into::into)

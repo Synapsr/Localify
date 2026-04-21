@@ -1,22 +1,114 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
-    AddRouteRequest, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
-    DomainInfoDto, DomainPatternRequest, InitProjectFromFolderRequest,
-    InitProjectFromFolderResultDto, InstallResultDto, KillPortConflictRequest, LogsDto,
-    LogsRequest, OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
+    AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
+    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
+    DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest,
+    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto, LogsRequest,
+    OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
     UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
 };
+use serde::Serialize;
+use tauri::{AppHandle, Runtime};
+use tauri_plugin_updater::UpdaterExt;
 
 pub struct AppState {
     pub api: DesktopApi,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfoDto {
+    pub version: String,
+    pub notes: Option<String>,
+    pub pub_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateCheckDto {
+    pub configured: bool,
+    pub update: Option<AppUpdateInfoDto>,
+}
+
 fn map_error<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+fn build_updater<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<tauri_plugin_updater::Updater>, String> {
+    let Some(endpoint) = super::updater_endpoint() else {
+        return Ok(None);
+    };
+
+    let updater = app
+        .updater_builder()
+        .pubkey(super::updater_public_key())
+        .endpoints(vec![tauri::Url::parse(endpoint).map_err(map_error)?])
+        .map_err(map_error)?
+        .build()
+        .map_err(map_error)?;
+
+    Ok(Some(updater))
+}
+
+pub(crate) async fn check_app_update_with_handle<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<AppUpdateCheckDto, String> {
+    let Some(updater) = build_updater(&app)? else {
+        return Ok(AppUpdateCheckDto {
+            configured: false,
+            update: None,
+        });
+    };
+
+    let update = updater
+        .check()
+        .await
+        .map_err(map_error)?
+        .map(|update| AppUpdateInfoDto {
+            version: update.version.to_string(),
+            notes: update.body,
+            pub_date: update.date.map(|value| value.to_string()),
+        });
+
+    Ok(AppUpdateCheckDto {
+        configured: true,
+        update,
+    })
+}
+
+pub(crate) async fn install_app_update_with_handle<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let Some(updater) = build_updater(&app)? else {
+        return Err("Desktop updater is not configured for this build.".into());
+    };
+
+    let Some(update) = updater.check().await.map_err(map_error)? else {
+        return Ok(());
+    };
+
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(map_error)?;
+
+    app.restart()
+}
+
+#[tauri::command]
+pub async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateCheckDto, String> {
+    check_app_update_with_handle(app).await
+}
+
+#[tauri::command]
+pub async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
+    install_app_update_with_handle(app).await
 }
 
 #[tauri::command]
@@ -35,6 +127,45 @@ pub fn update_config(
     request: ConfigUpdateRequest,
 ) -> Result<AppConfigDto, String> {
     state.api.update_config(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn get_licensing_status(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
+    state.api.licensing_status().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn update_keygen_settings(
+    state: tauri::State<'_, AppState>,
+    request: KeygenSettingsUpdateRequest,
+) -> Result<LicensingDto, String> {
+    state.api.update_keygen_settings(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn activate_license(
+    state: tauri::State<'_, AppState>,
+    request: ActivateLicenseRequest,
+) -> Result<LicensingDto, String> {
+    state.api.activate_license(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn import_offline_license(
+    state: tauri::State<'_, AppState>,
+    request: ImportOfflineLicenseRequest,
+) -> Result<LicensingDto, String> {
+    state.api.import_offline_license(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn clear_license(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
+    state.api.clear_license().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn refresh_license(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
+    state.api.refresh_license().map_err(map_error)
 }
 
 #[tauri::command]

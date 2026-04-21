@@ -91,8 +91,86 @@ export interface BootstrapDto {
   environment: EnvironmentDto;
   config: AppConfigDto;
   daemon: DaemonStatusDto;
+  licensing: LicensingDto;
   domains: DomainInfoDto[];
   projects: ProjectInfoDto[];
+}
+
+export interface LicenseLimitsDto {
+  plan: string;
+  maxProjects: number | null;
+  maxDomainsPerProject: number | null;
+}
+
+export interface MachineDto {
+  fingerprint: string;
+  name: string | null;
+  hostname: string | null;
+  platform: string;
+}
+
+export interface ActiveLicenseDto {
+  keyMasked: string;
+  licenseId: string;
+  name: string | null;
+  expiry: string | null;
+  lastValidatedAt: string | null;
+  validationCode: string | null;
+  validationDetail: string | null;
+  machineId: string | null;
+  machineFingerprint: string | null;
+  machineName: string | null;
+  machineHostname: string | null;
+  machinePlatform: string | null;
+  responseSignatureVerified: boolean;
+  responseSignatureDate: string | null;
+}
+
+export interface OfflineLicenseDto {
+  algorithm: string;
+  issued: string | null;
+  fileExpiry: string | null;
+  licenseId: string | null;
+  name: string | null;
+  licenseExpiry: string | null;
+  plan: string | null;
+  maxProjects: number | null;
+  maxDomainsPerProject: number | null;
+}
+
+export interface LicensingDto {
+  status:
+    | "notConfigured"
+    | "unlicensed"
+    | "licensed"
+    | "licensedOffline"
+    | "invalid"
+    | string;
+  configured: boolean;
+  apiUrl: string;
+  account: string;
+  product: string | null;
+  publicKey: string | null;
+  limits: LicenseLimitsDto;
+  freeLimits: LicenseLimitsDto;
+  projectCount: number;
+  domainCount: number;
+  lastError: string | null;
+  currentMachine: MachineDto | null;
+  activeLicense: ActiveLicenseDto | null;
+  offlineCachePresent: boolean;
+  offlineLicense: OfflineLicenseDto | null;
+}
+
+export interface AppUpdateInfoDto {
+  version: string;
+  notes: string | null;
+  pubDate: string | null;
+}
+
+export interface AppUpdateCheckDto {
+  configured: boolean;
+  update: AppUpdateInfoDto | null;
 }
 
 export interface StepDto {
@@ -141,6 +219,22 @@ export interface RegisterDomainRequest {
   wildcard: boolean;
   routes: string[];
   projectId?: string | null;
+}
+
+export interface KeygenSettingsUpdateRequest {
+  apiUrl: string;
+  account: string;
+  product?: string | null;
+  publicKey?: string | null;
+}
+
+export interface ActivateLicenseRequest {
+  key: string;
+}
+
+export interface ImportOfflineLicenseRequest {
+  certificate: string;
+  key?: string | null;
 }
 
 export interface CreateProjectRequest {
@@ -234,8 +328,8 @@ export interface InitProjectFromFolderResultDto {
   project: ProjectInfoDto;
   services: InitProjectServiceRequest[];
   daemonReloaded: boolean;
-  updatedScripts: string[];
-  skippedScriptUpdates: string[];
+  updatedFiles: string[];
+  skippedFileUpdates: string[];
 }
 
 export interface DomainPatternRequest {

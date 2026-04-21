@@ -66,7 +66,7 @@ pnpm tauri:dev
 
 The packaged desktop app needs the `localify` CLI inside the bundle. The
 packaging script now builds that CLI as a Tauri sidecar automatically, then
-produces a macOS app bundle and DMG.
+produces a macOS app bundle, updater archive, and DMG.
 
 ```bash
 pnpm tauri:build
@@ -76,9 +76,128 @@ Artifacts are written under:
 
 - `src-tauri/target/release/bundle/macos/`
 - `src-tauri/target/release/bundle/dmg/`
+- `dist/updates/` when updater publishing is configured
 
 If you need to override the CLI path while testing a packaged build, set
 `LOCALIFY_CLI_PATH`.
+
+## Desktop Versioning
+
+The desktop release version is managed from the repo-root `package.json` and
+then synced to the two Tauri/Rust files that also need an explicit version.
+
+Use:
+
+```bash
+pnpm version:desktop -- 0.1.2
+```
+
+That updates:
+
+- `package.json`
+- `src-tauri/tauri.conf.json`
+- `src-tauri/Cargo.toml`
+
+`pnpm tauri:build` now validates that those three files stay aligned before it
+starts packaging. If they drift, the build exits early and tells you to rerun
+the sync command.
+
+## Self-Hosted Desktop Updates
+
+The desktop app can now check for a newer signed build during startup and
+install it automatically. This does not require GitHub Releases or GitHub
+Actions, but it does require Tauri updater artifacts and a separate updater
+signing keypair.
+
+Generate the updater key once on your Mac:
+
+```bash
+pnpm tauri signer generate -w ~/.tauri/localify-updater.key
+```
+
+Commit the generated public key to `src-tauri/updater.pub`, then keep the
+private key safe. Existing installs can only trust future updates signed with
+that same private key.
+
+Add these updater values to `.env` for local release builds:
+
+- `LOCALIFY_UPDATER_BASE_URL=https://downloads.example.com`
+- `LOCALIFY_UPDATER_ENDPOINT=https://downloads.example.com/latest.json` optional
+- `TAURI_SIGNING_PRIVATE_KEY=~/.tauri/localify-updater.key` optional when using the default path
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` optional if you password-protect the updater key
+
+`pnpm tauri:build` now loads `.env`, defaults `TAURI_SIGNING_PRIVATE_KEY` to
+`~/.tauri/localify-updater.key` when present, and does the full local release
+flow. If `TAURI_SIGNING_PRIVATE_KEY` points at a local file, the wrapper reads
+the key content before invoking Tauri:
+
+- build the `.app`, `.app.tar.gz`, `.app.tar.gz.sig`, and `.dmg`
+- sign and notarize the macOS app when Apple env vars are present
+- publish `dist/updates/latest.json`
+- copy the updater archive and signature to `dist/updates/<version>/`
+
+`latest.json` is emitted in Tauri's static updater format, so you can upload
+`dist/updates/` directly to any HTTPS host, object storage bucket, or CDN.
+The packaged app reads the compiled-in update endpoint and checks it on startup
+before showing the main UI.
+
+If you need to republish the manifest from existing artifacts:
+
+```bash
+pnpm desktop:publish-updater
+```
+
+## Publish To Cloudflare R2
+
+The simplest production hosting setup for Localify updates is:
+
+- one public R2 bucket
+- one custom domain such as `downloads.localify.app`
+- the generated static updater files uploaded as plain objects
+
+Tauri only needs HTTPS access to:
+
+- `latest.json`
+- `<version>/localify-desktop.app.tar.gz`
+- `<version>/localify-desktop.app.tar.gz.sig`
+
+Cloudflare setup:
+
+1. Create an R2 bucket, for example `localify-updates`
+2. Connect a custom domain to that bucket, for example `downloads.localify.app`
+3. Authenticate Wrangler locally with `pnpm dlx wrangler login`
+
+Add these values to `.env`:
+
+- `LOCALIFY_UPDATER_BASE_URL=https://downloads.localify.app`
+- `LOCALIFY_R2_BUCKET=localify-updates`
+- `LOCALIFY_R2_JURISDICTION=` optional, only if your bucket uses a specific jurisdiction
+
+Build the release locally:
+
+```bash
+pnpm tauri:build
+```
+
+That generates the updater payload in `dist/updates/`. Then upload it to R2:
+
+```bash
+pnpm publish:update:r2
+```
+
+The upload script pushes versioned artifacts first and `latest.json` last, so
+clients never see a new manifest before the matching payload exists in R2.
+
+If you want to inspect the exact Wrangler commands before a real upload:
+
+```bash
+pnpm desktop:publish-r2 -- --dry-run
+```
+
+The script uses `wrangler r2 object put` with explicit metadata:
+
+- `latest.json` gets `Cache-Control: no-store, no-cache, must-revalidate`
+- updater archives get `Cache-Control: public, max-age=31536000, immutable`
 
 ## Sign And Notarize
 
@@ -93,26 +212,36 @@ Local build prerequisites:
 - the signing identity available via `security find-identity -v -p codesigning`
 - notarization credentials configured through Tauri env vars
 
-Recommended notarization auth for CI is the App Store Connect API:
+This repo now uses the Apple ID notarization flow for both local builds and CI:
 
 - `APPLE_SIGNING_IDENTITY`
-- `APPLE_API_ISSUER`
-- `APPLE_API_KEY`
-- `APPLE_API_KEY_PATH`
+- `APPLE_ID`
+- `APPLE_PASSWORD`
+- `APPLE_TEAM_ID`
+
+Optional when the Apple account is attached to multiple teams:
+
+- `APPLE_PROVIDER_SHORT_NAME`
 
 For local notarized builds on your Mac:
 
 ```bash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export APPLE_API_ISSUER="..."
-export APPLE_API_KEY="..."
-export APPLE_API_KEY_PATH="$HOME/private_keys/AuthKey_XXXXXX.p8"
+export APPLE_ID="you@example.com"
+export APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+export APPLE_TEAM_ID="ABCDE12345"
 
 pnpm tauri:build
-bash scripts/verify-macos-signing.sh \
-  "src-tauri/target/release/bundle/macos/Localify Desktop.app" \
-  "$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name 'Localify Desktop_*.dmg' | head -n 1)"
 ```
+
+`pnpm tauri:build` now does the full macOS post-processing automatically when
+those env vars are present:
+
+- build the `.app` and `.dmg`
+- let Tauri sign + notarize the `.app`
+- submit the `.dmg` to `notarytool` if it is not already stapled
+- staple the `.dmg`
+- verify both artifacts with `codesign`, `spctl`, and `stapler`
 
 The verification script checks:
 
@@ -121,6 +250,12 @@ The verification script checks:
 - `xcrun stapler validate` on the `.app`
 - `codesign --verify` on the `.dmg`
 - `xcrun stapler validate` on the `.dmg`
+
+If you need to rerun only the post-processing on existing artifacts:
+
+```bash
+pnpm desktop:postprocess-macos-bundles
+```
 
 ## GitHub Actions
 
@@ -131,18 +266,23 @@ existing CLI release pipeline.
 Required GitHub secrets:
 
 - `APPLE_SIGNING_IDENTITY`
+- `APPLE_ID`
+- `APPLE_PASSWORD`
+- `APPLE_TEAM_ID`
 - `APPLE_CERTIFICATE`
 - `APPLE_CERTIFICATE_PASSWORD`
 - `KEYCHAIN_PASSWORD`
-- `APPLE_API_ISSUER`
-- `APPLE_API_KEY`
-- `APPLE_API_KEY_BASE64`
+- `APPLE_PROVIDER_SHORT_NAME` optional
 
 Notes:
 
 - `APPLE_CERTIFICATE` should be the base64-encoded exported `.p12`
-- `APPLE_API_KEY_BASE64` should be the base64-encoded contents of the
-  downloaded App Store Connect `.p8` key
+- `APPLE_PASSWORD` must be an Apple app-specific password, not your main Apple
+  account password
+- `APPLE_TEAM_ID` is the Developer Team ID shown on your Apple Developer
+  membership page
+- `APPLE_PROVIDER_SHORT_NAME` is only needed if notarization complains about
+  multiple teams/providers on the same Apple account
 - the workflow uploads a notarized `.app` and `.dmg` as build artifacts
 
 Useful helper commands:
@@ -150,9 +290,6 @@ Useful helper commands:
 ```bash
 # Export your signing certificate from a local .p12 for GitHub Secrets
 openssl base64 -A -in /path/to/certificate.p12 -out apple-certificate-base64.txt
-
-# Convert the App Store Connect private key for GitHub Secrets
-base64 -i /path/to/AuthKey_XXXXXX.p8 | tr -d '\n' > apple-api-key-base64.txt
 ```
 
 ## Frontend Files

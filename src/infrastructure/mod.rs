@@ -4,6 +4,7 @@ pub mod dns;
 pub mod docker;
 pub mod file_security;
 pub mod filesystem;
+pub mod licensing;
 pub mod mgmt_client;
 pub mod network;
 pub mod paths;

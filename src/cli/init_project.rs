@@ -8,8 +8,9 @@ use crate::branding::BRANDING;
 use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
 use roxy::desktop::{DesktopApi, ProjectRootStore};
 use roxy::project_init::{
-    FolderInitSelection, FolderInitServicePlan, PackageScriptUpdate, ServicePlan,
-    apply_package_updates, build_init_plan, detect_folder_init_plan, resolve_folder_init_selection,
+    FolderInitSelection, FolderInitServicePlan, NextConfigUpdate, PackageScriptUpdate, ServicePlan,
+    apply_local_app_updates, build_init_plan, detect_folder_init_plan,
+    plan_current_dir_local_app_updates, resolve_folder_init_selection,
 };
 
 pub struct InitProjectArgs {
@@ -26,6 +27,7 @@ struct ResolvedInitProjectArgs {
     name: String,
     services: Vec<ServicePlan>,
     package_updates: Vec<PackageScriptUpdate>,
+    next_config_updates: Vec<NextConfigUpdate>,
 }
 
 pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
@@ -62,15 +64,16 @@ pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
         }
     }
 
-    let update_results = apply_package_updates(&resolved.package_updates);
+    let update_results =
+        apply_local_app_updates(&resolved.package_updates, &resolved.next_config_updates);
     if !update_results.updated.is_empty() {
-        println!("  Updated dev scripts:");
+        println!("  Updated local app files:");
         for updated in &update_results.updated {
             println!("    {updated}");
         }
     }
     if !update_results.skipped.is_empty() {
-        println!("  Skipped dev script updates:");
+        println!("  Skipped local app file updates:");
         for skipped in &update_results.skipped {
             println!("    {skipped}");
         }
@@ -127,6 +130,7 @@ fn resolve_args(args: InitProjectArgs) -> Result<ResolvedInitProjectArgs> {
             name,
             services: Vec::new(),
             package_updates: Vec::new(),
+            next_config_updates: Vec::new(),
         });
     }
 
@@ -148,6 +152,7 @@ fn resolve_non_interactive_args(
     name: String,
     args: InitProjectArgs,
 ) -> Result<ResolvedInitProjectArgs> {
+    let current_dir = env::current_dir().context("Failed to determine the current directory")?;
     let init_plan = build_init_plan(
         &name,
         args.domain,
@@ -157,11 +162,14 @@ fn resolve_non_interactive_args(
         args.api_target,
         args.project_only,
     )?;
+    let next_config_updates =
+        plan_current_dir_local_app_updates(&current_dir, &name, &init_plan.services)?;
 
     Ok(ResolvedInitProjectArgs {
         name,
         services: init_plan.services,
         package_updates: Vec::new(),
+        next_config_updates,
     })
 }
 
@@ -196,6 +204,7 @@ fn resolve_single_service_interactive(
         name,
         services: resolved.services,
         package_updates: resolved.package_updates,
+        next_config_updates: resolved.next_config_updates,
     })
 }
 
@@ -243,6 +252,7 @@ fn resolve_workspace_services_interactive(
         name,
         services: resolved.services,
         package_updates: resolved.package_updates,
+        next_config_updates: resolved.next_config_updates,
     })
 }
 

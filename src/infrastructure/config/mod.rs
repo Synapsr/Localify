@@ -2,11 +2,15 @@ mod dto;
 pub mod watcher;
 
 // Re-export shared config types so existing CLI/daemon code keeps compiling.
-pub use crate::config::{DaemonConfig, DockerConfig, RoxyPaths};
+pub use crate::config::{
+    DaemonConfig, DockerConfig, KeygenConfig, OfflineLicenseFile, RoxyPaths, StoredLicense,
+};
 
 use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository, RepositoryError};
+use crate::config::LicensingConfig as RootLicensingConfig;
 use crate::domain::value_objects::{RouteTarget, RouteTargetError};
 use crate::domain::{DomainPattern, DomainRegistration};
+use crate::infrastructure::licensing::plan_limits_for_license;
 use dto::{ProjectDto, RegistrationDto};
 use std::collections::HashMap;
 use std::fs;
@@ -51,6 +55,9 @@ pub enum ConfigError {
 
     #[error("Invalid project '{0}': {1}")]
     InvalidProject(String, String),
+
+    #[error("{0}")]
+    LicenseLimitExceeded(String),
 }
 
 #[allow(dead_code)]
@@ -81,6 +88,9 @@ pub struct Config {
 
     #[serde(default)]
     pub docker: DockerConfig,
+
+    #[serde(default)]
+    pub licensing: RootLicensingConfig,
 
     #[serde(default)]
     domains: HashMap<String, RegistrationDto>,
@@ -184,6 +194,20 @@ impl Config {
             .map(|project| project.enabled)
             .unwrap_or(true)
     }
+
+    fn license_limits(&self) -> LicenseLimits {
+        let derived = plan_limits_for_license(&self.licensing);
+        LicenseLimits {
+            max_projects: derived.max_projects,
+            max_domains_per_project: derived.max_domains_per_project,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LicenseLimits {
+    max_projects: Option<usize>,
+    max_domains_per_project: Option<usize>,
 }
 
 /// Validate that a static files target points to an existing directory.
@@ -238,6 +262,49 @@ impl ConfigStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn licensing_config(&self) -> Result<RootLicensingConfig, ConfigError> {
+        Ok(self.load()?.licensing)
+    }
+
+    #[allow(dead_code)]
+    pub fn update_keygen_config(
+        &self,
+        keygen: KeygenConfig,
+    ) -> Result<RootLicensingConfig, ConfigError> {
+        let mut config = self.load()?;
+        config.licensing.keygen = keygen;
+        config.licensing.license = None;
+        config.licensing.offline_license = None;
+        self.save(&config)?;
+        Ok(config.licensing)
+    }
+
+    pub fn store_licensing(
+        &self,
+        license: Option<StoredLicense>,
+        offline_license: Option<OfflineLicenseFile>,
+    ) -> Result<RootLicensingConfig, ConfigError> {
+        let mut config = self.load()?;
+        config.licensing.license = license;
+        config.licensing.offline_license = offline_license;
+        self.save(&config)?;
+        Ok(config.licensing)
+    }
+
+    #[allow(dead_code)]
+    pub fn store_license(
+        &self,
+        license: Option<StoredLicense>,
+    ) -> Result<RootLicensingConfig, ConfigError> {
+        let offline_license = if license.is_some() {
+            self.load()?.licensing.offline_license
+        } else {
+            None
+        };
+        self.store_licensing(license, offline_license)
+    }
+
     pub fn add_domain(&self, registration: DomainRegistration) -> Result<(), ConfigError> {
         self.add_domain_with_project(registration, None)
     }
@@ -259,6 +326,8 @@ impl ConfigStore {
         {
             return Err(ConfigError::ProjectNotFound(project_id.clone()));
         }
+
+        enforce_domain_limits(&config, project_id.as_deref(), None)?;
 
         let mut dto = RegistrationDto::from(registration);
         dto.project = project_id;
@@ -320,6 +389,8 @@ impl ConfigStore {
             return Err(ConfigError::ProjectNotFound(project_id.clone()));
         }
 
+        enforce_domain_limits(&config, project_id.as_deref(), Some(&key))?;
+
         let mut dto = RegistrationDto::from(registration);
         dto.project = project_id;
         config.domains.insert(key, dto);
@@ -374,6 +445,8 @@ impl ConfigStore {
         if config.projects.contains_key(&project_id) {
             return Err(ConfigError::ProjectExists(project_id));
         }
+
+        enforce_project_limit(&config)?;
 
         config.projects.insert(
             project_id.clone(),
@@ -455,6 +528,80 @@ impl ConfigStore {
         config.projects.remove(project_id);
         self.save(&config)
     }
+}
+
+fn enforce_project_limit(config: &Config) -> Result<(), ConfigError> {
+    let limits = config.license_limits();
+    let Some(max_projects) = limits.max_projects else {
+        return Ok(());
+    };
+
+    if config.projects.len() < max_projects {
+        return Ok(());
+    }
+
+    Err(ConfigError::LicenseLimitExceeded(format!(
+        "Free plan limit reached: up to {max_projects} projects are included. Activate a Keygen license to add more."
+    )))
+}
+
+fn enforce_domain_limits(
+    config: &Config,
+    project_id: Option<&str>,
+    excluding_domain_key: Option<&str>,
+) -> Result<(), ConfigError> {
+    let limits = config.license_limits();
+
+    if let Some(project_id) = project_id
+        && let Some(max_domains_per_project) = limits.max_domains_per_project
+    {
+        let current = config
+            .domains
+            .values()
+            .filter(|domain| domain.project.as_deref() == Some(project_id))
+            .filter(|domain| {
+                excluding_domain_key
+                    .map(|key| domain.pattern.display_pattern() != key)
+                    .unwrap_or(true)
+            })
+            .count();
+
+        if current >= max_domains_per_project {
+            return Err(ConfigError::LicenseLimitExceeded(format!(
+                "Plan limit reached: project '{project_id}' already has {max_domains_per_project} domains. Activate a Keygen license to add more."
+            )));
+        }
+    }
+
+    if project_id.is_none() {
+        let Some(max_projects) = limits.max_projects else {
+            return Ok(());
+        };
+        let Some(max_domains_per_project) = limits.max_domains_per_project else {
+            return Ok(());
+        };
+        let Some(max_total_domains) = max_projects.checked_mul(max_domains_per_project) else {
+            return Ok(());
+        };
+
+        let existing_domain_count = config
+            .domains
+            .keys()
+            .filter(|key| {
+                excluding_domain_key
+                    .map(|excluded| excluded != key.as_str())
+                    .unwrap_or(true)
+            })
+            .count();
+
+        if existing_domain_count >= max_total_domains {
+            return Err(ConfigError::LicenseLimitExceeded(format!(
+                "Free plan limit reached: up to {max_projects} projects with {max_domains_per_project} domains each are included. Activate a Keygen license to add more."
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -550,6 +697,7 @@ mod tests {
     use super::*;
     use crate::branding::BRANDING;
     use crate::domain::Route;
+    use serde_json::json;
 
     fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -820,5 +968,85 @@ mod tests {
         store.remove_project(&project.id).unwrap();
 
         assert!(store.list_projects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn free_plan_limits_projects() {
+        let (_dir, store) = temp_store();
+
+        store.create_project("One").unwrap();
+        store.create_project("Two").unwrap();
+        store.create_project("Three").unwrap();
+
+        let error = store.create_project("Four").unwrap_err();
+
+        assert!(matches!(error, ConfigError::LicenseLimitExceeded(_)));
+    }
+
+    #[test]
+    fn free_plan_limits_domains_per_project() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Demo").unwrap();
+
+        store
+            .add_domain_with_project(
+                proxy_registration("one.roxy", 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration("two.roxy", 3001),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let error = store
+            .add_domain_with_project(
+                proxy_registration("three.roxy", 3002),
+                Some(project.id.clone()),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ConfigError::LicenseLimitExceeded(_)));
+    }
+
+    #[test]
+    fn valid_keygen_license_overrides_free_limits() {
+        let (_dir, store) = temp_store();
+
+        store
+            .store_license(Some(StoredLicense {
+                key: "TEST-KEY-1234".into(),
+                license_id: "lic_123".into(),
+                name: Some("Pro".into()),
+                expiry: None,
+                plan: Some("Pro".into()),
+                max_projects: Some(5),
+                max_domains_per_project: Some(4),
+                validation_code: Some("VALID".into()),
+                validation_detail: Some("ok".into()),
+                last_validated_at: Some("now".into()),
+                machine_id: None,
+                machine_fingerprint: None,
+                machine_name: None,
+                machine_hostname: None,
+                machine_platform: None,
+                response_signature_verified: false,
+                response_signature_date: None,
+                metadata: json!({
+                    "plan": "Pro",
+                    "maxProjects": 5,
+                    "maxDomainsPerProject": 4
+                }),
+            }))
+            .unwrap();
+
+        store.create_project("One").unwrap();
+        store.create_project("Two").unwrap();
+        store.create_project("Three").unwrap();
+        store.create_project("Four").unwrap();
+
+        assert_eq!(store.list_projects().unwrap().len(), 4);
     }
 }

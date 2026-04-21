@@ -8,6 +8,7 @@ import { SettingsCli } from "./settings-cli";
 import { SettingsDeveloper } from "./settings-developer";
 import { SettingsHeader } from "./settings-header";
 import { SettingsHotkeys } from "./settings-hotkeys";
+import { SettingsLicensing } from "./settings-licensing";
 import { SettingsStatus } from "./settings-status";
 import { SettingsUninstall } from "./settings-uninstall";
 
@@ -21,6 +22,7 @@ export const SettingsScreen = () => {
       <SettingsHeader />
       <div className="space-y-8">
         <SettingsStatus />
+        <SettingsLicensing />
         <SettingsHotkeys />
         <SettingsCli />
         <SettingsUninstall />

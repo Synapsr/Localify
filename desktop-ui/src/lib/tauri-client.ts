@@ -5,14 +5,21 @@ import {
   detectProjectInitPlanRequestSchema,
   initProjectFromFolderRequestSchema,
 } from "./validators/validator.init-project-from-folder";
+import {
+  activateLicenseRequestSchema,
+  importOfflineLicenseRequestSchema,
+  keygenSettingsUpdateRequestSchema,
+} from "./validators/validator.license";
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import type {
+  ActivateLicenseRequest,
   AddRouteRequest,
   AssignDomainProjectRequest,
   AvailablePortDto,
   AppConfigDto,
+  AppUpdateCheckDto,
   BootstrapDto,
   CliAccessDto,
   ConfigUpdateRequest,
@@ -24,10 +31,13 @@ import type {
   DetectProjectInitPlanRequest,
   DomainInfoDto,
   DomainPatternRequest,
+  ImportOfflineLicenseRequest,
   InitProjectFromFolderRequest,
   InitProjectFromFolderResultDto,
   InstallResultDto,
+  KeygenSettingsUpdateRequest,
   KillPortConflictRequest,
+  LicensingDto,
   LogsDto,
   LogsRequest,
   OpenInEditorRequest,
@@ -88,8 +98,16 @@ function formatTauriError(error: unknown, command: string): string {
 
 export interface DesktopClient {
   getBootstrap(): Promise<BootstrapDto>;
+  checkAppUpdate(): Promise<AppUpdateCheckDto>;
+  installAppUpdate(): Promise<void>;
   getConfig(): Promise<AppConfigDto>;
   updateConfig(request: ConfigUpdateRequest): Promise<AppConfigDto>;
+  getLicensingStatus(): Promise<LicensingDto>;
+  updateKeygenSettings(request: KeygenSettingsUpdateRequest): Promise<LicensingDto>;
+  activateLicense(request: ActivateLicenseRequest): Promise<LicensingDto>;
+  importOfflineLicense(request: ImportOfflineLicenseRequest): Promise<LicensingDto>;
+  clearLicense(): Promise<LicensingDto>;
+  refreshLicense(): Promise<LicensingDto>;
   getDaemonStatus(): Promise<DaemonStatusDto>;
   listDomains(): Promise<DomainInfoDto[]>;
   listProjects(): Promise<ProjectInfoDto[]>;
@@ -129,8 +147,25 @@ export interface DesktopClient {
 export function createDesktopClient(): DesktopClient {
   return {
     getBootstrap: () => tauriInvoke("get_bootstrap"),
+    checkAppUpdate: () => tauriInvoke("check_app_update"),
+    installAppUpdate: () => tauriInvoke("install_app_update"),
     getConfig: () => tauriInvoke("get_config"),
     updateConfig: (request) => tauriInvoke("update_config", { request }),
+    getLicensingStatus: () => tauriInvoke("get_licensing_status"),
+    updateKeygenSettings: (request) =>
+      tauriInvoke("update_keygen_settings", {
+        request: keygenSettingsUpdateRequestSchema.parse(request),
+      }),
+    activateLicense: (request) =>
+      tauriInvoke("activate_license", {
+        request: activateLicenseRequestSchema.parse(request),
+      }),
+    importOfflineLicense: (request) =>
+      tauriInvoke("import_offline_license", {
+        request: importOfflineLicenseRequestSchema.parse(request),
+      }),
+    clearLicense: () => tauriInvoke("clear_license"),
+    refreshLicense: () => tauriInvoke("refresh_license"),
     getDaemonStatus: () => tauriInvoke("get_daemon_status"),
     listDomains: () => tauriInvoke("list_domains"),
     listProjects: () => tauriInvoke("list_projects"),

@@ -14,6 +14,12 @@ HTTPS for every local project.
 - ✓ Share work across devices
 - ✓ No nginx. No dnsmasq. No YAML.
 
+## Repository Layout
+
+- `src/`, `src-tauri/`, `desktop-ui/` — Rust core plus Tauri desktop app
+- `apps/web/` — Next.js marketing site for landing, pricing, and future checkout
+- root `package.json` — shared workspace entrypoint with explicit `desktop:*` and `web:*` scripts
+
 ---
 
 ## Why Roxy?

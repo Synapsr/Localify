@@ -19,6 +19,28 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_keygen_api_url() -> String {
+    KEYGEN_API_URL.to_string()
+}
+
+fn default_keygen_account() -> String {
+    KEYGEN_ACCOUNT_ID.to_string()
+}
+
+fn default_keygen_product() -> Option<String> {
+    Some(KEYGEN_PRODUCT_ID.to_string())
+}
+
+fn default_keygen_public_key() -> Option<String> {
+    Some(KEYGEN_PUBLIC_KEY.to_string())
+}
+
+pub const KEYGEN_API_URL: &str = "https://licences.localify.dev";
+pub const KEYGEN_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000000";
+pub const KEYGEN_PRODUCT_ID: &str = "00000000-0000-0000-0000-000000000000";
+pub const KEYGEN_PUBLIC_KEY: &str =
+    "552d01b1542040fab21a49cd6e363991d863a711938061cc04ee703a4fa6e068";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_http_port")]
@@ -105,6 +127,125 @@ pub struct DockerConfig {
     /// Enable Docker auto-discovery of containers.
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeygenConfig {
+    #[serde(default = "default_keygen_api_url")]
+    pub api_url: String,
+
+    #[serde(default = "default_keygen_account")]
+    pub account: String,
+
+    #[serde(default = "default_keygen_product")]
+    pub product: Option<String>,
+
+    #[serde(default = "default_keygen_public_key")]
+    pub public_key: Option<String>,
+}
+
+impl KeygenConfig {
+    pub fn effective_api_url(&self) -> &str {
+        let api_url = self.api_url.trim();
+        if api_url.is_empty() {
+            KEYGEN_API_URL
+        } else {
+            api_url
+        }
+    }
+
+    pub fn effective_account(&self) -> &str {
+        let account = self.account.trim();
+        if account.is_empty() {
+            KEYGEN_ACCOUNT_ID
+        } else {
+            account
+        }
+    }
+
+    pub fn effective_product(&self) -> Option<&str> {
+        self.product
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or(Some(KEYGEN_PRODUCT_ID))
+    }
+
+    pub fn effective_public_key(&self) -> Option<&str> {
+        self.public_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or(Some(KEYGEN_PUBLIC_KEY))
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.effective_account().is_empty() && !self.effective_api_url().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredLicense {
+    pub key: String,
+    pub license_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub expiry: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub max_projects: Option<usize>,
+    #[serde(default)]
+    pub max_domains_per_project: Option<usize>,
+    #[serde(default)]
+    pub validation_code: Option<String>,
+    #[serde(default)]
+    pub validation_detail: Option<String>,
+    #[serde(default)]
+    pub last_validated_at: Option<String>,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub machine_fingerprint: Option<String>,
+    #[serde(default)]
+    pub machine_name: Option<String>,
+    #[serde(default)]
+    pub machine_hostname: Option<String>,
+    #[serde(default)]
+    pub machine_platform: Option<String>,
+    #[serde(default)]
+    pub response_signature_verified: bool,
+    #[serde(default)]
+    pub response_signature_date: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfflineLicenseFile {
+    pub certificate: String,
+    pub algorithm: String,
+    #[serde(default)]
+    pub issued: Option<String>,
+    #[serde(default)]
+    pub expiry: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicensingConfig {
+    #[serde(default)]
+    pub keygen: KeygenConfig,
+
+    #[serde(default)]
+    pub license: Option<StoredLicense>,
+
+    #[serde(default)]
+    pub offline_license: Option<OfflineLicenseFile>,
 }
 
 /// All resolved paths needed by Roxy components.

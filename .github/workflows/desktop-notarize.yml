@@ -17,11 +17,12 @@ jobs:
     env:
       CI: true
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
     steps:
       - name: Validate required secrets
@@ -29,11 +30,11 @@ jobs:
           missing=0
           for var in \
             APPLE_SIGNING_IDENTITY \
-            APPLE_API_ISSUER \
-            APPLE_API_KEY \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID \
             APPLE_CERTIFICATE \
             APPLE_CERTIFICATE_PASSWORD \
-            APPLE_API_KEY_BASE64 \
             KEYCHAIN_PASSWORD
           do
             if [ -z "${!var}" ]; then
@@ -101,13 +102,6 @@ jobs:
             "$KEYCHAIN_PATH"
 
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-
-      - name: Prepare App Store Connect API key
-        shell: bash
-        run: |
-          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
-          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
-          echo "APPLE_API_KEY_PATH=$API_KEY_PATH" >> "$GITHUB_ENV"
 
       - name: Build notarized desktop app
         run: pnpm tauri:build

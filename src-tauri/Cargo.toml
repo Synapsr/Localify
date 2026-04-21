@@ -1,6 +1,6 @@
 [package]
 name = "localify-desktop"
-version = "0.1.0"
+version = "0.1.3"
 description = "Desktop shell for Localify"
 authors = ["Localify contributors"]
 edition = "2024"
@@ -14,9 +14,10 @@ tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
 roxy = { path = ".." }
-tauri = { version = "2.10.3", features = ["tray-icon"] }
+tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-global-shortcut = "2.3.1"
+tauri-plugin-updater = "2.10.1"

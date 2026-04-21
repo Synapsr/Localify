@@ -53,17 +53,26 @@ pub struct FolderInitSelection {
 pub struct PackageScriptUpdate {
     pub package_json_path: PathBuf,
     pub display_path: String,
+    pub script_name: String,
     pub script: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NextConfigUpdate {
+    pub next_config_path: PathBuf,
+    pub display_path: String,
+    pub allowed_dev_origin: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedFolderInitSelection {
     pub services: Vec<ServicePlan>,
     pub package_updates: Vec<PackageScriptUpdate>,
+    pub next_config_updates: Vec<NextConfigUpdate>,
 }
 
 #[derive(Debug, Clone)]
-pub struct PackageUpdateResults {
+pub struct LocalAppUpdateResults {
     pub updated: Vec<String>,
     pub skipped: Vec<String>,
 }
@@ -78,6 +87,7 @@ struct FolderServiceBlueprint {
     enabled: bool,
     package_json_path: Option<PathBuf>,
     dev_script: Option<String>,
+    next_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +98,7 @@ struct WorkspaceAppCandidate {
     package_json_path: PathBuf,
     dev_script: String,
     is_root: bool,
+    next_config_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -190,7 +201,7 @@ pub fn detect_folder_init_plan(root: &Path, project_name: Option<&str>) -> Resul
 }
 
 /// Resolves a user-edited folder init plan into concrete Localify services and
-/// optional `package.json` script rewrites.
+/// any local app file rewrites needed to run cleanly behind Localify.
 pub fn resolve_folder_init_selection(
     root: &Path,
     project_name: &str,
@@ -200,6 +211,7 @@ pub fn resolve_folder_init_selection(
     let blueprints = folder_service_blueprints(root, project_name)?;
     let mut services = Vec::new();
     let mut package_updates = Vec::new();
+    let mut next_config_updates = Vec::new();
     let mut seen_ids = HashSet::new();
     let mut seen_domains = HashSet::new();
 
@@ -240,6 +252,10 @@ pub fn resolve_folder_init_selection(
             bail!("Duplicate domain in init-project plan: {domain}");
         }
 
+        if let Some(update) = build_next_config_update(blueprint, &domain) {
+            next_config_updates.push(update);
+        }
+
         services.push(ServicePlan {
             domain,
             target: target.clone(),
@@ -262,18 +278,22 @@ pub fn resolve_folder_init_selection(
     Ok(ResolvedFolderInitSelection {
         services,
         package_updates,
+        next_config_updates,
     })
 }
 
-/// Applies planned `package.json` dev-script rewrites after a project has been
-/// initialized so local apps start on the selected Localify ports.
-pub fn apply_package_updates(updates: &[PackageScriptUpdate]) -> PackageUpdateResults {
-    let mut results = PackageUpdateResults {
+/// Applies planned local app file rewrites after a project has been
+/// initialized so the selected apps run cleanly behind Localify.
+pub fn apply_local_app_updates(
+    package_updates: &[PackageScriptUpdate],
+    next_config_updates: &[NextConfigUpdate],
+) -> LocalAppUpdateResults {
+    let mut results = LocalAppUpdateResults {
         updated: Vec::new(),
         skipped: Vec::new(),
     };
 
-    for update in updates {
+    for update in package_updates {
         match apply_package_update(update) {
             Ok(()) => results.updated.push(format!(
                 "{} ({})",
@@ -289,7 +309,46 @@ pub fn apply_package_updates(updates: &[PackageScriptUpdate]) -> PackageUpdateRe
         }
     }
 
+    for update in next_config_updates {
+        match apply_next_config_update(update) {
+            Ok(()) => results.updated.push(format!(
+                "{} ({})",
+                update.display_path,
+                update.next_config_path.display()
+            )),
+            Err(error) => results.skipped.push(format!(
+                "{} ({}) - {}",
+                update.display_path,
+                update.next_config_path.display(),
+                error
+            )),
+        }
+    }
+
     results
+}
+
+/// Plans local app file updates for `localify init-project` in the current
+/// directory when the folder maps cleanly to a single detected app.
+pub fn plan_current_dir_local_app_updates(
+    root: &Path,
+    project_name: &str,
+    services: &[ServicePlan],
+) -> Result<Vec<NextConfigUpdate>> {
+    if services.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let blueprints = folder_service_blueprints(root, project_name)?;
+    if blueprints.len() != 1 {
+        return Ok(Vec::new());
+    }
+
+    Ok(
+        build_next_config_update(&blueprints[0], &services[0].domain)
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn ensure_root_directory(root: &Path) -> Result<()> {
@@ -339,6 +398,7 @@ fn synthetic_primary_service(project_name: &str) -> Result<Vec<FolderServiceBlue
         enabled: true,
         package_json_path: None,
         dev_script: None,
+        next_config_path: None,
     }])
 }
 
@@ -371,6 +431,7 @@ fn workspace_service_blueprints(
             enabled,
             package_json_path: Some(app.package_json_path.clone()),
             dev_script: Some(app.dev_script.clone()),
+            next_config_path: app.next_config_path.clone(),
         });
     }
 
@@ -505,6 +566,7 @@ fn read_workspace_app(
         package_json_path: package_json_path.to_path_buf(),
         dev_script: dev_script.to_string(),
         is_root: package_dir == root,
+        next_config_path: resolve_next_config_path(package_dir, dev_script),
     }))
 }
 
@@ -539,6 +601,7 @@ fn build_package_update(
     Ok(Some(PackageScriptUpdate {
         package_json_path: package_json_path.clone(),
         display_path: blueprint.display_path.clone(),
+        script_name: "dev-localify".into(),
         script,
     }))
 }
@@ -547,9 +610,23 @@ fn is_port_target(target: &str) -> bool {
     target.parse::<u16>().is_ok()
 }
 
+fn build_next_config_update(
+    blueprint: &FolderServiceBlueprint,
+    domain: &str,
+) -> Option<NextConfigUpdate> {
+    blueprint
+        .next_config_path
+        .as_ref()
+        .map(|next_config_path| NextConfigUpdate {
+            next_config_path: next_config_path.clone(),
+            display_path: blueprint.display_path.clone(),
+            allowed_dev_origin: normalize_domain(domain.to_string()),
+        })
+}
+
 fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
     let trimmed = script.trim();
-    if trimmed.contains("next dev") {
+    if is_next_dev_script(trimmed) {
         let normalized = strip_script_flags(
             trimmed,
             &["--hostname", "--host", "-H", "--port", "-p"],
@@ -587,6 +664,32 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
     if trimmed.contains("react-scripts start") {
         let normalized = strip_script_flags(trimmed, &[], &["HOST", "PORT"]);
         return Some(format!("HOST=127.0.0.1 PORT={port} {normalized}"));
+    }
+
+    None
+}
+
+fn is_next_dev_script(script: &str) -> bool {
+    script.trim().contains("next dev")
+}
+
+fn resolve_next_config_path(package_dir: &Path, dev_script: &str) -> Option<PathBuf> {
+    if !is_next_dev_script(dev_script) {
+        return None;
+    }
+
+    for file_name in [
+        "next.config.ts",
+        "next.config.mts",
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.cjs",
+        "next.config.cts",
+    ] {
+        let candidate = package_dir.join(file_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
     }
 
     None
@@ -640,15 +743,16 @@ fn apply_package_update(update: &PackageScriptUpdate) -> Result<()> {
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("Missing scripts object"))?;
     let current_script = scripts
-        .get("dev")
+        .get(&update.script_name)
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Missing scripts.dev"))?;
+        .unwrap_or_default();
 
-    if current_script.trim() == update.script.trim() {
-        return Ok(());
+    if current_script.trim() != update.script.trim() {
+        scripts.insert(
+            update.script_name.clone(),
+            Value::String(update.script.clone()),
+        );
     }
-
-    scripts.insert("dev".into(), Value::String(update.script.clone()));
     let formatted = serde_json::to_string_pretty(&package_json).with_context(|| {
         format!(
             "Failed to serialize '{}'",
@@ -659,6 +763,268 @@ fn apply_package_update(update: &PackageScriptUpdate) -> Result<()> {
         .with_context(|| format!("Failed to write '{}'", update.package_json_path.display()))?;
 
     Ok(())
+}
+
+fn apply_next_config_update(update: &NextConfigUpdate) -> Result<()> {
+    let content = fs::read_to_string(&update.next_config_path)
+        .with_context(|| format!("Failed to read '{}'", update.next_config_path.display()))?;
+    let updated = update_next_config_content(&content, &update.allowed_dev_origin)?;
+
+    if updated == content {
+        return Ok(());
+    }
+
+    fs::write(&update.next_config_path, updated)
+        .with_context(|| format!("Failed to write '{}'", update.next_config_path.display()))?;
+
+    Ok(())
+}
+fn update_next_config_content(content: &str, origin: &str) -> Result<String> {
+    let Some((object_open, object_close)) = find_next_config_object_bounds(content) else {
+        bail!("Could not find a supported Next.js config object");
+    };
+    let object_body = &content[object_open + 1..object_close];
+
+    if let Some(property_offset) = object_body.find("allowedDevOrigins") {
+        let property_start = object_open + 1 + property_offset;
+        return update_existing_allowed_dev_origins(
+            content,
+            object_open,
+            object_close,
+            property_start,
+            origin,
+        );
+    }
+
+    Ok(insert_allowed_dev_origins_property(
+        content,
+        object_open,
+        object_close,
+        origin,
+    ))
+}
+
+fn find_next_config_object_bounds(content: &str) -> Option<(usize, usize)> {
+    let mut matches = Vec::new();
+
+    for anchor in ["const nextConfig", "let nextConfig", "var nextConfig"] {
+        if let Some(anchor_start) = content.find(anchor) {
+            let tail = &content[anchor_start + anchor.len()..];
+            if let Some(equals_offset) = tail.find('=')
+                && let Some(open_offset) = tail[equals_offset + 1..].find('{')
+            {
+                let open = anchor_start + anchor.len() + equals_offset + 1 + open_offset;
+                if let Some(close) = find_matching_delimiter(content, open, b'{', b'}') {
+                    matches.push((open, close));
+                }
+            }
+        }
+    }
+
+    if let Some(anchor_start) = content.find("module.exports") {
+        let tail = &content[anchor_start + "module.exports".len()..];
+        if let Some(equals_offset) = tail.find('=')
+            && let Some(open_offset) = tail[equals_offset + 1..].find('{')
+        {
+            let open = anchor_start + "module.exports".len() + equals_offset + 1 + open_offset;
+            if let Some(close) = find_matching_delimiter(content, open, b'{', b'}') {
+                matches.push((open, close));
+            }
+        }
+    }
+
+    if let Some(anchor_start) = content.find("export default") {
+        let tail = &content[anchor_start + "export default".len()..];
+        if let Some(open_offset) = tail.find('{') {
+            let open = anchor_start + "export default".len() + open_offset;
+            if let Some(close) = find_matching_delimiter(content, open, b'{', b'}') {
+                matches.push((open, close));
+            }
+        }
+    }
+
+    matches.into_iter().min_by_key(|(open, _)| *open)
+}
+
+fn update_existing_allowed_dev_origins(
+    content: &str,
+    _object_open: usize,
+    object_close: usize,
+    property_start: usize,
+    origin: &str,
+) -> Result<String> {
+    let property_body = &content[property_start..object_close];
+    let Some(array_offset) = property_body.find('[') else {
+        bail!("Found allowedDevOrigins but could not locate its array value");
+    };
+    let array_open = property_start + array_offset;
+    let Some(array_close) = find_matching_delimiter(content, array_open, b'[', b']') else {
+        bail!("Found allowedDevOrigins but could not parse its array value");
+    };
+
+    if array_close > object_close {
+        bail!("Found allowedDevOrigins outside the Next.js config object");
+    }
+
+    let inner = &content[array_open + 1..array_close];
+    if array_contains_origin(inner, origin) {
+        return Ok(content.to_string());
+    }
+
+    let replacement = if inner.contains('\n') {
+        let trimmed = inner.trim_end_matches(char::is_whitespace);
+        let trailing = &inner[trimmed.len()..];
+        let closing_indent = line_indent_at(content, array_close);
+        let item_indent = format!("{closing_indent}  ");
+        let mut updated_inner = String::from(trimmed);
+        if !trimmed.trim().is_empty() && !trimmed.ends_with(',') {
+            updated_inner.push(',');
+        }
+        if !trimmed.trim().is_empty() {
+            updated_inner.push('\n');
+        }
+        updated_inner.push_str(&item_indent);
+        updated_inner.push_str(&format!("'{origin}',"));
+        updated_inner.push_str(trailing);
+        format!("[{updated_inner}]")
+    } else {
+        let trimmed = inner.trim();
+        if trimmed.is_empty() {
+            format!("['{origin}']")
+        } else if trimmed.ends_with(',') {
+            format!("[{trimmed} '{origin}']")
+        } else {
+            format!("[{trimmed}, '{origin}']")
+        }
+    };
+
+    Ok(format!(
+        "{}{}{}",
+        &content[..array_open],
+        replacement,
+        &content[array_close + 1..]
+    ))
+}
+
+fn insert_allowed_dev_origins_property(
+    content: &str,
+    object_open: usize,
+    object_close: usize,
+    origin: &str,
+) -> String {
+    let inner = &content[object_open + 1..object_close];
+    let trimmed = inner.trim_end_matches(char::is_whitespace);
+    let trailing = &inner[trimmed.len()..];
+    let closing_indent = line_indent_at(content, object_close);
+    let property_indent = format!("{closing_indent}  ");
+
+    let inserted = if trimmed.trim().is_empty() {
+        format!("\n{property_indent}allowedDevOrigins: ['{origin}'],\n{closing_indent}")
+    } else {
+        let mut updated_inner = String::from(trimmed);
+        if !trimmed.ends_with(',') {
+            updated_inner.push(',');
+        }
+        updated_inner.push('\n');
+        updated_inner.push_str(&property_indent);
+        updated_inner.push_str(&format!("allowedDevOrigins: ['{origin}'],"));
+        updated_inner.push_str(trailing);
+        updated_inner
+    };
+
+    format!(
+        "{}{}{}",
+        &content[..object_open + 1],
+        inserted,
+        &content[object_close..]
+    )
+}
+
+fn array_contains_origin(array_content: &str, origin: &str) -> bool {
+    array_content.contains(&format!("'{origin}'"))
+        || array_content.contains(&format!("\"{origin}\""))
+}
+
+fn line_indent_at(content: &str, index: usize) -> String {
+    let line_start = content[..index].rfind('\n').map_or(0, |value| value + 1);
+    content[line_start..index]
+        .chars()
+        .take_while(|ch| ch.is_whitespace())
+        .collect()
+}
+
+fn find_matching_delimiter(content: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut depth = 0usize;
+    let mut index = start;
+    let mut quote = None;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+
+        if in_line_comment {
+            if byte == b'\n' {
+                in_line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                in_block_comment = false;
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+
+        if let Some(active_quote) = quote {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            in_line_comment = true;
+            index += 2;
+            continue;
+        }
+
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            in_block_comment = true;
+            index += 2;
+            continue;
+        }
+
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+
+        if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+
+        index += 1;
+    }
+
+    None
 }
 
 fn reserve_auto_targets(count: usize) -> Result<Vec<String>> {
@@ -723,6 +1089,10 @@ mod tests {
 }}"#
         );
         fs::write(path, package_json).unwrap();
+    }
+
+    fn write_next_config(path: &Path, content: &str) {
+        fs::write(path, content).unwrap();
     }
 
     #[test]
@@ -858,15 +1228,20 @@ mod tests {
         let package_json_path = temp_dir.path().join("package.json");
         write_package_json(&package_json_path, "vite");
 
-        let results = apply_package_updates(&[PackageScriptUpdate {
-            package_json_path: package_json_path.clone(),
-            display_path: "app".into(),
-            script: "vite --port 4010".into(),
-        }]);
+        let results = apply_local_app_updates(
+            &[PackageScriptUpdate {
+                package_json_path: package_json_path.clone(),
+                display_path: "app".into(),
+                script_name: "dev-localify".into(),
+                script: "vite --port 4010".into(),
+            }],
+            &[],
+        );
 
         assert_eq!(results.updated.len(), 1);
         let updated = fs::read_to_string(package_json_path).unwrap();
-        assert!(updated.contains(r#""dev": "vite --port 4010""#));
+        assert!(updated.contains(r#""dev": "vite""#));
+        assert!(updated.contains(r#""dev-localify": "vite --port 4010""#));
     }
 
     #[test]
@@ -875,6 +1250,10 @@ mod tests {
         let root = temp_dir.path();
         fs::create_dir_all(root.join("apps/web")).unwrap();
         write_package_json(&root.join("apps/web/package.json"), "next dev");
+        write_next_config(
+            &root.join("apps/web/next.config.ts"),
+            "export default { reactStrictMode: true };\n",
+        );
 
         let plan = detect_folder_init_plan(root, Some("Demo")).unwrap();
         let selection = FolderInitSelection {
@@ -889,9 +1268,120 @@ mod tests {
 
         assert_eq!(resolved.services.len(), 1);
         assert_eq!(resolved.package_updates.len(), 1);
+        assert_eq!(resolved.next_config_updates.len(), 1);
         assert_eq!(
             resolved.package_updates[0].script,
             "next dev --hostname 127.0.0.1 --port 4010"
         );
+        assert_eq!(
+            resolved.next_config_updates[0].allowed_dev_origin,
+            format!("demo{}", BRANDING.domain_suffix)
+        );
+    }
+
+    #[test]
+    fn plan_current_dir_local_app_updates_detects_single_next_app() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        write_package_json(&root.join("package.json"), "next dev");
+        write_next_config(
+            &root.join("next.config.ts"),
+            "export default { reactStrictMode: true };\n",
+        );
+
+        let updates = plan_current_dir_local_app_updates(
+            root,
+            "Demo",
+            &[ServicePlan {
+                domain: format!("demo{}", BRANDING.domain_suffix),
+                target: "3000".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].next_config_path, root.join("next.config.ts"));
+    }
+
+    #[test]
+    fn plan_current_dir_local_app_updates_skips_next_without_config_file() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        write_package_json(&root.join("package.json"), "next dev");
+
+        let updates = plan_current_dir_local_app_updates(
+            root,
+            "Demo",
+            &[ServicePlan {
+                domain: format!("demo{}", BRANDING.domain_suffix),
+                target: "3000".into(),
+            }],
+        )
+        .unwrap();
+
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn apply_next_config_update_inserts_allowed_dev_origins_into_existing_config() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("next.config.ts");
+        let origin = format!("demo{}", BRANDING.domain_suffix);
+        write_next_config(
+            &config_path,
+            "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {\n  reactStrictMode: true,\n};\n\nexport default nextConfig;\n",
+        );
+
+        apply_next_config_update(&NextConfigUpdate {
+            next_config_path: config_path.clone(),
+            display_path: "web".into(),
+            allowed_dev_origin: origin.clone(),
+        })
+        .unwrap();
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains(&format!("allowedDevOrigins: ['{origin}']")));
+    }
+
+    #[test]
+    fn apply_next_config_update_appends_missing_origin_without_duplication() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("next.config.js");
+        let existing_origin = format!("existing{}", BRANDING.domain_suffix);
+        let origin = format!("demo{}", BRANDING.domain_suffix);
+        write_next_config(
+            &config_path,
+            &format!("module.exports = {{\n  allowedDevOrigins: ['{existing_origin}'],\n}};\n"),
+        );
+
+        let update = NextConfigUpdate {
+            next_config_path: config_path.clone(),
+            display_path: "web".into(),
+            allowed_dev_origin: origin.clone(),
+        };
+
+        apply_next_config_update(&update).unwrap();
+        apply_next_config_update(&update).unwrap();
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains(&format!("'{existing_origin}', '{origin}'")));
+        assert_eq!(updated.matches(&origin).count(), 1);
+    }
+
+    #[test]
+    fn apply_next_config_update_requires_existing_file() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("next.config.mjs");
+        let origin = format!("demo{}", BRANDING.domain_suffix);
+
+        let error = apply_next_config_update(&NextConfigUpdate {
+            next_config_path: config_path.clone(),
+            display_path: "web".into(),
+            allowed_dev_origin: origin.clone(),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Failed to read"));
+        assert!(!config_path.exists());
     }
 }
