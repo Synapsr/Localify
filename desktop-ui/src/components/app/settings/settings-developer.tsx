@@ -1,5 +1,6 @@
 "use client";
 
+import { SettingsLicensingAdvanced } from "./settings-licensing-advanced";
 import { SettingsPorts } from "./settings-ports";
 import { SettingsProcesses } from "./settings-processes";
 import { SettingsSystem } from "./settings-system";
@@ -21,6 +22,7 @@ export const SettingsDeveloper = () => {
       <SettingsProcesses />
       <SettingsPorts />
       <SettingsSystem />
+      <SettingsLicensingAdvanced />
     </section>
   );
 };

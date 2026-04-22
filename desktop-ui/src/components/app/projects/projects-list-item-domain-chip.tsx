@@ -1,21 +1,31 @@
 "use client";
 
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useMutation } from "@tanstack/react-query";
 import { motion } from "motion/react";
 import { type MouseEvent, type PointerEvent } from "react";
 
 import type { DomainInfoDto } from "@/types/roxy";
 
-import { CheckIcon, CopyIcon, ExternalLinkIcon, TrashIcon } from "@/components/icons";
+import {
+  CheckIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  PlayIcon,
+  SpinnerIcon,
+  TrashIcon,
+} from "@/components/icons";
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { projectMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
 
 interface ProjectDomainChipProps {
   domain: DomainInfoDto;
+  projectRootPath: string | null;
 }
 
 const actionVariants = {
@@ -42,13 +52,22 @@ function extractPort(target: string | undefined): string | null {
   }
 }
 
-export const ProjectDomainChip = ({ domain }: ProjectDomainChipProps) => {
+function getPrimaryLaunchTarget(domain: DomainInfoDto): string | null {
+  const rootRoute = domain.registration.routes.find((route) => route.path === "/");
+  const candidate = rootRoute ?? domain.registration.routes[0];
+  return candidate?.target ?? null;
+}
+
+export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChipProps) => {
   const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
   const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
+  const runLocalDevServer = useMutation(projectMutations.runLocalDevServer());
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain);
   const reachable = domain.targetReachable;
   const port = extractPort(routes[0]?.target);
+  const launchTarget = getPrimaryLaunchTarget(domain);
+  const canRunLocalDevServer = Boolean(projectRootPath && launchTarget);
 
   const stopMousePropagation = (event: MouseEvent) => {
     event.stopPropagation();
@@ -75,6 +94,23 @@ export const ProjectDomainChip = ({ domain }: ProjectDomainChipProps) => {
     event.stopPropagation();
     event.preventDefault();
     void openUrl(url);
+  };
+
+  const handleRunLocalDevServer = async (event: MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!projectRootPath || !launchTarget) {
+      return;
+    }
+
+    try {
+      await runLocalDevServer.mutateAsync({
+        rootPath: projectRootPath,
+        target: launchTarget,
+      });
+    } catch {
+      // The mutation already exposes the actionable error in the tooltip.
+    }
   };
 
   return (
@@ -172,6 +208,36 @@ export const ProjectDomainChip = ({ domain }: ProjectDomainChipProps) => {
               )}
             </TooltipTrigger>
             <TooltipContent>{urlCopied ? "URL copied" : "Copy URL"}</TooltipContent>
+          </Tooltip>
+        </motion.span>
+
+        <motion.span
+          variants={actionVariants}
+          transition={{ type: "spring", stiffness: 500, damping: 30, delay: 0.02 }}
+          className="inline-flex shrink-0"
+        >
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={handleRunLocalDevServer}
+                  aria-label={`Run local dev server for ${pattern}`}
+                  disabled={!canRunLocalDevServer || runLocalDevServer.isPending}
+                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground disabled:opacity-40"
+                />
+              }
+            >
+              {runLocalDevServer.isPending ? (
+                <SpinnerIcon className="size-3.5 animate-spin" />
+              ) : (
+                <PlayIcon className="size-3.5 translate-x-px" />
+              )}
+            </TooltipTrigger>
+            <TooltipContent>
+              {runLocalDevServer.error?.message ??
+                (canRunLocalDevServer ? "Run local dev server" : "No linked local app to run")}
+            </TooltipContent>
           </Tooltip>
         </motion.span>
 

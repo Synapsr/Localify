@@ -3,26 +3,100 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy)]
-enum EditorApp {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EditorPreference {
+    #[default]
+    Auto,
     Cursor,
     VsCode,
+    Windsurf,
+    Zed,
+    SublimeText,
+    Nova,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EditorApp {
+    preference: EditorPreference,
+    label: &'static str,
+    command_names: &'static [&'static str],
+    app_names: &'static [&'static str],
+}
+
+const EDITOR_APPS: [EditorApp; 6] = [
+    EditorApp {
+        preference: EditorPreference::Cursor,
+        label: "Cursor",
+        command_names: &["cursor"],
+        app_names: &["Cursor"],
+    },
+    EditorApp {
+        preference: EditorPreference::VsCode,
+        label: "VS Code",
+        command_names: &["code"],
+        app_names: &["Visual Studio Code"],
+    },
+    EditorApp {
+        preference: EditorPreference::Windsurf,
+        label: "Windsurf",
+        command_names: &["windsurf"],
+        app_names: &["Windsurf"],
+    },
+    EditorApp {
+        preference: EditorPreference::Zed,
+        label: "Zed",
+        command_names: &["zed"],
+        app_names: &["Zed"],
+    },
+    EditorApp {
+        preference: EditorPreference::Nova,
+        label: "Nova",
+        command_names: &["nova"],
+        app_names: &["Nova"],
+    },
+    EditorApp {
+        preference: EditorPreference::SublimeText,
+        label: "Sublime Text",
+        command_names: &["subl"],
+        app_names: &["Sublime Text"],
+    },
+];
+
+const MACOS_APP_DIRS: [&str; 3] = [
+    "/Applications",
+    "/System/Applications",
+    "/System/Applications/Utilities",
+];
+
 impl EditorApp {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Cursor => "Cursor",
-            Self::VsCode => "VS Code",
-        }
+    #[allow(dead_code)]
+    fn from_preference(preference: EditorPreference) -> Option<Self> {
+        EDITOR_APPS
+            .iter()
+            .copied()
+            .find(|app| app.preference == preference)
     }
 
-    fn command_name(self) -> &'static str {
-        match self {
-            Self::Cursor => "cursor",
-            Self::VsCode => "code",
-        }
+    #[allow(dead_code)]
+    fn available(self) -> bool {
+        self.command_names
+            .iter()
+            .any(|command| find_command(command).is_some())
+            || self
+                .app_names
+                .iter()
+                .any(|name| find_app_bundle(name).is_some())
+    }
+
+    fn detect_launch(self) -> Option<EditorLaunch> {
+        self.command_names
+            .iter()
+            .find_map(|command| find_command(command))
+            .map(|program| EditorLaunch::Command { program, app: self })
+            .or_else(|| detect_editor_app_launch(self))
     }
 }
 
@@ -38,23 +112,50 @@ enum EditorLaunch {
     },
 }
 
+#[allow(dead_code)]
+pub fn available_editor_preferences() -> Vec<EditorPreference> {
+    EDITOR_APPS
+        .iter()
+        .copied()
+        .filter(|app| app.available())
+        .map(|app| app.preference)
+        .collect()
+}
+
+#[allow(dead_code)]
+pub fn editor_label(preference: EditorPreference) -> &'static str {
+    match preference {
+        EditorPreference::Auto => "Auto",
+        _ => EditorApp::from_preference(preference)
+            .map(|app| app.label)
+            .unwrap_or("Unknown editor"),
+    }
+}
+
 pub fn open_in_editor(path: &Path) -> Result<()> {
+    open_in_editor_with_preference(path, EditorPreference::Auto)
+}
+
+pub fn open_in_editor_with_preference(path: &Path, preference: EditorPreference) -> Result<()> {
     if !path.exists() {
         bail!("Project folder '{}' does not exist.", path.display());
     }
 
-    let launch = detect_editor()
-        .ok_or_else(|| anyhow!("Install Cursor or VS Code to open this project from Localify."))?;
+    let launch = detect_editor(preference).ok_or_else(|| {
+        anyhow!(
+            "Install a supported editor like Cursor, VS Code, Windsurf, Zed, Nova, or Sublime Text to open this project from Localify."
+        )
+    })?;
 
     match launch {
         EditorLaunch::Command { program, app } => {
             let status = Command::new(&program)
                 .arg(path)
                 .status()
-                .with_context(|| format!("Failed to launch {}.", app.label()))?;
+                .with_context(|| format!("Failed to launch {}.", app.label))?;
 
             if !status.success() {
-                bail!("{} exited before opening the project.", app.label());
+                bail!("{} exited before opening the project.", app.label);
             }
         }
         #[cfg(target_os = "macos")]
@@ -64,10 +165,10 @@ pub fn open_in_editor(path: &Path) -> Result<()> {
                 .arg(app_name)
                 .arg(path)
                 .status()
-                .with_context(|| format!("Failed to launch {}.", app.label()))?;
+                .with_context(|| format!("Failed to launch {}.", app.label))?;
 
             if !status.success() {
-                bail!("{} exited before opening the project.", app.label());
+                bail!("{} exited before opening the project.", app.label);
             }
         }
     }
@@ -75,42 +176,43 @@ pub fn open_in_editor(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn detect_editor() -> Option<EditorLaunch> {
-    detect_editor_command(EditorApp::Cursor)
-        .or_else(|| detect_editor_command(EditorApp::VsCode))
-        .or_else(|| detect_editor_app(EditorApp::Cursor))
-        .or_else(|| detect_editor_app(EditorApp::VsCode))
+fn detect_editor(preference: EditorPreference) -> Option<EditorLaunch> {
+    match preference {
+        EditorPreference::Auto => EDITOR_APPS.iter().find_map(|app| app.detect_launch()),
+        _ => EditorApp::from_preference(preference).and_then(|app| app.detect_launch()),
+    }
 }
 
-fn detect_editor_command(app: EditorApp) -> Option<EditorLaunch> {
+fn find_command(command_name: &str) -> Option<PathBuf> {
     env::var_os("PATH").and_then(|paths| {
         env::split_paths(&paths)
-            .map(|dir| dir.join(app.command_name()))
-            .find(|candidate| command_works(candidate))
-            .map(|program| EditorLaunch::Command { program, app })
+            .map(|dir| dir.join(command_name))
+            .find(|candidate| candidate.is_file())
     })
 }
 
-fn command_works(program: &Path) -> bool {
-    program.is_file()
+#[cfg(target_os = "macos")]
+fn find_app_bundle(app_name: &str) -> Option<PathBuf> {
+    MACOS_APP_DIRS
+        .iter()
+        .map(|directory| PathBuf::from(directory).join(format!("{app_name}.app")))
+        .find(|candidate| candidate.exists())
 }
 
 #[cfg(target_os = "macos")]
-fn detect_editor_app(app: EditorApp) -> Option<EditorLaunch> {
-    let app_name = match app {
-        EditorApp::Cursor => "Cursor",
-        EditorApp::VsCode => "Visual Studio Code",
-    };
-    let app_path = PathBuf::from("/Applications").join(format!("{app_name}.app"));
+fn detect_editor_app_launch(app: EditorApp) -> Option<EditorLaunch> {
+    app.app_names
+        .iter()
+        .find_map(|name| find_app_bundle(name).map(|_| *name))
+        .map(|app_name| EditorLaunch::OpenApp { app_name, app })
+}
 
-    if app_path.exists() {
-        return Some(EditorLaunch::OpenApp { app_name, app });
-    }
-
+#[cfg(not(target_os = "macos"))]
+fn find_app_bundle(_app_name: &str) -> Option<PathBuf> {
     None
 }
 
 #[cfg(not(target_os = "macos"))]
-fn detect_editor_app(_app: EditorApp) -> Option<EditorLaunch> {
+fn detect_editor_app_launch(_app: EditorApp) -> Option<EditorLaunch> {
     None
 }

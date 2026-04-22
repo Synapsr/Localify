@@ -20,6 +20,8 @@ use directory::try_directory_listing;
 use path_utils::resolve_path;
 use styles::NOT_FOUND_CSS;
 
+const FILE_NOT_FOUND_TEMPLATE: &str = include_str!("../templates/file_not_found.html");
+
 /// Serve static files from a directory.
 ///
 /// If the request path maps to a directory without an `index.html`,
@@ -170,22 +172,10 @@ fn rewrite_redirect_location_to_include_mount_prefix<ResBody>(
 fn build_not_found_response(uri_path: &str) -> Response {
     let path = theme::html_escape(uri_path);
     let image_data_uri = embedded_assets::roxy_404_data_uri();
-
-    let mut body = String::new();
-    body.push_str("<div class=\"error-container\">\n");
-    body.push_str("<div class=\"error-image\">\n");
-    body.push_str("<img src=\"");
-    body.push_str(image_data_uri);
-    body.push_str("\" alt=\"404 - Localify Fox\" ");
-    body.push_str("width=\"300\" height=\"225\">\n");
-    body.push_str("</div>\n");
-    body.push_str("<div class=\"error-card\">\n");
-    body.push_str("<h1 class=\"error-title\">File Not Found</h1>\n");
-    body.push_str("<p class=\"error-message\">The path <code>");
-    body.push_str(&path);
-    body.push_str("</code> does not exist.</p>\n");
-    body.push_str("<p class=\"error-hint\">Check the path and try again, or navigate back to the directory listing.</p>\n");
-    body.push_str("</div></div>");
+    let body = theme::render_template(
+        FILE_NOT_FOUND_TEMPLATE,
+        &[("{{IMAGE_DATA_URI}}", image_data_uri), ("{{PATH}}", &path)],
+    );
 
     let html = theme::render_page("File Not Found", &body, NOT_FOUND_CSS, "");
 

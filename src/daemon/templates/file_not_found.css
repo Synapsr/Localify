@@ -1,0 +1,23 @@
+.error-container{
+    display:flex;flex-direction:column;align-items:stretch;
+    gap:16px;max-width:560px;width:100%;margin:0 auto;
+    animation:fadeInUp .4s ease-out;
+}
+.error-image{display:none}
+.error-card{
+    background:transparent;
+    padding:0;
+    text-align:left;width:100%;
+}
+.error-title{
+    color:var(--ink);font-size:1.75rem;margin-bottom:12px;
+    font-weight:600;letter-spacing:-.02em;line-height:1.15;
+}
+.error-message{
+    margin-bottom:8px;font-size:.975rem;color:var(--ink-soft);line-height:1.6;
+}
+.error-hint{
+    color:var(--ink-muted);font-size:.88rem;margin-top:6px;line-height:1.5;
+}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:600px){.error-title{font-size:1.5rem}}

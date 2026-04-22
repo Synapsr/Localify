@@ -5,18 +5,62 @@ use roxy::desktop::dto::{
     CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
     DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto, LogsRequest,
-    NodeTrustDto, OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
-    RemoveProjectResultDto, RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherPreferencesDto, LicensingDto,
+    LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest, PortConflictDto, ProjectInfoDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
+    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, MutexGuard};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
 pub struct AppState {
     pub api: DesktopApi,
+    pending_deep_link: Mutex<Option<DeepLinkPayloadDto>>,
+}
+
+impl AppState {
+    pub fn with_api(api: DesktopApi) -> Self {
+        Self {
+            api,
+            pending_deep_link: Mutex::new(None),
+        }
+    }
+
+    pub fn set_pending_deep_link(&self, payload: DeepLinkPayloadDto) {
+        *self.pending_deep_link_guard() = Some(payload);
+    }
+
+    pub fn take_pending_deep_link(&self) -> Option<DeepLinkPayloadDto> {
+        self.pending_deep_link_guard().take()
+    }
+
+    fn pending_deep_link_guard(&self) -> MutexGuard<'_, Option<DeepLinkPayloadDto>> {
+        match self.pending_deep_link.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepLinkPayloadDto {
+    pub route: DeepLinkRouteDto,
+    pub project_id: Option<String>,
+    pub view: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeepLinkRouteDto {
+    Projects,
+    Logs,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,6 +176,30 @@ pub fn update_config(
 #[tauri::command]
 pub fn get_licensing_status(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
     state.api.licensing_status().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn export_settings(
+    state: tauri::State<'_, AppState>,
+    request: SettingsExportRequest,
+) -> Result<SettingsExportResultDto, String> {
+    state.api.export_settings(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn preview_settings_import(
+    state: tauri::State<'_, AppState>,
+    request: SettingsImportPreviewRequest,
+) -> Result<SettingsImportPreviewDto, String> {
+    state.api.preview_settings_import(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn import_settings(
+    state: tauri::State<'_, AppState>,
+    request: SettingsImportRequest,
+) -> Result<SettingsImportResultDto, String> {
+    state.api.import_settings(request).map_err(map_error)
 }
 
 #[tauri::command]
@@ -389,4 +457,30 @@ pub fn open_in_editor(
     request: OpenInEditorRequest,
 ) -> Result<(), String> {
     state.api.open_in_editor(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn run_local_dev_server(
+    state: tauri::State<'_, AppState>,
+    request: RunLocalDevServerRequest,
+) -> Result<(), String> {
+    state.api.run_local_dev_server(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn update_launcher_preferences(
+    state: tauri::State<'_, AppState>,
+    request: UpdateLauncherPreferencesRequest,
+) -> Result<LauncherPreferencesDto, String> {
+    state
+        .api
+        .update_launcher_preferences(request)
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn consume_pending_deep_link(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<DeepLinkPayloadDto>, String> {
+    Ok(state.take_pending_deep_link())
 }

@@ -27,7 +27,7 @@ export function AppStartupScreen({
 }: AppStartupScreenProps) {
   return (
     <div className="flex h-full items-center justify-center px-6 py-12">
-      <Card className="w-full max-w-xl overflow-hidden border-[--color-border-strong] bg-[--color-surface] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
+      <Card className="w-full max-w-xl overflow-hidden border-[--color-border] bg-[--color-surface] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
         <div className="border-b border-[--color-border] bg-[linear-gradient(135deg,rgba(15,23,42,0.045),rgba(15,23,42,0.01))] px-6 py-5">
           <div className="flex items-center gap-3">
             <div className="flex size-11 items-center justify-center rounded-2xl border border-[--color-border] bg-[--color-bg] text-base font-semibold text-[--color-ink]">

@@ -16,6 +16,7 @@ use tracing::{debug, info};
 use crate::branding::BRANDING;
 use crate::domain::{DomainRegistration, Route, RouteTarget};
 use crate::infrastructure::editor::open_in_editor;
+use crate::infrastructure::local_dev::open_local_dev_server;
 
 use super::embedded_assets;
 use super::proxy::{ClientAddr, Scheme, proxy_request};
@@ -23,6 +24,10 @@ use super::static_files::serve_static;
 use super::theme;
 
 const OPEN_IN_EDITOR_PATH: &str = "/.localify/open-in-editor";
+const RUN_DEV_SERVER_PATH: &str = "/.localify/run-dev-server";
+const DOMAIN_NOT_REGISTERED_TEMPLATE: &str = include_str!("templates/domain_not_registered.html");
+const NO_ROUTE_FOUND_TEMPLATE: &str = include_str!("templates/no_route_found.html");
+const ACTION_ERROR_TEMPLATE: &str = include_str!("templates/action_error.html");
 
 /// Immutable snapshot of daemon state. Swapped atomically via `SharedState`.
 pub struct RuntimeState {
@@ -167,6 +172,17 @@ async fn handle_request(
         );
     }
 
+    if method == Method::POST && path == RUN_DEV_SERVER_PATH {
+        return handle_run_dev_server(
+            &state,
+            host_header.as_deref(),
+            proto,
+            client_ip,
+            uri.query(),
+            request.headers(),
+        );
+    }
+
     match resolve_route(&state, host_header.as_deref(), path) {
         RouteResolution::MissingHost => {
             (StatusCode::BAD_REQUEST, "Missing Host header").into_response()
@@ -275,56 +291,88 @@ fn handle_open_in_editor(
     }
 }
 
+fn handle_run_dev_server(
+    state: &RuntimeState,
+    host_header: Option<&str>,
+    scheme: &str,
+    client_ip: Option<IpAddr>,
+    target_query: Option<&str>,
+    headers: &HeaderMap,
+) -> Response {
+    let host = match host_header {
+        Some(host) => host,
+        None => return action_error_response(StatusCode::BAD_REQUEST, "Missing Host header."),
+    };
+
+    if !client_ip.is_some_and(|ip| ip.is_loopback()) {
+        return action_error_response(
+            StatusCode::FORBIDDEN,
+            "Run dev server is only available from this machine.",
+        );
+    }
+
+    if !is_same_origin_action(headers, scheme, host) {
+        return action_error_response(
+            StatusCode::FORBIDDEN,
+            "Run dev server requires a same-origin request from the Localify error page.",
+        );
+    }
+
+    let registration = match state.get_domain(host) {
+        Some(registration) => registration,
+        None => {
+            return action_error_response(
+                StatusCode::NOT_FOUND,
+                "This Localify domain is not registered.",
+            );
+        }
+    };
+    let Some(root_path) = state.project_root_for_registration(registration) else {
+        return action_error_response(
+            StatusCode::NOT_FOUND,
+            "No project folder is linked to this domain yet.",
+        );
+    };
+    let Some(target) = query_param_value(target_query, "target").or_else(|| {
+        registration
+            .routes()
+            .iter()
+            .find_map(|route| match route.target() {
+                RouteTarget::Proxy(target) => Some(target.to_string()),
+                RouteTarget::StaticFiles(_) => None,
+            })
+    }) else {
+        return action_error_response(
+            StatusCode::BAD_REQUEST,
+            "This domain is not backed by a proxy target that Localify can launch.",
+        );
+    };
+
+    match open_local_dev_server(Path::new(root_path), &target) {
+        Ok(()) => redirect_back(headers, scheme, host),
+        Err(error) => action_error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
 fn build_not_registered_response(domain: &str) -> Response {
     let domain = domain.split(':').next().unwrap_or(domain);
     let domain_raw = domain.trim_end_matches('.').to_lowercase();
     let domain = theme::html_escape(&domain_raw);
     let image_data_uri = embedded_assets::roxy_error_data_uri();
-
-    let mut body = String::new();
-    body.push_str("<div class=\"error-container\">\n");
-    body.push_str("<div class=\"error-image\">\n");
-    body.push_str("<img src=\"");
-    body.push_str(image_data_uri);
-    body.push_str("\" alt=\"Server Error - Localify Fox\" ");
-    body.push_str("width=\"300\" height=\"225\">\n");
-    body.push_str("</div>\n");
-    body.push_str("<div class=\"error-card\">\n");
-    body.push_str("<h1 class=\"error-title\">Domain Not Registered</h1>\n");
-    body.push_str("<p class=\"error-message\">The domain <code>");
-    body.push_str(&domain);
-    body.push_str("</code> is not registered with ");
-    body.push_str(BRANDING.app_name);
-    body.push_str(".</p>\n");
-    body.push_str("<div class=\"help-section\">\n");
-    body.push_str("<p class=\"help-label\">To register this domain, run:</p>\n");
-    body.push_str("<div class=\"command\">");
-    body.push_str(BRANDING.cli_command());
-    body.push_str(" register ");
-    body.push_str(&domain);
-    body.push_str(" --route \"/=3000\"<br>");
-    // Suggest wildcard registration when the user hits a subdomain.
-    if let Some(wildcard_base) = wildcard_base_domain(&domain_raw) {
-        let wildcard_base = theme::html_escape(&wildcard_base);
-        body.push_str("<span class=\"comment\"># using subdomains? register wildcard:</span><br>");
-        body.push_str(BRANDING.cli_command());
-        body.push_str(" register ");
-        body.push_str(&wildcard_base);
-        body.push_str(" --wildcard --route \"/=3000\"<br>");
-    }
-    body.push_str("<span class=\"comment\"># or with multiple routes:</span><br>");
-    body.push_str(BRANDING.cli_command());
-    body.push_str(" register ");
-    body.push_str(&domain);
-    body.push_str(" --route \"/=3000\" --route \"/api=3001\"");
-    body.push_str("</div>\n");
-    body.push_str("<p class=\"help-label\">Then restart the ");
-    body.push_str(BRANDING.app_name);
-    body.push_str(" daemon:</p>\n");
-    body.push_str("<div class=\"command\">");
-    body.push_str(BRANDING.cli_command());
-    body.push_str(" restart</div>\n");
-    body.push_str("</div></div></div>");
+    let app_actions = build_open_app_actions("localify://open/projects");
+    let register_commands = build_domain_registration_commands(&domain_raw, &domain);
+    let restart_command = format!("{} restart", BRANDING.cli_command());
+    let body = theme::render_template(
+        DOMAIN_NOT_REGISTERED_TEMPLATE,
+        &[
+            ("{{IMAGE_DATA_URI}}", image_data_uri),
+            ("{{DOMAIN}}", &domain),
+            ("{{APP_NAME}}", BRANDING.app_name),
+            ("{{APP_ACTIONS}}", &app_actions),
+            ("{{REGISTER_COMMANDS}}", &register_commands),
+            ("{{RESTART_COMMAND}}", &restart_command),
+        ],
+    );
 
     let html = theme::render_page("Domain Not Registered", &body, theme::ERROR_PAGE_CSS, "");
 
@@ -365,18 +413,11 @@ fn redirect_back(headers: &HeaderMap, scheme: &str, host: &str) -> Response {
 
 fn action_error_response(status: StatusCode, message: &str) -> Response {
     let message = theme::html_escape(message);
-    let body = format!(
-        "<div class=\"error-container\">\
-            <div class=\"error-card\">\
-                <h1 class=\"error-title\">Open in Editor Unavailable</h1>\
-                <p class=\"error-message\">{message}</p>\
-            </div>\
-        </div>"
-    );
+    let body = theme::render_template(ACTION_ERROR_TEMPLATE, &[("{{MESSAGE}}", &message)]);
     html_response(
         status,
         theme::render_page(
-            "Open in Editor Unavailable",
+            "Localify Action Unavailable",
             &body,
             theme::ERROR_PAGE_CSS,
             "",
@@ -389,6 +430,42 @@ fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String>
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
+}
+
+fn query_param_value(query: Option<&str>, key: &str) -> Option<String> {
+    query.and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let (candidate, value) = pair.split_once('=')?;
+            (candidate == key).then(|| percent_decode(value)).flatten()
+        })
+    })
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let mut out = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                let decoded = u8::from_str_radix(hex, 16).ok()?;
+                out.push(decoded as char);
+                index += 3;
+            }
+            b'+' => {
+                out.push(' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte as char);
+                index += 1;
+            }
+        }
+    }
+
+    Some(out)
 }
 
 fn same_origin_path(url: &str, scheme: &str, host: &str) -> Option<String> {
@@ -405,46 +482,29 @@ fn same_origin_path(url: &str, scheme: &str, host: &str) -> Option<String> {
 
 fn build_no_route_response(registration: &DomainRegistration, host: &str, path: &str) -> Response {
     let domain = host.split(':').next().unwrap_or(host);
-    let domain = domain.trim_end_matches('.').to_lowercase();
-    let domain = theme::html_escape(&domain);
+    let domain_raw = domain.trim_end_matches('.').to_lowercase();
+    let domain = theme::html_escape(&domain_raw);
     let path = theme::html_escape(path);
     let reg_domain = theme::html_escape(registration.domain().as_str());
     let image_data_uri = embedded_assets::roxy_404_data_uri();
-
-    let mut body = String::new();
-    body.push_str("<div class=\"error-container\">\n");
-    body.push_str("<div class=\"error-image\">\n");
-    body.push_str("<img src=\"");
-    body.push_str(image_data_uri);
-    body.push_str("\" alt=\"404 - Localify Fox\" ");
-    body.push_str("width=\"300\" height=\"225\">\n");
-    body.push_str("</div>\n");
-    body.push_str("<div class=\"error-card\">\n");
-    body.push_str("<h1 class=\"error-title\">No Route Found</h1>\n");
-    body.push_str("<p class=\"error-message\">No route matches path <code>");
-    body.push_str(&path);
-    body.push_str("</code> on domain <code>");
-    body.push_str(&domain);
-    body.push_str("</code>.</p>\n");
-    body.push_str("<div class=\"help-section\">\n");
-    body.push_str("<p class=\"help-label\">To add a route for this path, run:</p>\n");
-    body.push_str("<div class=\"command\">");
-    body.push_str(BRANDING.cli_command());
-    body.push_str(" route add ");
-    if registration.is_wildcard() {
-        body.push_str("--wildcard ");
-    }
-    body.push_str(&reg_domain);
-    body.push(' ');
-    body.push_str(&path);
-    body.push_str(" 3000</div>\n");
-    body.push_str("<p class=\"help-label\">Then reload the ");
-    body.push_str(BRANDING.app_name);
-    body.push_str(" daemon:</p>\n");
-    body.push_str("<div class=\"command\">");
-    body.push_str(BRANDING.cli_command());
-    body.push_str(" reload</div>\n");
-    body.push_str("</div></div></div>");
+    let app_actions = build_open_app_actions(&format!(
+        "localify://open/logs?domain={}",
+        theme::encode_path_segment(&domain_raw)
+    ));
+    let add_route_command = build_add_route_command(registration.is_wildcard(), &reg_domain, &path);
+    let reload_command = format!("{} reload", BRANDING.cli_command());
+    let body = theme::render_template(
+        NO_ROUTE_FOUND_TEMPLATE,
+        &[
+            ("{{IMAGE_DATA_URI}}", image_data_uri),
+            ("{{PATH}}", &path),
+            ("{{DOMAIN}}", &domain),
+            ("{{APP_ACTIONS}}", &app_actions),
+            ("{{ADD_ROUTE_COMMAND}}", &add_route_command),
+            ("{{APP_NAME}}", BRANDING.app_name),
+            ("{{RELOAD_COMMAND}}", &reload_command),
+        ],
+    );
 
     let html = theme::render_page("No Route Found", &body, theme::ERROR_PAGE_CSS, "");
 
@@ -460,6 +520,14 @@ fn html_response(status: StatusCode, html: String) -> Response {
         .unwrap_or_else(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").into_response()
         })
+}
+
+fn build_open_app_actions(href: &str) -> String {
+    format!(
+        "<div class=\"error-actions\">\
+<a class=\"error-button\" href=\"{href}\">Open in app</a>\
+</div>"
+    )
 }
 
 fn wildcard_base_domain(domain: &str) -> Option<String> {
@@ -479,6 +547,45 @@ fn wildcard_base_domain(domain: &str) -> Option<String> {
         parts[parts.len() - 2],
         parts[parts.len() - 1]
     ))
+}
+
+fn build_domain_registration_commands(domain_raw: &str, escaped_domain: &str) -> String {
+    let mut commands = String::new();
+    commands.push_str(BRANDING.cli_command());
+    commands.push_str(" register ");
+    commands.push_str(escaped_domain);
+    commands.push_str(" --route \"/=3000\"<br>");
+
+    if let Some(wildcard_base) = wildcard_base_domain(domain_raw) {
+        let wildcard_base = theme::html_escape(&wildcard_base);
+        commands
+            .push_str("<span class=\"comment\"># using subdomains? register wildcard:</span><br>");
+        commands.push_str(BRANDING.cli_command());
+        commands.push_str(" register ");
+        commands.push_str(&wildcard_base);
+        commands.push_str(" --wildcard --route \"/=3000\"<br>");
+    }
+
+    commands.push_str("<span class=\"comment\"># or with multiple routes:</span><br>");
+    commands.push_str(BRANDING.cli_command());
+    commands.push_str(" register ");
+    commands.push_str(escaped_domain);
+    commands.push_str(" --route \"/=3000\" --route \"/api=3001\"");
+    commands
+}
+
+fn build_add_route_command(is_wildcard: bool, reg_domain: &str, path: &str) -> String {
+    let mut command = String::new();
+    command.push_str(BRANDING.cli_command());
+    command.push_str(" route add ");
+    if is_wildcard {
+        command.push_str("--wildcard ");
+    }
+    command.push_str(reg_domain);
+    command.push(' ');
+    command.push_str(path);
+    command.push_str(" 3000");
+    command
 }
 
 #[cfg(test)]

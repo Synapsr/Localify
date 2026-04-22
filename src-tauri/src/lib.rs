@@ -3,19 +3,23 @@ mod commands;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use commands::AppState;
+use commands::{AppState, DeepLinkPayloadDto, DeepLinkRouteDto};
 use roxy::branding::BRANDING;
 use roxy::desktop::DesktopApi;
-use roxy::desktop::dto::StartDaemonRequest;
+use roxy::desktop::dto::{
+    DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, RunLocalDevServerRequest,
+    StartDaemonRequest,
+};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Runtime, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::{
     async_runtime,
     menu::{AboutMetadata, Submenu},
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 #[cfg(target_os = "macos")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -30,6 +34,8 @@ const MENU_CHECK_UPDATES: &str = "menu-check-updates";
 const TRAY_TEMPLATE_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
 const UPDATER_PUBLIC_KEY: &str = include_str!("../updater.pub");
 const UPDATER_ENDPOINT: Option<&str> = option_env!("LOCALIFY_UPDATER_ENDPOINT");
+const DEEP_LINK_EVENT: &str = "localify://deep-link";
+const LOCALIFY_SCHEME: &str = "localify";
 
 #[derive(Default)]
 struct TrayState {
@@ -53,7 +59,9 @@ fn default_binary_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    if cfg!(debug_assertions) && let Some(path) = workspace_binary_path("debug") {
+    if cfg!(debug_assertions)
+        && let Some(path) = workspace_binary_path("debug")
+    {
         return path;
     }
 
@@ -134,6 +142,313 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let _ = window.unminimize();
     window.set_focus()?;
     Ok(())
+}
+
+#[derive(Debug)]
+enum DeepLinkAction {
+    Projects,
+    Logs { domain: String },
+    InEditor { domain: String },
+    RunLocalDevServer {
+        domain: String,
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DeepLinkDelivery {
+    Pending,
+    Emit,
+}
+
+#[derive(Debug)]
+struct ResolvedDomainProject {
+    project_id: Option<String>,
+    root_path: Option<String>,
+    target: Option<String>,
+}
+
+fn handle_startup_deep_links<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let Some(urls) = app
+        .deep_link()
+        .get_current()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+
+    handle_deep_link_urls(app, &urls, DeepLinkDelivery::Pending);
+    Ok(())
+}
+
+fn handle_deep_link_urls<R: Runtime>(
+    app: &AppHandle<R>,
+    urls: &[tauri::Url],
+    delivery: DeepLinkDelivery,
+) {
+    for url in urls {
+        if let Err(error) = handle_deep_link_url(app, url, delivery) {
+            eprintln!("failed to handle deep link '{}': {error}", url);
+        }
+    }
+}
+
+fn handle_deep_link_url<R: Runtime>(
+    app: &AppHandle<R>,
+    url: &tauri::Url,
+    delivery: DeepLinkDelivery,
+) -> Result<(), String> {
+    let action = parse_deep_link_action(url)?;
+    open_main_window(app).map_err(|error| error.to_string())?;
+    execute_deep_link_action(app, action, delivery)
+}
+
+fn parse_deep_link_action(url: &tauri::Url) -> Result<DeepLinkAction, String> {
+    if url.scheme() != LOCALIFY_SCHEME {
+        return Err(format!("Unsupported deep-link scheme '{}'.", url.scheme()));
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Deep link is missing an action namespace.".to_string())?;
+
+    match (host, url.path()) {
+        ("open", "/projects") => Ok(DeepLinkAction::Projects),
+        ("open", "/logs") => Ok(DeepLinkAction::Logs {
+            domain: query_param(url, "domain")?,
+        }),
+        ("action", "/open-in-editor") => Ok(DeepLinkAction::InEditor {
+            domain: query_param(url, "domain")?,
+        }),
+        ("action", "/run-local-dev-server") => Ok(DeepLinkAction::RunLocalDevServer {
+            domain: query_param(url, "domain")?,
+            target: optional_query_param(url, "target"),
+        }),
+        _ => Err(format!(
+            "Unsupported deep-link target '{}{}'.",
+            host,
+            url.path()
+        )),
+    }
+}
+
+fn query_param(url: &tauri::Url, key: &str) -> Result<String, String> {
+    url.query_pairs()
+        .find_map(|(candidate, value)| (candidate == key).then_some(value.into_owned()))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("Deep link is missing query parameter '{}'.", key))
+}
+
+fn optional_query_param(url: &tauri::Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find_map(|(candidate, value)| (candidate == key).then_some(value.into_owned()))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn execute_deep_link_action<R: Runtime>(
+    app: &AppHandle<R>,
+    action: DeepLinkAction,
+    delivery: DeepLinkDelivery,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    match action {
+        DeepLinkAction::Projects => deliver_deep_link_payload(
+            app,
+            DeepLinkPayloadDto {
+                route: DeepLinkRouteDto::Projects,
+                project_id: None,
+                view: None,
+            },
+            delivery,
+        ),
+        DeepLinkAction::Logs { domain } => {
+            let resolved = resolve_domain_project(&state.api, &domain)?;
+            let payload = match resolved.and_then(|resolved| resolved.project_id) {
+                Some(project_id) => DeepLinkPayloadDto {
+                    route: DeepLinkRouteDto::Logs,
+                    project_id: Some(project_id),
+                    view: Some("requests".into()),
+                },
+                None => DeepLinkPayloadDto {
+                    route: DeepLinkRouteDto::Projects,
+                    project_id: None,
+                    view: None,
+                },
+            };
+
+            deliver_deep_link_payload(app, payload, delivery)
+        }
+        DeepLinkAction::InEditor { domain } => {
+            let resolved = resolve_domain_project(&state.api, &domain)?;
+            let payload = resolved
+                .as_ref()
+                .and_then(|resolved| resolved.project_id.as_ref())
+                .map(|project_id| DeepLinkPayloadDto {
+                    route: DeepLinkRouteDto::Logs,
+                    project_id: Some(project_id.clone()),
+                    view: Some("requests".into()),
+                })
+                .unwrap_or(DeepLinkPayloadDto {
+                    route: DeepLinkRouteDto::Projects,
+                    project_id: None,
+                    view: None,
+                });
+
+            deliver_deep_link_payload(app, payload, delivery)?;
+
+            let Some(resolved) = resolved else {
+                return Err(format!(
+                    "No Localify project is linked to domain '{}'.",
+                    normalize_domain(&domain)
+                ));
+            };
+
+            let Some(root_path) = resolved.root_path else {
+                return Err(format!(
+                    "No local project folder is linked to domain '{}'.",
+                    normalize_domain(&domain)
+                ));
+            };
+
+            state
+                .api
+                .open_in_editor(OpenInEditorRequest { path: root_path })
+                .map_err(|error| error.to_string())
+        }
+        DeepLinkAction::RunLocalDevServer { domain, target } => {
+            let resolved = resolve_domain_project(&state.api, &domain)?;
+            let payload = resolved
+                .as_ref()
+                .and_then(|resolved| resolved.project_id.as_ref())
+                .map(|project_id| DeepLinkPayloadDto {
+                    route: DeepLinkRouteDto::Logs,
+                    project_id: Some(project_id.clone()),
+                    view: Some("requests".into()),
+                })
+                .unwrap_or(DeepLinkPayloadDto {
+                    route: DeepLinkRouteDto::Projects,
+                    project_id: None,
+                    view: None,
+                });
+
+            deliver_deep_link_payload(app, payload, delivery)?;
+
+            let Some(resolved) = resolved else {
+                return Err(format!(
+                    "No Localify project is linked to domain '{}'.",
+                    normalize_domain(&domain)
+                ));
+            };
+
+            let Some(root_path) = resolved.root_path else {
+                return Err(format!(
+                    "No local project folder is linked to domain '{}'.",
+                    normalize_domain(&domain)
+                ));
+            };
+
+            let Some(target) = target.or(resolved.target) else {
+                return Err(format!(
+                    "Localify could not find a proxy target to launch for '{}'.",
+                    normalize_domain(&domain)
+                ));
+            };
+
+            state
+                .api
+                .run_local_dev_server(RunLocalDevServerRequest { root_path, target })
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn deliver_deep_link_payload<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: DeepLinkPayloadDto,
+    delivery: DeepLinkDelivery,
+) -> Result<(), String> {
+    match delivery {
+        DeepLinkDelivery::Pending => {
+            app.state::<AppState>().set_pending_deep_link(payload);
+            Ok(())
+        }
+        DeepLinkDelivery::Emit => app
+            .emit(DEEP_LINK_EVENT, payload)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn resolve_domain_project(
+    api: &DesktopApi,
+    domain: &str,
+) -> Result<Option<ResolvedDomainProject>, String> {
+    let domain = normalize_domain(domain);
+    let bootstrap = api.bootstrap().map_err(|error| error.to_string())?;
+
+    let Some(matched_domain) = bootstrap
+        .domains
+        .iter()
+        .filter(|candidate| domain_matches_registration(&domain, candidate))
+        .max_by_key(|candidate| {
+            (
+                candidate.registration.domain.len(),
+                !candidate.registration.wildcard,
+            )
+        })
+    else {
+        return Ok(None);
+    };
+
+    let project_id = matched_domain.project_id.clone();
+    let root_path = project_id
+        .as_deref()
+        .and_then(|project_id| project_root_path(&bootstrap.projects, project_id));
+    let target = matched_domain
+        .registration
+        .routes
+        .iter()
+        .find(|route| route.path == "/" && route.target_kind == "proxy")
+        .or_else(|| {
+            matched_domain
+                .registration
+                .routes
+                .iter()
+                .find(|route| route.target_kind == "proxy")
+        })
+        .map(|route| route.target.clone());
+
+    Ok(Some(ResolvedDomainProject {
+        project_id,
+        root_path,
+        target,
+    }))
+}
+
+fn normalize_domain(domain: &str) -> String {
+    domain
+        .split(':')
+        .next()
+        .unwrap_or(domain)
+        .trim()
+        .trim_end_matches('.')
+        .to_lowercase()
+}
+
+fn domain_matches_registration(domain: &str, candidate: &DomainInfoDto) -> bool {
+    let registered = normalize_domain(&candidate.registration.domain);
+    if candidate.registration.wildcard {
+        domain == registered || domain.ends_with(&format!(".{registered}"))
+    } else {
+        domain == registered
+    }
+}
+
+fn project_root_path(projects: &[ProjectInfoDto], project_id: &str) -> Option<String> {
+    projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .and_then(|project| project.root_path.clone())
 }
 
 fn daemon_running<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -462,7 +777,16 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 pub fn run() {
     let api = DesktopApi::new(default_config_path(), default_binary_path());
 
-    let builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let _ = open_main_window(app);
+        }));
+    }
+
+    let builder = builder
         .on_menu_event(|app, event| {
             #[cfg(target_os = "macos")]
             if let Err(error) = run_app_menu_action(app, event.id().as_ref()) {
@@ -472,10 +796,11 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
         })
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { api })
+        .manage(AppState::with_api(api))
         .manage(TrayState::default());
 
     #[cfg(target_os = "macos")]
@@ -488,11 +813,19 @@ pub fn run() {
                     .pubkey(updater_public_key())
                     .build(),
             )?;
+            let app_handle = app.handle().clone();
+            app_handle.clone().deep_link().on_open_url(move |event| {
+                let urls = event.urls();
+                handle_deep_link_urls(&app_handle, &urls, DeepLinkDelivery::Emit);
+            });
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title(&runtime_desktop_name());
             }
             setup_app_menu(app.handle())?;
             setup_tray(app.handle())?;
+            if let Err(error) = handle_startup_deep_links(app.handle()) {
+                eprintln!("failed to process startup deep links: {error}");
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -517,6 +850,9 @@ pub fn run() {
             commands::get_config,
             commands::update_config,
             commands::get_licensing_status,
+            commands::export_settings,
+            commands::preview_settings_import,
+            commands::import_settings,
             commands::update_keygen_settings,
             commands::activate_license,
             commands::import_offline_license,
@@ -550,7 +886,10 @@ pub fn run() {
             commands::restart_daemon,
             commands::reload_daemon,
             commands::read_logs,
-            commands::open_in_editor
+            commands::open_in_editor,
+            commands::run_local_dev_server,
+            commands::update_launcher_preferences,
+            commands::consume_pending_deep_link
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

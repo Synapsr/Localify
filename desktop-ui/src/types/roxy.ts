@@ -103,8 +103,124 @@ export interface BootstrapDto {
   config: AppConfigDto;
   daemon: DaemonStatusDto;
   licensing: LicensingDto;
+  launcherPreferences: LauncherPreferencesDto;
+  launcherAvailability: LauncherAvailabilityDto;
   domains: DomainInfoDto[];
   projects: ProjectInfoDto[];
+}
+
+export type EditorPreference =
+  | "auto"
+  | "cursor"
+  | "vsCode"
+  | "windsurf"
+  | "zed"
+  | "sublimeText"
+  | "nova";
+export type TerminalPreference = "terminal" | "ghostty" | "iTerm" | "wezTerm";
+export type RunActionPreference = "terminalOnly" | "editorAndTerminal";
+
+export interface LauncherPreferencesDto {
+  editor: EditorPreference;
+  terminal: TerminalPreference;
+  runAction: RunActionPreference;
+}
+
+export interface EditorOptionDto {
+  id: Exclude<EditorPreference, "auto">;
+  label: string;
+}
+
+export interface TerminalOptionDto {
+  id: TerminalPreference;
+  label: string;
+}
+
+export interface LauncherAvailabilityDto {
+  availableEditors: EditorOptionDto[];
+  availableTerminals: TerminalOptionDto[];
+}
+
+export interface SettingsTransferSettingsDto {
+  daemon: DaemonConfigDto;
+  docker: DockerConfigDto;
+  keygen: KeygenSettingsUpdateRequest;
+  launcherPreferences: LauncherPreferencesDto;
+}
+
+export interface SettingsTransferDomainDto {
+  domain: string;
+  wildcard: boolean;
+  routes: string[];
+}
+
+export interface SettingsTransferProjectDto {
+  id: string;
+  name: string;
+  enabled: boolean;
+  rootPath: string | null;
+  domains: SettingsTransferDomainDto[];
+}
+
+export interface SettingsTransferSnapshotDto {
+  version: number;
+  scope: "all" | "projects" | string;
+  settings: SettingsTransferSettingsDto | null;
+  standaloneDomains: SettingsTransferDomainDto[];
+  projects: SettingsTransferProjectDto[];
+}
+
+export interface SettingsExportRequest {
+  filePath: string;
+  mode: "all" | "projects";
+  projectIds: string[];
+}
+
+export interface SettingsExportResultDto {
+  filePath: string;
+  mode: "all" | "projects" | string;
+  includesSettings: boolean;
+  standaloneDomainCount: number;
+  projectCount: number;
+}
+
+export interface SettingsImportPreviewRequest {
+  filePath: string;
+}
+
+export interface SettingsImportPreviewProjectDto {
+  id: string;
+  name: string;
+  enabled: boolean;
+  domainCount: number;
+  hasRootPath: boolean;
+}
+
+export interface SettingsImportPreviewDto {
+  filePath: string;
+  version: number;
+  scope: "all" | "projects" | string;
+  includesSettings: boolean;
+  standaloneDomainCount: number;
+  projectCount: number;
+  projects: SettingsImportPreviewProjectDto[];
+}
+
+export interface SettingsImportRequest {
+  filePath: string;
+  mode: "replaceAll" | "projects";
+  projectIds: string[];
+}
+
+export interface SettingsImportResultDto {
+  mode: "replaceAll" | "projects" | string;
+  importedProjects: number;
+  importedDomains: number;
+  importedStandaloneDomains: number;
+  appliedSettings: boolean;
+  skippedRootPaths: number;
+  daemonReloaded: boolean;
+  daemonReloadError: string | null;
 }
 
 export interface LicenseLimitsDto {
@@ -182,6 +298,14 @@ export interface AppUpdateInfoDto {
 export interface AppUpdateCheckDto {
   configured: boolean;
   update: AppUpdateInfoDto | null;
+}
+
+export type DeepLinkRouteDto = "projects" | "logs";
+
+export interface DeepLinkPayloadDto {
+  route: DeepLinkRouteDto;
+  projectId: string | null;
+  view: string | null;
 }
 
 export interface StepDto {
@@ -333,6 +457,17 @@ export interface InitProjectServiceRequest {
 
 export interface OpenInEditorRequest {
   path: string;
+}
+
+export interface RunLocalDevServerRequest {
+  rootPath: string;
+  target: string;
+}
+
+export interface UpdateLauncherPreferencesRequest {
+  editor: EditorPreference;
+  terminal: TerminalPreference;
+  runAction: RunActionPreference;
 }
 
 export interface InitProjectFromFolderResultDto {

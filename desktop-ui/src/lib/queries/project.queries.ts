@@ -15,6 +15,7 @@ import type {
   OpenInEditorRequest,
   ProjectInfoDto,
   RemoveProjectRequest,
+  RunLocalDevServerRequest,
   UpdateProjectRequest,
 } from "../../types/roxy";
 
@@ -79,5 +80,9 @@ export const projectMutations = {
   openInEditor: () =>
     mutationOptions<void, Error, OpenInEditorRequest>({
       mutationFn: (request) => tauriClient.openInEditor(request),
+    }),
+  runLocalDevServer: () =>
+    mutationOptions<void, Error, RunLocalDevServerRequest>({
+      mutationFn: (request) => tauriClient.runLocalDevServer(request),
     }),
 } as const;

@@ -8,6 +8,7 @@ import { Agentation } from "agentation";
 import { router } from "./router";
 import { AppShell } from "./components/app-shell";
 import { SharedProvider } from "./components/shared/shared-provider";
+import { startDeepLinkBridge } from "./lib/deep-link";
 
 const container = document.getElementById("app");
 if (!container) {
@@ -24,3 +25,5 @@ createRoot(container).render(
     </SharedProvider>
   </StrictMode>,
 );
+
+void startDeepLinkBridge();

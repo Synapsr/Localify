@@ -19,8 +19,10 @@ use crate::desktop::dto::{
     InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto,
     LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
     RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateProjectRequest,
+    RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateProjectRequest,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +45,15 @@ pub enum HelperCommand {
     },
     CreateProjectWithDomains {
         request: CreateProjectWithDomainsRequest,
+    },
+    ExportSettings {
+        request: SettingsExportRequest,
+    },
+    PreviewSettingsImport {
+        request: SettingsImportPreviewRequest,
+    },
+    ImportSettings {
+        request: SettingsImportRequest,
     },
     GetLicensingStatus,
     UpdateKeygenSettings {
@@ -172,6 +183,27 @@ impl SystemHelperClient {
         request: CreateProjectWithDomainsRequest,
     ) -> Result<ProjectInfoDto> {
         self.send(HelperCommand::CreateProjectWithDomains { request })
+    }
+
+    pub fn export_settings(
+        &self,
+        request: SettingsExportRequest,
+    ) -> Result<SettingsExportResultDto> {
+        self.send(HelperCommand::ExportSettings { request })
+    }
+
+    pub fn preview_settings_import(
+        &self,
+        request: SettingsImportPreviewRequest,
+    ) -> Result<SettingsImportPreviewDto> {
+        self.send(HelperCommand::PreviewSettingsImport { request })
+    }
+
+    pub fn import_settings(
+        &self,
+        request: SettingsImportRequest,
+    ) -> Result<SettingsImportResultDto> {
+        self.send(HelperCommand::ImportSettings { request })
     }
 
     pub fn get_licensing_status(&self) -> Result<LicensingDto> {
@@ -437,6 +469,15 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::CreateProjectWithDomains { request } => {
             serde_json::to_value(api.create_project_with_domains(request)?).map_err(Into::into)
+        }
+        HelperCommand::ExportSettings { request } => {
+            serde_json::to_value(api.export_settings(request)?).map_err(Into::into)
+        }
+        HelperCommand::PreviewSettingsImport { request } => {
+            serde_json::to_value(api.preview_settings_import(request)?).map_err(Into::into)
+        }
+        HelperCommand::ImportSettings { request } => {
+            serde_json::to_value(api.import_settings(request)?).map_err(Into::into)
         }
         HelperCommand::GetLicensingStatus => {
             serde_json::to_value(api.licensing_status()?).map_err(Into::into)

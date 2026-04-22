@@ -8,8 +8,10 @@ import { SettingsCli } from "./settings-cli";
 import { SettingsDeveloper } from "./settings-developer";
 import { SettingsHeader } from "./settings-header";
 import { SettingsHotkeys } from "./settings-hotkeys";
+import { SettingsLaunchers } from "./settings-launchers";
 import { SettingsLicensing } from "./settings-licensing";
 import { SettingsStatus } from "./settings-status";
+import { SettingsTransfer } from "./settings-transfer";
 import { SettingsTroubleshooting } from "./settings-troubleshooting";
 import { SettingsUninstall } from "./settings-uninstall";
 
@@ -24,7 +26,9 @@ export const SettingsScreen = () => {
       <div className="space-y-8">
         <SettingsStatus />
         <SettingsTroubleshooting />
+        <SettingsLaunchers />
         <SettingsLicensing />
+        <SettingsTransfer />
         <SettingsHotkeys />
         <SettingsCli />
         <SettingsUninstall />

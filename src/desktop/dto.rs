@@ -4,6 +4,9 @@ use crate::config::{
     DaemonConfig, DockerConfig, KEYGEN_ACCOUNT_ID, KEYGEN_API_URL, KEYGEN_PRODUCT_ID,
     KEYGEN_PUBLIC_KEY, RoxyPaths,
 };
+use crate::desktop::{
+    EditorPreference, LauncherPreferences, RunActionPreference, TerminalPreference,
+};
 
 fn default_project_enabled() -> bool {
     true
@@ -233,9 +236,192 @@ pub struct BootstrapDto {
     #[serde(default)]
     pub licensing: LicensingDto,
     #[serde(default)]
+    pub launcher_preferences: LauncherPreferencesDto,
+    #[serde(default)]
+    pub launcher_availability: LauncherAvailabilityDto,
+    #[serde(default)]
     pub domains: Vec<DomainInfoDto>,
     #[serde(default)]
     pub projects: Vec<ProjectInfoDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherPreferencesDto {
+    #[serde(default)]
+    pub editor: EditorPreference,
+    #[serde(default)]
+    pub terminal: TerminalPreference,
+    #[serde(default)]
+    pub run_action: RunActionPreference,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorOptionDto {
+    pub id: EditorPreference,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOptionDto {
+    pub id: TerminalPreference,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherAvailabilityDto {
+    #[serde(default)]
+    pub available_editors: Vec<EditorOptionDto>,
+    #[serde(default)]
+    pub available_terminals: Vec<TerminalOptionDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsTransferSettingsDto {
+    pub daemon: DaemonConfigDto,
+    pub docker: DockerConfigDto,
+    pub keygen: KeygenSettingsUpdateRequest,
+    pub launcher_preferences: LauncherPreferencesDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsTransferDomainDto {
+    pub domain: String,
+    pub wildcard: bool,
+    #[serde(default)]
+    pub routes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsTransferProjectDto {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_project_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub root_path: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<SettingsTransferDomainDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsTransferSnapshotDto {
+    pub version: u32,
+    pub scope: String,
+    #[serde(default)]
+    pub settings: Option<SettingsTransferSettingsDto>,
+    #[serde(default)]
+    pub standalone_domains: Vec<SettingsTransferDomainDto>,
+    #[serde(default)]
+    pub projects: Vec<SettingsTransferProjectDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsExportRequest {
+    pub file_path: String,
+    pub mode: String,
+    #[serde(default)]
+    pub project_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsExportResultDto {
+    pub file_path: String,
+    pub mode: String,
+    pub includes_settings: bool,
+    pub standalone_domain_count: usize,
+    pub project_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsImportPreviewRequest {
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsImportPreviewProjectDto {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub domain_count: usize,
+    pub has_root_path: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsImportPreviewDto {
+    pub file_path: String,
+    pub version: u32,
+    pub scope: String,
+    pub includes_settings: bool,
+    pub standalone_domain_count: usize,
+    pub project_count: usize,
+    #[serde(default)]
+    pub projects: Vec<SettingsImportPreviewProjectDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsImportRequest {
+    pub file_path: String,
+    pub mode: String,
+    #[serde(default)]
+    pub project_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsImportResultDto {
+    pub mode: String,
+    pub imported_projects: usize,
+    pub imported_domains: usize,
+    pub imported_standalone_domains: usize,
+    pub applied_settings: bool,
+    pub skipped_root_paths: usize,
+    pub daemon_reloaded: bool,
+    #[serde(default)]
+    pub daemon_reload_error: Option<String>,
+}
+
+impl From<LauncherPreferences> for LauncherPreferencesDto {
+    fn from(value: LauncherPreferences) -> Self {
+        Self {
+            editor: value.editor,
+            terminal: value.terminal,
+            run_action: value.run_action,
+        }
+    }
+}
+
+impl From<LauncherPreferencesDto> for LauncherPreferences {
+    fn from(value: LauncherPreferencesDto) -> Self {
+        Self {
+            editor: value.editor,
+            terminal: value.terminal,
+            run_action: value.run_action,
+        }
+    }
+}
+
+impl From<UpdateLauncherPreferencesRequest> for LauncherPreferences {
+    fn from(value: UpdateLauncherPreferencesRequest) -> Self {
+        Self {
+            editor: value.editor,
+            terminal: value.terminal,
+            run_action: value.run_action,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -495,6 +681,24 @@ pub struct InitProjectRequest {
 #[serde(rename_all = "camelCase")]
 pub struct OpenInEditorRequest {
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLocalDevServerRequest {
+    pub root_path: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLauncherPreferencesRequest {
+    #[serde(default)]
+    pub editor: EditorPreference,
+    #[serde(default)]
+    pub terminal: TerminalPreference,
+    #[serde(default)]
+    pub run_action: RunActionPreference,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

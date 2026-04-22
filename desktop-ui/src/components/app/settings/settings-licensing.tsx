@@ -1,278 +1,339 @@
 "use client";
 
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { BookmarkIcon, RefreshIcon, ZapIcon } from "@/components/icons";
+import {
+  BookmarkIcon,
+  CheckIcon,
+  ExternalLinkIcon,
+  RefreshIcon,
+  ZapIcon,
+} from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { bootstrapQueries, licenseMutations } from "@/lib/queries";
+import type { LicensingDto } from "@/types/roxy";
 
 import { SettingsGroup, SettingsSection } from "./settings-list";
 
+const BUY_LICENSE_URL = "https://localify.dev/buy";
+
 const formatLimit = (value: number | null) => (value === null ? "Unlimited" : String(value));
-const formatFingerprint = (value: string) =>
-  value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+
+const formatDate = (value: string | null) => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  const parsed = /^\d+$/.test(trimmed)
+    ? new Date(Number(trimmed) * 1000)
+    : new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return trimmed;
+  return parsed.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+};
+
+const isActive = (licensing: LicensingDto) =>
+  licensing.status === "licensed" || licensing.status === "licensedOffline";
 
 export const SettingsLicensing = () => {
-  const queryClient = useQueryClient();
   const { data } = useQuery(bootstrapQueries.read());
-  const activateLicense = useMutation(licenseMutations.activate(queryClient));
-  const importOfflineLicense = useMutation(
-    licenseMutations.importOffline(queryClient),
-  );
-  const clearLicense = useMutation(licenseMutations.clear(queryClient));
-  const refreshLicense = useMutation(licenseMutations.refresh(queryClient));
-  const [licenseKey, setLicenseKey] = useState("");
-  const [offlineCertificate, setOfflineCertificate] = useState("");
-  const [offlineKey, setOfflineKey] = useState("");
 
   if (!data) return null;
 
-  const { licensing } = data;
-  const statusTone: "accent" | "danger" | "muted" =
-    licensing.status === "licensed" || licensing.status === "licensedOffline"
-      ? "accent"
-      : licensing.status === "invalid"
-        ? "danger"
-        : "muted";
-  const mutationError =
-    activateLicense.error?.message ??
-    importOfflineLicense.error?.message ??
-    clearLicense.error?.message ??
-    refreshLicense.error?.message ??
-    licensing.lastError;
+  return (
+    <SettingsSection label="License" icon={<BookmarkIcon />}>
+      {isActive(data.licensing) ? (
+        <LicensedView licensing={data.licensing} />
+      ) : (
+        <UnlicensedView licensing={data.licensing} />
+      )}
+    </SettingsSection>
+  );
+};
 
-  const activate = async () => {
-    await activateLicense.mutateAsync({ key: licenseKey });
-    setLicenseKey("");
-  };
+const UnlicensedView = ({ licensing }: { licensing: LicensingDto }) => {
+  const [dialogOpen, setDialogOpen] = useState(false);
 
-  const importOffline = async () => {
-    await importOfflineLicense.mutateAsync({
-      certificate: offlineCertificate,
-      key: offlineKey.trim().length > 0 ? offlineKey.trim() : null,
-    });
-    setOfflineCertificate("");
-    setOfflineKey("");
+  return (
+    <>
+      <SettingsGroup>
+        <div className="flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-[--color-ink]">
+                You&apos;re on the Free plan
+              </span>
+              <Badge tone="muted">Free</Badge>
+            </div>
+            <p className="text-xs text-[--color-muted]">
+              Up to {formatLimit(licensing.freeLimits.maxProjects)} projects and{" "}
+              {formatLimit(licensing.freeLimits.maxDomainsPerProject)} domains per project. Buy a
+              license to unlock more, or paste a key you already have.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => setDialogOpen(true)}>
+              <ZapIcon />
+              Enter license key
+            </Button>
+            <Button size="sm" onClick={() => void openUrl(BUY_LICENSE_URL)}>
+              <ExternalLinkIcon />
+              Buy a license
+            </Button>
+          </div>
+        </div>
+      </SettingsGroup>
+
+      {licensing.lastError ? (
+        <p className="px-1 text-xs text-[--color-danger]">{licensing.lastError}</p>
+      ) : null}
+
+      <ActivateLicenseDialog open={dialogOpen} onOpenChange={setDialogOpen} />
+    </>
+  );
+};
+
+const LicensedView = ({ licensing }: { licensing: LicensingDto }) => {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const isOffline = licensing.status === "licensedOffline";
+
+  return (
+    <>
+      <div className="flex items-center gap-3 rounded-xl border border-[--color-accent]/30 bg-[--color-accent]/5 px-4 py-3">
+        <span
+          aria-hidden
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-[--color-accent]/15 text-[--color-accent] [&>svg]:size-4"
+        >
+          <CheckIcon />
+        </span>
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-[--color-ink]">
+              You have a {licensing.limits.plan} license
+            </span>
+            {isOffline ? <Badge tone="muted">Offline</Badge> : null}
+          </div>
+          <p className="text-xs text-[--color-muted]">
+            Everything is active. Thanks for supporting Localify.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => setDetailsOpen(true)}>
+          Details
+        </Button>
+      </div>
+
+      <LicenseDetailsDialog
+        licensing={licensing}
+        open={detailsOpen}
+        onOpenChange={setDetailsOpen}
+      />
+    </>
+  );
+};
+
+const LicenseDetailsDialog = ({
+  licensing,
+  open,
+  onOpenChange,
+}: {
+  licensing: LicensingDto;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) => {
+  const queryClient = useQueryClient();
+  const refreshLicense = useMutation(licenseMutations.refresh(queryClient));
+  const clearLicense = useMutation(licenseMutations.clear(queryClient));
+
+  const { activeLicense, offlineLicense } = licensing;
+  const isOffline = licensing.status === "licensedOffline";
+  const licenseExpiry =
+    formatDate(activeLicense?.expiry ?? null) ?? formatDate(offlineLicense?.licenseExpiry ?? null);
+  const offlineExpiry = formatDate(offlineLicense?.fileExpiry ?? null);
+  const lastValidated = formatDate(activeLicense?.lastValidatedAt ?? null);
+
+  const actionError =
+    refreshLicense.error?.message ?? clearLicense.error?.message ?? licensing.lastError;
+
+  const removeLicense = async () => {
+    await clearLicense.mutateAsync();
+    onOpenChange(false);
   };
 
   return (
-    <SettingsSection
-      label="Licensing"
-      icon={<BookmarkIcon />}
-      description="Buy a plan, paste the license key here, and Localify handles the rest."
-    >
-      <SettingsGroup>
-        <div className="space-y-4 px-4 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-1">
-              <div className="text-sm font-medium text-[--color-ink]">Current plan</div>
-              <p className="text-xs text-[--color-muted]">
-                {formatLimit(licensing.limits.maxProjects)} projects,{" "}
-                {formatLimit(licensing.limits.maxDomainsPerProject)} domains per project
-              </p>
-            </div>
-            <Badge tone={statusTone}>{licensing.limits.plan}</Badge>
-          </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>License details</DialogTitle>
+          <DialogDescription>
+            {licensing.limits.plan} plan — {formatLimit(licensing.limits.maxProjects)} projects,{" "}
+            {formatLimit(licensing.limits.maxDomainsPerProject)} domains per project.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="pb-4">
+          <dl className="grid gap-4 text-xs sm:grid-cols-2">
+            {activeLicense?.name ? (
+              <InfoItem label="Registered to" value={activeLicense.name} />
+            ) : null}
+            {licensing.currentMachine ? (
+              <InfoItem
+                label="This device"
+                value={
+                  licensing.currentMachine.name ??
+                  licensing.currentMachine.hostname ??
+                  licensing.currentMachine.platform
+                }
+              />
+            ) : null}
+            <InfoItem
+              label="Free updates until"
+              value={licenseExpiry ?? "Included"}
+            />
+            {isOffline && offlineExpiry ? (
+              <InfoItem label="Offline file expires" value={offlineExpiry} />
+            ) : lastValidated ? (
+              <InfoItem label="Last checked" value={lastValidated} />
+            ) : null}
+            {activeLicense?.keyMasked ? (
+              <InfoItem
+                label="License key"
+                value={activeLicense.keyMasked}
+                mono
+              />
+            ) : null}
+          </dl>
 
-          {licensing.currentMachine ? (
-            <div className="rounded-lg border border-[--color-border]/70 bg-background/70 px-3 py-2 text-xs text-[--color-muted]">
-              <div className="font-medium text-[--color-ink]">Current device</div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span>
-                  {licensing.currentMachine.name ??
-                    licensing.currentMachine.hostname ??
-                    "Unnamed device"}
-                </span>
-                <span>{licensing.currentMachine.platform}</span>
-                <span className="font-mono">
-                  {formatFingerprint(licensing.currentMachine.fingerprint)}
-                </span>
-              </div>
-            </div>
+          {actionError ? (
+            <p className="mt-4 text-xs text-[--color-danger]">{actionError}</p>
           ) : null}
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            loading={clearLicense.isPending}
+            onClick={() => void removeLicense()}
+          >
+            Remove license
+          </Button>
+          <Button
+            variant="outline"
+            loading={refreshLicense.isPending}
+            onClick={() => void refreshLicense.mutateAsync()}
+          >
+            <RefreshIcon />
+            Refresh
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+};
 
-          <div className="rounded-lg border border-[--color-border]/70 bg-background/70 px-3 py-3 text-xs text-[--color-muted]">
-            <div className="font-medium text-[--color-ink]">Localify managed licensing</div>
-            <p className="mt-1">
-              This build already targets the Localify licensing backend. End users only need a
-              valid license key.
-            </p>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <div className="space-y-1">
-                <div className="uppercase tracking-[0.18em]">API</div>
-                <div className="font-mono text-[11px] text-[--color-ink]">{licensing.apiUrl}</div>
-              </div>
-              <div className="space-y-1">
-                <div className="uppercase tracking-[0.18em]">Account</div>
-                <div className="font-mono text-[11px] text-[--color-ink]">
-                  {licensing.account}
-                </div>
-              </div>
-              <div className="space-y-1 sm:col-span-2">
-                <div className="uppercase tracking-[0.18em]">Product</div>
-                <div className="font-mono text-[11px] text-[--color-ink]">
-                  {licensing.product ?? "Not scoped"}
-                </div>
-              </div>
-              <div className="space-y-1 sm:col-span-2">
-                <div className="uppercase tracking-[0.18em]">Signature verification</div>
-                <div className="text-[--color-ink]">
-                  {licensing.publicKey ? "Enabled with embedded Keygen public key" : "Disabled"}
-                </div>
-              </div>
-            </div>
-          </div>
+const InfoItem = ({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) => (
+  <div className="space-y-0.5">
+    <dt className="text-[10px] font-medium tracking-wider text-[--color-muted] uppercase">
+      {label}
+    </dt>
+    <dd className={mono ? "font-mono text-[11px] text-[--color-ink]" : "text-[--color-ink]"}>
+      {value}
+    </dd>
+  </div>
+);
 
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant="ghost"
-              loading={refreshLicense.isPending}
-              onClick={() => void refreshLicense.mutateAsync()}
-              disabled={!licensing.activeLicense}
-            >
-              <RefreshIcon />
-              Refresh license
-            </Button>
-          </div>
-        </div>
+const ActivateLicenseDialog = ({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) => {
+  const queryClient = useQueryClient();
+  const activateLicense = useMutation(licenseMutations.activate(queryClient));
+  const [licenseKey, setLicenseKey] = useState("");
 
-        <div className="space-y-4 px-4 py-4">
-          <div className="space-y-1">
-            <div className="text-sm font-medium text-[--color-ink]">License key</div>
-            <p className="text-xs text-[--color-muted]">
-              Free includes {licensing.freeLimits.maxProjects} projects and{" "}
-              {licensing.freeLimits.maxDomainsPerProject} domains per project.
-            </p>
-          </div>
+  const handleClose = (next: boolean) => {
+    if (!next) {
+      setLicenseKey("");
+      activateLicense.reset();
+    }
+    onOpenChange(next);
+  };
 
-          <div className="flex flex-col gap-3 sm:flex-row">
+  const submit = async () => {
+    await activateLicense.mutateAsync({ key: licenseKey.trim() });
+    setLicenseKey("");
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Enter your license key</DialogTitle>
+          <DialogDescription>
+            Paste the key you received after purchase. Localify will activate this device
+            automatically.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <form
+            id="activate-license-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (licenseKey.trim().length > 0) void submit();
+            }}
+          >
             <Input
+              autoFocus
               value={licenseKey}
               onChange={(event) => setLicenseKey(event.target.value)}
-              placeholder="Paste your Keygen license key"
+              placeholder="Paste your license key"
+              aria-invalid={activateLicense.isError || undefined}
             />
-            <Button
-              size="sm"
-              loading={activateLicense.isPending}
-              onClick={() => void activate()}
-              disabled={licenseKey.trim().length === 0}
-            >
-              <ZapIcon />
-              Activate
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              loading={clearLicense.isPending}
-              onClick={() => void clearLicense.mutateAsync()}
-              disabled={!licensing.activeLicense}
-            >
-              Clear
-            </Button>
-          </div>
-
-          {licensing.activeLicense ? (
-            <div className="rounded-lg border border-[--color-border]/70 bg-background/70 px-3 py-2 text-xs text-[--color-muted]">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span>{licensing.activeLicense.keyMasked}</span>
-                {licensing.activeLicense.name ? (
-                  <span className="text-[--color-ink]">{licensing.activeLicense.name}</span>
-                ) : null}
-                {licensing.activeLicense.validationCode ? (
-                  <Badge tone={statusTone}>{licensing.activeLicense.validationCode}</Badge>
-                ) : null}
-                {licensing.activeLicense.responseSignatureVerified ? (
-                  <Badge tone="accent">Signed response verified</Badge>
-                ) : null}
-              </div>
-              {licensing.activeLicense.machineFingerprint ? (
-                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span>
-                    {licensing.activeLicense.machineName ??
-                      licensing.activeLicense.machineHostname ??
-                      "Activated device"}
-                  </span>
-                  {licensing.activeLicense.machinePlatform ? (
-                    <span>{licensing.activeLicense.machinePlatform}</span>
-                  ) : null}
-                  <span className="font-mono">
-                    {formatFingerprint(licensing.activeLicense.machineFingerprint)}
-                  </span>
-                  {licensing.activeLicense.machineId ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-                      {licensing.activeLicense.machineId}
-                    </span>
-                  ) : null}
-                </div>
-              ) : null}
-              {licensing.activeLicense.responseSignatureDate ? (
-                <div className="mt-2 text-[10px] uppercase tracking-[0.18em] text-[--color-muted]">
-                  Verified at {licensing.activeLicense.responseSignatureDate}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="rounded-lg border border-[--color-border]/70 bg-background/70 px-3 py-2 text-xs text-[--color-muted]">
-            <div className="font-medium text-[--color-ink]">Offline cache</div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span>{licensing.offlineCachePresent ? "Cached" : "Missing"}</span>
-              {licensing.offlineLicense?.algorithm ? (
-                <span>{licensing.offlineLicense.algorithm}</span>
-              ) : null}
-              {licensing.offlineLicense?.fileExpiry ? (
-                <span>Expires {licensing.offlineLicense.fileExpiry}</span>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <div className="text-sm font-medium text-[--color-ink]">
-                Import offline certificate
-              </div>
-              <p className="text-xs text-[--color-muted]">
-                Use this when a machine cannot reach Keygen. Signature verification is already
-                embedded in the app.
+            {activateLicense.error ? (
+              <p className="mt-2 text-xs text-[--color-danger]">
+                {activateLicense.error.message}
               </p>
-            </div>
-            <Textarea
-              value={offlineCertificate}
-              onChange={(event) => setOfflineCertificate(event.target.value)}
-              placeholder="Paste the Keygen offline certificate"
-              className="min-h-32"
-            />
-            <Input
-              value={offlineKey}
-              onChange={(event) => setOfflineKey(event.target.value)}
-              placeholder="Optional override license key"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              loading={importOfflineLicense.isPending}
-              onClick={() => void importOffline()}
-              disabled={!licensing.publicKey}
-            >
-              Import offline file
-            </Button>
-          </div>
-
-          <p className="text-xs text-[--color-muted]">
-            Activation validates the key, binds this device automatically when required by the
-            plan, and refreshes the offline cache when Keygen returns one.
-          </p>
-
-          {mutationError ? (
-            <p className="text-xs text-[--color-danger]">{mutationError}</p>
-          ) : null}
-        </div>
-      </SettingsGroup>
-    </SettingsSection>
+            ) : null}
+          </form>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => handleClose(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            form="activate-license-form"
+            loading={activateLicense.isPending}
+            disabled={licenseKey.trim().length === 0}
+          >
+            <ZapIcon />
+            Activate
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 };

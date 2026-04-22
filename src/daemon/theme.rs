@@ -57,205 +57,55 @@ pub const HOME_ICON: &str = concat!(
 
 // ── Page Shell ──────────────────────────────────────────────
 
+const PAGE_SHELL_TEMPLATE: &str = include_str!("templates/page_shell.html");
+const COMMON_CSS: &str = include_str!("templates/common.css");
+
 /// Render a complete themed HTML page.
 ///
 /// Wraps the given body content in the branded page shell
 /// with header, footer, and common styles. Pass page-specific
 /// CSS and JS via `extra_css` and `extra_js`.
 pub fn render_page(title: &str, body: &str, extra_css: &str, extra_js: &str) -> String {
-    let mut html = String::with_capacity(8192 + body.len());
-    html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
-    html.push_str("<meta charset=\"utf-8\">\n");
-    html.push_str(
-        "<meta name=\"viewport\" \
-         content=\"width=device-width, initial-scale=1\">\n",
-    );
-    html.push_str("<title>");
-    html.push_str(&html_escape(title));
-    html.push_str(" - ");
-    html.push_str(BRANDING.app_name);
-    html.push_str("</title>\n<style>\n");
-    html.push_str(COMMON_CSS);
-    if !extra_css.is_empty() {
-        html.push('\n');
-        html.push_str(extra_css);
+    let extra_css_block = if extra_css.is_empty() {
+        String::new()
+    } else {
+        format!("\n{extra_css}")
+    };
+    let extra_js_block = if extra_js.is_empty() {
+        String::new()
+    } else {
+        format!("<script>\n{extra_js}\n</script>")
+    };
+
+    render_template(
+        PAGE_SHELL_TEMPLATE,
+        &[
+            ("{{PAGE_TITLE}}", &html_escape(title)),
+            ("{{APP_NAME}}", BRANDING.app_name),
+            ("{{COMMON_CSS}}", COMMON_CSS),
+            ("{{EXTRA_CSS_BLOCK}}", &extra_css_block),
+            ("{{BODY}}", body),
+            ("{{EXTRA_JS_BLOCK}}", &extra_js_block),
+        ],
+    )
+}
+
+/// Render an embedded HTML template by replacing explicit placeholders.
+///
+/// This keeps daemon-served pages easy to edit as HTML files without pulling
+/// in a heavier templating engine for a handful of static pages.
+pub fn render_template(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut html = template.to_string();
+
+    for (placeholder, value) in replacements {
+        html = html.replace(placeholder, value);
     }
-    html.push_str("\n</style>\n</head>\n<body>\n");
-    html.push_str(HEADER_HTML);
-    html.push_str("<main class=\"roxy-main\">\n");
-    html.push_str(body);
-    html.push_str("\n</main>\n");
-    html.push_str(FOOTER_HTML);
-    if !extra_js.is_empty() {
-        html.push_str("<script>\n");
-        html.push_str(extra_js);
-        html.push_str("\n</script>\n");
-    }
-    html.push_str("</body>\n</html>");
+
     html
 }
 
 /// Shared styles for branded daemon error pages.
-pub const ERROR_PAGE_CSS: &str = "\
-.error-container{\
-    display:flex;flex-direction:column;align-items:center;\
-    gap:28px;max-width:720px;margin:24px auto;\
-    animation:fadeInUp .5s ease-out;\
-}\
-.error-image{display:none}\
-.error-card{\
-    background:var(--surface);border-radius:var(--radius-lg);\
-    border:1px solid var(--border);padding:40px;\
-    box-shadow:var(--shadow-sm);\
-    text-align:left;width:100%;\
-}\
-.error-title{\
-    color:var(--ink);font-size:1.8rem;margin-bottom:12px;\
-    font-weight:700;letter-spacing:-.02em;\
-}\
-.error-message{\
-    margin-bottom:20px;font-size:1rem;line-height:1.65;\
-    color:var(--ink-soft);\
-}\
-.help-section{margin-top:28px;text-align:left}\
-.help-label{\
-    font-size:.72rem;color:var(--ink-muted);\
-    margin-bottom:10px;\
-    font-weight:600;text-transform:uppercase;letter-spacing:.12em;\
-    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
-}\
-.command{\
-    background:#0F1917;color:#E8F0EC;\
-    padding:16px 18px;\
-    border-radius:var(--radius-md);\
-    margin:8px 0 22px 0;\
-    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
-    font-size:.85rem;line-height:1.75;\
-    border:1px solid rgba(255,255,255,.06);\
-    box-shadow:0 6px 18px rgba(15,25,23,.18);\
-    overflow-x:auto;\
-}\
-.command code{background:transparent;color:inherit;padding:0;border:0}\
-.comment{color:#86A195;font-size:.92em}\
-@keyframes fadeInUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}\
-@media(max-width:600px){.error-card{padding:28px 22px}.error-title{font-size:1.5rem}}\
-";
-
-// ── Private Constants ───────────────────────────────────────
-
-const COMMON_CSS: &str = "\
-:root{\
-    --bg:#F5F2EA;\
-    --surface:#FFFFFF;\
-    --surface-soft:#FBF8F2;\
-    --ink:#13211E;\
-    --ink-soft:rgba(19,33,30,.72);\
-    --ink-muted:rgba(19,33,30,.54);\
-    --border:rgba(27,44,39,.10);\
-    --border-strong:rgba(27,44,39,.18);\
-    --accent:#256F5A;\
-    --accent-strong:#0F513F;\
-    --accent-soft:rgba(37,111,90,.10);\
-    --danger:#B14A2A;\
-    --danger-strong:#8A3518;\
-    --danger-soft:rgba(177,74,42,.08);\
-    --shadow-sm:0 1px 2px rgba(15,25,23,.04),0 6px 24px rgba(15,25,23,.06);\
-    --shadow-md:0 12px 40px rgba(15,25,23,.08);\
-    --radius-sm:10px;\
-    --radius-md:14px;\
-    --radius-lg:20px;\
-}\
-*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}\
-html{scroll-behavior:smooth}\
-body{\
-    font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;\
-    background:\
-        radial-gradient(circle at 0% -10%,rgba(84,148,125,.14),transparent 38%),\
-        radial-gradient(circle at 100% 0%,rgba(214,193,151,.22),transparent 30%),\
-        var(--bg);\
-    color:var(--ink);\
-    line-height:1.6;min-height:100vh;\
-    display:flex;flex-direction:column;\
-    -webkit-font-smoothing:antialiased;\
-    text-rendering:optimizeLegibility;\
-}\
-a{color:var(--accent-strong);text-decoration:none;transition:color .18s ease}\
-a:hover{color:var(--ink)}\
-code{\
-    font-family:ui-monospace,'SF Mono',Menlo,Consolas,'Cascadia Code',monospace;\
-    font-size:.88em;\
-    background:var(--accent-soft);color:var(--accent-strong);\
-    padding:.12em .5em;border-radius:6px;\
-}\
-.roxy-header{padding:1.25rem 1.5rem 0}\
-.roxy-header-inner{\
-    max-width:960px;margin:0 auto;\
-    display:flex;align-items:center;justify-content:space-between;gap:1rem;\
-    padding:.7rem 1.1rem;\
-    border-radius:999px;\
-    border:1px solid rgba(255,255,255,.6);\
-    background:rgba(255,250,240,.72);\
-    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);\
-    box-shadow:0 10px 28px rgba(20,34,29,.06);\
-}\
-.roxy-brand{\
-    display:inline-flex;align-items:center;gap:.7rem;\
-    font-weight:700;font-size:.95rem;letter-spacing:-.01em;\
-    color:var(--ink);\
-}\
-.roxy-brand__mark{\
-    width:1.85rem;height:1.85rem;border-radius:50%;\
-    display:flex;flex-direction:column;\
-    align-items:center;justify-content:center;gap:2px;\
-    background:linear-gradient(135deg,#15332C,#2D6D59);\
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.2),0 4px 10px rgba(20,46,39,.2);\
-}\
-.roxy-brand__mark i{\
-    display:block;height:1.5px;border-radius:2px;\
-    background:rgba(255,250,240,.94);\
-}\
-.roxy-brand__mark i:nth-child(1){width:.7rem}\
-.roxy-brand__mark i:nth-child(2){width:.95rem}\
-.roxy-brand__mark i:nth-child(3){width:.55rem}\
-.roxy-header-version{\
-    font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;\
-    font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;\
-    color:var(--ink-muted);\
-}\
-.roxy-main{\
-    max-width:960px;width:100%;margin:0 auto;\
-    padding:2.25rem 1.5rem 3.5rem;flex:1;\
-}\
-.roxy-footer{\
-    max-width:960px;margin:0 auto;width:100%;\
-    padding:1.25rem 1.5rem 2rem;\
-    color:var(--ink-muted);font-size:.8rem;\
-    display:flex;align-items:center;justify-content:space-between;gap:1rem;\
-}\
-.roxy-footer a{color:var(--ink-muted)}\
-.roxy-footer a:hover{color:var(--ink)}\
-@media(max-width:640px){\
-    .roxy-header-inner{border-radius:18px}\
-    .roxy-footer{flex-direction:column;text-align:center}\
-}\
-";
-
-const HEADER_HTML: &str = concat!(
-    r##"<header class="roxy-header"><div class="roxy-header-inner">"##,
-    r##"<span class="roxy-brand">"##,
-    r##"<span class="roxy-brand__mark" aria-hidden="true"><i></i><i></i><i></i></span>"##,
-    r##"<span>Localify</span>"##,
-    r##"</span>"##,
-    r##"<span class="roxy-header-version">Local proxy</span>"##,
-    "</div></header>\n",
-);
-
-const FOOTER_HTML: &str = concat!(
-    r##"<footer class="roxy-footer">"##,
-    r##"<span>Localify &middot; local-first development proxy</span>"##,
-    r##"<a href="https://github.com/rbas">github.com/rbas</a>"##,
-    "</footer>\n",
-);
+pub const ERROR_PAGE_CSS: &str = include_str!("templates/error_page.css");
 
 #[cfg(test)]
 mod tests {
@@ -306,6 +156,15 @@ mod tests {
     fn test_render_page_omits_empty_script() {
         let html = render_page("T", "", "", "");
         assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn test_render_template_replaces_placeholders() {
+        let html = render_template(
+            "<div>{{A}} {{B}}</div>",
+            &[("{{A}}", "hello"), ("{{B}}", "world")],
+        );
+        assert_eq!(html, "<div>hello world</div>");
     }
 
     #[test]

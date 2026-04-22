@@ -1,0 +1,20 @@
+<div class="error-container">
+  <div class="error-image">
+    <img src="{{IMAGE_DATA_URI}}" alt="404 - Localify Fox" width="300" height="225">
+  </div>
+  <div class="error-card">
+    <p class="error-eyebrow">No matching route</p>
+    <h1 class="error-title">This path isn't routed yet</h1>
+    <p class="error-message">{{APP_NAME}} recognizes <code>{{DOMAIN}}</code>, but nothing is configured to handle <code>{{PATH}}</code>. Open the app to point this path at a local port.</p>
+    {{APP_ACTIONS}}
+    <details class="error-details">
+      <summary class="error-details__summary"><span>Prefer the command line?</span><svg class="error-details__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></summary>
+      <div class="help-section">
+        <p class="help-label">Add a route for this path</p>
+        <div class="command">{{ADD_ROUTE_COMMAND}}</div>
+        <p class="help-label">Reload {{APP_NAME}}</p>
+        <div class="command">{{RELOAD_COMMAND}}</div>
+      </div>
+    </details>
+  </div>
+</div>

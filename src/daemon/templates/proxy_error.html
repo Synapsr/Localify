@@ -1,0 +1,47 @@
+<section class="px-error">
+  <header class="px-error__hero">
+    <span class="px-badge px-badge--danger">
+      {{PROXY_ERROR_ICON}}
+      <span>{{EYEBROW}}</span>
+    </span>
+    <h1 class="px-error__title">{{TITLE}}</h1>
+    <p class="px-error__lede">{{SUMMARY}}</p>
+
+    <dl class="px-meta">
+      <div class="px-meta__item">
+        <dt>Domain</dt>
+        <dd><code>{{DOMAIN}}</code></dd>
+      </div>
+      <div class="px-meta__item">
+        <dt>Route target</dt>
+        <dd><code>{{TARGET_DISPLAY}}</code></dd>
+      </div>
+    </dl>
+  </header>
+
+  {{PROJECT_ACTION_SECTION}}
+
+  <section class="px-panel">
+    <div class="px-panel__head">
+      <h2 class="px-panel__title">What to check</h2>
+      <p class="px-panel__hint">Most of the time, one of these is it.</p>
+    </div>
+    <ol class="px-fixes">{{POSSIBLE_FIX_ITEMS}}</ol>
+  </section>
+
+  <details class="px-details">
+    <summary class="px-details__summary">
+      <span>Diagnose from the terminal</span>
+      <svg class="px-details__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </summary>
+    <pre class="px-terminal"><code>{{DIAGNOSTICS_COMMANDS}}</code></pre>
+  </details>
+
+  <details class="px-details">
+    <summary class="px-details__summary">
+      <span>Show raw error</span>
+      <svg class="px-details__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </summary>
+    <pre class="px-raw">{{RAW_ERROR}}</pre>
+  </details>
+</section>

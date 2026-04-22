@@ -1,9 +1,10 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
+
 import { cn } from "../lib/cn";
 import { projectMutations } from "../lib/queries";
-import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
 
@@ -64,8 +65,7 @@ export function ProjectRow({
       className={cn(
         "overflow-hidden transition-[transform,box-shadow,border-color]",
         dragState === "dragging" && "opacity-50",
-        dragState === "over" &&
-          "border-[--color-accent] shadow-[0_0_0_2px_var(--color-accent)]",
+        dragState === "over" && "border-[--color-accent] shadow-[0_0_0_2px_var(--color-accent)]",
       )}
     >
       <div className="flex items-start gap-3 border-b border-[--color-border] p-4">
@@ -82,7 +82,9 @@ export function ProjectRow({
               : "cursor-not-allowed text-[--color-border]",
           )}
         >
-          <span aria-hidden className="text-sm leading-none">⋮⋮</span>
+          <span aria-hidden className="text-sm leading-none">
+            ⋮⋮
+          </span>
         </div>
 
         <div className="min-w-0 flex-1 space-y-2">
@@ -140,7 +142,9 @@ export function ProjectRow({
           {expanded ? (
             <>Collapse</>
           ) : (
-            <>Show {hiddenCount} more domain{hiddenCount === 1 ? "" : "s"}</>
+            <>
+              Show {hiddenCount} more domain{hiddenCount === 1 ? "" : "s"}
+            </>
           )}
         </button>
       )}
@@ -171,8 +175,7 @@ function DomainPreview({ domain, expanded, highlight }: DomainPreviewProps) {
         <span className="flex-1" />
         {primaryRoute && (
           <span className="truncate font-mono text-xs text-[--color-muted]">
-            {primaryRoute.path === "/" ? "" : `${primaryRoute.path} `}→{" "}
-            {primaryRoute.target}
+            {primaryRoute.path === "/" ? "" : `${primaryRoute.path} `}→ {primaryRoute.target}
           </span>
         )}
       </div>
@@ -207,7 +210,7 @@ function RowButton({ children, onClick, disabled }: RowButtonProps) {
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex h-7 items-center rounded-md border border-[--color-border] bg-[--color-surface] px-2.5 text-xs font-medium text-[--color-ink] transition-colors hover:border-[--color-border-strong] disabled:cursor-not-allowed disabled:opacity-50"
+      className="inline-flex h-7 items-center rounded-md border border-[--color-border] bg-[--color-surface] px-2.5 text-xs font-medium text-[--color-ink] transition-colors hover:border-[--color-border] disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>

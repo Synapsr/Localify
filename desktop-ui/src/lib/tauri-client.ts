@@ -10,15 +10,23 @@ import {
   importOfflineLicenseRequestSchema,
   keygenSettingsUpdateRequestSchema,
 } from "./validators/validator.license";
+import { launcherPreferencesSchema } from "./validators/validator.launcher-preferences";
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
+import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
+import {
+  settingsExportRequestSchema,
+  settingsImportPreviewRequestSchema,
+  settingsImportRequestSchema,
+} from "./validators/validator.settings-transfer";
 import type {
   ActivateLicenseRequest,
   AddRouteRequest,
   AssignDomainProjectRequest,
   AvailablePortDto,
   AppConfigDto,
+  DeepLinkPayloadDto,
   AppUpdateCheckDto,
   BootstrapDto,
   CliAccessDto,
@@ -37,6 +45,7 @@ import type {
   InstallResultDto,
   KeygenSettingsUpdateRequest,
   KillPortConflictRequest,
+  LauncherPreferencesDto,
   LicensingDto,
   LogsDto,
   LogsRequest,
@@ -51,10 +60,18 @@ import type {
   RemoveProjectRequest,
   RemoveProjectResultDto,
   RemoveRouteRequest,
+  RunLocalDevServerRequest,
+  SettingsExportRequest,
+  SettingsExportResultDto,
+  SettingsImportPreviewDto,
+  SettingsImportPreviewRequest,
+  SettingsImportRequest,
+  SettingsImportResultDto,
   StartDaemonRequest,
   UninstallPreviewDto,
   UninstallResultDto,
   UnregisterDomainResultDto,
+  UpdateLauncherPreferencesRequest,
   UpdateProjectRequest,
 } from "../types/roxy";
 
@@ -101,9 +118,15 @@ export interface DesktopClient {
   getBootstrap(): Promise<BootstrapDto>;
   checkAppUpdate(): Promise<AppUpdateCheckDto>;
   installAppUpdate(): Promise<void>;
+  consumePendingDeepLink(): Promise<DeepLinkPayloadDto | null>;
   getConfig(): Promise<AppConfigDto>;
   updateConfig(request: ConfigUpdateRequest): Promise<AppConfigDto>;
   getLicensingStatus(): Promise<LicensingDto>;
+  exportSettings(request: SettingsExportRequest): Promise<SettingsExportResultDto>;
+  previewSettingsImport(
+    request: SettingsImportPreviewRequest,
+  ): Promise<SettingsImportPreviewDto>;
+  importSettings(request: SettingsImportRequest): Promise<SettingsImportResultDto>;
   updateKeygenSettings(request: KeygenSettingsUpdateRequest): Promise<LicensingDto>;
   activateLicense(request: ActivateLicenseRequest): Promise<LicensingDto>;
   importOfflineLicense(request: ImportOfflineLicenseRequest): Promise<LicensingDto>;
@@ -144,6 +167,10 @@ export interface DesktopClient {
   reloadDaemon(request: StartDaemonRequest): Promise<DaemonLaunchDto>;
   readLogs(request: LogsRequest): Promise<LogsDto>;
   openInEditor(request: OpenInEditorRequest): Promise<void>;
+  runLocalDevServer(request: RunLocalDevServerRequest): Promise<void>;
+  updateLauncherPreferences(
+    request: UpdateLauncherPreferencesRequest,
+  ): Promise<LauncherPreferencesDto>;
 }
 
 export function createDesktopClient(): DesktopClient {
@@ -151,9 +178,22 @@ export function createDesktopClient(): DesktopClient {
     getBootstrap: () => tauriInvoke("get_bootstrap"),
     checkAppUpdate: () => tauriInvoke("check_app_update"),
     installAppUpdate: () => tauriInvoke("install_app_update"),
+    consumePendingDeepLink: () => tauriInvoke("consume_pending_deep_link"),
     getConfig: () => tauriInvoke("get_config"),
     updateConfig: (request) => tauriInvoke("update_config", { request }),
     getLicensingStatus: () => tauriInvoke("get_licensing_status"),
+    exportSettings: (request) =>
+      tauriInvoke("export_settings", {
+        request: settingsExportRequestSchema.parse(request),
+      }),
+    previewSettingsImport: (request) =>
+      tauriInvoke("preview_settings_import", {
+        request: settingsImportPreviewRequestSchema.parse(request),
+      }),
+    importSettings: (request) =>
+      tauriInvoke("import_settings", {
+        request: settingsImportRequestSchema.parse(request),
+      }),
     updateKeygenSettings: (request) =>
       tauriInvoke("update_keygen_settings", {
         request: keygenSettingsUpdateRequestSchema.parse(request),
@@ -215,6 +255,14 @@ export function createDesktopClient(): DesktopClient {
     openInEditor: (request) =>
       tauriInvoke("open_in_editor", {
         request: openInEditorRequestSchema.parse(request),
+      }),
+    runLocalDevServer: (request) =>
+      tauriInvoke("run_local_dev_server", {
+        request: runLocalDevServerRequestSchema.parse(request),
+      }),
+    updateLauncherPreferences: (request) =>
+      tauriInvoke("update_launcher_preferences", {
+        request: launcherPreferencesSchema.parse(request),
       }),
   };
 }

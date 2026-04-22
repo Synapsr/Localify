@@ -4,7 +4,15 @@ import { tauriClient } from "../tauri-client";
 import type {
   CliAccessDto,
   InstallResultDto,
+  LauncherPreferencesDto,
   NodeTrustDto,
+  SettingsExportRequest,
+  SettingsExportResultDto,
+  SettingsImportPreviewDto,
+  SettingsImportPreviewRequest,
+  SettingsImportRequest,
+  SettingsImportResultDto,
+  UpdateLauncherPreferencesRequest,
   UninstallPreviewDto,
 } from "../../types/roxy";
 import { configQueries } from "./config.queries";
@@ -51,6 +59,26 @@ export const systemMutations = {
   setupNodeTrust: (queryClient: QueryClient) =>
     mutationOptions<NodeTrustDto, Error, void>({
       mutationFn: () => tauriClient.setupNodeTrust(),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
+  exportSettings: () =>
+    mutationOptions<SettingsExportResultDto, Error, SettingsExportRequest>({
+      mutationFn: (request) => tauriClient.exportSettings(request),
+    }),
+  previewSettingsImport: () =>
+    mutationOptions<SettingsImportPreviewDto, Error, SettingsImportPreviewRequest>({
+      mutationFn: (request) => tauriClient.previewSettingsImport(request),
+    }),
+  importSettings: (queryClient: QueryClient) =>
+    mutationOptions<SettingsImportResultDto, Error, SettingsImportRequest>({
+      mutationFn: (request) => tauriClient.importSettings(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
+  updateLauncherPreferences: (queryClient: QueryClient) =>
+    mutationOptions<LauncherPreferencesDto, Error, UpdateLauncherPreferencesRequest>({
+      mutationFn: (request) => tauriClient.updateLauncherPreferences(request),
       onSuccess: async () =>
         invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),

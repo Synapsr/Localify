@@ -1,33 +1,4 @@
-pub(super) const NOT_FOUND_CSS: &str = "\
-.error-container{\
-    display:flex;flex-direction:column;align-items:center;\
-    gap:24px;max-width:700px;margin:40px auto;\
-}\
-.error-image{\
-    animation:fadeInDown .6s ease-out;\
-}\
-.error-image img{\
-    width:100%;max-width:300px;height:auto;\
-    border-radius:12px;\
-    box-shadow:0 8px 24px rgba(156,180,212,.25);\
-}\
-.error-card{\
-    background:var(--card-bg);border-radius:12px;\
-    border:1px solid var(--border);padding:36px;\
-    box-shadow:0 4px 16px rgba(0,0,0,.04);\
-    text-align:center;width:100%;\
-    animation:fadeInUp .6s ease-out;\
-}\
-.error-title{\
-    color:var(--fox-orange);font-size:1.6em;margin-bottom:16px;\
-    font-weight:700;\
-}\
-.error-message{margin-bottom:12px;font-size:1.05em}\
-.error-hint{color:var(--text-light);font-size:.92em;margin-top:8px}\
-@keyframes fadeInDown{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}\
-@keyframes fadeInUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}\
-@media(max-width:600px){.error-image img{max-width:240px}.error-card{padding:28px}}\
-";
+pub(super) const NOT_FOUND_CSS: &str = include_str!("../templates/file_not_found.css");
 
 pub(super) const FILEBROWSER_CSS: &str = "\
 .page-title{\

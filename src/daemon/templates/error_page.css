@@ -1,0 +1,80 @@
+.error-container{
+    display:flex;flex-direction:column;align-items:stretch;
+    gap:16px;max-width:560px;width:100%;margin:0 auto;
+    animation:fadeInUp .4s ease-out;
+}
+.error-image{display:none}
+.error-card{
+    background:transparent;
+    padding:0;
+    text-align:left;width:100%;
+}
+.error-eyebrow{
+    display:block;
+    font-size:.68rem;color:var(--ink-muted);
+    margin:0 0 10px;
+    font-weight:500;text-transform:uppercase;letter-spacing:.12em;
+    font-family:var(--font-mono);
+}
+.error-title{
+    color:var(--ink);font-size:1.75rem;margin-bottom:12px;
+    font-weight:600;letter-spacing:-.02em;line-height:1.15;
+}
+.error-message{
+    margin-bottom:16px;font-size:.975rem;line-height:1.6;
+    color:var(--ink-soft);
+}
+.error-hint{
+    color:var(--ink-muted);font-size:.88rem;
+    margin-top:8px;line-height:1.5;
+}
+.error-actions{
+    display:flex;flex-wrap:wrap;gap:12px;
+    margin:20px 0 0;
+}
+.error-button{
+    appearance:none;
+    display:inline-flex;align-items:center;justify-content:center;
+    gap:.5rem;
+    padding:.7rem 1rem;
+    border-radius:999px;
+    background:var(--ink);
+    color:var(--bg);
+    text-decoration:none;
+    font:500 .9rem/1 var(--font-sans);
+    transition:opacity .15s ease,transform .15s ease;
+}
+.error-button:hover{opacity:.88}
+.error-button:active{transform:translateY(1px)}
+.error-details{margin-top:24px}
+.error-details__summary{
+    display:inline-flex;align-items:center;gap:.4rem;
+    padding:4px 0;cursor:pointer;
+    font-size:.82rem;font-weight:500;color:var(--ink-muted);
+    list-style:none;
+}
+.error-details__summary:hover{color:var(--ink)}
+.error-details__summary::-webkit-details-marker{display:none}
+.error-details__chevron{transition:transform .2s ease;color:currentColor}
+.error-details[open] .error-details__chevron{transform:rotate(180deg)}
+.error-details .help-section{margin-top:14px}
+.help-section{margin-top:28px;text-align:left}
+.help-label{
+    font-size:.68rem;color:var(--ink-muted);
+    margin-bottom:8px;
+    font-weight:500;text-transform:uppercase;letter-spacing:.1em;
+    font-family:var(--font-mono);
+}
+.command{
+    background:#0A0A0A;color:#FAFAFA;
+    padding:14px 16px;
+    border-radius:var(--radius-md);
+    margin:6px 0 18px 0;
+    font-family:var(--font-mono);
+    font-size:.82rem;line-height:1.7;
+    overflow-x:auto;
+}
+.command code{background:transparent;color:inherit;padding:0;border:0}
+.comment{color:#A3A3A3;font-size:.92em}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:600px){.error-title{font-size:1.5rem}}

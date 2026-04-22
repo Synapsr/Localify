@@ -59,7 +59,7 @@ export const ProjectDomainList = ({ project, domains }: ProjectDomainListProps) 
               transition={chipTransition}
               className="inline-flex"
             >
-              <ProjectDomainChip domain={domain} />
+              <ProjectDomainChip domain={domain} projectRootPath={project.rootPath} />
             </motion.span>
           ))
         )}

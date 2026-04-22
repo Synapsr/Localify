@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::net::TcpListener;
@@ -21,7 +22,6 @@ use crate::application::stop_daemon::StopDaemon;
 use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
-use crate::desktop::ProjectRootStore;
 use crate::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
     AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
@@ -29,16 +29,22 @@ use crate::desktop::dto::{
     DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
     FolderInitServiceDto, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
     InitProjectFromFolderResultDto, InitProjectRequest, InitProjectResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LogsDto, LogsRequest, NodeTrustDto,
-    OpenInEditorRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
-    RemoveProjectResultDto, RemoveRouteRequest, RouteDto, StartDaemonRequest, StepDto,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateProjectRequest,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherAvailabilityDto, LogsDto,
+    LogsRequest, NodeTrustDto, OpenInEditorRequest, PortConflictDto, ProjectInfoDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RouteDto,
+    RunLocalDevServerRequest, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
+    SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
+    SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
+    StartDaemonRequest, StepDto, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
+use crate::desktop::{LauncherPreferencesStore, ProjectRootStore, RunActionPreference};
 use crate::domain::{DomainPattern, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, ConfiguredProject};
@@ -55,6 +61,7 @@ use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
 use crate::infrastructure::target_probe::is_route_target_reachable;
+use crate::infrastructure::{editor, local_dev};
 use crate::project_init::{
     FolderInitSelection, apply_local_app_updates, detect_folder_init_plan,
     resolve_folder_init_selection,
@@ -62,6 +69,11 @@ use crate::project_init::{
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
 
 const CLI_INSTALL_DIR: &str = "/usr/local/bin";
+const SETTINGS_TRANSFER_VERSION: u32 = 1;
+const SETTINGS_TRANSFER_SCOPE_ALL: &str = "all";
+const SETTINGS_TRANSFER_SCOPE_PROJECTS: &str = "projects";
+const SETTINGS_IMPORT_MODE_REPLACE_ALL: &str = "replaceAll";
+const SETTINGS_IMPORT_MODE_PROJECTS: &str = "projects";
 
 #[derive(Debug, Clone)]
 pub struct DesktopApi {
@@ -92,6 +104,8 @@ impl DesktopApi {
             let mut bootstrap = helper.get_bootstrap()?;
             bootstrap.environment = self.environment();
             bootstrap.daemon.ca_installed = self.effective_desktop_ca_installed()?;
+            bootstrap.launcher_preferences = self.effective_launcher_preferences()?.into();
+            bootstrap.launcher_availability = self.launcher_availability();
             bootstrap.projects = self.enrich_projects_with_local_paths(bootstrap.projects)?;
             return Ok(bootstrap);
         }
@@ -101,6 +115,8 @@ impl DesktopApi {
             config: self.read_config()?,
             daemon: self.daemon_status()?,
             licensing: self.licensing_status()?,
+            launcher_preferences: self.effective_launcher_preferences()?.into(),
+            launcher_availability: self.launcher_availability(),
             domains: self.list_domains()?,
             projects: self.list_projects()?,
         })
@@ -778,6 +794,294 @@ impl DesktopApi {
         crate::desktop::editor::open_in_editor(Path::new(&request.path))
     }
 
+    pub fn update_launcher_preferences(
+        &self,
+        request: UpdateLauncherPreferencesRequest,
+    ) -> Result<crate::desktop::dto::LauncherPreferencesDto> {
+        let preferences = self.normalize_launcher_preferences(request.into());
+        self.launcher_preferences_store()?.save(&preferences)?;
+        Ok(preferences.into())
+    }
+
+    pub fn export_settings(
+        &self,
+        request: SettingsExportRequest,
+    ) -> Result<SettingsExportResultDto> {
+        validate_settings_export_request(&request)?;
+        let snapshot = self.build_settings_snapshot(&request)?;
+        let path = PathBuf::from(request.file_path.trim());
+        write_settings_snapshot(&path, &snapshot)?;
+
+        Ok(SettingsExportResultDto {
+            file_path: path.display().to_string(),
+            mode: request.mode,
+            includes_settings: snapshot.settings.is_some(),
+            standalone_domain_count: snapshot.standalone_domains.len(),
+            project_count: snapshot.projects.len(),
+        })
+    }
+
+    pub fn preview_settings_import(
+        &self,
+        request: SettingsImportPreviewRequest,
+    ) -> Result<SettingsImportPreviewDto> {
+        let path = import_file_path(&request.file_path)?;
+        let snapshot = read_settings_snapshot(&path)?;
+        validate_settings_snapshot(&snapshot)?;
+
+        Ok(SettingsImportPreviewDto {
+            file_path: path.display().to_string(),
+            version: snapshot.version,
+            scope: snapshot.scope,
+            includes_settings: snapshot.settings.is_some(),
+            standalone_domain_count: snapshot.standalone_domains.len(),
+            project_count: snapshot.projects.len(),
+            projects: snapshot
+                .projects
+                .iter()
+                .map(|project| SettingsImportPreviewProjectDto {
+                    id: project.id.clone(),
+                    name: project.name.clone(),
+                    enabled: project.enabled,
+                    domain_count: project.domains.len(),
+                    has_root_path: project.root_path.is_some(),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn import_settings(
+        &self,
+        request: SettingsImportRequest,
+    ) -> Result<SettingsImportResultDto> {
+        let path = import_file_path(&request.file_path)?;
+        let snapshot = read_settings_snapshot(&path)?;
+        validate_settings_snapshot(&snapshot)?;
+        validate_settings_import_request(&request, &snapshot)?;
+        let licensing = self.licensing_status()?;
+
+        match request.mode.as_str() {
+            SETTINGS_IMPORT_MODE_REPLACE_ALL => {
+                validate_settings_snapshot_targets(&snapshot)?;
+                ensure_snapshot_within_license_limits(&licensing, &snapshot)?;
+                self.import_settings_replace_all(snapshot)
+            }
+            SETTINGS_IMPORT_MODE_PROJECTS => {
+                let selected_projects = select_snapshot_projects(&snapshot, &request.project_ids)?;
+                let selected_snapshot = SettingsTransferSnapshotDto {
+                    version: snapshot.version,
+                    scope: snapshot.scope.clone(),
+                    settings: snapshot.settings.clone(),
+                    standalone_domains: Vec::new(),
+                    projects: selected_projects.clone(),
+                };
+                validate_settings_snapshot_targets(&selected_snapshot)?;
+                ensure_project_import_within_license_limits(self, &licensing, &selected_projects)?;
+                self.import_settings_projects(selected_projects)
+            }
+            other => bail!("Unsupported import mode '{other}'."),
+        }
+    }
+
+    pub fn run_local_dev_server(&self, request: RunLocalDevServerRequest) -> Result<()> {
+        let preferences = self.effective_launcher_preferences()?;
+        let project_root = Path::new(&request.root_path);
+
+        if preferences.run_action == RunActionPreference::EditorAndTerminal {
+            crate::desktop::editor::open_in_editor_with_preference(
+                project_root,
+                preferences.editor,
+            )?;
+        }
+
+        crate::infrastructure::local_dev::open_local_dev_server_with_terminal(
+            project_root,
+            &request.target,
+            preferences.terminal,
+        )
+    }
+
+    fn build_settings_snapshot(
+        &self,
+        request: &SettingsExportRequest,
+    ) -> Result<SettingsTransferSnapshotDto> {
+        let bootstrap = self.bootstrap()?;
+        let selected_project_ids = request
+            .project_ids
+            .iter()
+            .map(|project_id| project_id.trim())
+            .filter(|project_id| !project_id.is_empty())
+            .collect::<HashSet<_>>();
+        let include_all = request.mode == SETTINGS_TRANSFER_SCOPE_ALL;
+
+        if !include_all {
+            let available = bootstrap
+                .projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<HashSet<_>>();
+            let missing = selected_project_ids
+                .iter()
+                .filter(|project_id| !available.contains(**project_id))
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                bail!("Cannot export unknown project IDs: {}.", missing.join(", "));
+            }
+        }
+
+        let mut domains_by_project = HashMap::<String, Vec<SettingsTransferDomainDto>>::new();
+        let mut standalone_domains = Vec::new();
+
+        for domain in &bootstrap.domains {
+            let export_domain = export_domain_snapshot(domain.registration.clone())?;
+            if let Some(project_id) = domain.project_id.as_deref() {
+                domains_by_project
+                    .entry(project_id.to_string())
+                    .or_default()
+                    .push(export_domain);
+            } else if include_all {
+                standalone_domains.push(export_domain);
+            }
+        }
+
+        let projects = bootstrap
+            .projects
+            .into_iter()
+            .filter(|project| include_all || selected_project_ids.contains(project.id.as_str()))
+            .map(|project| {
+                let project_id = project.id;
+                let domains = domains_by_project.remove(&project_id).unwrap_or_default();
+
+                SettingsTransferProjectDto {
+                    id: project_id,
+                    name: project.name,
+                    enabled: project.enabled,
+                    root_path: project.root_path,
+                    domains,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let settings = include_all.then_some(SettingsTransferSettingsDto {
+            daemon: bootstrap.config.daemon,
+            docker: bootstrap.config.docker,
+            keygen: KeygenSettingsUpdateRequest {
+                api_url: bootstrap.licensing.api_url,
+                account: bootstrap.licensing.account,
+                product: bootstrap.licensing.product,
+                public_key: bootstrap.licensing.public_key,
+            },
+            launcher_preferences: bootstrap.launcher_preferences,
+        });
+
+        Ok(SettingsTransferSnapshotDto {
+            version: SETTINGS_TRANSFER_VERSION,
+            scope: request.mode.clone(),
+            settings,
+            standalone_domains,
+            projects,
+        })
+    }
+
+    fn import_settings_replace_all(
+        &self,
+        snapshot: SettingsTransferSnapshotDto,
+    ) -> Result<SettingsImportResultDto> {
+        let daemon_was_running = self.daemon_status()?.running;
+        let current = self.bootstrap()?;
+
+        for project in current.projects {
+            self.remove_project(RemoveProjectRequest {
+                id: project.id,
+                delete_domains: true,
+            })?;
+        }
+
+        for domain in current
+            .domains
+            .into_iter()
+            .filter(|domain| domain.project_id.is_none())
+        {
+            self.unregister_domain(DomainPatternRequest {
+                domain: domain.registration.domain,
+                wildcard: domain.registration.wildcard,
+            })?;
+        }
+
+        let applied_settings = if let Some(settings) = snapshot.settings.clone() {
+            self.update_config(ConfigUpdateRequest {
+                daemon: Some(settings.daemon),
+                paths: None,
+                docker: Some(settings.docker),
+            })?;
+            self.update_keygen_settings(settings.keygen)?;
+            self.update_launcher_preferences(UpdateLauncherPreferencesRequest {
+                editor: settings.launcher_preferences.editor,
+                terminal: settings.launcher_preferences.terminal,
+                run_action: settings.launcher_preferences.run_action,
+            })?;
+            true
+        } else {
+            false
+        };
+
+        let standalone_domain_count =
+            import_standalone_domains(self, &snapshot.standalone_domains)?;
+        let (project_domain_count, skipped_root_paths) = import_projects(self, &snapshot.projects)?;
+        let (daemon_reloaded, daemon_reload_error) =
+            reload_daemon_if_running(self, daemon_was_running);
+
+        Ok(SettingsImportResultDto {
+            mode: SETTINGS_IMPORT_MODE_REPLACE_ALL.into(),
+            imported_projects: snapshot.projects.len(),
+            imported_domains: project_domain_count,
+            imported_standalone_domains: standalone_domain_count,
+            applied_settings,
+            skipped_root_paths,
+            daemon_reloaded,
+            daemon_reload_error,
+        })
+    }
+
+    fn import_settings_projects(
+        &self,
+        selected_projects: Vec<SettingsTransferProjectDto>,
+    ) -> Result<SettingsImportResultDto> {
+        let daemon_was_running = self.daemon_status()?.running;
+        ensure_project_import_has_no_conflicts(self, &selected_projects)?;
+
+        let existing_projects = self
+            .list_projects()?
+            .into_iter()
+            .map(|project| project.id)
+            .collect::<HashSet<_>>();
+
+        for project in &selected_projects {
+            if existing_projects.contains(project.id.as_str()) {
+                self.remove_project(RemoveProjectRequest {
+                    id: project.id.clone(),
+                    delete_domains: true,
+                })?;
+            }
+        }
+
+        let (project_domain_count, skipped_root_paths) = import_projects(self, &selected_projects)?;
+        let (daemon_reloaded, daemon_reload_error) =
+            reload_daemon_if_running(self, daemon_was_running);
+
+        Ok(SettingsImportResultDto {
+            mode: SETTINGS_IMPORT_MODE_PROJECTS.into(),
+            imported_projects: selected_projects.len(),
+            imported_domains: project_domain_count,
+            imported_standalone_domains: 0,
+            applied_settings: false,
+            skipped_root_paths,
+            daemon_reloaded,
+            daemon_reload_error,
+        })
+    }
+
     fn enrich_projects_with_local_paths(
         &self,
         projects: Vec<ProjectInfoDto>,
@@ -1413,6 +1717,64 @@ impl DesktopApi {
         ProjectRootStore::new_default()
     }
 
+    fn launcher_preferences_store(&self) -> Result<LauncherPreferencesStore> {
+        LauncherPreferencesStore::new_default()
+    }
+
+    fn launcher_preferences(&self) -> Result<crate::desktop::LauncherPreferences> {
+        self.launcher_preferences_store()?.load()
+    }
+
+    fn effective_launcher_preferences(&self) -> Result<crate::desktop::LauncherPreferences> {
+        Ok(self.normalize_launcher_preferences(self.launcher_preferences()?))
+    }
+
+    fn normalize_launcher_preferences(
+        &self,
+        preferences: crate::desktop::LauncherPreferences,
+    ) -> crate::desktop::LauncherPreferences {
+        let available_editors = editor::available_editor_preferences();
+        let available_terminals = local_dev::available_terminal_preferences();
+
+        crate::desktop::LauncherPreferences {
+            editor: if preferences.editor == crate::desktop::EditorPreference::Auto
+                || available_editors.contains(&preferences.editor)
+            {
+                preferences.editor
+            } else {
+                crate::desktop::EditorPreference::Auto
+            },
+            terminal: if available_terminals.contains(&preferences.terminal) {
+                preferences.terminal
+            } else {
+                available_terminals
+                    .first()
+                    .copied()
+                    .unwrap_or(crate::desktop::TerminalPreference::Terminal)
+            },
+            run_action: preferences.run_action,
+        }
+    }
+
+    fn launcher_availability(&self) -> LauncherAvailabilityDto {
+        LauncherAvailabilityDto {
+            available_editors: editor::available_editor_preferences()
+                .into_iter()
+                .map(|id| crate::desktop::dto::EditorOptionDto {
+                    id,
+                    label: editor::editor_label(id).into(),
+                })
+                .collect(),
+            available_terminals: local_dev::available_terminal_preferences()
+                .into_iter()
+                .map(|id| crate::desktop::dto::TerminalOptionDto {
+                    id,
+                    label: local_dev::terminal_label(id).into(),
+                })
+                .collect(),
+        }
+    }
+
     fn store_project_root_path(&self, project_id: &str, root_path: &Path) -> Result<()> {
         if self.direct_mode {
             return Ok(());
@@ -1846,6 +2208,521 @@ impl DesktopApi {
 
 fn parse_pattern(request: &DomainPatternRequest) -> Result<DomainPattern> {
     DomainPattern::from_name(&request.domain, request.wildcard).map_err(Into::into)
+}
+
+fn validate_settings_export_request(request: &SettingsExportRequest) -> Result<()> {
+    let path = transfer_file_path(&request.file_path)?;
+    if path.is_dir() {
+        bail!("Export path '{}' is a directory.", path.display());
+    }
+
+    match request.mode.as_str() {
+        SETTINGS_TRANSFER_SCOPE_ALL => Ok(()),
+        SETTINGS_TRANSFER_SCOPE_PROJECTS => {
+            if request
+                .project_ids
+                .iter()
+                .all(|project_id| project_id.trim().is_empty())
+            {
+                bail!("Select at least one project to export.");
+            }
+            Ok(())
+        }
+        other => bail!("Unsupported export mode '{other}'."),
+    }
+}
+
+fn validate_settings_import_request(
+    request: &SettingsImportRequest,
+    snapshot: &SettingsTransferSnapshotDto,
+) -> Result<()> {
+    match request.mode.as_str() {
+        SETTINGS_IMPORT_MODE_REPLACE_ALL => {
+            if snapshot.settings.is_none() {
+                bail!(
+                    "This file does not contain the portable global settings needed for a full import."
+                );
+            }
+            Ok(())
+        }
+        SETTINGS_IMPORT_MODE_PROJECTS => {
+            if request
+                .project_ids
+                .iter()
+                .all(|project_id| project_id.trim().is_empty())
+            {
+                bail!("Select at least one project to import.");
+            }
+            Ok(())
+        }
+        other => bail!("Unsupported import mode '{other}'."),
+    }
+}
+
+fn validate_settings_snapshot(snapshot: &SettingsTransferSnapshotDto) -> Result<()> {
+    if snapshot.version != SETTINGS_TRANSFER_VERSION {
+        bail!(
+            "Unsupported settings export version '{}'.",
+            snapshot.version
+        );
+    }
+
+    if !matches!(
+        snapshot.scope.as_str(),
+        SETTINGS_TRANSFER_SCOPE_ALL | SETTINGS_TRANSFER_SCOPE_PROJECTS
+    ) {
+        bail!("Unsupported export scope '{}'.", snapshot.scope);
+    }
+
+    let mut project_ids = HashSet::new();
+    let mut domain_keys = HashSet::new();
+
+    for project in &snapshot.projects {
+        let expected_id = normalize_project_snapshot_id(&project.name)?;
+        if project.id.trim().is_empty() {
+            bail!("Exported project IDs cannot be empty.");
+        }
+        if project.id != expected_id {
+            bail!(
+                "Exported project '{}' has an invalid ID '{}'.",
+                project.name,
+                project.id
+            );
+        }
+        if !project_ids.insert(project.id.as_str()) {
+            bail!(
+                "Project '{}' appears more than once in the export file.",
+                project.id
+            );
+        }
+
+        for domain in &project.domains {
+            validate_snapshot_domain(domain)?;
+            let key = snapshot_domain_key(&domain.domain, domain.wildcard);
+            if !domain_keys.insert(key.clone()) {
+                bail!(
+                    "Domain '{}' appears more than once in the export file.",
+                    key
+                );
+            }
+        }
+    }
+
+    for domain in &snapshot.standalone_domains {
+        validate_snapshot_domain(domain)?;
+        let key = snapshot_domain_key(&domain.domain, domain.wildcard);
+        if !domain_keys.insert(key.clone()) {
+            bail!(
+                "Domain '{}' appears more than once in the export file.",
+                key
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_snapshot_domain(domain: &SettingsTransferDomainDto) -> Result<()> {
+    if domain.domain.trim().is_empty() {
+        bail!("Exported domains cannot be empty.");
+    }
+    if domain.routes.is_empty() {
+        bail!("Domain '{}' has no routes to import.", domain.domain);
+    }
+    if domain.routes.iter().any(|route| route.trim().is_empty()) {
+        bail!("Domain '{}' has an empty route entry.", domain.domain);
+    }
+    Ok(())
+}
+
+fn validate_settings_snapshot_targets(snapshot: &SettingsTransferSnapshotDto) -> Result<()> {
+    for domain in snapshot.standalone_domains.iter().chain(
+        snapshot
+            .projects
+            .iter()
+            .flat_map(|project| project.domains.iter()),
+    ) {
+        for route in &domain.routes {
+            validate_import_route(route)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_import_route(route: &str) -> Result<()> {
+    let parsed = parse_desktop_route(route)?;
+    if let RouteTarget::StaticFiles(path) = parsed.target()
+        && !path.is_dir()
+    {
+        bail!(
+            "Static files route '{}' points to '{}' but that folder does not exist on this machine.",
+            route,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_snapshot_within_license_limits(
+    licensing: &crate::desktop::dto::LicensingDto,
+    snapshot: &SettingsTransferSnapshotDto,
+) -> Result<()> {
+    if let Some(max_projects) = licensing.limits.max_projects
+        && snapshot.projects.len() > max_projects
+    {
+        bail!(
+            "This import contains {} projects, but the current {} plan allows up to {}.",
+            snapshot.projects.len(),
+            licensing.limits.plan,
+            max_projects
+        );
+    }
+
+    if let Some(max_domains_per_project) = licensing.limits.max_domains_per_project {
+        for project in &snapshot.projects {
+            if project.domains.len() > max_domains_per_project {
+                bail!(
+                    "Project '{}' contains {} domains, but the current {} plan allows up to {} domains per project.",
+                    project.name,
+                    project.domains.len(),
+                    licensing.limits.plan,
+                    max_domains_per_project
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_project_import_within_license_limits(
+    api: &DesktopApi,
+    licensing: &crate::desktop::dto::LicensingDto,
+    projects: &[SettingsTransferProjectDto],
+) -> Result<()> {
+    if let Some(max_projects) = licensing.limits.max_projects {
+        let existing_project_ids = api
+            .list_projects()?
+            .into_iter()
+            .map(|project| project.id)
+            .collect::<HashSet<_>>();
+        let replacing_project_ids = projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<HashSet<_>>();
+        let retained_project_count = existing_project_ids
+            .iter()
+            .filter(|project_id| !replacing_project_ids.contains(project_id.as_str()))
+            .count();
+        let final_project_count = retained_project_count + projects.len();
+
+        if final_project_count > max_projects {
+            bail!(
+                "This import would leave {} projects configured, but the current {} plan allows up to {}.",
+                final_project_count,
+                licensing.limits.plan,
+                max_projects
+            );
+        }
+    }
+
+    if let Some(max_domains_per_project) = licensing.limits.max_domains_per_project {
+        for project in projects {
+            if project.domains.len() > max_domains_per_project {
+                bail!(
+                    "Project '{}' contains {} domains, but the current {} plan allows up to {} domains per project.",
+                    project.name,
+                    project.domains.len(),
+                    licensing.limits.plan,
+                    max_domains_per_project
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn transfer_file_path(file_path: &str) -> Result<PathBuf> {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        bail!("File path is required.");
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        bail!("File path '{}' must be absolute.", path.display());
+    }
+
+    Ok(path)
+}
+
+fn import_file_path(file_path: &str) -> Result<PathBuf> {
+    let path = transfer_file_path(file_path)?;
+    if !path.is_file() {
+        bail!("Import file '{}' was not found.", path.display());
+    }
+    Ok(path)
+}
+
+fn read_settings_snapshot(path: &Path) -> Result<SettingsTransferSnapshotDto> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read settings export '{}'.", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse settings export '{}'.", path.display()))
+}
+
+fn write_settings_snapshot(path: &Path, snapshot: &SettingsTransferSnapshotDto) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create the export directory '{}'.",
+                parent.display()
+            )
+        })?;
+    }
+
+    let content = serde_json::to_string_pretty(snapshot)
+        .context("Failed to serialize the settings export file")?;
+    fs::write(path, format!("{content}\n"))
+        .with_context(|| format!("Failed to write settings export '{}'.", path.display()))
+}
+
+fn export_domain_snapshot(registration: RegistrationDto) -> Result<SettingsTransferDomainDto> {
+    Ok(SettingsTransferDomainDto {
+        domain: registration.domain,
+        wildcard: registration.wildcard,
+        routes: registration
+            .routes
+            .into_iter()
+            .map(export_route_string)
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn export_route_string(route: RouteDto) -> Result<String> {
+    let path = route.path.trim();
+    let target = route.target.trim();
+
+    if path.is_empty() || target.is_empty() {
+        bail!("Cannot export an empty route.");
+    }
+
+    if path == "/" {
+        return Ok(format!("/={target}"));
+    }
+
+    Ok(format!("{path}={target}"))
+}
+
+fn select_snapshot_projects(
+    snapshot: &SettingsTransferSnapshotDto,
+    selected_project_ids: &[String],
+) -> Result<Vec<SettingsTransferProjectDto>> {
+    let selected_ids = selected_project_ids
+        .iter()
+        .map(|project_id| project_id.trim())
+        .filter(|project_id| !project_id.is_empty())
+        .collect::<HashSet<_>>();
+    let projects = snapshot
+        .projects
+        .iter()
+        .filter(|project| selected_ids.contains(project.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if projects.len() != selected_ids.len() {
+        let available = snapshot
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<HashSet<_>>();
+        let missing = selected_ids
+            .iter()
+            .filter(|project_id| !available.contains(**project_id))
+            .copied()
+            .collect::<Vec<_>>();
+        bail!(
+            "The export file does not contain project IDs: {}.",
+            missing.join(", ")
+        );
+    }
+
+    Ok(projects)
+}
+
+fn ensure_project_import_has_no_conflicts(
+    api: &DesktopApi,
+    projects: &[SettingsTransferProjectDto],
+) -> Result<()> {
+    let replacing_projects = projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect::<HashSet<_>>();
+    let imported_domains = projects
+        .iter()
+        .flat_map(|project| {
+            project.domains.iter().map(move |domain| {
+                (
+                    snapshot_domain_key(&domain.domain, domain.wildcard),
+                    (project.id.as_str(), project.name.as_str()),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    for current in api.list_domains()? {
+        let key = snapshot_domain_key(&current.registration.domain, current.registration.wildcard);
+        let Some(&(import_project_id, import_project_name)) = imported_domains.get(&key) else {
+            continue;
+        };
+
+        if current.project_id.as_deref() == Some(import_project_id) {
+            continue;
+        }
+
+        if current
+            .project_id
+            .as_deref()
+            .is_some_and(|project_id| replacing_projects.contains(project_id))
+        {
+            continue;
+        }
+
+        let current_owner = current
+            .project_name
+            .clone()
+            .unwrap_or_else(|| "an ungrouped domain".into());
+        bail!(
+            "Domain '{}' already belongs to {}. Remove it first, or import the matching project instead of '{}'.",
+            current.registration.pattern,
+            current_owner,
+            import_project_name
+        );
+    }
+
+    Ok(())
+}
+
+fn import_standalone_domains(
+    api: &DesktopApi,
+    domains: &[SettingsTransferDomainDto],
+) -> Result<usize> {
+    for domain in domains {
+        api.register_domain(RegisterDomainRequest {
+            domain: domain.domain.clone(),
+            wildcard: domain.wildcard,
+            routes: domain.routes.clone(),
+            project_id: None,
+        })?;
+    }
+
+    Ok(domains.len())
+}
+
+fn import_projects(
+    api: &DesktopApi,
+    projects: &[SettingsTransferProjectDto],
+) -> Result<(usize, usize)> {
+    let mut imported_domains = 0;
+    let mut skipped_root_paths = 0;
+
+    for project in projects {
+        let created = api.create_project_with_domains(CreateProjectWithDomainsRequest {
+            name: project.name.clone(),
+            domains: project
+                .domains
+                .iter()
+                .map(|domain| crate::desktop::dto::CreateProjectDomainRequest {
+                    domain: domain.domain.clone(),
+                    wildcard: domain.wildcard,
+                    routes: domain.routes.clone(),
+                })
+                .collect(),
+        })?;
+
+        if !project.enabled {
+            api.update_project(UpdateProjectRequest {
+                id: created.id.clone(),
+                name: None,
+                enabled: Some(false),
+                root_path: None,
+            })?;
+        }
+
+        if sync_imported_project_root_path(api, &created.id, project.root_path.as_deref())? {
+            skipped_root_paths += 1;
+        }
+
+        imported_domains += project.domains.len();
+    }
+
+    Ok((imported_domains, skipped_root_paths))
+}
+
+fn sync_imported_project_root_path(
+    api: &DesktopApi,
+    project_id: &str,
+    root_path: Option<&str>,
+) -> Result<bool> {
+    let Some(root_path) = root_path
+        .map(str::trim)
+        .filter(|root_path| !root_path.is_empty())
+    else {
+        api.remove_project_root_path(project_id)?;
+        return Ok(false);
+    };
+
+    let path = Path::new(root_path);
+    if path.is_absolute() && path.is_dir() {
+        api.store_project_root_path(project_id, path)?;
+        return Ok(false);
+    }
+
+    api.remove_project_root_path(project_id)?;
+    Ok(true)
+}
+
+fn reload_daemon_if_running(api: &DesktopApi, daemon_was_running: bool) -> (bool, Option<String>) {
+    if !daemon_was_running {
+        return (false, None);
+    }
+
+    match api.reload_daemon(StartDaemonRequest { verbose: false }) {
+        Ok(_) => (true, None),
+        Err(error) => (false, Some(error.to_string())),
+    }
+}
+
+fn snapshot_domain_key(domain: &str, wildcard: bool) -> String {
+    format!("{}:{}", wildcard, domain.trim().to_lowercase())
+}
+
+fn normalize_project_snapshot_id(name: &str) -> Result<String> {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+
+    for ch in name.trim().chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_was_dash = false;
+            continue;
+        }
+
+        if slug.is_empty() || previous_was_dash {
+            continue;
+        }
+
+        slug.push('-');
+        previous_was_dash = true;
+    }
+
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        bail!("Project names must contain letters or numbers.");
+    }
+
+    Ok(slug)
 }
 
 fn rollback_created_project(
