@@ -1,6 +1,7 @@
 import { PropsWithChildren, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
+import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { HotkeysProvider } from "@/providers/hotkeys-provider";
 
@@ -22,6 +23,7 @@ export const SharedProvider = ({ children }: PropsWithChildren) => {
       <HotkeysProvider>
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>{children}</TooltipProvider>
+          <Toaster closeButton position="bottom-right" richColors />
         </QueryClientProvider>
       </HotkeysProvider>
     </ThemeProvider>

@@ -157,3 +157,63 @@ body {
 .screen-wrapper {
   @apply max-w-4xl mx-auto w-full h-fit min-h-full rounded-lg;
 }
+
+@property --btn-glow-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@utility btn-glow {
+  position: relative;
+  isolation: isolate;
+  color: oklch(0.985 0 0);
+  border: 0;
+  background: transparent;
+  box-shadow:
+    0 0 20px -8px rgba(96, 165, 250, 0.45),
+    0 0 40px -12px rgba(236, 72, 153, 0.3);
+  transition: box-shadow 200ms ease;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    z-index: -2;
+    border-radius: inherit;
+    background: conic-gradient(from var(--btn-glow-angle),
+        #3b82f6,
+        #a855f7,
+        #f97316,
+        #ec4899,
+        #3b82f6);
+    animation: btn-glow-spin 4s linear infinite;
+  }
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: oklch(0.16 0 0);
+  }
+
+  &:hover {
+    box-shadow:
+      0 0 28px -6px rgba(96, 165, 250, 0.6),
+      0 0 56px -10px rgba(236, 72, 153, 0.4);
+  }
+}
+
+@keyframes btn-glow-spin {
+  to {
+    --btn-glow-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-glow::before {
+    animation: none;
+  }
+}

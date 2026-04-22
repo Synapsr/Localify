@@ -3,8 +3,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
-import { PowerIcon, ServersIcon, TerminalIcon } from "@/components/icons";
+import { DownloadIcon, PowerIcon, ServersIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { useAppUpdate } from "@/hooks/use-app-update";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,7 @@ export const SettingsStatus = () => {
   const startDaemon = useMutation(daemonMutations.start(queryClient));
   const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
   const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
+  const appUpdate = useAppUpdate();
 
   if (!data) return null;
 
@@ -42,9 +44,35 @@ export const SettingsStatus = () => {
     setupCliAccess.error instanceof Error ? setupCliAccess.error.message : null;
   const nodeTrustError =
     setupNodeTrust.error instanceof Error ? setupNodeTrust.error.message : null;
+  const updateError = appUpdate.errorMessage;
   const portConflict = Boolean(
     (status === "setup" && installError?.includes("already in use")) ||
       (status === "off" && daemonError?.includes("already in use")),
+  );
+  const updateAction = appUpdate.availableUpdate ? (
+    <Button
+      variant="outline"
+      size="sm"
+      loading={appUpdate.isInstalling}
+      disabled={appUpdate.isChecking}
+      onClick={() => {
+        void appUpdate.installUpdate();
+      }}
+    >
+      Install
+    </Button>
+  ) : (
+    <Button
+      variant="outline"
+      size="sm"
+      loading={appUpdate.isChecking}
+      disabled={appUpdate.isInstalling}
+      onClick={() => {
+        void appUpdate.checkForUpdates();
+      }}
+    >
+      Check now
+    </Button>
   );
 
   const statusAction =
@@ -138,11 +166,30 @@ export const SettingsStatus = () => {
             )
           }
         />
+        <SettingsRow
+          icon={<DownloadIcon />}
+          title="Desktop updates"
+          description={
+            appUpdate.availableUpdate
+              ? `Version ${appUpdate.availableUpdate.version} is ready to download and install.`
+              : "Checks for new Localify Desktop builds in the background and on demand."
+          }
+          value={
+            appUpdate.availableUpdate
+              ? `v${appUpdate.availableUpdate.version} available`
+              : appUpdate.status === "upToDate"
+                ? "Up to date"
+                : appUpdate.status === "unconfigured"
+                  ? "Unavailable"
+                  : undefined
+          }
+          trailing={updateAction}
+        />
       </SettingsGroup>
 
-      {installError || daemonError || cliError || nodeTrustError ? (
+      {installError || daemonError || cliError || nodeTrustError || updateError ? (
         <p className="px-1 text-xs text-[--color-danger]">
-          {installError ?? daemonError ?? cliError ?? nodeTrustError}
+          {installError ?? daemonError ?? cliError ?? nodeTrustError ?? updateError}
         </p>
       ) : null}
 

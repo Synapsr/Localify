@@ -1,15 +1,9 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 
-import {
-  DangerTriangleIcon,
-  InfoCircleIcon,
-  LockIcon,
-  PowerIcon,
-  TerminalIcon,
-} from "@/components/icons";
+import { ChevronDownIcon, InfoCircleIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,80 +14,26 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
+import { bootstrapQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 import {
   buildTroubleshootingIssues,
-  type TroubleshootingAction,
+  type TroubleshootingIssue,
 } from "./settings-troubleshooting.data";
 import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
 
 export const SettingsTroubleshooting = () => {
   const { data } = useQuery(bootstrapQueries.read());
-  const queryClient = useQueryClient();
-  const install = useMutation(systemMutations.install(queryClient));
-  const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
-  const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
-  const startDaemon = useMutation(daemonMutations.start(queryClient));
   const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const issues = useMemo(
+    () => (data ? buildTroubleshootingIssues(data) : []),
+    [data],
+  );
 
   if (!data) return null;
-
-  const issues = buildTroubleshootingIssues(data);
-
-  const handleAction = (action: TroubleshootingAction) => {
-    if (action === "install") {
-      install.mutate();
-      return;
-    }
-
-    if (action === "setupCliAccess") {
-      setupCliAccess.mutate();
-      return;
-    }
-
-    if (action === "setupNodeTrust") {
-      setupNodeTrust.mutate();
-      return;
-    }
-
-    startDaemon.mutate({ verbose: false });
-  };
-
-  const getActionState = (action: TroubleshootingAction) => {
-    if (action === "install") {
-      return {
-        loading: install.isPending,
-        error: install.error instanceof Error ? install.error.message : null,
-      };
-    }
-
-    if (action === "setupCliAccess") {
-      return {
-        loading: setupCliAccess.isPending,
-        error:
-          setupCliAccess.error instanceof Error
-            ? setupCliAccess.error.message
-            : null,
-      };
-    }
-
-    if (action === "setupNodeTrust") {
-      return {
-        loading: setupNodeTrust.isPending,
-        error:
-          setupNodeTrust.error instanceof Error
-            ? setupNodeTrust.error.message
-            : null,
-      };
-    }
-
-    return {
-      loading: startDaemon.isPending,
-      error: startDaemon.error instanceof Error ? startDaemon.error.message : null,
-    };
-  };
 
   return (
     <>
@@ -109,136 +49,26 @@ export const SettingsTroubleshooting = () => {
       </SettingsSection>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto overscroll-none sm:max-w-3xl">
+        <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto overscroll-none sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>Troubleshooting</DialogTitle>
             <DialogDescription>
-              Quick diagnostics for local HTTPS, terminal setup, background routing, and Node.js certificate trust.
+              Common Localify situations, how to recognize them, and what to try next.
             </DialogDescription>
           </DialogHeader>
-          <DialogBody className="space-y-3 pb-6">
-            {issues.map((issue) => {
-              const action = issue.action;
-              const actionState = issue.action
-                ? getActionState(issue.action.id)
-                : null;
-
-              return (
-                <article
+          <DialogBody className="pb-4">
+            <ul className="divide-y divide-[--color-border]/50 rounded-xl border border-[--color-border]/60">
+              {issues.map((issue) => (
+                <FaqRow
                   key={issue.id}
-                  className="space-y-3 rounded-xl border border-[--color-border]/70 bg-[--color-surface]/70 p-4"
-                >
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "text-[--color-muted] [&>svg]:size-4",
-                            issue.id === "port-conflicts" && "text-[--color-danger]",
-                          )}
-                        >
-                          {issue.id === "ca-trust" ? (
-                            <LockIcon />
-                          ) : issue.id === "cli-access" || issue.id === "node-trust" ? (
-                            <TerminalIcon />
-                          ) : issue.id === "daemon" ? (
-                            <PowerIcon />
-                          ) : issue.id === "port-conflicts" ? (
-                            <DangerTriangleIcon />
-                          ) : (
-                            <InfoCircleIcon />
-                          )}
-                        </span>
-                        <h3 className="text-sm font-semibold text-[--color-ink]">
-                          {issue.title}
-                        </h3>
-                        <span
-                          className={cn(
-                            "rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                            issue.tone === "success" &&
-                              "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300",
-                            issue.tone === "warning" &&
-                              "bg-amber-500/12 text-amber-700 dark:text-amber-300",
-                            issue.tone === "info" &&
-                              "bg-[--color-border]/60 text-[--color-muted]",
-                          )}
-                        >
-                          {issue.tone === "success"
-                            ? "Looks good"
-                            : issue.tone === "warning"
-                              ? "Check this"
-                              : "Heads up"}
-                        </span>
-                      </div>
-                      <p className="text-sm text-[--color-muted]">{issue.summary}</p>
-                    </div>
-
-                    {action ? (
-                      <Button
-                        variant={issue.tone === "warning" ? "primary" : "outline"}
-                        size="sm"
-                        loading={actionState?.loading}
-                        onClick={() => handleAction(action.id)}
-                      >
-                        {action.label}
-                      </Button>
-                    ) : null}
-                  </div>
-
-                  {issue.symptoms.length > 0 ? (
-                    <div className="space-y-1">
-                      <p className="text-[11px] font-medium tracking-wide text-[--color-muted] uppercase">
-                        Symptoms
-                      </p>
-                      <ul className="space-y-1 text-sm text-[--color-ink]">
-                        {issue.symptoms.map((symptom) => (
-                          <li key={symptom} className="flex gap-2">
-                            <span className="mt-1 size-1.5 shrink-0 rounded-full bg-[--color-muted]/70" />
-                            <span>{symptom}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-
-                  <div className="space-y-1">
-                    <p className="text-[11px] font-medium tracking-wide text-[--color-muted] uppercase">
-                      What to try
-                    </p>
-                    <ul className="space-y-1 text-sm text-[--color-ink]">
-                      {issue.solutions.map((solution) => (
-                        <li key={solution} className="flex gap-2">
-                          <span className="mt-1 size-1.5 shrink-0 rounded-full bg-[--color-muted]/70" />
-                          <span>{solution}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  {issue.commands?.length ? (
-                    <div className="space-y-1">
-                      <p className="text-[11px] font-medium tracking-wide text-[--color-muted] uppercase">
-                        Command examples
-                      </p>
-                      <div className="space-y-2">
-                        {issue.commands.map((command) => (
-                          <code
-                            key={command}
-                            className="block overflow-x-auto rounded-md border border-[--color-border] bg-neutral-50/80 px-3 py-2 font-mono text-[11px] text-[--color-ink] dark:bg-neutral-900/70"
-                          >
-                            {command}
-                          </code>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {actionState?.error ? (
-                    <p className="text-xs text-[--color-danger]">{actionState.error}</p>
-                  ) : null}
-                </article>
-              );
-            })}
+                  issue={issue}
+                  open={expanded === issue.id}
+                  onToggle={() =>
+                    setExpanded((current) => (current === issue.id ? null : issue.id))
+                  }
+                />
+              ))}
+            </ul>
           </DialogBody>
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setOpen(false)}>
@@ -250,3 +80,77 @@ export const SettingsTroubleshooting = () => {
     </>
   );
 };
+
+interface FaqRowProps {
+  issue: TroubleshootingIssue;
+  open: boolean;
+  onToggle: () => void;
+}
+
+const FaqRow = ({ issue, open, onToggle }: FaqRowProps) => {
+  const panelId = `troubleshoot-${issue.id}`;
+
+  return (
+    <li>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[--color-border]/15 focus-visible:bg-[--color-border]/20 focus-visible:outline-none"
+      >
+        <span className="min-w-0 flex-1 text-sm font-medium text-[--color-ink]">
+          {issue.title}
+        </span>
+        <ChevronDownIcon
+          className={cn(
+            "size-4 shrink-0 text-[--color-muted]/70 transition-transform duration-300 ease-out",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+
+      <div
+        id={panelId}
+        role="region"
+        className={cn(
+          "grid transition-[grid-template-rows] duration-300 ease-out",
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+        )}
+      >
+        <div className="overflow-hidden">
+          <div className="space-y-3 px-4 pt-1 pb-4 text-sm text-[--color-muted]">
+            <p>{issue.summary}</p>
+
+            {issue.symptoms.length > 0 ? <BulletList items={issue.symptoms} /> : null}
+            <BulletList items={issue.solutions} />
+
+            {issue.commands?.length ? (
+              <div className="space-y-1.5 pt-1">
+                {issue.commands.map((command) => (
+                  <code
+                    key={command}
+                    className="block overflow-x-auto rounded-md bg-[--color-border]/25 px-2.5 py-1.5 font-mono text-[11px] text-[--color-ink]"
+                  >
+                    {command}
+                  </code>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </li>
+  );
+};
+
+const BulletList = ({ items }: { items: string[] }) => (
+  <ul className="space-y-1">
+    {items.map((item) => (
+      <li key={item} className="flex gap-2">
+        <span className="mt-[7px] size-1 shrink-0 rounded-full bg-[--color-muted]/60" />
+        <span>{item}</span>
+      </li>
+    ))}
+  </ul>
+);

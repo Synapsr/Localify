@@ -1,7 +1,7 @@
 "use client";
 
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMutation } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "motion/react";
 import { type MouseEvent, type PointerEvent } from "react";
 
@@ -231,7 +231,7 @@ export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChip
               {runLocalDevServer.isPending ? (
                 <SpinnerIcon className="size-3.5 animate-spin" />
               ) : (
-                <PlayIcon className="size-3.5 translate-x-px" />
+                <PlayIcon className="size-4.5 translate-x-px" />
               )}
             </TooltipTrigger>
             <TooltipContent>

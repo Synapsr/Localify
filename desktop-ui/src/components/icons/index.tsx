@@ -39,4 +39,10 @@ export {
   DangerTriangle as DangerTriangleIcon,
   Lock as LockIcon,
   ArrowRight as ArrowRightIcon,
+  ArrowLeft as ArrowLeftIcon,
+  Upload as UploadIcon,
+  Download as DownloadIcon,
+  Box as BoxIcon,
+  InboxDown as InboxDownIcon,
+  InboxCheck as InboxCheckIcon,
 } from "@mynaui/icons-react";

@@ -3488,13 +3488,15 @@ fn tail_lines(path: &Path, line_count: usize) -> Result<String> {
 mod tests {
     use super::{
         CliRemovalOutcome, DesktopApi, cli_command_points_to_binary, cli_shell_command,
-        ensure_cli_command_link, normalize_desktop_route, parse_desktop_route,
-        remove_cli_command_link, shell_escape,
+        ensure_cli_command_link, export_route_string, normalize_desktop_route,
+        normalize_project_snapshot_id, parse_desktop_route, remove_cli_command_link, shell_escape,
+        validate_settings_snapshot,
     };
     use crate::config::RoxyPaths;
     use crate::desktop::dto::{
         CreateProjectDomainRequest, CreateProjectWithDomainsRequest, LogsRequest,
-        RemoveProjectRequest,
+        RemoveProjectRequest, RouteDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
+        SettingsTransferSnapshotDto,
     };
     use crate::domain::RouteTarget;
     use crate::infrastructure::config::{Config, ConfigStore};
@@ -3522,6 +3524,54 @@ mod tests {
     #[test]
     fn normalize_desktop_route_wraps_bare_target_at_root() {
         assert_eq!(normalize_desktop_route("3000").unwrap(), "/=3000");
+    }
+
+    #[test]
+    fn export_route_string_preserves_root_route_explicitly() {
+        let route = export_route_string(RouteDto {
+            path: "/".into(),
+            target: "3000".into(),
+            target_kind: "proxy".into(),
+        })
+        .unwrap();
+
+        assert_eq!(route, "/=3000");
+    }
+
+    #[test]
+    fn normalize_project_snapshot_id_matches_project_slug_rules() {
+        assert_eq!(
+            normalize_project_snapshot_id(" Client App ").unwrap(),
+            "client-app"
+        );
+    }
+
+    #[test]
+    fn validate_settings_snapshot_rejects_duplicate_domains() {
+        let snapshot = SettingsTransferSnapshotDto {
+            version: 1,
+            scope: "all".into(),
+            settings: None,
+            standalone_domains: vec![SettingsTransferDomainDto {
+                domain: "demo.localify".into(),
+                wildcard: false,
+                routes: vec!["/=3000".into()],
+            }],
+            projects: vec![SettingsTransferProjectDto {
+                id: "client-app".into(),
+                name: "Client App".into(),
+                enabled: true,
+                root_path: None,
+                domains: vec![SettingsTransferDomainDto {
+                    domain: "demo.localify".into(),
+                    wildcard: false,
+                    routes: vec!["/=3001".into()],
+                }],
+            }],
+        };
+
+        let error = validate_settings_snapshot(&snapshot).unwrap_err();
+        assert!(error.to_string().contains("appears more than once"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   type Variants,
 } from "motion/react";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import type { BootstrapDto } from "@/types/roxy";
 
@@ -38,7 +39,7 @@ const STEPS: readonly StepId[] = ["welcome", "why", "how", "activate"] as const;
 
 export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
   const [stepIndex, setStepIndex] = useState(0);
-  const [direction, setDirection] = useState<1 | -1>(1);
+  const [direction, setDirection] = useState<0 | 1 | -1>(0);
   const reduceMotion = useReducedMotion();
 
   const currentStep = STEPS[stepIndex]!;
@@ -56,15 +57,14 @@ export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
         exit: { opacity: 0 },
       }
     : {
-        initial: (dir: 1 | -1) => ({
-          opacity: 0,
-          x: dir * 24,
-          filter: "blur(8px)",
-        }),
+        initial: (dir: 0 | 1 | -1) =>
+          dir === 0
+            ? { opacity: 1, x: 0, filter: "blur(0px)" }
+            : { opacity: 0, x: dir * 24, filter: "blur(8px)" },
         animate: { opacity: 1, x: 0, filter: "blur(0px)" },
-        exit: (dir: 1 | -1) => ({
+        exit: (dir: 0 | 1 | -1) => ({
           opacity: 0,
-          x: dir * -24,
+          x: (dir || 1) * -24,
           filter: "blur(8px)",
         }),
       };
@@ -79,7 +79,7 @@ export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
 
       <div className="relative flex flex-1 items-center justify-center px-6 py-10">
         <div className="w-full max-w-2xl">
-          <AnimatePresence mode="wait" custom={direction} initial={false}>
+          <AnimatePresence mode="wait" custom={direction}>
             <motion.div
               key={currentStep}
               custom={direction}
@@ -93,11 +93,7 @@ export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
                 <WelcomeStep bootstrap={bootstrap} onContinue={() => go(1)} />
               )}
               {currentStep === "why" && (
-                <WhyStep
-                  bootstrap={bootstrap}
-                  onBack={() => go(0)}
-                  onContinue={() => go(2)}
-                />
+                <WhyStep bootstrap={bootstrap} onBack={() => go(0)} onContinue={() => go(2)} />
               )}
               {currentStep === "how" && (
                 <HowItWorksStep
@@ -182,6 +178,33 @@ function StepIndicator({
 
 // ---------- Step 1: Welcome ----------
 
+const welcomeEase = [0.22, 1, 0.36, 1] as const;
+
+const welcomeContainer: Variants = {
+  hidden: {},
+  show: {
+    transition: {
+      staggerChildren: 0.12,
+      delayChildren: 0.15,
+    },
+  },
+};
+
+const welcomeItem: Variants = {
+  hidden: { opacity: 0, filter: "blur(12px)", y: 10 },
+  show: {
+    opacity: 1,
+    filter: "blur(0px)",
+    y: 0,
+    transition: { duration: 0.8, ease: welcomeEase },
+  },
+};
+
+const welcomeItemReduced: Variants = {
+  hidden: { opacity: 0 },
+  show: { opacity: 1, transition: { duration: 0.2 } },
+};
+
 function WelcomeStep({
   bootstrap,
   onContinue,
@@ -191,63 +214,45 @@ function WelcomeStep({
 }) {
   const appName = bootstrap.environment.appName;
   const reduceMotion = useReducedMotion();
+  const item = reduceMotion ? welcomeItemReduced : welcomeItem;
 
-  const titleWords = ["Welcome", "to", appName];
   const subtitle = `A local development proxy with custom ${bootstrap.environment.fixedDomainSuffix} domains and automatic HTTPS.`;
 
   return (
-    <div className="flex flex-col items-center text-center">
+    <motion.div
+      className="flex flex-col items-center text-center"
+      initial="hidden"
+      animate="show"
+      variants={welcomeContainer}
+    >
       <motion.img
         src="/logo.png"
         alt={`${appName} logo`}
-        initial={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.85, filter: "blur(10px)" }}
-        animate={reduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, filter: "blur(0px)" }}
-        transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-        className="mb-8 size-20  shadow-foreground/10"
+        variants={item}
+        className="mb-8 size-20 shadow-foreground/10"
       />
 
-      <h1 className="mb-6 text-5xl font-semibold tracking-tight sm:text-6xl">
-        {titleWords.map((word, i) => (
-          <BlurWord key={i} delay={0.15 + i * 0.12}>
-            {word}
-          </BlurWord>
-        ))}
-      </h1>
+      <motion.h1
+        variants={item}
+        className="mb-6 text-5xl font-semibold tracking-tight text-balance sm:text-6xl"
+      >
+        Welcome to {appName}
+      </motion.h1>
 
       <motion.p
-        initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, filter: "blur(6px)" }}
-        animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0, filter: "blur(0px)" }}
-        transition={{ duration: 0.7, delay: 0.6, ease: [0.22, 1, 0.36, 1] }}
-        className="mx-auto mb-10 max-w-md text-base text-muted-foreground"
+        variants={item}
+        className="mx-auto mb-10 max-w-md text-base text-pretty text-muted-foreground"
       >
         {subtitle}
       </motion.p>
 
-      <motion.div
-        initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.9, ease: "easeOut" }}
-      >
-        <Button size="lg" onClick={onContinue} className="px-5">
+      <motion.div variants={item}>
+        <Button variant="glow" size="lg" onClick={onContinue}>
           Get started
           <ChevronRightIcon data-icon="inline-end" />
         </Button>
       </motion.div>
-    </div>
-  );
-}
-
-function BlurWord({ children, delay }: { children: string; delay: number }) {
-  const reduceMotion = useReducedMotion();
-  return (
-    <motion.span
-      className="mr-[0.25em] inline-block"
-      initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 16, filter: "blur(14px)" }}
-      animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0, filter: "blur(0px)" }}
-      transition={{ duration: 0.7, delay, ease: [0.22, 1, 0.36, 1] }}
-    >
-      {children}
-    </motion.span>
+    </motion.div>
   );
 }
 
@@ -280,7 +285,8 @@ function WhyStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Why Localify</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          The end of <span className="font-mono">localhost:3000</span>, <span className="font-mono">:3001</span>, <span className="font-mono">:3002</span>…
+          The end of <span className="font-mono">localhost:3000</span>,{" "}
+          <span className="font-mono">:3001</span>, <span className="font-mono">:3002</span>…
         </p>
       </motion.div>
 
@@ -319,7 +325,7 @@ function WhyStep({
         <Button variant="ghost" size="lg" onClick={onBack}>
           Back
         </Button>
-        <Button size="lg" onClick={onContinue} className="px-5">
+        <Button variant="primary" size="lg" onClick={onContinue}>
           Continue
           <ChevronRightIcon data-icon="inline-end" />
         </Button>
@@ -328,20 +334,28 @@ function WhyStep({
   );
 }
 
-type BrowserTab = {
+type BrowserProject = {
   name: string;
   localPort: string;
 };
 
+const browserEase = [0.22, 1, 0.36, 1] as const;
+
+const browserIconVariants: Variants = {
+  initial: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
+  animate: { opacity: 1, scale: 1, filter: "blur(0px)" },
+  exit: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
+};
+
 function BrowserMock({ suffix }: { suffix: string }) {
   const reduceMotion = useReducedMotion();
-  const tabs: BrowserTab[] = [
+  const projects: BrowserProject[] = [
     { name: "shop", localPort: "3000" },
     { name: "admin", localPort: "3001" },
     { name: "docs", localPort: "3002" },
   ];
 
-  const cycleLength = tabs.length * 2;
+  const cycleLength = projects.length + 1;
   const [step, setStep] = useState(0);
 
   useEffect(() => {
@@ -352,148 +366,141 @@ function BrowserMock({ suffix }: { suffix: string }) {
     return () => clearInterval(id);
   }, [reduceMotion, cycleLength]);
 
-  const activeTab = step % tabs.length;
-  const mode: "local" | "localify" = step < tabs.length ? "local" : "localify";
-  const active = tabs[activeTab]!;
-  const activeUrl =
-    mode === "local"
-      ? `http://localhost:${active.localPort}`
-      : `https://${active.name}${suffix}`;
+  const tabModes: Array<"local" | "localify"> = projects.map((_, i) =>
+    i < step ? "localify" : "local",
+  );
+  const activeIndex = step === 0 ? 0 : step - 1;
+  const secure = tabModes[activeIndex] === "localify";
+  const active = projects[activeIndex]!;
+
+  const tabLabels = projects.map((p, i) =>
+    tabModes[i] === "local" ? `localhost:${p.localPort}` : `${p.name}${suffix}`,
+  );
+  const url = secure ? `https://${active.name}${suffix}` : `http://localhost:${active.localPort}`;
+  const label = secure ? "trusted" : "not secure";
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-[0_12px_40px_-12px] shadow-foreground/10">
-      {/* Window chrome */}
-      <div className="flex items-center gap-1.5 border-b border-border bg-muted/40 px-3 py-2">
-        <span className="size-2.5 rounded-full bg-red-400/80" />
-        <span className="size-2.5 rounded-full bg-yellow-400/80" />
-        <span className="size-2.5 rounded-full bg-green-400/80" />
-      </div>
+    <div className="overflow-hidden rounded-xl border border-border bg-muted/30">
+      <div className="flex">
+        <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2">
+          <span className="size-2.5 rounded-full bg-[#FF5C5F]" />
+          <span className="size-2.5 rounded-full bg-[#FAC800]" />
+          <span className="size-2.5 rounded-full bg-[#34C759]" />
+        </div>
 
-      {/* Tab strip */}
-      <div className="flex gap-px bg-muted/40 px-2 pt-2">
-        {tabs.map((tab, i) => {
-          const isActive = i === activeTab;
-          return (
-            <div
-              key={tab.name}
-              className={cn(
-                "relative flex min-w-0 flex-1 items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs transition-colors",
-                isActive
-                  ? "bg-card text-foreground"
-                  : "text-muted-foreground hover:text-foreground/70",
-              )}
-            >
-              <TabFavicon mode={mode} />
-              <span className="truncate">{tab.name}</span>
-              <span
+        <div className="flex w-full items-end pt-1">
+          {tabLabels.map((lbl, i) => {
+            const isActive = i === activeIndex;
+            const tabSecure = tabModes[i] === "localify";
+            return (
+              <div
+                // biome-ignore lint/suspicious/noArrayIndexKey: tab position is stable
+                key={i}
                 className={cn(
-                  "ml-auto size-3 shrink-0 rounded-full opacity-40",
-                  !isActive && "hidden",
+                  "relative flex min-w-0 flex-1 items-center gap-2 rounded-t-lg border-b border-border px-3 py-2.5 font-mono text-[11.5px]",
+                  isActive ? "border border-b-0 bg-card text-foreground" : "text-muted-foreground",
+                  i > 0 && !isActive
+                    ? "before:absolute before:top-1/2 before:left-0 before:h-4 before:w-px before:-translate-y-1/2 before:bg-border before:content-['']"
+                    : "",
                 )}
-              />
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Address bar */}
-      <div className="flex items-center gap-2 border-t border-border bg-card p-2.5">
-        <div className="flex flex-1 items-center gap-2 overflow-hidden rounded-md bg-muted/60 px-3 py-1.5">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.span
-              key={`${mode}-icon`}
-              initial={{ opacity: 0, scale: 0.6 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.6 }}
-              transition={{ duration: 0.2 }}
-              className="inline-flex shrink-0"
-            >
-              {mode === "local" ? (
-                <DangerTriangleIcon className="size-3 text-amber-500" />
-              ) : (
-                <LockIcon className="size-3 text-emerald-600 dark:text-emerald-400" />
-              )}
-            </motion.span>
-          </AnimatePresence>
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.span
-              key={activeUrl}
-              initial={{ opacity: 0, y: 4, filter: "blur(4px)" }}
-              animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-              exit={{ opacity: 0, y: -4, filter: "blur(4px)" }}
-              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-              className="min-w-0 truncate font-mono text-[12px] text-foreground"
-            >
-              <span className="text-muted-foreground">
-                {mode === "local" ? "http://" : "https://"}
-              </span>
-              {mode === "local"
-                ? `localhost:${active.localPort}`
-                : `${active.name}${suffix}`}
-            </motion.span>
-          </AnimatePresence>
+              >
+                <span
+                  className={cn(
+                    "inline-block size-1.5 shrink-0 rounded-full transition-colors duration-300",
+                    tabSecure ? "bg-emerald-500" : "bg-muted-foreground/40",
+                  )}
+                />
+                <span className="relative min-w-0 flex-1 overflow-hidden">
+                  <MorphText className="truncate" delay={i * 0.04} value={lbl} />
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* Caption */}
-      <div className="flex items-center justify-center gap-2 border-t border-border bg-muted/20 px-3 py-2 text-[11px]">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.span
-            key={mode}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.25 }}
+      <div className="p-2">
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
+          <span
+            aria-hidden
             className={cn(
-              "flex items-center gap-1.5 font-medium",
-              mode === "local"
-                ? "text-destructive/80"
-                : "text-emerald-600 dark:text-emerald-400",
+              "relative grid size-4 shrink-0 place-items-center",
+              secure ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
             )}
           >
-            <span
-              className={cn(
-                "size-1.5 rounded-full",
-                mode === "local" ? "bg-destructive" : "bg-emerald-500",
+            <AnimatePresence initial={false} mode="wait">
+              {secure ? (
+                <motion.span
+                  key="lock"
+                  variants={browserIconVariants}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  transition={{ type: "spring", duration: 0.3, bounce: 0 }}
+                  className="absolute inset-0 grid place-items-center"
+                >
+                  <LockIcon className="size-3.5" strokeWidth={2} />
+                </motion.span>
+              ) : (
+                <motion.span
+                  key="warn"
+                  variants={browserIconVariants}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  transition={{ type: "spring", duration: 0.3, bounce: 0 }}
+                  className="absolute inset-0 grid place-items-center"
+                >
+                  <DangerTriangleIcon className="size-3.5" strokeWidth={2} />
+                </motion.span>
               )}
+            </AnimatePresence>
+          </span>
+
+          <span className="relative min-w-0 flex-1 overflow-hidden">
+            <MorphText
+              className="truncate font-mono text-[12px] text-muted-foreground"
+              delay={0.18}
+              value={url}
             />
-            {mode === "local"
-              ? "3 projects fighting for the same port"
-              : "3 projects, 3 clean domains"}
-          </motion.span>
-        </AnimatePresence>
+          </span>
+
+          <span
+            className={cn(
+              "relative block min-w-[76px] overflow-hidden text-right font-mono text-[10.5px] tracking-wider uppercase transition-colors duration-300",
+              secure ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
+            )}
+          >
+            <MorphText delay={0.26} value={label} />
+          </span>
+        </div>
       </div>
     </div>
   );
 }
 
-function TabFavicon({ mode }: { mode: "local" | "localify" }) {
+function MorphText({
+  className,
+  delay = 0,
+  value,
+}: {
+  className?: string;
+  delay?: number;
+  value: string;
+}) {
   return (
-    <span className="inline-flex size-3 shrink-0 items-center justify-center">
-      <AnimatePresence mode="wait" initial={false}>
-        {mode === "localify" ? (
-          <motion.span
-            key="lock"
-            initial={{ opacity: 0, scale: 0.4 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.4 }}
-            transition={{ duration: 0.2 }}
-            className="inline-flex"
-          >
-            <LockIcon className="size-2.5 text-emerald-600 dark:text-emerald-400" />
-          </motion.span>
-        ) : (
-          <motion.span
-            key="dot"
-            initial={{ opacity: 0, scale: 0.4 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.4 }}
-            transition={{ duration: 0.2 }}
-            className="size-1.5 rounded-full bg-amber-500/70"
-          />
-        )}
-      </AnimatePresence>
-    </span>
+    <AnimatePresence initial={false} mode="popLayout">
+      <motion.span
+        key={value}
+        className={cn("block tabular-nums", className)}
+        initial={{ opacity: 0, filter: "blur(4px)", y: -3 }}
+        animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
+        exit={{ opacity: 0, filter: "blur(4px)", y: 3 }}
+        transition={{ duration: 0.3, ease: browserEase, delay }}
+      >
+        {value}
+      </motion.span>
+    </AnimatePresence>
   );
 }
 
@@ -531,8 +538,7 @@ function HowItWorksStep({
     },
     {
       title: "Register from the CLI",
-      description:
-        "One command inside any project to claim a domain without opening the app.",
+      description: "One command inside any project to claim a domain without opening the app.",
       icon: <TerminalIcon className="size-4" />,
       media: <CodeSnippet suffix={suffix} />,
     },
@@ -588,7 +594,7 @@ function HowItWorksStep({
         <Button variant="ghost" size="lg" onClick={onBack}>
           Back
         </Button>
-        <Button size="lg" onClick={onContinue} className="px-5">
+        <Button variant="primary" size="lg" onClick={onContinue}>
           Continue
           <ChevronRightIcon data-icon="inline-end" />
         </Button>
@@ -621,9 +627,7 @@ function CodeSnippet({ suffix }: { suffix: string }) {
         <span className="text-emerald-600 dark:text-emerald-400">$</span>
         <span className="truncate text-foreground">localify add</span>
       </div>
-      <div className="truncate text-muted-foreground">
-        → myapp{suffix}
-      </div>
+      <div className="truncate text-muted-foreground">→ myapp{suffix}</div>
     </div>
   );
 }
@@ -684,8 +688,14 @@ function ActivateStep({
       onActivated();
       void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       setState("error");
-      setMessage(err instanceof Error ? err.message : String(err));
+      setMessage(msg);
+      if (!msg.includes("already in use")) {
+        toast("Approve with your administrator password to continue.", {
+          icon: <LockIcon className="size-4" />,
+        });
+      }
     }
   }
 
@@ -748,27 +758,6 @@ function ActivateStep({
         ))}
       </ul>
 
-      <motion.div
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.4, ease: "easeOut" }}
-        className="rounded-xl border border-border bg-muted/30 p-3 text-xs text-muted-foreground"
-      >
-        <span className="font-medium text-foreground">Nothing leaves your computer.</span>{" "}
-        Certificates and DNS settings stay on this Mac. You can undo everything from{" "}
-        <span className="inline-flex items-center gap-1 font-mono">
-          <CodeIcon className="size-3" /> Settings → Uninstall
-        </span>
-        .
-      </motion.div>
-
-      {state === "error" && message && (
-        <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-          {phase === "install" ? "Could not install system trust." : "The daemon could not start."}
-          <div className="mt-1 font-mono text-xs opacity-80">{message}</div>
-        </div>
-      )}
-
       {showPortConflicts && (
         <div className="mt-4">
           <DaemonPortConflicts visible />
@@ -785,11 +774,11 @@ function ActivateStep({
           Back
         </Button>
         <Button
+          variant="primary"
           size="lg"
           onClick={activate}
           loading={state === "running"}
           disabled={state === "running" || state === "done"}
-          className="px-5"
         >
           {state === "running" ? (
             phase === "install" ? (
