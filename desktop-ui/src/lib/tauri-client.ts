@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import { createProjectWithDomainsRequestSchema } from "./validators/validator.create-project";
+import {
+  createProjectWithDomainsRequestSchema,
+  registerDomainRequestSchema,
+  updateDomainRequestSchema,
+} from "./validators/validator.create-project";
 import {
   detectProjectInitPlanRequestSchema,
   initProjectFromFolderRequestSchema,
@@ -73,6 +77,7 @@ import type {
   UninstallPreviewDto,
   UninstallResultDto,
   UnregisterDomainResultDto,
+  UpdateDomainRequest,
   UpdateLauncherPreferencesRequest,
   UpdateProjectRequest,
 } from "../types/roxy";
@@ -159,6 +164,7 @@ export interface DesktopClient {
   removeProject(request: RemoveProjectRequest): Promise<RemoveProjectResultDto>;
   assignDomainProject(request: AssignDomainProjectRequest): Promise<DomainInfoDto>;
   registerDomain(request: RegisterDomainRequest): Promise<RegisterDomainResultDto>;
+  updateDomain(request: UpdateDomainRequest): Promise<RegisterDomainResultDto>;
   unregisterDomain(request: DomainPatternRequest): Promise<UnregisterDomainResultDto>;
   addRoute(request: AddRouteRequest): Promise<RegistrationMutationDto>;
   removeRoute(request: RemoveRouteRequest): Promise<RegistrationMutationDto>;
@@ -245,7 +251,14 @@ export function createDesktopClient(): DesktopClient {
       }),
     assignDomainProject: (request) =>
       tauriInvoke("assign_domain_project", { request }),
-    registerDomain: (request) => tauriInvoke("register_domain", { request }),
+    registerDomain: (request) =>
+      tauriInvoke("register_domain", {
+        request: registerDomainRequestSchema.parse(request),
+      }),
+    updateDomain: (request) =>
+      tauriInvoke("update_domain", {
+        request: updateDomainRequestSchema.parse(request),
+      }),
     unregisterDomain: (request) => tauriInvoke("unregister_domain", { request }),
     addRoute: (request) => tauriInvoke("add_route", { request }),
     removeRoute: (request) => tauriInvoke("remove_route", { request }),

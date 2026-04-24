@@ -1,15 +1,23 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { motion } from "motion/react";
+import { useState } from "react";
 
 import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
-import { DownloadIcon, PowerIcon, ServersIcon, TerminalIcon } from "@/components/icons";
+import { CheckIcon, ServersIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { useAppUpdate } from "@/hooks/use-app-update";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-
-import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
 
 type Status = "setup" | "off" | "running";
 
@@ -18,9 +26,7 @@ export const SettingsStatus = () => {
   const queryClient = useQueryClient();
   const install = useMutation(systemMutations.install(queryClient));
   const startDaemon = useMutation(daemonMutations.start(queryClient));
-  const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
-  const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
-  const appUpdate = useAppUpdate();
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   if (!data) return null;
 
@@ -31,55 +37,34 @@ export const SettingsStatus = () => {
     data.daemon.caInstalled;
   const status: Status = !isSetup ? "setup" : data.daemon.running ? "running" : "off";
 
-  const statusCopy = {
-    setup: { title: `Set up ${appName}`, value: "Setup needed" },
-    off: { title: `${appName} is off`, value: "Off" },
-    running: { title: `${appName} is running`, value: "Running" },
+  const copy = {
+    setup: {
+      title: `Set up ${appName}`,
+      description: "A quick setup is needed before we can route your projects.",
+    },
+    off: {
+      title: `${appName} is off`,
+      description: `Turn ${appName} on to start routing your local projects.`,
+    },
+    running: {
+      title: `${appName} is running`,
+      description: "Your local projects are being routed.",
+    },
   }[status];
 
   const installError = install.error instanceof Error ? install.error.message : null;
   const daemonError =
     startDaemon.error instanceof Error ? startDaemon.error.message : null;
-  const cliError =
-    setupCliAccess.error instanceof Error ? setupCliAccess.error.message : null;
-  const nodeTrustError =
-    setupNodeTrust.error instanceof Error ? setupNodeTrust.error.message : null;
-  const updateError = appUpdate.errorMessage;
   const portConflict = Boolean(
     (status === "setup" && installError?.includes("already in use")) ||
       (status === "off" && daemonError?.includes("already in use")),
   );
-  const updateAction = appUpdate.availableUpdate ? (
-    <Button
-      variant="outline"
-      size="sm"
-      loading={appUpdate.isInstalling}
-      disabled={appUpdate.isChecking}
-      onClick={() => {
-        void appUpdate.installUpdate();
-      }}
-    >
-      Install
-    </Button>
-  ) : (
-    <Button
-      variant="outline"
-      size="sm"
-      loading={appUpdate.isChecking}
-      disabled={appUpdate.isInstalling}
-      onClick={() => {
-        void appUpdate.checkForUpdates();
-      }}
-    >
-      Check now
-    </Button>
-  );
 
-  const statusAction =
+  const primaryAction =
     status === "setup" ? (
       <Button
+        size="lg"
         variant="primary"
-        size="sm"
         loading={install.isPending}
         onClick={() => install.mutate()}
       >
@@ -87,125 +72,200 @@ export const SettingsStatus = () => {
       </Button>
     ) : status === "off" ? (
       <Button
+        size="lg"
         variant="primary"
-        size="sm"
         loading={startDaemon.isPending}
         onClick={() => startDaemon.mutate({ verbose: false })}
       >
         Turn on
       </Button>
-    ) : null;
+    ) : (
+      <Button size="lg" variant="outline" onClick={() => setDetailsOpen(true)}>
+        Details
+      </Button>
+    );
 
   return (
-    <SettingsSection label="System" icon={<PowerIcon />}>
-      <SettingsGroup>
-        <SettingsRow
-          icon={<StatusDot status={status} />}
-          title={statusCopy.title}
-          description={
-            status === "running"
-              ? "Your local projects are being routed."
-              : status === "off"
-                ? `Turn ${appName} on to start routing your local projects.`
-                : "A quick setup is needed before we can route your projects."
-          }
-          value={!statusAction ? statusCopy.value : undefined}
-          trailing={statusAction}
-        />
-        <SettingsRow
-          icon={<TerminalIcon />}
-          title="Terminal command"
-          description={`Use ${appName.toLowerCase()} from any shell or VS Code task.`}
-          value={data.environment.cliAccessReady ? "Installed" : undefined}
-          trailing={
-            data.environment.cliAccessReady ? undefined : (
-              <Button
-                variant="outline"
-                size="sm"
-                loading={setupCliAccess.isPending}
-                onClick={() => setupCliAccess.mutate()}
-              >
-                Install
-              </Button>
-            )
-          }
-        />
-        <SettingsRow
-          icon={<TerminalIcon />}
-          title="Node.js certificate trust"
-          description="Lets new terminals and restarted apps trust .localify HTTPS automatically."
-          value={data.environment.nodeTrust.ready ? "Enabled" : undefined}
-          trailing={
-            data.environment.nodeTrust.ready ? undefined : (
-              <Button
-                variant="outline"
-                size="sm"
-                loading={setupNodeTrust.isPending}
-                onClick={() => setupNodeTrust.mutate()}
-              >
-                Repair
-              </Button>
-            )
-          }
-        />
-        <SettingsRow
-          icon={<ServersIcon />}
-          title="Background service"
-          description="Routes local domains while the app is open."
-          value={data.daemon.running ? "Running" : undefined}
-          trailing={
-            data.daemon.running ? undefined : (
-              <Button
-                variant="outline"
-                size="sm"
-                loading={startDaemon.isPending}
-                onClick={() => startDaemon.mutate({ verbose: false })}
-              >
-                Start
-              </Button>
-            )
-          }
-        />
-        <SettingsRow
-          icon={<DownloadIcon />}
-          title="Desktop updates"
-          description={
-            appUpdate.availableUpdate
-              ? `Version ${appUpdate.availableUpdate.version} is ready to download and install.`
-              : "Checks for new Localify builds in the background and on demand."
-          }
-          value={
-            appUpdate.availableUpdate
-              ? `v${appUpdate.availableUpdate.version} available`
-              : appUpdate.status === "upToDate"
-                ? "Up to date"
-                : appUpdate.status === "unconfigured"
-                  ? "Unavailable"
-                  : undefined
-          }
-          trailing={updateAction}
-        />
-      </SettingsGroup>
+    <section className="space-y-2">
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ type: "spring", duration: 0.5, bounce: 0 }}
+        className="relative isolate overflow-hidden rounded-2xl border border-border/40 bg-neutral-50/80 px-6 py-5 shadow-[0_1px_0_0_rgba(255,255,255,0.6)_inset] transition-colors duration-200 hover:border-border dark:bg-neutral-900/50 dark:shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]"
+      >
+        <div className="flex items-center gap-5">
+          <StatusIndicator status={status} />
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <h3 className="text-[17px] font-semibold tracking-tight text-foreground">
+              {copy.title}
+            </h3>
+            <p className="max-w-md text-[13.5px] leading-normal text-pretty text-muted-foreground">
+              {copy.description}
+            </p>
+          </div>
+          {primaryAction}
+        </div>
+      </motion.div>
 
-      {installError || daemonError || cliError || nodeTrustError || updateError ? (
-        <p className="px-1 text-xs text-[--color-danger]">
-          {installError ?? daemonError ?? cliError ?? nodeTrustError ?? updateError}
-        </p>
+      {installError || daemonError ? (
+        <p className="px-1 text-xs text-[--color-danger]">{installError ?? daemonError}</p>
       ) : null}
 
       <DaemonPortConflicts visible={portConflict} />
-    </SettingsSection>
+
+      <SystemDetailsDialog open={detailsOpen} onOpenChange={setDetailsOpen} />
+    </section>
   );
 };
 
-const StatusDot = ({ status }: { status: Status }) => (
+const StatusIndicator = ({ status }: { status: Status }) => (
   <span
     aria-hidden
     className={cn(
-      "inline-flex size-2.5 shrink-0 rounded-full",
-      status === "running" && "bg-emerald-500 shadow-[0_0_0_3px_rgb(16_185_129/0.15)]",
-      status === "off" && "bg-[--color-muted]/60",
-      status === "setup" && "bg-amber-500 shadow-[0_0_0_3px_rgb(245_158_11/0.15)]",
+      "relative inline-flex size-10 shrink-0 items-center justify-center rounded-full",
+      status === "running" && "bg-emerald-500/10",
+      status === "off" && "bg-muted/60",
+      status === "setup" && "bg-amber-500/10",
     )}
-  />
+  >
+    <span
+      className={cn(
+        "inline-flex size-3 rounded-full",
+        status === "running" && "bg-emerald-500 shadow-[0_0_0_4px_rgb(16_185_129/0.2)]",
+        status === "off" && "bg-muted-foreground/40",
+        status === "setup" && "bg-amber-500 shadow-[0_0_0_4px_rgb(245_158_11/0.2)]",
+      )}
+    />
+  </span>
+);
+
+const SystemDetailsDialog = ({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) => {
+  const { data } = useQuery(bootstrapQueries.read());
+  const queryClient = useQueryClient();
+  const startDaemon = useMutation(daemonMutations.start(queryClient));
+  const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
+  const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
+
+  if (!data) return null;
+
+  const cliError =
+    setupCliAccess.error instanceof Error ? setupCliAccess.error.message : null;
+  const nodeTrustError =
+    setupNodeTrust.error instanceof Error ? setupNodeTrust.error.message : null;
+  const daemonError =
+    startDaemon.error instanceof Error ? startDaemon.error.message : null;
+  const actionError = cliError ?? nodeTrustError ?? daemonError;
+
+  const appName = data.environment.appName;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>System details</DialogTitle>
+          <DialogDescription>
+            The pieces {appName} needs to route your local projects.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="pb-4">
+          <ul className="space-y-2">
+            <DetailRow
+              icon={<TerminalIcon />}
+              title="Terminal command"
+              description={`Use ${appName.toLowerCase()} from any shell or VS Code task.`}
+              ready={data.environment.cliAccessReady}
+              action={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={setupCliAccess.isPending}
+                  onClick={() => setupCliAccess.mutate()}
+                >
+                  Install
+                </Button>
+              }
+            />
+            <DetailRow
+              icon={<TerminalIcon />}
+              title="Node.js certificate trust"
+              description="New terminals trust .localify HTTPS automatically."
+              ready={data.environment.nodeTrust.ready}
+              action={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={setupNodeTrust.isPending}
+                  onClick={() => setupNodeTrust.mutate()}
+                >
+                  Repair
+                </Button>
+              }
+            />
+            <DetailRow
+              icon={<ServersIcon />}
+              title="Background service"
+              description="Routes local domains while the app is open."
+              ready={data.daemon.running}
+              action={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={startDaemon.isPending}
+                  onClick={() => startDaemon.mutate({ verbose: false })}
+                >
+                  Start
+                </Button>
+              }
+            />
+          </ul>
+
+          {actionError ? (
+            <p className="mt-4 text-xs text-[--color-danger]">{actionError}</p>
+          ) : null}
+        </DialogBody>
+        <DialogFooter showCloseButton />
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+const DetailRow = ({
+  icon,
+  title,
+  description,
+  ready,
+  action,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  ready: boolean;
+  action: React.ReactNode;
+}) => (
+  <li className="flex items-center gap-3 rounded-xl border border-border/40 bg-neutral-50/60 px-3 py-3 dark:bg-neutral-800/40">
+    <span
+      aria-hidden
+      className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-background text-foreground/80 ring-1 ring-border/60 [&>svg]:size-4"
+    >
+      {icon}
+    </span>
+    <div className="min-w-0 flex-1">
+      <div className="truncate text-sm font-medium text-foreground">{title}</div>
+      <div className="truncate text-xs text-muted-foreground">{description}</div>
+    </div>
+    {ready ? (
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-500">
+        <CheckIcon className="size-3.5" />
+        Ready
+      </span>
+    ) : (
+      action
+    )}
+  </li>
 );

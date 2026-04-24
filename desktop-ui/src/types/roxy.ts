@@ -356,6 +356,11 @@ export interface RegisterDomainRequest {
   projectId?: string | null;
 }
 
+export interface UpdateDomainRequest extends RegisterDomainRequest {
+  currentDomain: string;
+  currentWildcard: boolean;
+}
+
 export interface KeygenSettingsUpdateRequest {
   apiUrl: string;
   account: string;

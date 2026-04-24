@@ -411,11 +411,7 @@ fn workspace_service_blueprints(
     let mut services = Vec::with_capacity(workspace_apps.len());
 
     for (index, app) in workspace_apps.iter().enumerate() {
-        let enabled = if app.is_root && workspace_apps.len() > 1 {
-            false
-        } else {
-            index == 0 || matches!(app.label.as_str(), "web" | "app")
-        };
+        let enabled = default_workspace_service_enabled(app, index, workspace_apps.len());
         let domain = default_workspace_domain(&slug, &app.label, services.is_empty(), app.is_root);
         let target = default_targets
             .get(index)
@@ -438,6 +434,18 @@ fn workspace_service_blueprints(
     Ok(services)
 }
 
+fn default_workspace_service_enabled(
+    app: &WorkspaceAppCandidate,
+    index: usize,
+    app_count: usize,
+) -> bool {
+    if app.is_root && app_count > 1 {
+        return false;
+    }
+
+    index == 0 || matches!(app.label.as_str(), "web" | "app" | "server" | "api")
+}
+
 fn default_workspace_domain(
     project_slug: &str,
     label: &str,
@@ -448,7 +456,7 @@ fn default_workspace_domain(
         return normalize_domain(project_slug.to_string());
     }
 
-    normalize_domain(format!("{label}-{project_slug}"))
+    normalize_domain(format!("{label}.{project_slug}"))
 }
 
 fn detect_workspace_apps(root: &Path) -> Result<Vec<WorkspaceAppCandidate>> {
@@ -1320,6 +1328,46 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(labels, vec!["web", "admin"]);
+    }
+
+    #[test]
+    fn detect_workspace_apps_enables_web_and_server_by_default() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::create_dir_all(root.join("apps/server")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+  "name": "repo-root",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "turbo dev"
+  }
+}"#,
+        )
+        .unwrap();
+        write_package_json(&root.join("apps/web/package.json"), "next dev");
+        write_package_json(
+            &root.join("apps/server/package.json"),
+            "bun run --hot src/index.ts",
+        );
+
+        let plan = detect_folder_init_plan(root, Some("Demo")).unwrap();
+
+        assert_eq!(plan.services.len(), 2);
+        assert_eq!(plan.services[0].display_path, "apps/web");
+        assert_eq!(
+            plan.services[0].domain,
+            format!("demo{}", BRANDING.domain_suffix)
+        );
+        assert!(plan.services[0].enabled);
+        assert_eq!(plan.services[1].display_path, "apps/server");
+        assert_eq!(
+            plan.services[1].domain,
+            format!("server.demo{}", BRANDING.domain_suffix)
+        );
+        assert!(plan.services[1].enabled);
     }
 
     #[test]

@@ -10,6 +10,7 @@ import type { DomainInfoDto } from "@/types/roxy";
 import {
   CheckIcon,
   CopyIcon,
+  EditIcon,
   ExternalLinkIcon,
   PlayIcon,
   SpinnerIcon,
@@ -23,6 +24,7 @@ import { projectMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
+import { ProjectEditDomainDialog } from "./projects-list-item-edit-domain-dialog";
 
 interface ProjectDomainChipProps {
   domain: DomainInfoDto;
@@ -279,6 +281,30 @@ export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChip
         <motion.span
           variants={actionVariants}
           transition={{ type: "spring", stiffness: 500, damping: 30, delay: 0.04 }}
+          className="inline-flex shrink-0"
+        >
+          <ProjectEditDomainDialog domain={domain}>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <DialogTrigger
+                    type="button"
+                    aria-label={`Edit ${pattern}`}
+                    onClick={stopMousePropagation}
+                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground data-popup-open:bg-foreground/10 data-popup-open:text-foreground"
+                  />
+                }
+              >
+                <EditIcon className="size-3.5" />
+              </TooltipTrigger>
+              <TooltipContent>Edit domain</TooltipContent>
+            </Tooltip>
+          </ProjectEditDomainDialog>
+        </motion.span>
+
+        <motion.span
+          variants={actionVariants}
+          transition={{ type: "spring", stiffness: 500, damping: 30, delay: 0.06 }}
           className="inline-flex shrink-0"
         >
           <Tooltip>

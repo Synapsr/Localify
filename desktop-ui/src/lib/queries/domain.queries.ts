@@ -8,6 +8,7 @@ import type {
   DomainPatternRequest,
   RegisterDomainRequest,
   RemoveRouteRequest,
+  UpdateDomainRequest,
 } from "../../types/roxy";
 import { invalidateBootstrapAnd } from "./shared";
 import { projectQueries } from "./project.queries";
@@ -33,6 +34,13 @@ export const domainMutations = {
     mutationOptions({
       mutationFn: (request: RegisterDomainRequest) =>
         tauriClient.registerDomain(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, domainMutationInvalidations),
+    }),
+  update: (queryClient: QueryClient) =>
+    mutationOptions({
+      mutationFn: (request: UpdateDomainRequest) =>
+        tauriClient.updateDomain(request),
       onSuccess: async () =>
         invalidateBootstrapAnd(queryClient, domainMutationInvalidations),
     }),

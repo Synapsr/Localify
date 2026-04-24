@@ -1,15 +1,20 @@
 "use client";
 
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
 
+import type { LicensingDto } from "@/types/roxy";
+
 import {
-  BookmarkIcon,
+  ArrowRightIcon,
   CheckIcon,
-  ExternalLinkIcon,
+  DangerTriangleIcon,
+  KeyIcon,
   RefreshIcon,
+  XIcon,
   ZapIcon,
 } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
@@ -25,9 +30,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { bootstrapQueries, licenseMutations } from "@/lib/queries";
-import type { LicensingDto } from "@/types/roxy";
-
-import { SettingsGroup, SettingsSection } from "./settings-list";
 
 const BUY_LICENSE_URL = "https://localify.dev/buy";
 
@@ -37,9 +39,7 @@ const formatDate = (value: string | null) => {
   if (!value) return null;
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
-  const parsed = /^\d+$/.test(trimmed)
-    ? new Date(Number(trimmed) * 1000)
-    : new Date(trimmed);
+  const parsed = /^\d+$/.test(trimmed) ? new Date(Number(trimmed) * 1000) : new Date(trimmed);
   if (Number.isNaN(parsed.getTime())) return trimmed;
   return parsed.toLocaleDateString(undefined, {
     year: "numeric",
@@ -63,15 +63,17 @@ export const SettingsLicensing = () => {
     !isActive(data.licensing);
 
   return (
-    <SettingsSection label="License" icon={<BookmarkIcon />}>
+    <section className="space-y-2">
       {isActive(data.licensing) ? (
         <LicensedView licensing={data.licensing} />
       ) : (
         <UnlicensedView licensing={data.licensing} openActivateDialog={openActivateDialog} />
       )}
-    </SettingsSection>
+    </section>
   );
 };
+
+const UpsellCard = motion.create("div");
 
 const UnlicensedView = ({
   licensing,
@@ -81,6 +83,9 @@ const UnlicensedView = ({
   openActivateDialog: boolean;
 }) => {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const visibleError =
+    licensing.lastError && licensing.lastError !== dismissedError ? licensing.lastError : null;
 
   useEffect(() => {
     if (openActivateDialog) {
@@ -90,37 +95,70 @@ const UnlicensedView = ({
 
   return (
     <>
-      <SettingsGroup>
-        <div className="flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-[--color-ink]">
-                You&apos;re on the Free plan
-              </span>
-              <Badge tone="muted">Free</Badge>
+      <UpsellCard
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ type: "spring", duration: 0.5, bounce: 0, delay: 0.05 }}
+        className="relative isolate overflow-hidden rounded-2xl border border-border/40 bg-neutral-50/80 px-6 py-6 shadow-[0_1px_0_0_rgba(255,255,255,0.6)_inset] transition-colors duration-200 hover:border-border dark:bg-neutral-900/50 dark:shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]"
+      >
+        <div className="flex items-center gap-6">
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <div className="flex items-baseline gap-2.5">
+              <h3 className="text-[17px] font-semibold tracking-tight text-balance text-foreground">
+                Upgrade to Pro from <br /> €49/
+                <span className="text-muted-foreground tabular-nums">Lifetime</span>
+              </h3>
             </div>
-            <p className="text-xs text-[--color-muted]">
-              Up to {formatLimit(licensing.freeLimits.maxProjects)} projects and{" "}
-              {formatLimit(licensing.freeLimits.maxDomainsPerProject)} domains per project. Buy a
-              license to unlock more, or paste a key you already have.
+            <p className="max-w-md text-[13.5px] leading-normal text-pretty text-muted-foreground">
+              Unlock unlimited projects and domains. Currently up to{" "}
+              {formatLimit(licensing.freeLimits.maxProjects)} projects and{" "}
+              {formatLimit(licensing.freeLimits.maxDomainsPerProject)} domains per project.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => setDialogOpen(true)}>
-              <ZapIcon />
-              Enter license key
+
+          <div className="flex  items-end gap-2">
+            <Button size="lg" variant="glow" onClick={() => void openUrl(BUY_LICENSE_URL)}>
+              Upgrade
+              <ArrowRightIcon data-icon="inline-end" />
             </Button>
-            <Button size="sm" onClick={() => void openUrl(BUY_LICENSE_URL)}>
-              <ExternalLinkIcon />
-              Buy a license
+            <Button variant="outline" size="lg" type="button" onClick={() => setDialogOpen(true)}>
+              I have a license key
             </Button>
           </div>
         </div>
-      </SettingsGroup>
+      </UpsellCard>
 
-      {licensing.lastError ? (
-        <p className="px-1 text-xs text-[--color-danger]">{licensing.lastError}</p>
-      ) : null}
+      <AnimatePresence initial={false}>
+        {visibleError ? (
+          <motion.div
+            key={visibleError}
+            initial={{ opacity: 0, y: -4, height: 0 }}
+            animate={{ opacity: 1, y: 0, height: "auto" }}
+            exit={{ opacity: 0, y: -4, height: 0 }}
+            transition={{ type: "spring", duration: 0.35, bounce: 0 }}
+            className="overflow-hidden"
+          >
+            <div
+              role="alert"
+              className="mt-2 flex items-start gap-2.5 rounded-xl border border-[--color-danger]/20 bg-[--color-danger]/6 px-3 py-2.5 text-[--color-danger]"
+            >
+              <DangerTriangleIcon
+                aria-hidden
+                className="mt-px size-3.5 shrink-0 [&>svg]:size-3.5"
+              />
+              <p className="flex-1 text-xs leading-relaxed">{visibleError}</p>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => setDismissedError(visibleError)}
+                className="-mt-0.5 -mr-1 flex size-5 shrink-0 items-center justify-center rounded-md text-[--color-danger]/70 transition-colors duration-150 hover:bg-[--color-danger]/10 hover:text-[--color-danger] focus-visible:ring-2 focus-visible:ring-[--color-danger]/40 focus-visible:outline-none"
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
       <ActivateLicenseDialog open={dialogOpen} onOpenChange={setDialogOpen} />
     </>
@@ -133,28 +171,35 @@ const LicensedView = ({ licensing }: { licensing: LicensingDto }) => {
 
   return (
     <>
-      <div className="flex items-center gap-3 rounded-xl border border-[--color-accent]/30 bg-[--color-accent]/5 px-4 py-3">
-        <span
-          aria-hidden
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-[--color-accent]/15 text-[--color-accent] [&>svg]:size-4"
-        >
-          <CheckIcon />
-        </span>
-        <div className="min-w-0 flex-1 space-y-0.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-[--color-ink]">
-              You have a {licensing.limits.plan} license
-            </span>
-            {isOffline ? <Badge tone="muted">Offline</Badge> : null}
+      <UpsellCard
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ type: "spring", duration: 0.5, bounce: 0, delay: 0.05 }}
+        className="relative isolate overflow-hidden rounded-2xl border border-border/40 bg-neutral-50/80 px-6 py-5 shadow-[0_1px_0_0_rgba(255,255,255,0.6)_inset] transition-colors duration-200 hover:border-border dark:bg-neutral-900/50 dark:shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]"
+      >
+        <div className="flex items-center gap-5">
+          <span
+            aria-hidden
+            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 [&>svg]:size-5"
+          >
+            <CheckIcon />
+          </span>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-[17px] font-semibold tracking-tight text-foreground">
+                {licensing.limits.plan} license active
+              </h3>
+              {isOffline ? <Badge tone="muted">Offline</Badge> : null}
+            </div>
+            <p className="text-[13.5px] leading-normal text-muted-foreground">
+              Thanks for supporting Localify — everything is unlocked.
+            </p>
           </div>
-          <p className="text-xs text-[--color-muted]">
-            Everything is active. Thanks for supporting Localify.
-          </p>
+          <Button size="lg" variant="outline" onClick={() => setDetailsOpen(true)}>
+            Details
+          </Button>
         </div>
-        <Button size="sm" variant="outline" onClick={() => setDetailsOpen(true)}>
-          Details
-        </Button>
-      </div>
+      </UpsellCard>
 
       <LicenseDetailsDialog
         licensing={licensing}
@@ -218,27 +263,18 @@ const LicenseDetailsDialog = ({
                 }
               />
             ) : null}
-            <InfoItem
-              label="Free updates until"
-              value={licenseExpiry ?? "Included"}
-            />
+            <InfoItem label="Free updates until" value={licenseExpiry ?? "Included"} />
             {isOffline && offlineExpiry ? (
               <InfoItem label="Offline file expires" value={offlineExpiry} />
             ) : lastValidated ? (
               <InfoItem label="Last checked" value={lastValidated} />
             ) : null}
             {activeLicense?.keyMasked ? (
-              <InfoItem
-                label="License key"
-                value={activeLicense.keyMasked}
-                mono
-              />
+              <InfoItem label="License key" value={activeLicense.keyMasked} mono />
             ) : null}
           </dl>
 
-          {actionError ? (
-            <p className="mt-4 text-xs text-[--color-danger]">{actionError}</p>
-          ) : null}
+          {actionError ? <p className="mt-4 text-xs text-[--color-danger]">{actionError}</p> : null}
         </DialogBody>
         <DialogFooter>
           <Button
@@ -262,15 +298,7 @@ const LicenseDetailsDialog = ({
   );
 };
 
-const InfoItem = ({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) => (
+const InfoItem = ({ label, value, mono }: { label: string; value: string; mono?: boolean }) => (
   <div className="space-y-0.5">
     <dt className="text-[10px] font-medium tracking-wider text-[--color-muted] uppercase">
       {label}
@@ -291,10 +319,12 @@ const ActivateLicenseDialog = ({
   const queryClient = useQueryClient();
   const activateLicense = useMutation(licenseMutations.activate(queryClient));
   const [licenseKey, setLicenseKey] = useState("");
+  const [succeeded, setSucceeded] = useState(false);
 
   const handleClose = (next: boolean) => {
     if (!next) {
       setLicenseKey("");
+      setSucceeded(false);
       activateLicense.reset();
     }
     onOpenChange(next);
@@ -302,56 +332,123 @@ const ActivateLicenseDialog = ({
 
   const submit = async () => {
     await activateLicense.mutateAsync({ key: licenseKey.trim() });
-    setLicenseKey("");
-    onOpenChange(false);
+    setSucceeded(true);
+    setTimeout(() => {
+      setLicenseKey("");
+      setSucceeded(false);
+      activateLicense.reset();
+      onOpenChange(false);
+    }, 1400);
   };
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Enter your license key</DialogTitle>
-          <DialogDescription>
-            Paste the key you received after purchase. Localify will activate this device
-            automatically.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogBody>
-          <form
-            id="activate-license-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (licenseKey.trim().length > 0) void submit();
-            }}
-          >
-            <Input
-              autoFocus
-              value={licenseKey}
-              onChange={(event) => setLicenseKey(event.target.value)}
-              placeholder="Paste your license key"
-              aria-invalid={activateLicense.isError || undefined}
-            />
-            {activateLicense.error ? (
-              <p className="mt-2 text-xs text-[--color-danger]">
-                {activateLicense.error.message}
-              </p>
-            ) : null}
-          </form>
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => handleClose(false)}>
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            form="activate-license-form"
-            loading={activateLicense.isPending}
-            disabled={licenseKey.trim().length === 0}
-          >
-            <ZapIcon />
-            Activate
-          </Button>
-        </DialogFooter>
+        <AnimatePresence mode="wait" initial={false}>
+          {succeeded ? (
+            <motion.div
+              key="success"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="flex flex-col items-center gap-4 px-6 py-10 text-center"
+            >
+              <motion.span
+                aria-hidden
+                initial={{ scale: 0.6, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: "spring", duration: 0.5, bounce: 0.35 }}
+                className="flex size-14 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 [&>svg]:size-7"
+              >
+                <CheckIcon />
+              </motion.span>
+              <div className="space-y-1.5">
+                <h2 className="text-[15px] font-medium text-foreground">License activated</h2>
+                <p className="text-sm text-muted-foreground">
+                  Thanks for supporting Localify — everything is unlocked.
+                </p>
+              </div>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="form"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+            >
+              <DialogHeader>
+                <DialogTitle>Enter your license key</DialogTitle>
+                <DialogDescription>
+                  Paste the key you received after purchase. Localify will activate this device
+                  automatically.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogBody className="pt-4">
+                <form
+                  id="activate-license-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (licenseKey.trim().length > 0) void submit();
+                  }}
+                >
+                  <div className="relative">
+                    <KeyIcon
+                      aria-hidden
+                      className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground [&>svg]:size-4"
+                    />
+                    <Input
+                      autoFocus
+                      value={licenseKey}
+                      onChange={(event) => setLicenseKey(event.target.value)}
+                      placeholder="Paste your license key"
+                      aria-invalid={activateLicense.isError || undefined}
+                      className="h-11 pl-9 font-mono text-[13px]"
+                    />
+                  </div>
+                  <AnimatePresence initial={false}>
+                    {activateLicense.error ? (
+                      <motion.p
+                        initial={{ opacity: 0, y: -4, height: 0 }}
+                        animate={{ opacity: 1, y: 0, height: "auto" }}
+                        exit={{ opacity: 0, y: -4, height: 0 }}
+                        transition={{ type: "spring", duration: 0.3, bounce: 0 }}
+                        className="mt-2 text-xs text-[--color-danger]"
+                      >
+                        {activateLicense.error.message}
+                      </motion.p>
+                    ) : null}
+                  </AnimatePresence>
+                  {/* <p className="mt-3 text-xs text-muted-foreground">
+                    No key yet?{" "}
+                    <button
+                      type="button"
+                      onClick={() => void openUrl(BUY_LICENSE_URL)}
+                      className="font-medium text-foreground underline underline-offset-3 transition-colors hover:text-foreground/80"
+                    >
+                      Buy a license
+                    </button>
+                    .
+                  </p> */}
+                </form>
+              </DialogBody>
+              <DialogFooter>
+                <Button
+                  type="submit"
+                  form="activate-license-form"
+                  size="lg"
+                  loading={activateLicense.isPending}
+                  disabled={licenseKey.trim().length === 0}
+                  className="w-full"
+                >
+                  <ZapIcon />
+                  Activate license
+                </Button>
+              </DialogFooter>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </DialogContent>
     </Dialog>
   );

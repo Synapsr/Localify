@@ -22,7 +22,7 @@ use crate::desktop::dto::{
     RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
     SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
     StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateProjectRequest,
+    UpdateDomainRequest, UpdateProjectRequest,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,6 +86,9 @@ pub enum HelperCommand {
     },
     RegisterDomain {
         request: RegisterDomainRequest,
+    },
+    UpdateDomain {
+        request: UpdateDomainRequest,
     },
     UnregisterDomain {
         request: DomainPatternRequest,
@@ -272,6 +275,10 @@ impl SystemHelperClient {
         request: RegisterDomainRequest,
     ) -> Result<RegisterDomainResultDto> {
         self.send(HelperCommand::RegisterDomain { request })
+    }
+
+    pub fn update_domain(&self, request: UpdateDomainRequest) -> Result<RegisterDomainResultDto> {
+        self.send(HelperCommand::UpdateDomain { request })
     }
 
     pub fn unregister_domain(
@@ -520,6 +527,9 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::RegisterDomain { request } => {
             serde_json::to_value(api.register_domain(request)?).map_err(Into::into)
+        }
+        HelperCommand::UpdateDomain { request } => {
+            serde_json::to_value(api.update_domain(request)?).map_err(Into::into)
         }
         HelperCommand::UnregisterDomain { request } => {
             serde_json::to_value(api.unregister_domain(request)?).map_err(Into::into)

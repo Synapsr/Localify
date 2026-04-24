@@ -12,7 +12,8 @@ use roxy::desktop::dto::{
     SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
     SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
     StartDaemonRequest, StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    UnregisterDomainResultDto, UpdateDomainRequest, UpdateLauncherPreferencesRequest,
+    UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
@@ -384,6 +385,14 @@ pub fn register_domain(
     request: RegisterDomainRequest,
 ) -> Result<RegisterDomainResultDto, String> {
     state.api.register_domain(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn update_domain(
+    state: tauri::State<'_, AppState>,
+    request: UpdateDomainRequest,
+) -> Result<RegisterDomainResultDto, String> {
+    state.api.update_domain(request).map_err(map_error)
 }
 
 #[tauri::command]

@@ -60,6 +60,20 @@ export const createProjectWithDomainsRequestSchema = z.object({
     .default([]),
 });
 
+export const registerDomainRequestSchema = z.object({
+  domain: z.string().trim().min(1, "Domain is required"),
+  wildcard: z.boolean(),
+  routes: z
+    .array(z.string().trim().min(1, "Route target is required"))
+    .min(1, "At least one route is required"),
+  projectId: z.string().trim().min(1).nullable().optional(),
+});
+
+export const updateDomainRequestSchema = registerDomainRequestSchema.extend({
+  currentDomain: z.string().trim().min(1, "Current domain is required"),
+  currentWildcard: z.boolean(),
+});
+
 export function emptyDomainEntry(): ProjectDomainEntry {
   return { domain: "", target: "", wildcard: false };
 }

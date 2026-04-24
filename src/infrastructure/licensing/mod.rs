@@ -395,7 +395,11 @@ pub fn resolve_license_state(licensing: &LicensingConfig) -> ResolvedLicenseStat
 
     let offline_result = verify_offline_license_cache(licensing);
     let offline_license = offline_result.as_ref().ok().cloned();
-    let offline_error = offline_result.err().map(|error| error.to_string());
+    let offline_error = if licensing.offline_license.is_some() {
+        offline_result.err().map(|error| error.to_string())
+    } else {
+        None
+    };
     let uses_verified_offline_cache =
         configured_public_key(&licensing.keygen).is_some() && licensing.offline_license.is_some();
 
@@ -1232,9 +1236,11 @@ struct KeygenErrorItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEYGEN_OFFLINE_ALGORITHM, decode_hex, mask_fingerprint, parse_ioplatform_uuid,
-        parse_signature_header, should_activate_machine,
+        KEYGEN_OFFLINE_ALGORITHM, ResolvedLicenseStatus, decode_hex, mask_fingerprint,
+        parse_ioplatform_uuid, parse_signature_header, resolve_license_state,
+        should_activate_machine,
     };
+    use crate::config::{LicensingConfig, OfflineLicenseFile, StoredLicense};
 
     #[test]
     fn parses_ioplatform_uuid_from_ioreg_output() {
@@ -1284,5 +1290,35 @@ mod tests {
     #[test]
     fn offline_algorithm_constant_is_encrypted_ed25519() {
         assert_eq!(KEYGEN_OFFLINE_ALGORITHM, "aes-256-gcm+ed25519");
+    }
+
+    #[test]
+    fn missing_offline_cache_is_not_a_visible_license_error() {
+        let licensing = LicensingConfig::default();
+
+        let resolved = resolve_license_state(&licensing);
+
+        assert_eq!(resolved.status, ResolvedLicenseStatus::Unlicensed);
+        assert_eq!(resolved.last_error, None);
+    }
+
+    #[test]
+    fn invalid_present_offline_cache_remains_a_visible_license_error() {
+        let licensing = LicensingConfig {
+            license: Some(StoredLicense {
+                key: "localify-test-key".into(),
+                ..StoredLicense::default()
+            }),
+            offline_license: Some(OfflineLicenseFile {
+                certificate: "not-a-valid-offline-certificate".into(),
+                ..OfflineLicenseFile::default()
+            }),
+            ..LicensingConfig::default()
+        };
+
+        let resolved = resolve_license_state(&licensing);
+
+        assert_eq!(resolved.status, ResolvedLicenseStatus::Invalid);
+        assert!(resolved.last_error.is_some());
     }
 }

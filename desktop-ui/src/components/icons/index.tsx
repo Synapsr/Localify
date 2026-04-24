@@ -30,6 +30,7 @@ export {
   Bookmark as BookmarkIcon,
   Terminal as TerminalIcon,
   Keyboard as KeyboardIcon,
+  Key as KeyIcon,
   Command as CommandIcon,
   Power as PowerIcon,
   Servers as ServersIcon,

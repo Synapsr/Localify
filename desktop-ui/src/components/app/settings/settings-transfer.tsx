@@ -29,13 +29,13 @@ import {
 import { bootstrapQueries, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
+import { SettingsCard } from "./settings-card";
 import {
   buildInitialImportProjectSelection,
   canSelectImportProject,
   countSelectedImportProjectsUsingNewSlots,
   getAvailableImportProjectSlots,
 } from "./settings-transfer.utils";
-import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
 
 type Step = "home" | "export" | "import";
 
@@ -343,16 +343,16 @@ export const SettingsTransfer = () => {
 
   return (
     <>
-      <SettingsSection label="Transfer" icon={<ArrowUpDownIcon />}>
-        <SettingsGroup>
-          <SettingsRow
-            icon={<ArrowUpDownIcon />}
-            title="Import and export settings"
-            description="Move your Localify setup to another Mac, or share selected projects with a teammate."
-            onActivate={() => handleOpenChange(true)}
-          />
-        </SettingsGroup>
-      </SettingsSection>
+      <SettingsCard
+        icon={<ArrowUpDownIcon />}
+        title="Transfer settings"
+        description="Move your Localify setup to another Mac, or share selected projects with a teammate."
+        action={
+          <Button size="lg" variant="outline" onClick={() => handleOpenChange(true)}>
+            Import / Export
+          </Button>
+        }
+      />
 
       <Dialog open={dialogOpen} onOpenChange={handleOpenChange}>
         <DialogContent className="max-h-[calc(100vh-2rem)] overflow-x-hidden overflow-y-auto overscroll-none sm:max-w-lg">

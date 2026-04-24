@@ -17,11 +17,11 @@ import {
 import { bootstrapQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
+import { SettingsCard } from "./settings-card";
 import {
   buildTroubleshootingIssues,
   type TroubleshootingIssue,
 } from "./settings-troubleshooting.data";
-import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
 
 export const SettingsTroubleshooting = () => {
   const { data } = useQuery(bootstrapQueries.read());
@@ -37,16 +37,16 @@ export const SettingsTroubleshooting = () => {
 
   return (
     <>
-      <SettingsSection label="Troubleshooting" icon={<InfoCircleIcon />}>
-        <SettingsGroup>
-          <SettingsRow
-            icon={<InfoCircleIcon />}
-            title="Open troubleshooting guide"
-            description="Known Localify issues, how to recognize them, and what to try next."
-            onActivate={() => setOpen(true)}
-          />
-        </SettingsGroup>
-      </SettingsSection>
+      <SettingsCard
+        icon={<InfoCircleIcon />}
+        title="Troubleshooting"
+        description="Known Localify issues, how to recognize them, and what to try next."
+        action={
+          <Button size="lg" variant="outline" onClick={() => setOpen(true)}>
+            Open guide
+          </Button>
+        }
+      />
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto overscroll-none sm:max-w-xl">
@@ -70,11 +70,7 @@ export const SettingsTroubleshooting = () => {
               ))}
             </ul>
           </DialogBody>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setOpen(false)}>
-              Close
-            </Button>
-          </DialogFooter>
+          <DialogFooter showCloseButton />
         </DialogContent>
       </Dialog>
     </>

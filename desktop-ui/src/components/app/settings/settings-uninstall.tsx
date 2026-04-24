@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
-import { DangerTriangleIcon, TrashIcon } from "@/components/icons";
+import { TrashIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,7 +18,7 @@ import {
 import { bootstrapQueries, systemMutations, systemQueries } from "@/lib/queries";
 import { clearStoredOnboardingCompleted } from "@/lib/util.onboarding-state";
 
-import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
+import { SettingsCard } from "./settings-card";
 
 function isUserCancelledNativePrompt(error: unknown): boolean {
   if (!(error instanceof Error)) {
@@ -80,25 +80,23 @@ export const SettingsUninstall = () => {
   }
 
   return (
-    <SettingsSection label="Danger zone" icon={<DangerTriangleIcon />}>
-      <SettingsGroup className="border-[--color-danger]/20 bg-[--color-danger]/5">
-        <SettingsRow
-          icon={<TrashIcon />}
-          title={`Remove ${appName}`}
-          description={`Stops ${appName} and removes it from your Mac, along with your registered domains.`}
-          danger
-          trailing={
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => setConfirming(true)}
-              disabled={confirming}
-            >
-              Remove
-            </Button>
-          }
-        />
-      </SettingsGroup>
+    <>
+      <SettingsCard
+        tone="danger"
+        icon={<TrashIcon />}
+        title={`Remove ${appName}`}
+        description={`Stops ${appName} and removes it from your Mac, along with your registered domains.`}
+        action={
+          <Button
+            variant="danger"
+            size="lg"
+            onClick={() => setConfirming(true)}
+            disabled={confirming}
+          >
+            Remove
+          </Button>
+        }
+      />
 
       <Dialog
         open={confirming}
@@ -209,6 +207,6 @@ export const SettingsUninstall = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </SettingsSection>
+    </>
   );
 };

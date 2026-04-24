@@ -142,11 +142,14 @@ function DialogFooter({
     <div
       ref={footerRef}
       data-slot="dialog-footer"
-      className={cn(" sticky bottom-0  px-6 py-4 ", className)}
+      className={cn("sticky bottom-0  px-6 py-4 ", className)}
       {...props}
     >
       <div className="relative z-10 flex flex-col-reverse justify-between gap-2 sm:flex-row ">
         {children}
+        {showCloseButton && (
+          <DialogPrimitive.Close render={<Button variant="outline" />}>Close</DialogPrimitive.Close>
+        )}
       </div>
       {showFooterBlur && (
         <ProgressiveBlur
@@ -155,9 +158,6 @@ function DialogFooter({
           backgroundColor="var(--color-background)"
           className="absolute !bottom-0 left-0 h-4 w-full"
         />
-      )}
-      {showCloseButton && (
-        <DialogPrimitive.Close render={<Button variant="outline" />}>Close</DialogPrimitive.Close>
       )}
     </div>
   );

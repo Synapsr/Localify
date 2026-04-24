@@ -892,6 +892,7 @@ pub fn run() {
             commands::remove_project,
             commands::assign_domain_project,
             commands::register_domain,
+            commands::update_domain,
             commands::unregister_domain,
             commands::add_route,
             commands::remove_route,

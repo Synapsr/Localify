@@ -38,8 +38,8 @@ use crate::desktop::dto::{
     SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
     SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
     StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateLauncherPreferencesRequest,
-    UpdateProjectRequest,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::home_dir::user_home_dir;
 use crate::desktop::node_trust;
@@ -47,7 +47,7 @@ use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
 use crate::desktop::{LauncherPreferencesStore, ProjectRootStore, RunActionPreference};
-use crate::domain::{DomainPattern, PathPrefix, Route, RouteTarget};
+use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, ConfiguredProject};
 use crate::infrastructure::dns::get_dns_service;
@@ -1420,6 +1420,87 @@ impl DesktopApi {
         Ok(RegisterDomainResultDto {
             registration: map_registration(result.registration),
             cert_outcome: map_step(None, result.cert_outcome),
+        })
+    }
+
+    pub fn update_domain(&self, request: UpdateDomainRequest) -> Result<RegisterDomainResultDto> {
+        if self.should_use_system_helper() {
+            let routes = request
+                .routes
+                .iter()
+                .map(|route| normalize_desktop_route(route))
+                .collect::<Result<Vec<_>>>()?;
+
+            return self
+                .ensure_helper_running()?
+                .update_domain(UpdateDomainRequest { routes, ..request });
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let current_pattern =
+            DomainPattern::from_name(&request.current_domain, request.current_wildcard)?;
+        let pattern = DomainPattern::from_name(&request.domain, request.wildcard)?;
+        let routes = request
+            .routes
+            .iter()
+            .map(|route| parse_desktop_route(route))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| anyhow::anyhow!("Invalid route: {error}"))?;
+
+        if routes.is_empty() {
+            bail!("At least one route is required.");
+        }
+
+        let existing = self
+            .config_store()
+            .get_domain(&current_pattern)?
+            .ok_or_else(|| anyhow::anyhow!("Domain '{}' not registered", current_pattern))?;
+        if current_pattern.display_pattern() != pattern.display_pattern()
+            && self.config_store().get_domain(&pattern)?.is_some()
+        {
+            bail!("Domain '{}' is already registered.", pattern);
+        }
+
+        let mut registration = DomainRegistration::new(pattern.clone(), routes);
+        let pattern_changed = current_pattern.display_pattern() != pattern.display_pattern();
+        let mut cert_outcome = if !pattern_changed {
+            if existing.is_https_enabled() {
+                registration.enable_https();
+            }
+            StepOutcome::Skipped("Domain pattern unchanged.".into())
+        } else {
+            match certs.create_and_install(&pattern) {
+                Ok(()) => {
+                    registration.enable_https();
+                    StepOutcome::Success("Certificate installed and trusted.".into())
+                }
+                Err(error) => StepOutcome::Warning(format!(
+                    "Failed to generate certificate: {error}. HTTPS will not be available for this domain."
+                )),
+            }
+        };
+
+        self.config_store().replace_domain_with_project(
+            &current_pattern,
+            registration.clone(),
+            request.project_id,
+        )?;
+
+        if pattern_changed
+            && certs.exists(&current_pattern)
+            && let Err(error) = certs.remove(&current_pattern)
+            && !matches!(cert_outcome, StepOutcome::Warning(_))
+        {
+            cert_outcome = StepOutcome::Warning(format!(
+                "Domain updated, but failed to remove the old certificate: {error}."
+            ));
+        }
+
+        Ok(RegisterDomainResultDto {
+            registration: map_registration(registration),
+            cert_outcome: map_step(None, cert_outcome),
         })
     }
 

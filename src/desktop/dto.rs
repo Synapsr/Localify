@@ -619,6 +619,17 @@ pub struct RegisterDomainRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateDomainRequest {
+    pub current_domain: String,
+    pub current_wildcard: bool,
+    pub domain: String,
+    pub wildcard: bool,
+    pub routes: Vec<String>,
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeygenSettingsUpdateRequest {
     pub api_url: String,
     pub account: String,

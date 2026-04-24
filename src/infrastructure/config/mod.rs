@@ -397,6 +397,43 @@ impl ConfigStore {
         self.save(&config)
     }
 
+    #[allow(dead_code)]
+    pub fn replace_domain_with_project(
+        &self,
+        current_pattern: &DomainPattern,
+        registration: DomainRegistration,
+        project_id: Option<String>,
+    ) -> Result<(), ConfigError> {
+        let mut config = self.load()?;
+
+        let current_key = current_pattern.display_pattern();
+        let new_key = registration.display_pattern();
+        let existing = config
+            .domains
+            .get(&current_key)
+            .ok_or_else(|| ConfigError::DomainNotFound(current_key.clone()))?;
+
+        if current_key != new_key && config.domains.contains_key(&new_key) {
+            return Err(ConfigError::DomainExists(new_key));
+        }
+
+        let project_id = project_id.or_else(|| existing.project.clone());
+
+        if let Some(project_id) = project_id.as_ref()
+            && !config.projects.contains_key(project_id)
+        {
+            return Err(ConfigError::ProjectNotFound(project_id.clone()));
+        }
+
+        enforce_domain_limits(&config, project_id.as_deref(), Some(&current_key))?;
+
+        let mut dto = RegistrationDto::from(registration);
+        dto.project = project_id;
+        config.domains.remove(&current_key);
+        config.domains.insert(new_key, dto);
+        self.save(&config)
+    }
+
     /// Check whether the config file exists on disk.
     pub fn config_exists(&self) -> bool {
         self.path.exists()
@@ -941,6 +978,57 @@ mod tests {
             configured.registration.display_pattern(),
             format!("app{}", BRANDING.domain_suffix)
         );
+    }
+
+    #[test]
+    fn replace_domain_updates_key_and_preserves_project() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Client App").unwrap();
+        let current = proxy_registration("old.roxy", 3000);
+        let current_pattern = current.pattern().clone();
+
+        store
+            .add_domain_with_project(current, Some(project.id.clone()))
+            .unwrap();
+
+        store
+            .replace_domain_with_project(
+                &current_pattern,
+                proxy_registration("new.roxy", 3001),
+                None,
+            )
+            .unwrap();
+
+        let domains = store.list_configured_domains().unwrap();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(
+            domains[0].registration.display_pattern(),
+            format!("new{}", BRANDING.domain_suffix)
+        );
+        assert_eq!(domains[0].project_id.as_deref(), Some(project.id.as_str()));
+    }
+
+    #[test]
+    fn replace_domain_rejects_duplicate_without_removing_current() {
+        let (_dir, store) = temp_store();
+        let current = proxy_registration("old.roxy", 3000);
+        let current_pattern = current.pattern().clone();
+
+        store.add_domain(current).unwrap();
+        store
+            .add_domain(proxy_registration("existing.roxy", 3001))
+            .unwrap();
+
+        let error = store
+            .replace_domain_with_project(
+                &current_pattern,
+                proxy_registration("existing.roxy", 3002),
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ConfigError::DomainExists(_)));
+        assert!(store.get_domain(&current_pattern).unwrap().is_some());
     }
 
     #[test]
