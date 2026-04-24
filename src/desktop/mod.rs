@@ -1,6 +1,7 @@
 mod api;
 pub mod dto;
 mod editor;
+mod home_dir;
 mod launcher_preferences;
 mod node_trust;
 mod port_conflicts;

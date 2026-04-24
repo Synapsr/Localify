@@ -147,8 +147,13 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 #[derive(Debug)]
 enum DeepLinkAction {
     Projects,
-    Logs { domain: String },
-    InEditor { domain: String },
+    SettingsLicensing,
+    Logs {
+        domain: String,
+    },
+    InEditor {
+        domain: String,
+    },
     RunLocalDevServer {
         domain: String,
         target: Option<String>,
@@ -214,6 +219,7 @@ fn parse_deep_link_action(url: &tauri::Url) -> Result<DeepLinkAction, String> {
 
     match (host, url.path()) {
         ("open", "/projects") => Ok(DeepLinkAction::Projects),
+        ("open", "/settings/licensing") => Ok(DeepLinkAction::SettingsLicensing),
         ("open", "/logs") => Ok(DeepLinkAction::Logs {
             domain: query_param(url, "domain")?,
         }),
@@ -257,6 +263,15 @@ fn execute_deep_link_action<R: Runtime>(
             app,
             DeepLinkPayloadDto {
                 route: DeepLinkRouteDto::Projects,
+                project_id: None,
+                view: None,
+            },
+            delivery,
+        ),
+        DeepLinkAction::SettingsLicensing => deliver_deep_link_payload(
+            app,
+            DeepLinkPayloadDto {
+                route: DeepLinkRouteDto::SettingsLicensing,
                 project_id: None,
                 view: None,
             },
@@ -690,7 +705,7 @@ async fn run_manual_update_check_inner<R: Runtime>(app: AppHandle<R>) -> Result<
         show_message_dialog(
             &app,
             "You're Up to Date",
-            format!("Localify Desktop {current_version} is already the latest version."),
+            format!("Localify {current_version} is already the latest version."),
             MessageDialogKind::Info,
         );
         finish_update_check(&app);
@@ -888,6 +903,7 @@ pub fn run() {
             commands::read_logs,
             commands::open_in_editor,
             commands::run_local_dev_server,
+            commands::stop_local_dev_server,
             commands::update_launcher_preferences,
             commands::consume_pending_deep_link
         ])

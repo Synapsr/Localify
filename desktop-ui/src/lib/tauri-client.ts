@@ -15,6 +15,7 @@ import { openInEditorRequestSchema } from "./validators/validator.open-in-editor
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
+import { stopLocalDevServerRequestSchema } from "./validators/validator.stop-local-dev-server";
 import {
   settingsExportRequestSchema,
   settingsImportPreviewRequestSchema,
@@ -61,6 +62,7 @@ import type {
   RemoveProjectResultDto,
   RemoveRouteRequest,
   RunLocalDevServerRequest,
+  StopLocalDevServerRequest,
   SettingsExportRequest,
   SettingsExportResultDto,
   SettingsImportPreviewDto,
@@ -168,6 +170,7 @@ export interface DesktopClient {
   readLogs(request: LogsRequest): Promise<LogsDto>;
   openInEditor(request: OpenInEditorRequest): Promise<void>;
   runLocalDevServer(request: RunLocalDevServerRequest): Promise<void>;
+  stopLocalDevServer(request: StopLocalDevServerRequest): Promise<void>;
   updateLauncherPreferences(
     request: UpdateLauncherPreferencesRequest,
   ): Promise<LauncherPreferencesDto>;
@@ -259,6 +262,10 @@ export function createDesktopClient(): DesktopClient {
     runLocalDevServer: (request) =>
       tauriInvoke("run_local_dev_server", {
         request: runLocalDevServerRequestSchema.parse(request),
+      }),
+    stopLocalDevServer: (request) =>
+      tauriInvoke("stop_local_dev_server", {
+        request: stopLocalDevServerRequestSchema.parse(request),
       }),
     updateLauncherPreferences: (request) =>
       tauriInvoke("update_launcher_preferences", {

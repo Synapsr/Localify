@@ -40,10 +40,15 @@ if (!version) {
   throw new Error("Missing desktop version in src-tauri/tauri.conf.json.");
 }
 
+const productName = String(tauriConfig.productName).trim();
+if (!productName) {
+  throw new Error("Missing productName in src-tauri/tauri.conf.json.");
+}
+
 const macosBundleDir = join(rootDir, "src-tauri", "target", "release", "bundle", "macos");
 const artifacts = {
-  archive: join(macosBundleDir, "Localify Desktop.app.tar.gz"),
-  signature: join(macosBundleDir, "Localify Desktop.app.tar.gz.sig"),
+  archive: join(macosBundleDir, `${productName}.app.tar.gz`),
+  signature: join(macosBundleDir, `${productName}.app.tar.gz.sig`),
 };
 
 for (const artifactPath of Object.values(artifacts)) {
@@ -65,7 +70,7 @@ const latestManifest = {
   version,
   notes:
     process.env.LOCALIFY_UPDATER_NOTES?.trim() ||
-    `Localify Desktop ${version}`,
+    `${productName} ${version}`,
   pub_date: new Date().toISOString(),
   platforms: {
     "darwin-aarch64": {

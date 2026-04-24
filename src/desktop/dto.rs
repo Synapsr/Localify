@@ -692,6 +692,12 @@ pub struct RunLocalDevServerRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StopLocalDevServerRequest {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateLauncherPreferencesRequest {
     #[serde(default)]
     pub editor: EditorPreference,

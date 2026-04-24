@@ -45,4 +45,5 @@ export {
   Box as BoxIcon,
   InboxDown as InboxDownIcon,
   InboxCheck as InboxCheckIcon,
+  Sparkles as SparklesIcon,
 } from "@mynaui/icons-react";

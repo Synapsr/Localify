@@ -16,6 +16,7 @@ import type {
   ProjectInfoDto,
   RemoveProjectRequest,
   RunLocalDevServerRequest,
+  StopLocalDevServerRequest,
   UpdateProjectRequest,
 } from "../../types/roxy";
 
@@ -81,8 +82,22 @@ export const projectMutations = {
     mutationOptions<void, Error, OpenInEditorRequest>({
       mutationFn: (request) => tauriClient.openInEditor(request),
     }),
-  runLocalDevServer: () =>
+  runLocalDevServer: (queryClient: QueryClient) =>
     mutationOptions<void, Error, RunLocalDevServerRequest>({
       mutationFn: (request) => tauriClient.runLocalDevServer(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [
+          projectQueryKeys.all(),
+          domainQueries.all(),
+        ]),
+    }),
+  stopLocalDevServer: (queryClient: QueryClient) =>
+    mutationOptions<void, Error, StopLocalDevServerRequest>({
+      mutationFn: (request) => tauriClient.stopLocalDevServer(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [
+          projectQueryKeys.all(),
+          domainQueries.all(),
+        ]),
     }),
 } as const;

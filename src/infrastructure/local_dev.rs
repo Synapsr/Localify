@@ -108,6 +108,12 @@ pub fn open_local_dev_server(project_root: &Path, target: &str) -> Result<()> {
     open_local_dev_server_with_terminal(project_root, target, TerminalPreference::Terminal)
 }
 
+#[allow(dead_code)]
+pub fn stop_local_dev_server(target: &str) -> Result<()> {
+    let target_port = extract_target_port(target)?;
+    stop_listening_process_on_port(target_port)
+}
+
 pub fn open_local_dev_server_with_terminal(
     project_root: &Path,
     target: &str,
@@ -449,6 +455,127 @@ fn extract_script_port(script: &str) -> Option<u16> {
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+struct ListeningProcessSummary {
+    pid: u32,
+    process_name: String,
+}
+
+#[allow(dead_code)]
+fn stop_listening_process_on_port(port: u16) -> Result<()> {
+    let listeners = inspect_listening_processes(port)?;
+    let listener = match listeners.as_slice() {
+        [] => bail!("No running local dev server is listening on port {}.", port),
+        [listener] => listener,
+        _ => bail!(
+            "Multiple processes are listening on port {}.\n{}",
+            port,
+            format_listeners(&listeners)
+        ),
+    };
+
+    let output = Command::new("kill")
+        .args(["-TERM", &listener.pid.to_string()])
+        .output()
+        .with_context(|| format!("Failed to stop PID {} on port {}.", listener.pid, port))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!(
+        "{}",
+        command_error(&output)
+            .unwrap_or_else(|| format!("Failed to stop PID {} on port {}.", listener.pid, port))
+    )
+}
+
+#[allow(dead_code)]
+fn inspect_listening_processes(port: u16) -> Result<Vec<ListeningProcessSummary>> {
+    let output = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
+        .output()
+        .with_context(|| format!("Failed to inspect port {}.", port))?;
+
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !output.status.success() {
+        bail!(
+            "{}",
+            command_error(&output).unwrap_or_else(|| format!("Failed to inspect port {}.", port))
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_lsof_machine_output(&stdout))
+}
+
+#[allow(dead_code)]
+fn parse_lsof_machine_output(output: &str) -> Vec<ListeningProcessSummary> {
+    let mut listeners = Vec::new();
+    let mut current_pid = None;
+    let mut current_process_name = None;
+
+    for line in output.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            if let (Some(current_pid), Some(process_name)) =
+                (current_pid.take(), current_process_name.take())
+            {
+                listeners.push(ListeningProcessSummary {
+                    pid: current_pid,
+                    process_name,
+                });
+            }
+
+            current_pid = pid.parse::<u32>().ok();
+            current_process_name = None;
+            continue;
+        }
+
+        if let Some(process_name) = line.strip_prefix('c') {
+            current_process_name = Some(process_name.to_string());
+        }
+    }
+
+    if let (Some(current_pid), Some(process_name)) = (current_pid, current_process_name) {
+        listeners.push(ListeningProcessSummary {
+            pid: current_pid,
+            process_name,
+        });
+    }
+
+    listeners
+}
+
+#[allow(dead_code)]
+fn format_listeners(listeners: &[ListeningProcessSummary]) -> String {
+    let mut lines = String::from("Detected listeners:");
+    for listener in listeners {
+        lines.push_str(&format!(
+            "\n- PID {} ({})",
+            listener.pid, listener.process_name
+        ));
+    }
+    lines
+}
+
+#[allow(dead_code)]
+fn command_error(output: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if !stderr.is_empty() {
+        Some(stderr)
+    } else if !stdout.is_empty() {
+        Some(stdout)
+    } else {
+        None
+    }
+}
+
 fn parse_port_token(value: &str) -> Option<u16> {
     value
         .trim_matches(|char| char == '"' || char == '\'')
@@ -588,7 +715,7 @@ fn launch_with_terminal_app(launch: &LocalDevLaunchPlan) -> Result<()> {
 fn launch_with_ghostty(launch: &LocalDevLaunchPlan) -> Result<()> {
     let command = run_script_command(launch);
     let script = format!(
-        "tell application \"Ghostty\"\nactivate\nset cfg to new surface configuration\nset initial working directory of cfg to \"{}\"\nset win to new window with configuration cfg\nset term to focused terminal of selected tab of win\ninput text \"{}\" to term\nsend key \"enter\" to term\nend tell",
+        "tell application \"Ghostty\"\nset cfg to new surface configuration\nset initial working directory of cfg to \"{}\"\nset win to new window with configuration cfg\nset term to focused terminal of selected tab of win\ninput text \"{}\" to term\nsend key \"enter\" to term\nend tell",
         escape_applescript_string(&launch.package_dir.to_string_lossy()),
         escape_applescript_string(&command)
     );
@@ -686,7 +813,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        PackageManager, detect_local_dev_candidates, extract_script_port, resolve_local_dev_launch,
+        PackageManager, detect_local_dev_candidates, extract_script_port,
+        parse_lsof_machine_output, resolve_local_dev_launch,
     };
 
     #[test]
@@ -824,5 +952,16 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].display_path, "apps/web");
+    }
+
+    #[test]
+    fn parse_lsof_machine_output_collects_listener_pids() {
+        let listeners = parse_lsof_machine_output("p123\ncnode\np456\ncvite\n");
+
+        assert_eq!(listeners.len(), 2);
+        assert_eq!(listeners[0].pid, 123);
+        assert_eq!(listeners[0].process_name, "node");
+        assert_eq!(listeners[1].pid, 456);
+        assert_eq!(listeners[1].process_name, "vite");
     }
 }

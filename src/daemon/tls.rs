@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::domain::{DomainName, DomainPattern};
 use crate::infrastructure::certs::CertificateGenerator;
-use crate::infrastructure::certs::generator::{build_ca_cert_params, build_leaf_cert_params};
+use crate::infrastructure::certs::generator::build_leaf_cert_params;
 
 const ON_DEMAND_CERT_CACHE_MAX: usize = 256;
 
@@ -29,6 +29,7 @@ const ON_DEMAND_CERT_CACHE_MAX: usize = 256;
 struct DomainCertResolver {
     /// All registered certificates, stored with their pattern for matching.
     certs: Vec<(DomainPattern, Arc<CertifiedKey>)>,
+    ca_cert_der: Option<CertificateDer<'static>>,
     ca_key_pem: Option<String>,
     on_demand: RwLock<HashMap<String, Arc<CertifiedKey>>>,
 }
@@ -52,13 +53,14 @@ impl ResolvesServerCert for DomainCertResolver {
 
         // Generate an on-demand cert for valid `.roxy` hostnames if we
         // can read the local CA private key.
+        let ca_cert_der = self.ca_cert_der.as_ref()?;
         let ca_key_pem = self.ca_key_pem.as_deref()?;
         if DomainName::new(hostname.as_str()).is_err() {
             warn!(hostname = %hostname, "TLS: no certificate for domain");
             return None;
         }
 
-        match generate_on_demand_certified_key(hostname.as_str(), ca_key_pem) {
+        match generate_on_demand_certified_key(hostname.as_str(), ca_cert_der, ca_key_pem) {
             Ok(cert) => {
                 if let Ok(mut cache) = self.on_demand.write() {
                     // Bound memory: on-demand certs are cheap to regenerate.
@@ -83,11 +85,14 @@ pub fn create_tls_acceptor(
     certs_dir: &Path,
     data_dir: &Path,
 ) -> Result<Option<TlsAcceptor>> {
-    let ca_key_pem = match load_ca_key_pem(data_dir) {
-        Ok(pem) => pem,
+    let (ca_cert_der, ca_key_pem) = match load_ca_material(data_dir) {
+        Ok(material) => material,
         Err(e) => {
-            warn!(error = %e, "TLS: failed to load Roxy CA key (on-demand certificates disabled)");
-            None
+            warn!(
+                error = %e,
+                "TLS: failed to load Roxy CA material (on-demand certificates disabled)"
+            );
+            (None, None)
         }
     };
 
@@ -143,6 +148,7 @@ pub fn create_tls_acceptor(
 
     let resolver = Arc::new(DomainCertResolver {
         certs,
+        ca_cert_der,
         ca_key_pem,
         on_demand: RwLock::new(HashMap::new()),
     });
@@ -154,18 +160,25 @@ pub fn create_tls_acceptor(
     Ok(Some(TlsAcceptor::from(Arc::new(config))))
 }
 
-fn load_ca_key_pem(data_dir: &Path) -> Result<Option<String>> {
+fn load_ca_material(data_dir: &Path) -> Result<(Option<CertificateDer<'static>>, Option<String>)> {
+    let ca_cert_path = data_dir.join("ca.crt");
     let ca_key_path = data_dir.join("ca.key");
-    if !ca_key_path.exists() {
-        return Ok(None);
+    if !ca_cert_path.exists() || !ca_key_path.exists() {
+        return Ok((None, None));
     }
 
+    let cert = CertificateDer::from_pem_file(&ca_cert_path)
+        .with_context(|| format!("Failed to read CA certificate: {}", ca_cert_path.display()))?;
     let pem = fs::read_to_string(&ca_key_path)
         .with_context(|| format!("Failed to read CA private key: {}", ca_key_path.display()))?;
-    Ok(Some(pem))
+    Ok((Some(cert), Some(pem)))
 }
 
-fn generate_on_demand_certified_key(hostname: &str, ca_key_pem: &str) -> Result<Arc<CertifiedKey>> {
+fn generate_on_demand_certified_key(
+    hostname: &str,
+    ca_cert_der: &CertificateDer<'_>,
+    ca_key_pem: &str,
+) -> Result<Arc<CertifiedKey>> {
     let leaf_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
         .context("Failed to generate leaf key pair")?;
 
@@ -177,8 +190,8 @@ fn generate_on_demand_certified_key(hostname: &str, ca_key_pem: &str) -> Result<
     let params = build_leaf_cert_params(hostname, vec![san]);
 
     let ca_key_pair = KeyPair::from_pem(ca_key_pem).context("Failed to parse CA key")?;
-    let ca_params = build_ca_cert_params();
-    let issuer = Issuer::from_params(&ca_params, &ca_key_pair);
+    let issuer =
+        Issuer::from_ca_cert_der(ca_cert_der, ca_key_pair).context("Failed to parse CA cert")?;
 
     let cert = params
         .signed_by(&leaf_key_pair, &issuer)

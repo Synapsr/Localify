@@ -1,10 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { bootstrapQueries } from "@/lib/queries";
+import {
+  loadStoredOnboardingCompleted,
+  markStoredOnboardingCompleted,
+} from "@/lib/util.onboarding-state";
 import { AppUpdateProvider } from "@/providers/app-update-provider";
 
+import { SpinnerIcon } from "./icons";
 import { Onboarding } from "./onboarding";
 import { AppStartupScreen } from "./shared/app-startup-screen";
 
@@ -12,16 +18,7 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const ONBOARDING_COMPLETED_STORAGE_KEY = "localify.onboarding-completed";
-const DEFAULT_DESKTOP_NAME = "Localify Desktop";
-
-function loadStoredOnboardingCompleted(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return window.localStorage.getItem(ONBOARDING_COMPLETED_STORAGE_KEY) === "1";
-}
+const DEFAULT_DESKTOP_NAME = "Localify";
 
 export function AppShell({ children }: AppShellProps) {
   const { data, isLoading, error } = useQuery(bootstrapQueries.read());
@@ -30,7 +27,7 @@ export function AppShell({ children }: AppShellProps) {
   useEffect(() => {
     if (data?.daemon.caInstalled) {
       setOnboardingCompleted(true);
-      window.localStorage.setItem(ONBOARDING_COMPLETED_STORAGE_KEY, "1");
+      markStoredOnboardingCompleted();
     }
   }, [data?.daemon.caInstalled]);
 
@@ -39,7 +36,11 @@ export function AppShell({ children }: AppShellProps) {
       <AppUpdateProvider desktopName={DEFAULT_DESKTOP_NAME} enabled={false}>
         <>{children}</>
       </AppUpdateProvider>
-    ) : null;
+    ) : (
+      <div className="h-full w-full bg-background">
+        <SpinnerIcon className="animate-spin" />
+      </div>
+    );
   }
 
   if (error && !data) {
@@ -53,11 +54,19 @@ export function AppShell({ children }: AppShellProps) {
     );
   }
 
-  if (!data) return null;
+  if (!data) {
+    return (
+      <AppStartupScreen
+        eyebrow="Desktop startup"
+        title="Waiting for Localify"
+        message="The desktop shell is still waiting for startup data."
+      />
+    );
+  }
 
   const handleOnboardingActivated = () => {
     setOnboardingCompleted(true);
-    window.localStorage.setItem(ONBOARDING_COMPLETED_STORAGE_KEY, "1");
+    markStoredOnboardingCompleted();
   };
 
   return (

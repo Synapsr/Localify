@@ -3,8 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/Localify Desktop.app"
-DMG_PATH="$(find "$ROOT_DIR/src-tauri/target/release/bundle/dmg" -maxdepth 1 -name 'Localify Desktop_*.dmg' | head -n 1)"
+PRODUCT_NAME="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('$ROOT_DIR/src-tauri/tauri.conf.json', 'utf8')).productName)")"
+APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/$PRODUCT_NAME.app"
+DMG_PATH="$(find "$ROOT_DIR/src-tauri/target/release/bundle/dmg" -maxdepth 1 -name "${PRODUCT_NAME}_*.dmg" | head -n 1)"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "Skipping macOS post-processing on non-macOS host"

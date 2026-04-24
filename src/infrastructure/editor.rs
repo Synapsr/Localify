@@ -157,6 +157,9 @@ pub fn open_in_editor_with_preference(path: &Path, preference: EditorPreference)
             if !status.success() {
                 bail!("{} exited before opening the project.", app.label);
             }
+
+            #[cfg(target_os = "macos")]
+            activate_editor_app(app)?;
         }
         #[cfg(target_os = "macos")]
         EditorLaunch::OpenApp { app_name, app } => {
@@ -170,6 +173,8 @@ pub fn open_in_editor_with_preference(path: &Path, preference: EditorPreference)
             if !status.success() {
                 bail!("{} exited before opening the project.", app.label);
             }
+
+            activate_editor_app(app)?;
         }
     }
 
@@ -205,6 +210,37 @@ fn detect_editor_app_launch(app: EditorApp) -> Option<EditorLaunch> {
         .iter()
         .find_map(|name| find_app_bundle(name).map(|_| *name))
         .map(|app_name| EditorLaunch::OpenApp { app_name, app })
+}
+
+#[cfg(target_os = "macos")]
+fn activate_editor_app(app: EditorApp) -> Result<()> {
+    let app_name = app.app_names.first().copied().ok_or_else(|| {
+        anyhow!(
+            "Failed to focus {} because no macOS app name is configured.",
+            app.label
+        )
+    })?;
+
+    let script = format!("tell application \"{}\" to activate", app_name);
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .with_context(|| format!("Failed to focus {}.", app.label))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        bail!(
+            "{} opened the project, but macOS could not bring it to the front.",
+            app.label
+        );
+    }
+
+    bail!("{stderr}")
 }
 
 #[cfg(not(target_os = "macos"))]

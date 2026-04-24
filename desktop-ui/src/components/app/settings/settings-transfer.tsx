@@ -29,6 +29,12 @@ import {
 import { bootstrapQueries, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
+import {
+  buildInitialImportProjectSelection,
+  canSelectImportProject,
+  countSelectedImportProjectsUsingNewSlots,
+  getAvailableImportProjectSlots,
+} from "./settings-transfer.utils";
 import { SettingsGroup, SettingsRow, SettingsSection } from "./settings-list";
 
 type Step = "home" | "export" | "import";
@@ -84,6 +90,16 @@ const slideVariants = {
   exit: (direction: number) => ({ opacity: 0, x: direction * -16 }),
 };
 
+const sameSelection = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((value) => right.includes(value));
+
+function replaceAllSnapshotWouldExceedProjectLimit(
+  projectCount: number,
+  maxProjects: number | null,
+) {
+  return maxProjects !== null && projectCount > maxProjects;
+}
+
 export const SettingsTransfer = () => {
   const { data } = useQuery(bootstrapQueries.read());
   const queryClient = useQueryClient();
@@ -108,10 +124,44 @@ export const SettingsTransfer = () => {
   if (!data) return null;
 
   const currentProjects = data.projects;
+  const currentProjectIds = currentProjects.map((project) => project.id);
+  const maxProjects = data.licensing.limits.maxProjects;
+  const availableImportProjectSlots = getAvailableImportProjectSlots(
+    maxProjects,
+    currentProjects.length,
+  );
   const exportError = exportMutation.error instanceof Error ? exportMutation.error.message : null;
   const previewError =
     previewImportMutation.error instanceof Error ? previewImportMutation.error.message : null;
   const importError = importMutation.error instanceof Error ? importMutation.error.message : null;
+  const selectedImportProjectsUsingNewSlots = countSelectedImportProjectsUsingNewSlots(
+    selectedImportProjectIds,
+    currentProjectIds,
+  );
+  const remainingImportProjectSlots =
+    availableImportProjectSlots === null
+      ? null
+      : Math.max(availableImportProjectSlots - selectedImportProjectsUsingNewSlots, 0);
+  const replaceAllExceedsProjectLimit =
+    preview !== null &&
+    maxProjects !== null &&
+    preview.projectCount > maxProjects;
+  const importSelectableProjectIds =
+    preview === null
+      ? []
+      : buildInitialImportProjectSelection({
+          currentProjectIds,
+          maxProjects,
+          projects: preview.projects,
+        });
+  const canSelectAllImportProjects =
+    preview === null || importSelectableProjectIds.length === preview.projects.length;
+  const importProjectCapacityMessage =
+    preview !== null && maxProjects !== null
+      ? availableImportProjectSlots === 0
+        ? `Your ${data.licensing.limits.plan} plan has all ${maxProjects} project slots in use. You can still re-import matching existing projects.`
+        : `Your ${data.licensing.limits.plan} plan allows ${maxProjects} projects total. You currently have ${currentProjects.length}, so you can add ${availableImportProjectSlots} new project${availableImportProjectSlots === 1 ? "" : "s"} from this file.`
+      : null;
 
   const resetAll = () => {
     setStep("home");
@@ -135,7 +185,7 @@ export const SettingsTransfer = () => {
     if (!nextOpen) {
       resetAll();
     } else {
-      setSelectedExportProjectIds(currentProjects.map((project) => project.id));
+      setSelectedExportProjectIds(currentProjectIds);
     }
   };
 
@@ -162,6 +212,17 @@ export const SettingsTransfer = () => {
   };
 
   const toggleImportProject = (projectId: string) => {
+    if (
+      !canSelectImportProject({
+        currentProjectIds,
+        maxProjects,
+        projectId,
+        selectedProjectIds: selectedImportProjectIds,
+      })
+    ) {
+      return;
+    }
+
     setSelectedImportProjectIds((current) =>
       current.includes(projectId)
         ? current.filter((candidate) => candidate !== projectId)
@@ -171,7 +232,7 @@ export const SettingsTransfer = () => {
 
   const exportAllSelected = selectedExportProjectIds.length === currentProjects.length;
   const importAllSelected =
-    preview !== null && selectedImportProjectIds.length === preview.projects.length;
+    preview !== null && sameSelection(selectedImportProjectIds, importSelectableProjectIds);
 
   const handleExport = async () => {
     setExportResultMessage(null);
@@ -219,9 +280,23 @@ export const SettingsTransfer = () => {
       if (typeof filePath !== "string") return;
 
       const nextPreview = await previewImportMutation.mutateAsync({ filePath });
+      const nextImportMode =
+        nextPreview.includesSettings && !replaceAllSnapshotWouldExceedProjectLimit(
+          nextPreview.projectCount,
+          maxProjects,
+        )
+          ? "replaceAll"
+          : "projects";
+
       setPreview(nextPreview);
-      setImportMode(nextPreview.includesSettings ? "replaceAll" : "projects");
-      setSelectedImportProjectIds(nextPreview.projects.map((project) => project.id));
+      setImportMode(nextImportMode);
+      setSelectedImportProjectIds(
+        buildInitialImportProjectSelection({
+          currentProjectIds,
+          maxProjects,
+          projects: nextPreview.projects,
+        }),
+      );
     } catch (rawError) {
       console.error("Failed to open import dialog.", rawError);
       setImportDialogError(rawError instanceof Error ? rawError.message : String(rawError));
@@ -444,9 +519,14 @@ export const SettingsTransfer = () => {
                             <ScopeTile
                               icon={<BoxIcon />}
                               title="Replace current setup"
-                              description="Apply the file's portable settings and replace existing projects."
+                              description={
+                                replaceAllExceedsProjectLimit
+                                  ? `This file contains ${preview.projectCount} projects, but your ${data.licensing.limits.plan} plan allows up to ${maxProjects}.`
+                                  : "Apply the file's portable settings and replace existing projects."
+                              }
                               selected={importMode === "replaceAll"}
                               onSelect={() => setImportMode("replaceAll")}
+                              disabled={replaceAllExceedsProjectLimit}
                             />
                             <ScopeTile
                               icon={<FolderIcon />}
@@ -471,6 +551,7 @@ export const SettingsTransfer = () => {
                           >
                             <ProjectList
                               heading="Projects in file"
+                              helper={importProjectCapacityMessage}
                               projects={preview.projects.map((project) => ({
                                 id: project.id,
                                 name: project.name,
@@ -484,10 +565,29 @@ export const SettingsTransfer = () => {
                                 setSelectedImportProjectIds(
                                   importAllSelected
                                     ? []
-                                    : preview.projects.map((project) => project.id),
+                                    : importSelectableProjectIds,
                                 )
                               }
                               allSelected={importAllSelected}
+                              selectAllLabel={canSelectAllImportProjects ? "Select all" : "Select max"}
+                              isDisabled={(project) =>
+                                !canSelectImportProject({
+                                  currentProjectIds,
+                                  maxProjects,
+                                  projectId: project.id,
+                                  selectedProjectIds: selectedImportProjectIds,
+                                })
+                              }
+                              limitBadgeText={
+                                remainingImportProjectSlots === 0 && maxProjects !== null
+                                  ? "No free slot"
+                                  : null
+                              }
+                              selectionSummary={
+                                maxProjects === null
+                                  ? null
+                                  : `${selectedImportProjectsUsingNewSlots}/${availableImportProjectSlots} new slots used`
+                              }
                             />
                           </motion.div>
                         ) : null}
@@ -674,18 +774,28 @@ type ListProject = {
 
 const ProjectList = ({
   heading,
+  helper,
   projects,
   selectedIds,
   onToggle,
   onToggleAll,
   allSelected,
+  isDisabled,
+  limitBadgeText,
+  selectAllLabel,
+  selectionSummary,
 }: {
   heading: string;
+  helper?: string | null;
   projects: ListProject[];
   selectedIds: string[];
   onToggle: (id: string) => void;
   onToggleAll: () => void;
   allSelected: boolean;
+  isDisabled?: (project: ListProject) => boolean;
+  limitBadgeText?: string | null;
+  selectAllLabel?: string;
+  selectionSummary?: string | null;
 }) => (
   <div className="space-y-2 pt-2">
     <div className="flex items-center justify-between gap-3 px-0.5">
@@ -696,30 +806,39 @@ const ProjectList = ({
         <span className="text-[11px] text-muted-foreground/80 tabular-nums">
           {selectedIds.length}/{projects.length}
         </span>
+        {selectionSummary ? (
+          <span className="text-[11px] text-muted-foreground/80">{selectionSummary}</span>
+        ) : null}
       </div>
       {projects.length > 0 ? (
         <Button variant="ghost" size="xs" onClick={onToggleAll}>
-          {allSelected ? "Clear" : "Select all"}
+          {allSelected ? "Clear" : selectAllLabel ?? "Select all"}
         </Button>
       ) : null}
     </div>
+    {helper ? <p className="text-xs text-muted-foreground">{helper}</p> : null}
     <div className="max-h-60 overflow-y-auto rounded-xl border border-border bg-background">
       <ul className="divide-y divide-border/70">
         {projects.map((project) => {
           const checked = selectedIds.includes(project.id);
+          const disabled = isDisabled?.(project) ?? false;
           return (
             <li key={project.id}>
               <label
                 className={cn(
-                  "flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors",
-                  "hover:bg-muted/40",
+                  "flex items-start gap-3 px-3 py-2.5 transition-colors",
+                  disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-muted/40",
                 )}
               >
                 <input
                   type="checkbox"
                   checked={checked}
+                  disabled={disabled}
                   onChange={() => onToggle(project.id)}
-                  className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-border accent-foreground"
+                  className={cn(
+                    "mt-0.5 size-4 shrink-0 rounded border-border accent-foreground",
+                    disabled ? "cursor-not-allowed" : "cursor-pointer",
+                  )}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
@@ -729,6 +848,11 @@ const ProjectList = ({
                     {!project.enabled ? (
                       <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tracking-wider text-muted-foreground uppercase">
                         Disabled
+                      </span>
+                    ) : null}
+                    {disabled && !checked && limitBadgeText ? (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tracking-wider text-muted-foreground uppercase">
+                        {limitBadgeText}
                       </span>
                     ) : null}
                   </div>

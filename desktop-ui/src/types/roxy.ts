@@ -300,7 +300,7 @@ export interface AppUpdateCheckDto {
   update: AppUpdateInfoDto | null;
 }
 
-export type DeepLinkRouteDto = "projects" | "logs";
+export type DeepLinkRouteDto = "projects" | "logs" | "settingsLicensing";
 
 export interface DeepLinkPayloadDto {
   route: DeepLinkRouteDto;
@@ -461,6 +461,10 @@ export interface OpenInEditorRequest {
 
 export interface RunLocalDevServerRequest {
   rootPath: string;
+  target: string;
+}
+
+export interface StopLocalDevServerRequest {
   target: string;
 }
 

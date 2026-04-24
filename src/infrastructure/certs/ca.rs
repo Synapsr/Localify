@@ -1,4 +1,6 @@
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, PKCS_ECDSA_P256_SHA256};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use std::fs;
 use std::path::PathBuf;
 
@@ -89,6 +91,13 @@ impl RootCA {
         KeyPair::from_pem(&key_pem).map_err(|e| CertError::GenerationError(e.to_string()))
     }
 
+    fn load_cert_der(&self) -> Result<CertificateDer<'static>, CertError> {
+        CertificateDer::from_pem_file(self.cert_path()).map_err(|e| CertError::ReadError {
+            path: self.cert_path(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        })
+    }
+
     /// Sign a certificate with this CA
     /// Returns the signed certificate PEM
     pub fn sign_certificate(
@@ -97,9 +106,9 @@ impl RootCA {
         key_pair: &KeyPair,
     ) -> Result<String, CertError> {
         let ca_key_pair = self.load_key_pair()?;
-
-        let ca_params = super::generator::build_ca_cert_params();
-        let issuer = Issuer::from_params(&ca_params, &ca_key_pair);
+        let ca_cert_der = self.load_cert_der()?;
+        let issuer = Issuer::from_ca_cert_der(&ca_cert_der, ca_key_pair)
+            .map_err(|e| CertError::GenerationError(e.to_string()))?;
 
         // Sign the domain certificate
         let cert = params

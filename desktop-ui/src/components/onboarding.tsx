@@ -15,7 +15,6 @@ import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
 import {
   CheckIcon,
   ChevronRightIcon,
-  CodeIcon,
   DangerTriangleIcon,
   FolderIcon,
   LockIcon,
@@ -656,44 +655,34 @@ function ActivateStep({
   const appName = bootstrap.environment.appName;
 
   const [state, setState] = useState<ActivateState>("idle");
-  const [message, setMessage] = useState<string | null>(null);
+  const [portConflictMessage, setPortConflictMessage] = useState<string | null>(null);
   const [phase, setPhase] = useState<"install" | "start" | null>(null);
 
-  const showPortConflicts =
-    state === "error" && phase === "start" && Boolean(message?.includes("already in use"));
+  const showPortConflicts = state === "error" && Boolean(portConflictMessage);
 
   async function activate() {
     setState("running");
-    setMessage(null);
+    setPortConflictMessage(null);
     try {
       setPhase("install");
       await waitForNextPaint();
       await install.mutateAsync();
       setPhase("start");
       await startDaemon.mutateAsync({ verbose: false });
-      queryClient.setQueryData<BootstrapDto>(bootstrapQueries.all(), (current) =>
-        current
-          ? {
-              ...current,
-              daemon: {
-                ...current.daemon,
-                caInstalled: true,
-                running: true,
-              },
-            }
-          : current,
-      );
+      await queryClient.fetchQuery(bootstrapQueries.read());
       setState("done");
       setPhase(null);
       onActivated();
-      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setState("error");
-      setMessage(msg);
-      if (!msg.includes("already in use")) {
-        toast("Approve with your administrator password to continue.", {
-          icon: <LockIcon className="size-4" />,
+      if (phase === "start" && msg.includes("already in use")) {
+        setPortConflictMessage(msg);
+      } else {
+        setPortConflictMessage(null);
+        toast.error("Activation failed", {
+          description: msg,
+          icon: <DangerTriangleIcon className="size-4" />,
         });
       }
     }
@@ -704,7 +693,7 @@ function ActivateStep({
       icon: <CheckIcon className="size-4" />,
       title: "Create a local certificate authority",
       description:
-        "A private CA is generated on your machine and trusted by your system keychain so browsers, Node.js, and local dev tools can trust Localify domains.",
+        "A private CA is generated on your machine and trusted by macOS so browsers, Node.js, and local dev tools can trust Localify domains.",
     },
     {
       icon: <ZapIcon className="size-4" />,
@@ -729,8 +718,8 @@ function ActivateStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Activate {appName}</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Localify needs your administrator password once, to set up secure local HTTPS. Here's
-          exactly what happens on your machine.
+          Localify needs your administrator password once to set up secure local HTTPS. The rest
+          stays inside the app with a visible progress state.
         </p>
       </motion.div>
 
@@ -782,9 +771,9 @@ function ActivateStep({
         >
           {state === "running" ? (
             phase === "install" ? (
-              "Installing system trust…"
+              "Applying secure setup…"
             ) : (
-              "Starting daemon…"
+              "Starting Localify…"
             )
           ) : state === "done" ? (
             <>

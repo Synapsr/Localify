@@ -11,11 +11,12 @@ use roxy::desktop::dto::{
     RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
     SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
     SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    StartDaemonRequest, StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
+use tauri::async_runtime;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
@@ -61,6 +62,7 @@ pub struct DeepLinkPayloadDto {
 pub enum DeepLinkRouteDto {
     Projects,
     Logs,
+    SettingsLicensing,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,7 +193,10 @@ pub fn preview_settings_import(
     state: tauri::State<'_, AppState>,
     request: SettingsImportPreviewRequest,
 ) -> Result<SettingsImportPreviewDto, String> {
-    state.api.preview_settings_import(request).map_err(map_error)
+    state
+        .api
+        .preview_settings_import(request)
+        .map_err(map_error)
 }
 
 #[tauri::command]
@@ -268,8 +273,12 @@ pub fn detect_project_init_plan(
 }
 
 #[tauri::command]
-pub fn install_roxy(state: tauri::State<'_, AppState>) -> Result<InstallResultDto, String> {
-    state.api.install().map_err(map_error)
+pub async fn install_roxy(state: tauri::State<'_, AppState>) -> Result<InstallResultDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.install().map_err(map_error))
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]
@@ -305,8 +314,14 @@ pub fn get_uninstall_preview(
 }
 
 #[tauri::command]
-pub fn uninstall_roxy(state: tauri::State<'_, AppState>) -> Result<UninstallResultDto, String> {
-    state.api.uninstall().map_err(map_error)
+pub async fn uninstall_roxy(
+    state: tauri::State<'_, AppState>,
+) -> Result<UninstallResultDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.uninstall().map_err(map_error))
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]
@@ -465,6 +480,14 @@ pub fn run_local_dev_server(
     request: RunLocalDevServerRequest,
 ) -> Result<(), String> {
     state.api.run_local_dev_server(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn stop_local_dev_server(
+    state: tauri::State<'_, AppState>,
+    request: StopLocalDevServerRequest,
+) -> Result<(), String> {
+    state.api.stop_local_dev_server(request).map_err(map_error)
 }
 
 #[tauri::command]

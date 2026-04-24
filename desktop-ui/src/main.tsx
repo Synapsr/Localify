@@ -1,14 +1,13 @@
 import "./styles.css";
-
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { Agentation } from "agentation";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
 
-import { router } from "./router";
 import { AppShell } from "./components/app-shell";
 import { SharedProvider } from "./components/shared/shared-provider";
 import { startDeepLinkBridge } from "./lib/deep-link";
+import { router } from "./router";
 
 const container = document.getElementById("app");
 if (!container) {

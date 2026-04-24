@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "motion/react";
 import { type MouseEvent, type PointerEvent } from "react";
@@ -14,6 +14,7 @@ import {
   PlayIcon,
   SpinnerIcon,
   TrashIcon,
+  XIcon,
 } from "@/components/icons";
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -59,15 +60,22 @@ function getPrimaryLaunchTarget(domain: DomainInfoDto): string | null {
 }
 
 export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChipProps) => {
+  const queryClient = useQueryClient();
   const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
   const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
-  const runLocalDevServer = useMutation(projectMutations.runLocalDevServer());
+  const runLocalDevServer = useMutation(projectMutations.runLocalDevServer(queryClient));
+  const stopLocalDevServer = useMutation(projectMutations.stopLocalDevServer(queryClient));
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain);
   const reachable = domain.targetReachable;
   const port = extractPort(routes[0]?.target);
   const launchTarget = getPrimaryLaunchTarget(domain);
-  const canRunLocalDevServer = Boolean(projectRootPath && launchTarget);
+  const launchPort = extractPort(launchTarget ?? undefined);
+  const canRunLocalDevServer = Boolean(projectRootPath && launchTarget && launchPort);
+  const canStopLocalDevServer = Boolean(launchTarget && launchPort && reachable);
+  const localDevServerPending = runLocalDevServer.isPending || stopLocalDevServer.isPending;
+  const localDevServerError =
+    stopLocalDevServer.error?.message ?? runLocalDevServer.error?.message;
 
   const stopMousePropagation = (event: MouseEvent) => {
     event.stopPropagation();
@@ -96,14 +104,26 @@ export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChip
     void openUrl(url);
   };
 
-  const handleRunLocalDevServer = async (event: MouseEvent) => {
+  const handleToggleLocalDevServer = async (event: MouseEvent) => {
     event.stopPropagation();
     event.preventDefault();
-    if (!projectRootPath || !launchTarget) {
-      return;
-    }
 
     try {
+      if (reachable) {
+        if (!launchTarget) {
+          return;
+        }
+
+        await stopLocalDevServer.mutateAsync({
+          target: launchTarget,
+        });
+        return;
+      }
+
+      if (!projectRootPath || !launchTarget) {
+        return;
+      }
+
       await runLocalDevServer.mutateAsync({
         rootPath: projectRootPath,
         target: launchTarget,
@@ -221,22 +241,37 @@ export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChip
               render={
                 <button
                   type="button"
-                  onClick={handleRunLocalDevServer}
-                  aria-label={`Run local dev server for ${pattern}`}
-                  disabled={!canRunLocalDevServer || runLocalDevServer.isPending}
-                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground disabled:opacity-40"
+                  onClick={handleToggleLocalDevServer}
+                  aria-label={`${reachable ? "Stop" : "Run"} local dev server for ${pattern}`}
+                  disabled={
+                    reachable ? !canStopLocalDevServer || localDevServerPending : !canRunLocalDevServer || localDevServerPending
+                  }
+                  className={cn(
+                    "inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors disabled:opacity-40",
+                    reachable
+                      ? "hover:bg-destructive/10 hover:text-destructive"
+                      : "hover:bg-foreground/10 hover:text-foreground",
+                  )}
                 />
               }
             >
-              {runLocalDevServer.isPending ? (
+              {localDevServerPending ? (
                 <SpinnerIcon className="size-3.5 animate-spin" />
+              ) : reachable ? (
+                <XIcon className="size-3.5" />
               ) : (
                 <PlayIcon className="size-4.5 translate-x-px" />
               )}
             </TooltipTrigger>
             <TooltipContent>
-              {runLocalDevServer.error?.message ??
-                (canRunLocalDevServer ? "Run local dev server" : "No linked local app to run")}
+              {localDevServerError ??
+                (reachable
+                  ? canStopLocalDevServer
+                    ? "Stop local dev server"
+                    : "No running local dev server to stop"
+                  : canRunLocalDevServer
+                    ? "Run local dev server"
+                    : "No linked local app to run")}
             </TooltipContent>
           </Tooltip>
         </motion.span>

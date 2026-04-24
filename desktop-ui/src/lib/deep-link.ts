@@ -19,6 +19,17 @@ async function applyDeepLink(payload: DeepLinkPayloadDto): Promise<void> {
     return;
   }
 
+  if (payload.route === "settingsLicensing") {
+    await router.navigate({
+      to: "/settings",
+      search: {
+        section: "licensing",
+        action: "activateLicense",
+      },
+    });
+    return;
+  }
+
   await router.navigate({
     to: "/logs",
     search: {

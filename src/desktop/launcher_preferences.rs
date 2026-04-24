@@ -1,11 +1,13 @@
+#[cfg(not(target_os = "macos"))]
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::branding::BRANDING;
+use crate::desktop::home_dir::user_home_dir;
 use crate::infrastructure::editor::EditorPreference;
 use crate::infrastructure::local_dev::TerminalPreference;
 
@@ -89,7 +91,7 @@ fn default_local_state_dir() -> Result<PathBuf> {
     {
         Ok(user_home_dir()?
             .join("Library/Application Support")
-            .join(BRANDING.desktop_name))
+            .join(BRANDING.desktop_state_dir_name))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -99,10 +101,4 @@ fn default_local_state_dir() -> Result<PathBuf> {
             .unwrap_or_else(|| user_home_dir().unwrap().join(".local/state"));
         Ok(base.join(BRANDING.slug))
     }
-}
-
-fn user_home_dir() -> Result<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("HOME is not set for the current user."))
 }

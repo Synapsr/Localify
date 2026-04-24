@@ -2,7 +2,8 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useSearch } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 
 import {
   BookmarkIcon,
@@ -52,22 +53,40 @@ const isActive = (licensing: LicensingDto) =>
 
 export const SettingsLicensing = () => {
   const { data } = useQuery(bootstrapQueries.read());
+  const search = useSearch({ from: "/settings" });
 
   if (!data) return null;
+
+  const openActivateDialog =
+    search.section === "licensing" &&
+    search.action === "activateLicense" &&
+    !isActive(data.licensing);
 
   return (
     <SettingsSection label="License" icon={<BookmarkIcon />}>
       {isActive(data.licensing) ? (
         <LicensedView licensing={data.licensing} />
       ) : (
-        <UnlicensedView licensing={data.licensing} />
+        <UnlicensedView licensing={data.licensing} openActivateDialog={openActivateDialog} />
       )}
     </SettingsSection>
   );
 };
 
-const UnlicensedView = ({ licensing }: { licensing: LicensingDto }) => {
+const UnlicensedView = ({
+  licensing,
+  openActivateDialog,
+}: {
+  licensing: LicensingDto;
+  openActivateDialog: boolean;
+}) => {
   const [dialogOpen, setDialogOpen] = useState(false);
+
+  useEffect(() => {
+    if (openActivateDialog) {
+      setDialogOpen(true);
+    }
+  }, [openActivateDialog]);
 
   return (
     <>

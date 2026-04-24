@@ -37,9 +37,11 @@ use crate::desktop::dto::{
     SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
     SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
     SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
-    StartDaemonRequest, StepDto, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateLauncherPreferencesRequest,
+    UpdateProjectRequest,
 };
+use crate::desktop::home_dir::user_home_dir;
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
@@ -886,6 +888,11 @@ impl DesktopApi {
     pub fn run_local_dev_server(&self, request: RunLocalDevServerRequest) -> Result<()> {
         let preferences = self.effective_launcher_preferences()?;
         let project_root = Path::new(&request.root_path);
+        crate::infrastructure::local_dev::open_local_dev_server_with_terminal(
+            project_root,
+            &request.target,
+            preferences.terminal,
+        )?;
 
         if preferences.run_action == RunActionPreference::EditorAndTerminal {
             crate::desktop::editor::open_in_editor_with_preference(
@@ -894,11 +901,11 @@ impl DesktopApi {
             )?;
         }
 
-        crate::infrastructure::local_dev::open_local_dev_server_with_terminal(
-            project_root,
-            &request.target,
-            preferences.terminal,
-        )
+        Ok(())
+    }
+
+    pub fn stop_local_dev_server(&self, request: StopLocalDevServerRequest) -> Result<()> {
+        crate::infrastructure::local_dev::stop_local_dev_server(&request.target)
     }
 
     fn build_settings_snapshot(
@@ -1090,7 +1097,15 @@ impl DesktopApi {
             return Ok(projects);
         }
 
-        let local_projects = self.project_root_store()?.load()?;
+        let local_projects = match self.project_root_store() {
+            Ok(store) => match store.load() {
+                Ok(local_projects) => local_projects,
+                Err(error) if is_missing_home_error(&error) => HashMap::new(),
+                Err(error) => return Err(error),
+            },
+            Err(error) if is_missing_home_error(&error) => HashMap::new(),
+            Err(error) => return Err(error),
+        };
 
         Ok(projects
             .into_iter()
@@ -1726,7 +1741,13 @@ impl DesktopApi {
     }
 
     fn effective_launcher_preferences(&self) -> Result<crate::desktop::LauncherPreferences> {
-        Ok(self.normalize_launcher_preferences(self.launcher_preferences()?))
+        match self.launcher_preferences() {
+            Ok(preferences) => Ok(self.normalize_launcher_preferences(preferences)),
+            Err(error) if is_missing_home_error(&error) => {
+                Ok(crate::desktop::LauncherPreferences::default())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn normalize_launcher_preferences(
@@ -1780,7 +1801,11 @@ impl DesktopApi {
             return Ok(());
         }
 
-        self.project_root_store()?.set(project_id, root_path)
+        match self.project_root_store()?.set(project_id, root_path) {
+            Ok(()) => Ok(()),
+            Err(error) if is_missing_home_error(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn remove_project_root_path(&self, project_id: &str) -> Result<()> {
@@ -1788,7 +1813,11 @@ impl DesktopApi {
             return Ok(());
         }
 
-        self.project_root_store()?.remove(project_id)
+        match self.project_root_store()?.remove(project_id) {
+            Ok(()) => Ok(()),
+            Err(error) if is_missing_home_error(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn should_use_system_helper(&self) -> bool {
@@ -1986,11 +2015,20 @@ impl DesktopApi {
         }
 
         let client = SystemHelperClient::new(self.helper_socket_path()?);
-        if client.ping().is_ok() {
-            Ok(Some(client))
-        } else {
-            Ok(None)
+        if client.ping().is_err() {
+            return Ok(None);
         }
+
+        if self.helper_matches_binary_path()? {
+            return Ok(Some(client));
+        }
+
+        eprintln!(
+            "ignoring running {} helper because it does not match the current CLI binary at {}",
+            BRANDING.app_name,
+            self.binary_path.display()
+        );
+        Ok(None)
     }
 
     fn ensure_helper_running(&self) -> Result<SystemHelperClient> {
@@ -2116,7 +2154,15 @@ impl DesktopApi {
 
     #[cfg(target_os = "macos")]
     fn effective_desktop_ca_installed(&self) -> Result<bool> {
-        macos_user_ca_is_trusted(&self.ca_cert_path())
+        let cert_path = self.ca_cert_path();
+
+        if macos_user_ca_is_trusted(&cert_path)? {
+            return Ok(true);
+        }
+
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        certs.is_ca_installed().map_err(Into::into)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2128,8 +2174,7 @@ impl DesktopApi {
 
     #[cfg(target_os = "macos")]
     fn ensure_desktop_ca_trust_step(&self) -> Result<Option<StepDto>> {
-        let cert_path = self.ca_cert_path();
-        Ok(Some(macos_ensure_user_ca_trust(&cert_path)?))
+        Ok(None)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -3056,70 +3101,6 @@ fn macos_user_ca_is_trusted(cert_path: &Path) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
-    if !cert_path.exists() {
-        bail!(
-            "{} installed its system components, but the CA certificate was not found at {}.",
-            BRANDING.app_name,
-            cert_path.display()
-        );
-    }
-
-    if macos_user_ca_is_trusted(cert_path)? {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: "skipped".into(),
-            message: format!(
-                "The {} local CA was already trusted in your macOS login keychain.",
-                BRANDING.app_name
-            ),
-        });
-    }
-
-    let keychain_path = macos_login_keychain_path()?;
-    delete_macos_keychain_certificates(&keychain_path)?;
-
-    let cert_path = path_as_utf8(cert_path)?;
-    let keychain_path = path_as_utf8(&keychain_path)?;
-
-    let output = Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-r",
-            "trustRoot",
-            "-p",
-            "ssl",
-            "-p",
-            "basic",
-            "-k",
-            &keychain_path,
-            &cert_path,
-        ])
-        .output()
-        .context(format!(
-            "Failed to trust the {} CA in the current macOS account",
-            BRANDING.app_name
-        ))?;
-
-    if !output.status.success() {
-        bail!(
-            "Failed to trust the {} CA in your macOS login keychain: {}",
-            BRANDING.app_name,
-            cli_failure_message(&output)
-        );
-    }
-
-    Ok(StepDto {
-        label: Some("Trust CA in your macOS account".into()),
-        status: "success".into(),
-        message: format!(
-            "Trusted the {} local CA in your macOS login keychain for browsers and SSL clients.",
-            BRANDING.app_name
-        ),
-    })
-}
-
-#[cfg(target_os = "macos")]
 fn macos_remove_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
     let keychain_path = macos_login_keychain_path()?;
     let had_trust = macos_user_ca_is_trusted(cert_path)?;
@@ -3186,8 +3167,7 @@ fn macos_login_keychain_path() -> Result<PathBuf> {
         }
     }
 
-    let home_dir = std::env::var("HOME").context("Failed to determine the current home folder")?;
-    Ok(PathBuf::from(home_dir).join("Library/Keychains/login.keychain-db"))
+    Ok(user_home_dir()?.join("Library/Keychains/login.keychain-db"))
 }
 
 #[cfg(target_os = "macos")]
@@ -3236,6 +3216,12 @@ fn path_as_utf8(path: &Path) -> Result<String> {
     path.to_str()
         .map(|value| value.to_string())
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8: {}", path.display()))
+}
+
+fn is_missing_home_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("HOME is not set for the current user.")
 }
 
 fn map_licensing_status(

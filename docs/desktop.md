@@ -63,7 +63,7 @@ pnpm tauri:dev
 ```
 
 `pnpm tauri:dev` also merges `src-tauri/tauri.dev.conf.json`, so the dev app
-uses the explicit "Localify Desktop (Dev)" name and the dev-only icon asset.
+uses the explicit "Localify (Dev)" name and the dev-only icon asset.
 The dev script also forces `LOCALIFY_CLI_PATH=$PWD/target/debug/localify`, so
 daemon start/restart actions from the dev shell always prefer the repo's debug
 CLI over any installed production binary or stale sibling build.

@@ -25,9 +25,9 @@ export const SettingsScreen = () => {
       <SettingsHeader />
       <div className="space-y-8">
         <SettingsStatus />
+        <SettingsLicensing />
         <SettingsTroubleshooting />
         <SettingsLaunchers />
-        <SettingsLicensing />
         <SettingsTransfer />
         <SettingsHotkeys />
         <SettingsCli />

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub struct Branding {
     pub app_name: &'static str,
     pub desktop_name: &'static str,
+    pub desktop_state_dir_name: &'static str,
     pub slug: &'static str,
     pub domain_suffix: &'static str,
     pub env_prefix: &'static str,
@@ -15,7 +16,8 @@ pub struct Branding {
 
 pub const BRANDING: Branding = Branding {
     app_name: "Localify",
-    desktop_name: "Localify Desktop",
+    desktop_name: "Localify",
+    desktop_state_dir_name: "Localify Desktop",
     slug: "localify",
     domain_suffix: ".localify",
     env_prefix: "LOCALIFY",

@@ -61,6 +61,13 @@ impl TrustStore for MacOsTrustStore {
             )));
         }
 
+        if !self.is_ca_trusted(cert_path)? {
+            return Err(CertError::TrustStoreError(format!(
+                "The {} CA was added to the macOS System keychain but is not trusted for TLS yet",
+                BRANDING.app_name
+            )));
+        }
+
         Ok(())
     }
 
@@ -100,7 +107,11 @@ impl TrustStore for MacOsTrustStore {
     fn is_ca_trusted(&self, cert_path: &Path) -> Result<bool, CertError> {
         let local_hash = certificate_sha1(cert_path)?;
         let trusted_hashes = find_keychain_hashes()?;
-        Ok(trusted_hashes.iter().any(|hash| hash == &local_hash))
+        if !trusted_hashes.iter().any(|hash| hash == &local_hash) {
+            return Ok(false);
+        }
+
+        verify_certificate_trust(cert_path)
     }
 }
 
@@ -185,6 +196,66 @@ fn certificate_sha1(cert_path: &Path) -> Result<String, CertError> {
     }
 
     parse_openssl_fingerprint(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn verify_certificate_trust(cert_path: &Path) -> Result<bool, CertError> {
+    let cert_path_str = cert_path.to_str().ok_or_else(|| {
+        CertError::TrustStoreError(format!(
+            "Certificate path contains invalid UTF-8: {}",
+            cert_path.display()
+        ))
+    })?;
+
+    let output = Command::new("security")
+        .args([
+            "verify-cert",
+            "-c",
+            cert_path_str,
+            "-p",
+            "basic",
+            "-L",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
+        .output()
+        .map_err(|e| {
+            CertError::TrustStoreError(format!(
+                "Failed to verify macOS trust for the CA certificate: {}",
+                e
+            ))
+        })?;
+
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if stderr.contains("authorization") || stderr.contains("Permission denied") {
+        return Err(CertError::PermissionDenied);
+    }
+
+    if stdout.contains("CSSMERR_TP_NOT_TRUSTED")
+        || stderr.contains("CSSMERR_TP_NOT_TRUSTED")
+        || stdout.contains("certificate verification failed")
+        || stderr.contains("certificate verification failed")
+    {
+        return Ok(false);
+    }
+
+    let mut message = stdout.trim().to_string();
+    if !stderr.trim().is_empty() {
+        if !message.is_empty() {
+            message.push(' ');
+        }
+        message.push_str(stderr.trim());
+    }
+
+    Err(CertError::TrustStoreError(format!(
+        "Failed to verify macOS trust for the CA certificate: {}",
+        message
+    )))
 }
 
 fn parse_security_find_certificate_hashes(output: &str) -> Vec<String> {

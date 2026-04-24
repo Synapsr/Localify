@@ -172,7 +172,7 @@ export const SettingsStatus = () => {
           description={
             appUpdate.availableUpdate
               ? `Version ${appUpdate.availableUpdate.version} is ready to download and install.`
-              : "Checks for new Localify Desktop builds in the background and on demand."
+              : "Checks for new Localify builds in the background and on demand."
           }
           value={
             appUpdate.availableUpdate

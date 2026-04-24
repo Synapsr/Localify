@@ -4,12 +4,13 @@ import { useQuery } from "@tanstack/react-query";
 import { Reorder } from "motion/react";
 import { useMemo } from "react";
 
-import { domainQueries, projectQueries } from "@/lib/queries";
+import { bootstrapQueries, domainQueries, projectQueries } from "@/lib/queries";
 import { buildProjectGroups } from "@/lib/util.project-groups";
 import { useProjectOrder } from "@/lib/use-project-order";
 
 import { ProjectsListEmptyState } from "./projects-list-empty-state";
 import { ProjectListItemSkeleton, ProjectsListItem } from "./projects-list-item";
+import { ProjectsListUpsell } from "./projects-list-upsell";
 import { filterProjectGroups } from "./util.project-search";
 
 interface ProjectsListProps {
@@ -25,8 +26,17 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
     ...domainQueries.list(),
     refetchInterval: 5000,
   });
+  const { data: bootstrap } = useQuery(bootstrapQueries.read());
 
   const isLoading = loadingProjects || loadingDomains;
+
+  const licensing = bootstrap?.licensing;
+  const atProjectLimit =
+    licensing !== undefined &&
+    licensing.status !== "licensed" &&
+    licensing.status !== "licensedOffline" &&
+    licensing.limits.maxProjects !== null &&
+    licensing.projectCount >= licensing.limits.maxProjects;
 
   const groups = useMemo(
     () => buildProjectGroups(projects ?? [], domains ?? []),
@@ -82,24 +92,27 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
   }
 
   return (
-    <Reorder.Group
-      axis="y"
-      values={order}
-      onReorder={setOrder}
-      className="flex flex-col gap-2"
-    >
-      {order.map((id) => {
-        const group = groupById.get(id);
-        if (!group) return null;
-        return (
-          <ProjectsListItem
-            key={id}
-            project={group.project}
-            domains={group.domains}
-          />
-        );
-      })}
-    </Reorder.Group>
+    <div className="flex flex-col gap-2">
+      <Reorder.Group
+        axis="y"
+        values={order}
+        onReorder={setOrder}
+        className="flex flex-col gap-2"
+      >
+        {order.map((id) => {
+          const group = groupById.get(id);
+          if (!group) return null;
+          return (
+            <ProjectsListItem
+              key={id}
+              project={group.project}
+              domains={group.domains}
+            />
+          );
+        })}
+      </Reorder.Group>
+      {atProjectLimit ? <ProjectsListUpsell /> : null}
+    </div>
   );
 };
 

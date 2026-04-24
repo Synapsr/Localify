@@ -6,6 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::branding::BRANDING;
+use crate::desktop::home_dir::user_home_dir;
 
 const START_MARKER: &str = "# >>> localify node trust >>>";
 const END_MARKER: &str = "# <<< localify node trust <<<";
@@ -95,8 +96,9 @@ pub fn uninstall(ca_cert_path: &Path) -> Result<NodeTrustRemoval> {
     let snippet_path = shell_snippet_path(&home_dir);
     let mut removed = false;
 
-    for rc_path in shell_rc_paths(&home_dir) {
+    for rc_path in shell_cleanup_paths(&home_dir) {
         removed |= remove_managed_block(&rc_path)?;
+        removed |= remove_legacy_node_trust_lines(&rc_path, ca_cert_path, &snippet_path)?;
     }
 
     if snippet_path.exists() {
@@ -118,12 +120,6 @@ pub fn uninstall(ca_cert_path: &Path) -> Result<NodeTrustRemoval> {
     Ok(NodeTrustRemoval { removed })
 }
 
-fn user_home_dir() -> Result<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set for the current user."))
-}
-
 fn config_home_dir(home_dir: &Path) -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -139,6 +135,19 @@ fn shell_snippet_path(home_dir: &Path) -> PathBuf {
 
 fn shell_rc_paths(home_dir: &Path) -> [PathBuf; 2] {
     [home_dir.join(".zshrc"), home_dir.join(".bashrc")]
+}
+
+fn shell_cleanup_paths(home_dir: &Path) -> [PathBuf; 8] {
+    [
+        home_dir.join(".zshenv"),
+        home_dir.join(".zprofile"),
+        home_dir.join(".zshrc"),
+        home_dir.join(".zlogin"),
+        home_dir.join(".bash_profile"),
+        home_dir.join(".bash_login"),
+        home_dir.join(".bashrc"),
+        home_dir.join(".profile"),
+    ]
 }
 
 fn shell_snippet_contents(ca_cert_path: &Path) -> String {
@@ -237,6 +246,69 @@ fn remove_managed_block(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn remove_legacy_node_trust_lines(
+    path: &Path,
+    ca_cert_path: &Path,
+    snippet_path: &Path,
+) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let existing =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let (stripped, removed) = strip_legacy_node_trust_lines(&existing, ca_cert_path, snippet_path);
+
+    if !removed {
+        return Ok(false);
+    }
+
+    let updated = if stripped.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", stripped.trim_end())
+    };
+    fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+fn strip_legacy_node_trust_lines(
+    contents: &str,
+    ca_cert_path: &Path,
+    snippet_path: &Path,
+) -> (String, bool) {
+    let has_localify_node_trust = contents.split_inclusive('\n').any(|line| {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
+        is_localify_node_extra_certs_line(trimmed, ca_cert_path)
+            || references_node_trust_snippet(trimmed, snippet_path)
+            || is_localify_node_trust_comment(trimmed)
+    });
+
+    if !has_localify_node_trust {
+        return (contents.to_string(), false);
+    }
+
+    let mut stripped = String::new();
+    let mut removed = false;
+
+    for line in contents.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
+        let should_remove = is_localify_node_extra_certs_line(trimmed, ca_cert_path)
+            || references_node_trust_snippet(trimmed, snippet_path)
+            || is_localify_node_trust_comment(trimmed)
+            || is_node_use_system_ca_line(trimmed);
+
+        if should_remove {
+            removed = true;
+            continue;
+        }
+
+        stripped.push_str(line);
+    }
+
+    (stripped, removed)
+}
+
 fn strip_managed_block(contents: &str) -> (String, bool) {
     let mut stripped = String::new();
     let mut in_block = false;
@@ -265,6 +337,51 @@ fn strip_managed_block(contents: &str) -> (String, bool) {
     }
 
     (stripped, removed)
+}
+
+fn is_localify_node_extra_certs_line(trimmed: &str, ca_cert_path: &Path) -> bool {
+    extract_env_assignment_value(trimmed, "NODE_EXTRA_CA_CERTS")
+        .map(|value| value == ca_cert_path.to_string_lossy() || value == "/etc/localify/ca.crt")
+        .unwrap_or(false)
+}
+
+fn references_node_trust_snippet(trimmed: &str, snippet_path: &Path) -> bool {
+    trimmed.contains(snippet_path.to_string_lossy().as_ref())
+        || trimmed.contains("/localify/env/node-trust.sh")
+}
+
+fn is_localify_node_trust_comment(trimmed: &str) -> bool {
+    trimmed
+        == format!(
+            "# Added by {}. Enables Node.js trust for local HTTPS certificates.",
+            BRANDING.app_name
+        )
+}
+
+fn is_node_use_system_ca_line(trimmed: &str) -> bool {
+    extract_env_assignment_value(trimmed, "NODE_USE_SYSTEM_CA")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn extract_env_assignment_value<'a>(trimmed: &'a str, key: &str) -> Option<&'a str> {
+    let value = trimmed
+        .strip_prefix("export ")?
+        .strip_prefix(key)?
+        .strip_prefix('=')?;
+    Some(unquote_shell_value(value.trim()))
+}
+
+fn unquote_shell_value(value: &str) -> &str {
+    value
+        .strip_prefix('\'')
+        .and_then(|inner| inner.strip_suffix('\''))
+        .or_else(|| {
+            value
+                .strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+        })
+        .unwrap_or(value)
 }
 
 fn prune_empty_dirs(path: Option<&Path>) -> Result<()> {
@@ -393,7 +510,11 @@ fn command_output(output: &std::process::Output) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{END_MARKER, START_MARKER, shell_escape, strip_managed_block};
+    use std::path::Path;
+
+    use super::{
+        END_MARKER, START_MARKER, shell_escape, strip_legacy_node_trust_lines, strip_managed_block,
+    };
 
     #[test]
     fn strip_managed_block_removes_existing_block() {
@@ -418,5 +539,59 @@ mod tests {
     #[test]
     fn shell_escape_quotes_single_quotes() {
         assert_eq!(shell_escape("my'app"), "'my'\"'\"'app'");
+    }
+
+    #[test]
+    fn strip_legacy_node_trust_lines_removes_localify_exports() {
+        let contents = "\
+export PATH=/usr/bin\n\
+# Added by Localify. Enables Node.js trust for local HTTPS certificates.\n\
+export NODE_USE_SYSTEM_CA=1\n\
+export NODE_EXTRA_CA_CERTS='/etc/localify/ca.crt'\n\
+";
+
+        let (stripped, removed) = strip_legacy_node_trust_lines(
+            contents,
+            Path::new("/etc/localify/ca.crt"),
+            Path::new("/Users/test/.config/localify/env/node-trust.sh"),
+        );
+
+        assert!(removed);
+        assert_eq!(stripped, "export PATH=/usr/bin\n");
+    }
+
+    #[test]
+    fn strip_legacy_node_trust_lines_keeps_unrelated_node_extra_ca_certs() {
+        let contents = "\
+export NODE_USE_SYSTEM_CA=1\n\
+export NODE_EXTRA_CA_CERTS='/tmp/company-ca.crt'\n\
+";
+
+        let (stripped, removed) = strip_legacy_node_trust_lines(
+            contents,
+            Path::new("/etc/localify/ca.crt"),
+            Path::new("/Users/test/.config/localify/env/node-trust.sh"),
+        );
+
+        assert!(!removed);
+        assert_eq!(stripped, contents);
+    }
+
+    #[test]
+    fn strip_legacy_node_trust_lines_removes_unmanaged_snippet_source() {
+        let contents = "\
+source ~/.zshrc\n\
+. '/Users/test/.config/localify/env/node-trust.sh'\n\
+export NODE_USE_SYSTEM_CA=1\n\
+";
+
+        let (stripped, removed) = strip_legacy_node_trust_lines(
+            contents,
+            Path::new("/etc/localify/ca.crt"),
+            Path::new("/Users/test/.config/localify/env/node-trust.sh"),
+        );
+
+        assert!(removed);
+        assert_eq!(stripped, "source ~/.zshrc\n");
     }
 }
