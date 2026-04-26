@@ -178,10 +178,10 @@ before showing the main UI.
 
 The public website download button should not point at the Tauri updater
 archive. `pnpm desktop:publish-updater` also copies the notarized DMG into the
-versioned publish directory as `localify-desktop.dmg`, and
+versioned publish directory as `localify.dmg`, and
 `pnpm publish:update:r2` publishes a stable public alias:
 
-- `latest/localify-desktop.dmg`
+- `latest/localify.dmg`
 
 That alias is the clean URL for end users. The versioned DMG remains immutable,
 while the `latest/` alias is replaced on each release.
@@ -208,8 +208,8 @@ Tauri only needs HTTPS access to:
 
 The public website needs HTTPS access to:
 
-- `latest/localify-desktop.dmg`
-- `<version>/localify-desktop.dmg` for immutable release history
+- `latest/localify.dmg`
+- `<version>/localify.dmg` for immutable release history
 
 Cloudflare setup:
 
@@ -237,7 +237,7 @@ pnpm publish:update:r2
 
 The upload script pushes versioned artifacts first and `latest.json` last, so
 clients never see a new manifest before the matching payload exists in R2.
-It also publishes `latest/localify-desktop.dmg` for the marketing site after
+It also publishes `latest/localify.dmg` for the marketing site after
 the versioned DMG is uploaded.
 
 If you want to inspect the exact Wrangler commands before a real upload:
@@ -249,7 +249,7 @@ pnpm desktop:publish-r2 -- --dry-run
 The script uses `wrangler r2 object put` with explicit metadata:
 
 - `latest.json` gets `Cache-Control: no-store, no-cache, must-revalidate`
-- `latest/localify-desktop.dmg` gets `Cache-Control: no-store, no-cache, must-revalidate`
+- `latest/localify.dmg` gets `Cache-Control: no-store, no-cache, must-revalidate`
 - updater archives get `Cache-Control: public, max-age=31536000, immutable`
 - versioned DMGs get `Cache-Control: public, max-age=31536000, immutable`
 

@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 const rootDir = resolve(import.meta.dirname, "..");
@@ -64,10 +72,12 @@ mkdirSync(publishedDir, { recursive: true });
 
 const publishedArchiveName = "localify-desktop.app.tar.gz";
 const publishedSignatureName = "localify-desktop.app.tar.gz.sig";
-const publishedDmgName = "localify-desktop.dmg";
+const publishedDmgName = "localify.dmg";
+const legacyPublishedDmgName = "localify-desktop.dmg";
 
 cpSync(artifacts.archive, join(publishedDir, publishedArchiveName));
 cpSync(artifacts.signature, join(publishedDir, publishedSignatureName));
+removeIfExists(join(publishedDir, legacyPublishedDmgName));
 cpSync(artifacts.dmg, join(publishedDir, publishedDmgName));
 
 const latestManifest = {
@@ -110,4 +120,10 @@ function findDmgArtifact(directoryPath, productName) {
   }
 
   return join(directoryPath, dmgFiles[0]);
+}
+
+function removeIfExists(filePath) {
+  if (existsSync(filePath)) {
+    unlinkSync(filePath);
+  }
 }

@@ -37,7 +37,7 @@ if (versionFiles.length === 0) {
   fail(`No updater artifacts found in ${versionDir}`);
 }
 
-const versionedDmgPath = join(versionDir, "localify-desktop.dmg");
+const versionedDmgPath = join(versionDir, "localify.dmg");
 
 for (const filePath of versionFiles) {
   const objectKey = relative(updatesDir, filePath).replaceAll("\\", "/");
@@ -54,7 +54,7 @@ if (existsSync(versionedDmgPath)) {
   uploadObject({
     bucket,
     jurisdiction,
-    objectKey: "latest/localify-desktop.dmg",
+    objectKey: "latest/localify.dmg",
     filePath: versionedDmgPath,
     dryRun,
   });
