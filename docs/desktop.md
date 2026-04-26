@@ -108,6 +108,35 @@ That updates:
 starts packaging. If they drift, the build exits early and tells you to rerun
 the sync command.
 
+For a production release, prefer the one-command publisher:
+
+```bash
+pnpm desktop:publish
+```
+
+By default it bumps the patch version, so `1.0.4` becomes `1.0.5`, then builds
+the app, generates updater metadata, uploads the updater artifacts, and updates
+the public DMG download alias in R2.
+
+You can override the version explicitly:
+
+```bash
+pnpm desktop:publish -- --version 1.0.5
+```
+
+Or choose a different bump:
+
+```bash
+pnpm desktop:publish -- --bump minor
+pnpm desktop:publish -- --bump major
+```
+
+To preview the resolved version and commands without changing files:
+
+```bash
+pnpm desktop:publish -- --dry-run
+```
+
 ## Self-Hosted Desktop Updates
 
 The desktop app can now check for a newer signed build during startup and
@@ -147,6 +176,16 @@ the key content before invoking Tauri:
 The packaged app reads the compiled-in update endpoint and checks it on startup
 before showing the main UI.
 
+The public website download button should not point at the Tauri updater
+archive. `pnpm desktop:publish-updater` also copies the notarized DMG into the
+versioned publish directory as `localify-desktop.dmg`, and
+`pnpm publish:update:r2` publishes a stable public alias:
+
+- `latest/localify-desktop.dmg`
+
+That alias is the clean URL for end users. The versioned DMG remains immutable,
+while the `latest/` alias is replaced on each release.
+
 If you need to republish the manifest from existing artifacts:
 
 ```bash
@@ -157,7 +196,7 @@ pnpm desktop:publish-updater
 
 The simplest production hosting setup for Localify updates is:
 
-- one public R2 bucket
+- one public R2 bucket, shared by updater artifacts and public DMG downloads
 - one custom domain such as `downloads.localify.app`
 - the generated static updater files uploaded as plain objects
 
@@ -167,16 +206,21 @@ Tauri only needs HTTPS access to:
 - `<version>/localify-desktop.app.tar.gz`
 - `<version>/localify-desktop.app.tar.gz.sig`
 
+The public website needs HTTPS access to:
+
+- `latest/localify-desktop.dmg`
+- `<version>/localify-desktop.dmg` for immutable release history
+
 Cloudflare setup:
 
-1. Create an R2 bucket, for example `localify-updates`
+1. Create or reuse the public R2 bucket, for example `localify-updates-prod`
 2. Connect a custom domain to that bucket, for example `downloads.localify.app`
 3. Authenticate Wrangler locally with `pnpm dlx wrangler login`
 
 Add these values to `.env`:
 
-- `LOCALIFY_UPDATER_BASE_URL=https://downloads.localify.app`
-- `LOCALIFY_R2_BUCKET=localify-updates`
+- `LOCALIFY_UPDATER_BASE_URL=https://downloads.localify.dev`
+- `LOCALIFY_R2_BUCKET=localify-updates-prod`
 - `LOCALIFY_R2_JURISDICTION=` optional, only if your bucket uses a specific jurisdiction
 
 Build the release locally:
@@ -193,6 +237,8 @@ pnpm publish:update:r2
 
 The upload script pushes versioned artifacts first and `latest.json` last, so
 clients never see a new manifest before the matching payload exists in R2.
+It also publishes `latest/localify-desktop.dmg` for the marketing site after
+the versioned DMG is uploaded.
 
 If you want to inspect the exact Wrangler commands before a real upload:
 
@@ -203,7 +249,9 @@ pnpm desktop:publish-r2 -- --dry-run
 The script uses `wrangler r2 object put` with explicit metadata:
 
 - `latest.json` gets `Cache-Control: no-store, no-cache, must-revalidate`
+- `latest/localify-desktop.dmg` gets `Cache-Control: no-store, no-cache, must-revalidate`
 - updater archives get `Cache-Control: public, max-age=31536000, immutable`
+- versioned DMGs get `Cache-Control: public, max-age=31536000, immutable`
 
 ## Sign And Notarize
 

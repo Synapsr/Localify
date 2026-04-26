@@ -5,6 +5,8 @@ demo-recording
 .DS_Store
 node_modules
 .next
+.open-next
+.wrangler
 desktop-ui/dist
 src-tauri/gen
 src-tauri/binaries/localify-*

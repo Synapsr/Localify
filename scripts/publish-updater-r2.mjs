@@ -37,6 +37,8 @@ if (versionFiles.length === 0) {
   fail(`No updater artifacts found in ${versionDir}`);
 }
 
+const versionedDmgPath = join(versionDir, "localify-desktop.dmg");
+
 for (const filePath of versionFiles) {
   const objectKey = relative(updatesDir, filePath).replaceAll("\\", "/");
   uploadObject({
@@ -44,6 +46,16 @@ for (const filePath of versionFiles) {
     jurisdiction,
     objectKey,
     filePath,
+    dryRun,
+  });
+}
+
+if (existsSync(versionedDmgPath)) {
+  uploadObject({
+    bucket,
+    jurisdiction,
+    objectKey: "latest/localify-desktop.dmg",
+    filePath: versionedDmgPath,
     dryRun,
   });
 }
@@ -162,11 +174,15 @@ function detectContentType(filePath) {
     return "application/gzip";
   }
 
+  if (filePath.endsWith(".dmg")) {
+    return "application/x-apple-diskimage";
+  }
+
   return "application/octet-stream";
 }
 
 function detectCacheControl(objectKey) {
-  if (objectKey === "latest.json") {
+  if (objectKey === "latest.json" || objectKey.startsWith("latest/")) {
     return "no-store, no-cache, must-revalidate";
   }
 
