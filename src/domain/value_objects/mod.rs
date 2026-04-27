@@ -8,5 +8,5 @@ mod route;
 pub use domain_name::DomainName;
 pub use domain_pattern::DomainPattern;
 pub use path_prefix::PathPrefix;
-pub use proxy_target::ProxyTarget;
+pub use proxy_target::{ProxyTarget, ProxyTargetScheme};
 pub use route::{Route, RouteTarget, RouteTargetError};

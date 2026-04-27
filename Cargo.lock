@@ -1552,6 +1552,7 @@ dependencies = [
  "http-body-util",
  "humantime",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "rcgen",
  "reqwest",

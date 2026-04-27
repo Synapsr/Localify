@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type RefCallback } from "react";
 
 import { XIcon } from "@/components/icons";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,8 @@ interface LogsListProps {
   onSelect: (id: number) => void;
   onRemoveDivider: (id: string) => void;
   showProject: boolean;
+  latestDividerId: string | null;
+  latestDividerRef: RefCallback<HTMLLIElement>;
 }
 
 type Row =
@@ -29,6 +31,8 @@ export const LogsList = ({
   onSelect,
   onRemoveDivider,
   showProject,
+  latestDividerId,
+  latestDividerRef,
 }: LogsListProps) => {
   const rows = useMemo<Row[]>(() => {
     const merged: Row[] = [
@@ -43,7 +47,7 @@ export const LogsList = ({
         divider,
       })),
     ];
-    merged.sort((a, b) => a.at - b.at);
+    merged.sort((a, b) => b.at - a.at);
     return merged;
   }, [entries, dividers]);
 
@@ -63,6 +67,7 @@ export const LogsList = ({
             key={`div-${row.divider.id}`}
             divider={row.divider}
             onRemove={onRemoveDivider}
+            refCallback={row.divider.id === latestDividerId ? latestDividerRef : undefined}
           />
         ),
       )}
@@ -138,9 +143,17 @@ function RequestRow({
   );
 }
 
-function DividerRow({ divider, onRemove }: { divider: Divider; onRemove: (id: string) => void }) {
+function DividerRow({
+  divider,
+  onRemove,
+  refCallback,
+}: {
+  divider: Divider;
+  onRemove: (id: string) => void;
+  refCallback?: RefCallback<HTMLLIElement>;
+}) {
   return (
-    <li className="group relative bg-muted/20">
+    <li ref={refCallback} className="group relative bg-muted/20">
       <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
         <span className="h-px flex-1 bg-border" />
         <span className="font-mono tabular-nums">{formatClock(new Date(divider.at))}</span>

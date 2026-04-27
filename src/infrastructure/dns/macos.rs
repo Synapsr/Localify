@@ -131,7 +131,7 @@ impl DnsService for MacOsDnsService {
         Err(DnsError::ValidationFailed(format!(
             "DNS resolver for {} not found in scutil output after multiple attempts. \
                  Try running 'sudo killall -HUP mDNSResponder' to refresh DNS.",
-            BRANDING.domain_suffix
+            BRANDING.domain_suffix()
         )))
     }
 

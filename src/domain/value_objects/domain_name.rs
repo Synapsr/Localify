@@ -7,8 +7,8 @@ pub struct DomainName(String);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DomainNameError {
-    #[error("Domain must end with '{}', got: {name}", BRANDING.domain_suffix)]
-    InvalidSuffix { name: String },
+    #[error("Domain must end with '{suffix}', got: {name}")]
+    InvalidSuffix { name: String, suffix: String },
 
     #[error("Domain name too short: {0}")]
     TooShort(String),
@@ -20,10 +20,13 @@ pub enum DomainNameError {
 impl DomainName {
     pub fn new(name: impl Into<String>) -> Result<Self, DomainNameError> {
         let name = name.into().to_lowercase();
-        let suffix = BRANDING.domain_suffix;
+        let suffix = BRANDING.domain_suffix();
 
         if !name.ends_with(suffix) {
-            return Err(DomainNameError::InvalidSuffix { name });
+            return Err(DomainNameError::InvalidSuffix {
+                name,
+                suffix: suffix.to_string(),
+            });
         }
 
         if name.len() <= suffix.len() {

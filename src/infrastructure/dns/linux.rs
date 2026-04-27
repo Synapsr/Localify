@@ -139,7 +139,7 @@ impl DnsService for LinuxDnsService {
         Err(DnsError::ValidationFailed(format!(
             "DNS routing for {} not found in resolvectl output after multiple attempts.\n\
                  Try running 'sudo {} install' again.",
-            BRANDING.domain_suffix,
+            BRANDING.domain_suffix(),
             BRANDING.cli_command()
         )))
     }

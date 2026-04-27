@@ -5,8 +5,15 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyTarget {
+    scheme: ProxyTargetScheme,
     host: String,
     port: Port,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyTargetScheme {
+    Http,
+    Https,
 }
 
 #[derive(Debug, Error)]
@@ -19,11 +26,26 @@ pub enum ProxyTargetError {
 
     #[error("Empty target string")]
     Empty,
+
+    #[error("Unsupported proxy target scheme: {0}")]
+    UnsupportedScheme(String),
+
+    #[error("Invalid proxy target: expected host:port, got '{0}'")]
+    InvalidHostPort(String),
 }
 
 impl ProxyTarget {
     pub fn new(host: impl Into<String>, port: Port) -> Self {
         Self {
+            scheme: ProxyTargetScheme::Http,
+            host: host.into(),
+            port,
+        }
+    }
+
+    pub fn with_scheme(scheme: ProxyTargetScheme, host: impl Into<String>, port: Port) -> Self {
+        Self {
+            scheme,
             host: host.into(),
             port,
         }
@@ -33,11 +55,17 @@ impl ProxyTarget {
         Self::new("127.0.0.1", port)
     }
 
-    /// Parse from string: "3000" or "192.168.1.50:3000" or "hostname:3000"
+    /// Parse from string: "3000", "hostname:3000", or "https://hostname:3000".
     pub fn parse(s: &str) -> Result<Self, ProxyTargetError> {
         let s = s.trim();
         if s.is_empty() {
             return Err(ProxyTargetError::Empty);
+        }
+
+        if let Some((scheme, rest)) = s.split_once("://") {
+            let scheme = ProxyTargetScheme::parse(scheme)?;
+            let (host, port) = parse_host_port(rest)?;
+            return Ok(Self::with_scheme(scheme, host, port));
         }
 
         // Try to split by colon
@@ -62,11 +90,50 @@ impl ProxyTarget {
     pub fn port(&self) -> Port {
         self.port
     }
+
+    pub fn scheme(&self) -> ProxyTargetScheme {
+        self.scheme
+    }
+
+    pub fn uri_scheme(&self) -> &'static str {
+        self.scheme.as_str()
+    }
+}
+
+impl ProxyTargetScheme {
+    fn parse(value: &str) -> Result<Self, ProxyTargetError> {
+        match value {
+            "http" => Ok(Self::Http),
+            "https" => Ok(Self::Https),
+            other => Err(ProxyTargetError::UnsupportedScheme(other.to_string())),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
+fn parse_host_port(s: &str) -> Result<(String, Port), ProxyTargetError> {
+    let (host, port_str) = s
+        .rsplit_once(':')
+        .ok_or_else(|| ProxyTargetError::InvalidHostPort(s.to_string()))?;
+    if host.trim().is_empty() {
+        return Err(ProxyTargetError::InvalidHostPort(s.to_string()));
+    }
+    let port = port_str.parse::<u16>()?;
+    Ok((host.trim().to_string(), Port::new(port)?))
 }
 
 impl fmt::Display for ProxyTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
+        match self.scheme {
+            ProxyTargetScheme::Http => write!(f, "{}:{}", self.host, self.port),
+            ProxyTargetScheme::Https => write!(f, "https://{}:{}", self.host, self.port),
+        }
     }
 }
 
@@ -113,6 +180,33 @@ mod tests {
         let target = ProxyTarget::parse("localhost:8080").unwrap();
         assert_eq!(target.host(), "localhost");
         assert_eq!(target.port().value(), 8080);
+        assert_eq!(target.scheme(), ProxyTargetScheme::Http);
+    }
+
+    #[test]
+    fn test_parse_https_target() {
+        let target = ProxyTarget::parse("https://localhost:8443").unwrap();
+        assert_eq!(target.host(), "localhost");
+        assert_eq!(target.port().value(), 8443);
+        assert_eq!(target.scheme(), ProxyTargetScheme::Https);
+        assert_eq!(target.to_string(), "https://localhost:8443");
+    }
+
+    #[test]
+    fn test_parse_http_target_is_normalized_like_legacy_targets() {
+        let target = ProxyTarget::parse("http://localhost:8080").unwrap();
+        assert_eq!(target.host(), "localhost");
+        assert_eq!(target.port().value(), 8080);
+        assert_eq!(target.scheme(), ProxyTargetScheme::Http);
+        assert_eq!(target.to_string(), "localhost:8080");
+    }
+
+    #[test]
+    fn test_reject_unsupported_scheme() {
+        assert!(matches!(
+            ProxyTarget::parse("ftp://localhost:3000"),
+            Err(ProxyTargetError::UnsupportedScheme(_))
+        ));
     }
 
     #[test]

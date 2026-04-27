@@ -7,6 +7,7 @@ import {
   type Variants,
 } from "motion/react";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import type { BootstrapDto } from "@/types/roxy";
@@ -16,12 +17,8 @@ import {
   CheckIcon,
   ChevronRightIcon,
   DangerTriangleIcon,
-  FolderIcon,
   LockIcon,
-  PlayIcon,
-  PlusIcon,
   PowerIcon,
-  TerminalIcon,
   ZapIcon,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -267,6 +264,7 @@ function WhyStep({
   onContinue: () => void;
 }) {
   const suffix = bootstrap.environment.fixedDomainSuffix;
+  const httpsPort = bootstrap.config.daemon.httpsPort;
 
   const paragraphs = [
     "AI makes it easy to juggle many projects at once. The problem: they all default to localhost:3000.",
@@ -312,7 +310,7 @@ function WhyStep({
         transition={{ duration: 0.55, delay: 0.5, ease: [0.22, 1, 0.36, 1] }}
         className="mt-8"
       >
-        <BrowserMock suffix={suffix} />
+        <BrowserMock suffix={suffix} httpsPort={httpsPort} />
       </motion.div>
 
       <motion.div
@@ -346,7 +344,7 @@ const browserIconVariants: Variants = {
   exit: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
 };
 
-function BrowserMock({ suffix }: { suffix: string }) {
+function BrowserMock({ suffix, httpsPort }: { suffix: string; httpsPort: number }) {
   const reduceMotion = useReducedMotion();
   const projects: BrowserProject[] = [
     { name: "shop", localPort: "3000" },
@@ -371,11 +369,14 @@ function BrowserMock({ suffix }: { suffix: string }) {
   const activeIndex = step === 0 ? 0 : step - 1;
   const secure = tabModes[activeIndex] === "localify";
   const active = projects[activeIndex]!;
+  const httpsPortSegment = httpsPort === 443 ? "" : `:${httpsPort}`;
 
   const tabLabels = projects.map((p, i) =>
     tabModes[i] === "local" ? `localhost:${p.localPort}` : `${p.name}${suffix}`,
   );
-  const url = secure ? `https://${active.name}${suffix}` : `http://localhost:${active.localPort}`;
+  const url = secure
+    ? `https://${active.name}${suffix}${httpsPortSegment}`
+    : `http://localhost:${active.localPort}`;
   const label = secure ? "trusted" : "not secure";
 
   return (
@@ -515,31 +516,28 @@ function HowItWorksStep({
   onContinue: () => void;
 }) {
   const suffix = bootstrap.environment.fixedDomainSuffix;
+  const [openVideo, setOpenVideo] = useState<string | null>(null);
 
   const items: Array<{
     title: string;
     description: string;
-    icon: React.ReactNode;
-    media: React.ReactNode;
+    video: string;
   }> = [
     {
-      title: "Create a project manually",
-      description: `Point Localify at a local port, pick a ${suffix} name, and add more domains as your project grows.`,
-      icon: <PlusIcon className="size-4" />,
-      media: <VideoPlaceholder />,
+      title: "Drop a folder, get a project",
+      description: `Localify scans the folder, detects each app, and proposes ${suffix} hostnames. Works for a single project or a whole monorepo.`,
+      video: "/videos/flow-2-web.mp4",
     },
     {
-      title: "Import a monorepo folder",
+      title: "Or run localify init from your editor",
       description:
-        "Drop in a folder with multiple apps — Localify detects each package and wires domains automatically.",
-      icon: <FolderIcon className="size-4" />,
-      media: <VideoPlaceholder />,
+        "Same result, interactive prompts. The project shows up in the app, ready to go.",
+      video: "/videos/flow-3-web.mp4",
     },
     {
-      title: "Register from the CLI",
-      description: "One command inside any project to claim a domain without opening the app.",
-      icon: <TerminalIcon className="size-4" />,
-      media: <CodeSnippet suffix={suffix} />,
+      title: "Projects by name, not by port",
+      description: `Every project gets a fixed ${suffix} hostname with trusted HTTPS. No port drift, demos that look like a product.`,
+      video: "/videos/flow-4-web.mp4",
     },
   ];
 
@@ -553,7 +551,7 @@ function HowItWorksStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">How it works</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Three ways to wire a project to a clean domain.
+          From a folder to a clean, trusted local URL.
         </p>
       </motion.div>
 
@@ -568,16 +566,11 @@ function HowItWorksStep({
               delay: 0.1 + i * 0.1,
               ease: [0.22, 1, 0.36, 1],
             }}
-            className="flex items-start gap-4 rounded-2xl border border-border bg-card p-4"
+            className="flex items-center gap-5 rounded-2xl border border-border bg-card p-4"
           >
-            {item.media}
-            <div className="min-w-0 flex-1 pt-1">
-              <div className="flex items-center gap-2">
-                <span className="inline-flex size-6 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                  {item.icon}
-                </span>
-                <h3 className="text-sm font-medium text-foreground">{item.title}</h3>
-              </div>
+            <FlowVideo src={item.video} onOpen={() => setOpenVideo(item.video)} />
+            <div className="min-w-0 flex-1">
+              <h3 className="text-[15px] font-medium text-foreground">{item.title}</h3>
               <p className="mt-1.5 text-sm text-muted-foreground">{item.description}</p>
             </div>
           </motion.li>
@@ -598,36 +591,113 @@ function HowItWorksStep({
           <ChevronRightIcon data-icon="inline-end" />
         </Button>
       </motion.div>
+
+      <FlowVideoModal src={openVideo} onClose={() => setOpenVideo(null)} />
     </div>
   );
 }
 
-function VideoPlaceholder() {
+function FlowVideo({ src, onOpen }: { src: string; onOpen: () => void }) {
   return (
-    <div className="relative h-20 w-32 shrink-0 overflow-hidden rounded-lg bg-muted">
-      <div className="absolute inset-0 bg-linear-to-br from-foreground/5 to-foreground/10" />
-      <div className="absolute inset-0 flex items-center justify-center">
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-background/80 shadow-sm backdrop-blur">
-          <PlayIcon className="size-3.5 translate-x-px text-foreground" />
+    <motion.button
+      type="button"
+      onClick={onOpen}
+      layoutId={`flow-video-${src}`}
+      transition={flowVideoTransition}
+      className="group relative aspect-4/3 w-30 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-border bg-muted ring-1 ring-black/5 focus-visible:ring-2 focus-visible:ring-foreground focus-visible:outline-none dark:ring-white/10"
+    >
+      <video
+        className="h-full w-full object-cover"
+        src={src}
+        autoPlay
+        loop
+        muted
+        playsInline
+        preload="metadata"
+      />
+      <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/0 opacity-0 transition duration-200 group-hover:bg-black/40 group-hover:opacity-100 group-focus-visible:bg-black/40 group-focus-visible:opacity-100">
+        <div className="flex items-center gap-1.5 rounded-full bg-background/90 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm backdrop-blur">
+          <MaximizeIcon className="size-3" />
+          Watch
         </div>
       </div>
-    </div>
+    </motion.button>
   );
 }
 
-function CodeSnippet({ suffix }: { suffix: string }) {
+const flowVideoTransition: Transition = {
+  type: "spring",
+  stiffness: 320,
+  damping: 32,
+  mass: 0.9,
+};
+
+function FlowVideoModal({ src, onClose }: { src: string | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!src) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [src, onClose]);
+
+  return createPortal(
+    <AnimatePresence>
+      {src && (
+        <motion.div
+          className="fixed inset-0 z-50 grid place-items-center p-8"
+          onClick={onClose}
+          role="dialog"
+          aria-modal="true"
+        >
+          <motion.div
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          />
+          <motion.div
+            layoutId={`flow-video-${src}`}
+            transition={flowVideoTransition}
+            onClick={(e) => e.stopPropagation()}
+            className="relative aspect-4/3 w-full max-w-3xl overflow-hidden rounded-2xl border border-border bg-muted shadow-2xl ring-1 ring-black/10 dark:ring-white/10"
+          >
+            <video
+              className="h-full w-full object-cover"
+              src={src}
+              autoPlay
+              loop
+              muted
+              playsInline
+            />
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
+    document.body,
+  );
+}
+
+function MaximizeIcon({ className }: { className?: string }) {
   return (
-    <div className="relative flex h-20 w-32 shrink-0 flex-col justify-center gap-1 overflow-hidden rounded-lg border border-border bg-muted/60 px-2.5 py-2 font-mono text-[10px]">
-      <div className="flex items-center gap-1 text-muted-foreground">
-        <span className="text-emerald-600 dark:text-emerald-400">$</span>
-        <span className="truncate text-foreground">cd ~/myapp</span>
-      </div>
-      <div className="flex items-center gap-1 text-muted-foreground">
-        <span className="text-emerald-600 dark:text-emerald-400">$</span>
-        <span className="truncate text-foreground">localify add</span>
-      </div>
-      <div className="truncate text-muted-foreground">→ myapp{suffix}</div>
-    </div>
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <polyline points="15 3 21 3 21 9" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
   );
 }
 

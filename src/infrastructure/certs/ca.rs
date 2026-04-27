@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_ca_paths() {
-        let ca = RootCA::new(PathBuf::from(format!("/tmp/test-{}", BRANDING.slug)));
+        let ca = RootCA::new(PathBuf::from(format!("/tmp/test-{}", BRANDING.slug())));
         assert!(ca.cert_path().to_string_lossy().contains("ca.crt"));
         assert!(ca.key_path().to_string_lossy().contains("ca.key"));
     }

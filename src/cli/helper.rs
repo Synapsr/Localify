@@ -29,7 +29,7 @@ pub fn ensure_running(config_path: &Path, socket: PathBuf, uid: u32) -> Result<(
 pub fn serve_forever(config_path: &Path, uid: u32, socket: PathBuf) -> Result<()> {
     let binary_path = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
-        BRANDING.slug
+        BRANDING.slug()
     ))?;
     let api = DesktopApi::new_direct(config_path.to_path_buf(), binary_path);
     serve(&socket, uid, &api)
@@ -77,7 +77,7 @@ fn start_helper_service(config_path: &Path, socket: &Path, uid: u32) -> Result<(
 fn spawn_helper_process(config_path: &Path, socket: &Path, uid: u32) -> Result<()> {
     let executable = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
-        BRANDING.slug
+        BRANDING.slug()
     ))?;
     let child = Command::new(executable)
         .arg("--config")
@@ -109,7 +109,7 @@ fn spawn_helper_process(config_path: &Path, socket: &Path, uid: u32) -> Result<(
 fn install_launchd_service(config_path: &Path, socket: &Path, uid: u32) -> Result<()> {
     let executable = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
-        BRANDING.slug
+        BRANDING.slug()
     ))?;
     let plist_path = launchd_plist_path(uid);
     let label = helper_service_label(uid);
@@ -225,6 +225,7 @@ fn launchd_plist_contents(
         .map(|arg| format!("    <string>{}</string>", escape_xml(arg)))
         .collect::<Vec<_>>()
         .join("\n");
+    let environment_variables = launchd_environment_variables();
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -237,6 +238,7 @@ fn launchd_plist_contents(
   <array>
 {}
   </array>
+{}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -246,6 +248,19 @@ fn launchd_plist_contents(
 "#,
         escape_xml(label),
         program_arguments,
+        environment_variables,
+    )
+}
+
+fn launchd_environment_variables() -> String {
+    let Some(profile) = BRANDING.active_profile() else {
+        return String::new();
+    };
+
+    format!(
+        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>",
+        escape_xml(BRANDING.profile_env()),
+        escape_xml(&profile)
     )
 }
 
@@ -265,7 +280,7 @@ fn helper_matches_current_executable(uid: u32) -> Result<bool> {
     })?;
     let executable = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
-        BRANDING.slug
+        BRANDING.slug()
     ))?;
     let expected = fs::canonicalize(&executable).unwrap_or(executable);
 

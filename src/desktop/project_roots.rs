@@ -91,7 +91,7 @@ fn default_project_roots_dir() -> Result<PathBuf> {
     {
         Ok(user_home_dir()?
             .join("Library/Application Support")
-            .join(BRANDING.desktop_state_dir_name))
+            .join(BRANDING.desktop_state_dir_name()))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -103,6 +103,6 @@ fn default_project_roots_dir() -> Result<PathBuf> {
                     .map(|home| home.join(".local/state"))
                     .unwrap()
             });
-        Ok(base.join(BRANDING.slug))
+        Ok(base.join(BRANDING.slug()))
     }
 }

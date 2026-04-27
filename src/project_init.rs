@@ -1172,11 +1172,11 @@ fn reserve_auto_targets(count: usize) -> Result<Vec<String>> {
 
 fn normalize_domain(value: String) -> String {
     let trimmed = value.trim();
-    if trimmed.ends_with(BRANDING.domain_suffix) {
+    if trimmed.ends_with(BRANDING.domain_suffix()) {
         return trimmed.to_string();
     }
 
-    format!("{trimmed}{}", BRANDING.domain_suffix)
+    format!("{trimmed}{}", BRANDING.domain_suffix())
 }
 
 fn slugify(value: &str) -> Result<String> {
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(plan.services.len(), 1);
         assert_eq!(
             plan.services[0].domain,
-            format!("test-1{}", BRANDING.domain_suffix)
+            format!("test-1{}", BRANDING.domain_suffix())
         );
         assert!(!plan.services[0].target.is_empty());
     }
@@ -1238,7 +1238,7 @@ mod tests {
         assert_eq!(plan.services.len(), 2);
         assert_eq!(
             plan.services[1].domain,
-            format!("api-test-1{}", BRANDING.domain_suffix)
+            format!("api-test-1{}", BRANDING.domain_suffix())
         );
     }
 
@@ -1252,7 +1252,7 @@ mod tests {
         assert_eq!(plan.services[0].id, SYNTHETIC_PRIMARY_SERVICE_ID);
         assert_eq!(
             plan.services[0].domain,
-            format!("demo-app{}", BRANDING.domain_suffix)
+            format!("demo-app{}", BRANDING.domain_suffix())
         );
     }
 
@@ -1260,11 +1260,11 @@ mod tests {
     fn normalize_domain_appends_suffix_once() {
         assert_eq!(
             normalize_domain("demo".into()),
-            format!("demo{}", BRANDING.domain_suffix)
+            format!("demo{}", BRANDING.domain_suffix())
         );
         assert_eq!(
-            normalize_domain(format!("demo{}", BRANDING.domain_suffix)),
-            format!("demo{}", BRANDING.domain_suffix)
+            normalize_domain(format!("demo{}", BRANDING.domain_suffix())),
+            format!("demo{}", BRANDING.domain_suffix())
         );
     }
 
@@ -1359,13 +1359,13 @@ mod tests {
         assert_eq!(plan.services[0].display_path, "apps/web");
         assert_eq!(
             plan.services[0].domain,
-            format!("demo{}", BRANDING.domain_suffix)
+            format!("demo{}", BRANDING.domain_suffix())
         );
         assert!(plan.services[0].enabled);
         assert_eq!(plan.services[1].display_path, "apps/server");
         assert_eq!(
             plan.services[1].domain,
-            format!("server.demo{}", BRANDING.domain_suffix)
+            format!("server.demo{}", BRANDING.domain_suffix())
         );
         assert!(plan.services[1].enabled);
     }
@@ -1459,7 +1459,7 @@ mod tests {
         );
         assert_eq!(
             resolved.next_config_updates[0].allowed_dev_origin,
-            format!("demo{}", BRANDING.domain_suffix)
+            format!("demo{}", BRANDING.domain_suffix())
         );
     }
 
@@ -1477,7 +1477,7 @@ mod tests {
             root,
             "Demo",
             &[ServicePlan {
-                domain: format!("demo{}", BRANDING.domain_suffix),
+                domain: format!("demo{}", BRANDING.domain_suffix()),
                 target: "3000".into(),
             }],
         )
@@ -1497,7 +1497,7 @@ mod tests {
             root,
             "Demo",
             &[ServicePlan {
-                domain: format!("demo{}", BRANDING.domain_suffix),
+                domain: format!("demo{}", BRANDING.domain_suffix()),
                 target: "3000".into(),
             }],
         )
@@ -1510,7 +1510,7 @@ mod tests {
     fn apply_next_config_update_inserts_allowed_dev_origins_into_existing_config() {
         let temp_dir = tempdir().unwrap();
         let config_path = temp_dir.path().join("next.config.ts");
-        let origin = format!("demo{}", BRANDING.domain_suffix);
+        let origin = format!("demo{}", BRANDING.domain_suffix());
         write_next_config(
             &config_path,
             "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {\n  reactStrictMode: true,\n};\n\nexport default nextConfig;\n",
@@ -1531,8 +1531,8 @@ mod tests {
     fn apply_next_config_update_appends_missing_origin_without_duplication() {
         let temp_dir = tempdir().unwrap();
         let config_path = temp_dir.path().join("next.config.js");
-        let existing_origin = format!("existing{}", BRANDING.domain_suffix);
-        let origin = format!("demo{}", BRANDING.domain_suffix);
+        let existing_origin = format!("existing{}", BRANDING.domain_suffix());
+        let origin = format!("demo{}", BRANDING.domain_suffix());
         write_next_config(
             &config_path,
             &format!("module.exports = {{\n  allowedDevOrigins: ['{existing_origin}'],\n}};\n"),
@@ -1556,7 +1556,7 @@ mod tests {
     fn apply_next_config_update_requires_existing_file() {
         let temp_dir = tempdir().unwrap();
         let config_path = temp_dir.path().join("next.config.mjs");
-        let origin = format!("demo{}", BRANDING.domain_suffix);
+        let origin = format!("demo{}", BRANDING.domain_suffix());
 
         let error = apply_next_config_update(&NextConfigUpdate {
             next_config_path: config_path.clone(),

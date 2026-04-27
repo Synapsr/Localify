@@ -156,7 +156,7 @@ mod tests {
     use crate::domain::ProxyTarget;
 
     fn make_pattern(name: &str) -> DomainPattern {
-        let normalized = name.replace(".roxy", BRANDING.domain_suffix);
+        let normalized = name.replace(".roxy", BRANDING.domain_suffix());
         DomainPattern::Exact(DomainName::new(normalized).unwrap())
     }
 

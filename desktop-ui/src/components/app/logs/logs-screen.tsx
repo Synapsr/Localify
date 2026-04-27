@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { bootstrapQueries, logsQueries } from "@/lib/queries";
@@ -19,9 +19,11 @@ const TAIL_LINES = 1000;
 const FOLLOW_POLL_MS = 2000;
 const CLEAR_STORAGE_KEY = "roxy.logs.clearedAt";
 const PROJECT_STORAGE_KEY = "roxy.logs.project";
+const DOMAIN_STORAGE_KEY = "roxy.logs.domain";
 const FOLLOW_STORAGE_KEY = "roxy.logs.follow";
 const VIEW_STORAGE_KEY = "roxy.logs.view";
 const DENSITY_STORAGE_KEY = "roxy.logs.density";
+const PATH_PREFIXES_STORAGE_KEY = "roxy.logs.pathPrefixes";
 
 function loadStoredNumber(key: string): number | null {
   if (typeof window === "undefined") return null;
@@ -45,9 +47,23 @@ function persist(key: string, value: string | null) {
   }
 }
 
+function parsePathPrefixes(value: string): string[] {
+  return value
+    .split(/[\s,]+/)
+    .map((prefix) => prefix.trim())
+    .filter((prefix) => prefix.length > 0)
+    .map((prefix) => (prefix.startsWith("/") ? prefix : `/${prefix}`));
+}
+
+function matchesPathPrefix(entry: RequestEntry, prefixes: string[]): boolean {
+  if (!entry.path || prefixes.length === 0) return false;
+  return prefixes.some((prefix) => entry.path?.startsWith(prefix) ?? false);
+}
+
 export function LogsScreen() {
   const navigate = useNavigate();
   const search = useSearch({ from: "/logs" });
+  const requestListScrollRef = useRef<HTMLDivElement | null>(null);
 
   const [viewMode, setViewModeState] = useState<LogsViewMode>(
     () => search.view ?? (loadStoredString(VIEW_STORAGE_KEY) === "raw" ? "raw" : "requests"),
@@ -61,12 +77,20 @@ export function LogsScreen() {
   const [projectId, setProjectIdState] = useState<string>(
     () => search.projectId ?? loadStoredString(PROJECT_STORAGE_KEY) ?? "all",
   );
+  const [domain, setDomainState] = useState<string>(
+    () => search.domain ?? loadStoredString(DOMAIN_STORAGE_KEY) ?? "all",
+  );
   const [selectedId, setSelectedIdState] = useState<number | null>(() =>
     typeof search.selectedId === "number" ? search.selectedId : null,
   );
   const [requestDensity, setRequestDensityState] = useState<LogsRequestDensity>(() =>
     loadStoredString(DENSITY_STORAGE_KEY) === "all" ? "all" : "focus",
   );
+  const [pathPrefixes, setPathPrefixesState] = useState<string>(
+    () => loadStoredString(PATH_PREFIXES_STORAGE_KEY) ?? "",
+  );
+  const [latestDividerElement, setLatestDividerElement] = useState<HTMLLIElement | null>(null);
+  const [latestDividerVisible, setLatestDividerVisible] = useState(true);
 
   const setFollow = (next: boolean) => {
     setFollowState(next);
@@ -78,12 +102,29 @@ export function LogsScreen() {
   };
   const setProjectId = (next: string) => {
     setProjectIdState(next);
+    setDomainState("all");
     persist(PROJECT_STORAGE_KEY, next);
+    persist(DOMAIN_STORAGE_KEY, "all");
     void navigate({
       to: "/logs",
       search: (previous) => ({
         ...previous,
         projectId: next === "all" ? undefined : next,
+        domain: undefined,
+        selectedId: undefined,
+      }),
+      replace: true,
+    });
+  };
+  const setDomain = (next: string) => {
+    setDomainState(next);
+    persist(DOMAIN_STORAGE_KEY, next);
+    void navigate({
+      to: "/logs",
+      search: (previous) => ({
+        ...previous,
+        domain: next === "all" ? undefined : next,
+        selectedId: undefined,
       }),
       replace: true,
     });
@@ -115,6 +156,10 @@ export function LogsScreen() {
     setRequestDensityState(next);
     persist(DENSITY_STORAGE_KEY, next);
   };
+  const setPathPrefixes = (next: string) => {
+    setPathPrefixesState(next);
+    persist(PATH_PREFIXES_STORAGE_KEY, next.trim().length === 0 ? null : next);
+  };
 
   const bootstrapQuery = useQuery(bootstrapQueries.read());
   const logsQuery = useQuery({
@@ -125,6 +170,13 @@ export function LogsScreen() {
 
   const domains = bootstrapQuery.data?.domains;
   const projects = bootstrapQuery.data?.projects;
+  const projectDomains = useMemo(() => {
+    if (!domains || projectId === "all") return [];
+    return domains
+      .filter((d) => d.projectId === projectId)
+      .sort((left, right) => left.registration.domain.localeCompare(right.registration.domain));
+  }, [domains, projectId]);
+  const pathPrefixFilters = useMemo(() => parsePathPrefixes(pathPrefixes), [pathPrefixes]);
 
   const requests = useMemo<RequestEntry[]>(
     () => parseRequests(logsQuery.data?.content ?? "", domains ?? []),
@@ -141,27 +193,42 @@ export function LogsScreen() {
     if (projectId !== "all") {
       out = out.filter((r) => r.projectId === projectId);
     }
+    if (projectId !== "all" && domain !== "all") {
+      out = out.filter((r) => r.host === domain);
+    }
     if (clearedAt !== null) {
       out = out.filter((r) => r.timestamp.getTime() > clearedAt);
     }
     return out;
-  }, [requests, projectId, clearedAt]);
+  }, [requests, projectId, domain, clearedAt]);
 
   const hiddenByClear = useMemo(() => {
     if (clearedAt === null) return 0;
     return requests.filter(
       (r) =>
-        r.timestamp.getTime() <= clearedAt && (projectId === "all" || r.projectId === projectId),
+        r.timestamp.getTime() <= clearedAt &&
+        (projectId === "all" || r.projectId === projectId) &&
+        (projectId === "all" || domain === "all" || r.host === domain),
     ).length;
-  }, [requests, clearedAt, projectId]);
+  }, [requests, clearedAt, projectId, domain]);
   const hiddenNoiseCount = useMemo(() => {
     if (requestDensity === "all") return 0;
-    return scopedRequests.filter((r) => r.noise !== null).length;
-  }, [requestDensity, scopedRequests]);
+    return scopedRequests.filter(
+      (r) => r.noise !== null && !matchesPathPrefix(r, pathPrefixFilters),
+    ).length;
+  }, [requestDensity, scopedRequests, pathPrefixFilters]);
+  const hiddenPrefixCount = useMemo(
+    () => scopedRequests.filter((r) => matchesPathPrefix(r, pathPrefixFilters)).length,
+    [scopedRequests, pathPrefixFilters],
+  );
   const visible = useMemo(() => {
-    if (requestDensity === "all") return scopedRequests;
-    return scopedRequests.filter((r) => r.noise === null);
-  }, [requestDensity, scopedRequests]);
+    let out = scopedRequests;
+    if (pathPrefixFilters.length > 0) {
+      out = out.filter((r) => !matchesPathPrefix(r, pathPrefixFilters));
+    }
+    if (requestDensity === "all") return out;
+    return out.filter((r) => r.noise === null);
+  }, [requestDensity, scopedRequests, pathPrefixFilters]);
   const issueCount = useMemo(
     () => visible.filter((request) => request.status >= 400).length,
     [visible],
@@ -172,6 +239,13 @@ export function LogsScreen() {
     if (clearedAt === null) return dividers;
     return dividers.filter((d) => d.at > clearedAt);
   }, [dividers, clearedAt]);
+  const latestVisibleDivider = useMemo(() => {
+    if (visibleDividers.length === 0) return null;
+    return visibleDividers.reduce((latest, divider) => (divider.at > latest.at ? divider : latest));
+  }, [visibleDividers]);
+  const setLatestDividerRef = useCallback((node: HTMLLIElement | null) => {
+    setLatestDividerElement(node);
+  }, []);
 
   const selectedEntry = useMemo(
     () => (selectedId === null ? null : (visible.find((r) => r.id === selectedId) ?? null)),
@@ -182,6 +256,22 @@ export function LogsScreen() {
     const nextProjectId = search.projectId ?? loadStoredString(PROJECT_STORAGE_KEY) ?? "all";
     setProjectIdState((current) => (current === nextProjectId ? current : nextProjectId));
   }, [search.projectId]);
+
+  useEffect(() => {
+    const nextDomain = search.domain ?? loadStoredString(DOMAIN_STORAGE_KEY) ?? "all";
+    setDomainState((current) => (current === nextDomain ? current : nextDomain));
+  }, [search.domain]);
+
+  useEffect(() => {
+    if (domain === "all") return;
+    if (projectId === "all" || projectDomains.length === 0) {
+      setDomain("all");
+      return;
+    }
+    if (!projectDomains.some((d) => d.registration.domain === domain)) {
+      setDomain("all");
+    }
+  }, [domain, projectId, projectDomains]);
 
   useEffect(() => {
     const nextViewMode =
@@ -204,6 +294,27 @@ export function LogsScreen() {
     }
   }, [visible, selectedId]);
 
+  useEffect(() => {
+    const root = requestListScrollRef.current;
+    const target = latestDividerElement;
+    if (!root || !target) {
+      setLatestDividerVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setLatestDividerVisible(entry?.isIntersecting ?? true);
+      },
+      {
+        root,
+        threshold: 0.95,
+      },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [latestDividerElement]);
+
   const handleClear = () => {
     setClearedAt(Date.now());
     setSelectedId(null);
@@ -217,6 +328,14 @@ export function LogsScreen() {
 
   const reduceMotion = useReducedMotion();
   const detailOpen = selectedEntry !== null;
+  const canJumpToLatestMarker =
+    viewMode === "requests" && latestVisibleDivider !== null && !latestDividerVisible;
+  const handleJumpToLatestMarker = () => {
+    latestDividerElement?.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "center",
+    });
+  };
   const detailEnterTransition = reduceMotion
     ? { duration: 0.12 }
     : { duration: 0.3, ease: [0.22, 1, 0.36, 1] as const };
@@ -227,6 +346,9 @@ export function LogsScreen() {
         projects={projects ?? []}
         projectId={projectId}
         onProjectChange={setProjectId}
+        domains={projectDomains}
+        domain={domain}
+        onDomainChange={setDomain}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         follow={follow}
@@ -241,15 +363,18 @@ export function LogsScreen() {
         canClearDividers={dividers.length > 0}
         requestDensity={requestDensity}
         onRequestDensityChange={setRequestDensity}
+        pathPrefixes={pathPrefixes}
+        onPathPrefixesChange={setPathPrefixes}
         visibleRequestCount={visible.length}
         hiddenNoiseCount={hiddenNoiseCount}
+        hiddenPrefixCount={hiddenPrefixCount}
         issueCount={issueCount}
       />
 
       <div className="-mb-6 flex min-h-0 flex-1 overflow-hidden rounded-t-lg border border-border bg-background">
         {viewMode === "raw" ? (
           <RawView
-            lines={rawLines}
+            lines={[...rawLines].reverse()}
             loading={logsQuery.isLoading}
             logFileExists={logsQuery.data?.exists ?? false}
             logPath={logsQuery.data?.path ?? null}
@@ -281,29 +406,69 @@ export function LogsScreen() {
                   show all
                 </button>
               ) : null}
-              <div className="flex-1 overflow-auto">
-                {visible.length === 0 && visibleDividers.length === 0 ? (
-                  <RequestEmptyState
-                    loading={logsQuery.isLoading}
-                    projectSelected={projectId !== "all"}
-                    hasClearCutoff={clearedAt !== null && hiddenByClear === 0}
-                    logFileExists={logsQuery.data?.exists ?? false}
-                    logPath={logsQuery.data?.path ?? null}
-                    rawLogCount={rawLines.length}
-                    hiddenNoiseCount={hiddenNoiseCount}
-                    onShowRaw={() => setViewMode("raw")}
-                    onShowAllRequests={() => setRequestDensity("all")}
-                  />
-                ) : (
-                  <LogsList
-                    entries={visible}
-                    dividers={visibleDividers}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
-                    onRemoveDivider={removeDivider}
-                    showProject={projectId === "all"}
-                  />
-                )}
+              {hiddenPrefixCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setPathPrefixes("")}
+                  className="flex w-full items-center justify-center gap-2 border-b border-border bg-muted/20 py-2 text-[11px] text-muted-foreground hover:bg-muted/50"
+                >
+                  {hiddenPrefixCount} request{hiddenPrefixCount > 1 ? "s" : ""} hidden by prefix —
+                  show
+                </button>
+              ) : null}
+              <div className="relative min-h-0 flex-1">
+                <div ref={requestListScrollRef} className="h-full overflow-auto">
+                  {visible.length === 0 && visibleDividers.length === 0 ? (
+                    <RequestEmptyState
+                      loading={logsQuery.isLoading}
+                      projectSelected={projectId !== "all"}
+                      hasClearCutoff={clearedAt !== null && hiddenByClear === 0}
+                      logFileExists={logsQuery.data?.exists ?? false}
+                      logPath={logsQuery.data?.path ?? null}
+                      rawLogCount={rawLines.length}
+                      hiddenNoiseCount={hiddenNoiseCount}
+                      onShowRaw={() => setViewMode("raw")}
+                      onShowAllRequests={() => setRequestDensity("all")}
+                    />
+                  ) : (
+                    <LogsList
+                      entries={visible}
+                      dividers={visibleDividers}
+                      selectedId={selectedId}
+                      onSelect={setSelectedId}
+                      onRemoveDivider={removeDivider}
+                      showProject={projectId === "all"}
+                      latestDividerId={latestVisibleDivider?.id ?? null}
+                      latestDividerRef={setLatestDividerRef}
+                    />
+                  )}
+                </div>
+                <AnimatePresence initial={false}>
+                  {canJumpToLatestMarker ? (
+                    <motion.div
+                      key="latest-marker-indicator"
+                      initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+                      animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                      exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+                      transition={
+                        reduceMotion
+                          ? { duration: 0.12 }
+                          : { duration: 0.2, ease: [0.22, 1, 0.36, 1] as const }
+                      }
+                      className="pointer-events-none absolute right-3 bottom-18 left-3 flex justify-center"
+                    >
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleJumpToLatestMarker}
+                        className="pointer-events-auto rounded-full bg-background/95 text-muted-foreground shadow-lg shadow-black/10 backdrop-blur transition-colors"
+                      >
+                        Latest marker
+                      </Button>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
               </div>
             </div>
 

@@ -32,6 +32,10 @@ pub struct NodeTrustRemoval {
 }
 
 pub fn status(ca_cert_path: &Path) -> Result<NodeTrustStatus> {
+    if BRANDING.is_dev_profile() {
+        return dev_status(ca_cert_path);
+    }
+
     let home_dir = user_home_dir()?;
     let snippet_path = shell_snippet_path(&home_dir);
     let expected_snippet = shell_snippet_contents(ca_cert_path);
@@ -55,6 +59,14 @@ pub fn status(ca_cert_path: &Path) -> Result<NodeTrustStatus> {
 }
 
 pub fn install(ca_cert_path: &Path) -> Result<NodeTrustSetup> {
+    if BRANDING.is_dev_profile() {
+        let status = dev_status(ca_cert_path)?;
+        return Ok(NodeTrustSetup {
+            already_ready: status.ready,
+            status,
+        });
+    }
+
     if !ca_cert_path.exists() {
         bail!(
             "{} could not enable Node.js certificate trust because the CA certificate was not found at {}.",
@@ -92,6 +104,11 @@ pub fn install(ca_cert_path: &Path) -> Result<NodeTrustSetup> {
 }
 
 pub fn uninstall(ca_cert_path: &Path) -> Result<NodeTrustRemoval> {
+    if BRANDING.is_dev_profile() {
+        let _ = ca_cert_path;
+        return Ok(NodeTrustRemoval { removed: false });
+    }
+
     let home_dir = user_home_dir()?;
     let snippet_path = shell_snippet_path(&home_dir);
     let mut removed = false;
@@ -120,6 +137,18 @@ pub fn uninstall(ca_cert_path: &Path) -> Result<NodeTrustRemoval> {
     Ok(NodeTrustRemoval { removed })
 }
 
+fn dev_status(ca_cert_path: &Path) -> Result<NodeTrustStatus> {
+    let home_dir = user_home_dir()?;
+    let snippet_path = shell_snippet_path(&home_dir);
+    Ok(NodeTrustStatus {
+        ready: ca_cert_path.exists(),
+        ca_cert_path: ca_cert_path.to_path_buf(),
+        shell_snippet_path: snippet_path,
+        shell_integration_ready: true,
+        launchctl_ready: true,
+    })
+}
+
 fn config_home_dir(home_dir: &Path) -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -128,7 +157,7 @@ fn config_home_dir(home_dir: &Path) -> PathBuf {
 
 fn shell_snippet_path(home_dir: &Path) -> PathBuf {
     config_home_dir(home_dir)
-        .join(BRANDING.slug)
+        .join(BRANDING.slug())
         .join("env")
         .join("node-trust.sh")
 }

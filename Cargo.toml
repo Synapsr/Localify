@@ -42,6 +42,13 @@ hyper-util = { version = "0.1", features = [
   "server-auto",
   "service",
 ] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+  "aws-lc-rs",
+  "http1",
+  "http2",
+  "tls12",
+  "webpki-tokio",
+] }
 http-body-util = "0.1"
 
 # TLS

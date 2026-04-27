@@ -4,14 +4,26 @@ use std::path::PathBuf;
 use crate::branding::BRANDING;
 
 fn default_http_port() -> u16 {
+    if BRANDING.is_dev_profile() {
+        return 8080;
+    }
+
     80
 }
 
 fn default_https_port() -> u16 {
+    if BRANDING.is_dev_profile() {
+        return 8443;
+    }
+
     443
 }
 
 fn default_dns_port() -> u16 {
+    if BRANDING.is_dev_profile() {
+        return 1054;
+    }
+
     1053
 }
 
@@ -102,7 +114,7 @@ impl DaemonConfig {
 }
 
 fn default_data_dir() -> PathBuf {
-    BRANDING.config_dir()
+    BRANDING.data_dir()
 }
 
 fn default_pid_file() -> PathBuf {

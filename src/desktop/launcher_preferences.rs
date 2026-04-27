@@ -91,7 +91,7 @@ fn default_local_state_dir() -> Result<PathBuf> {
     {
         Ok(user_home_dir()?
             .join("Library/Application Support")
-            .join(BRANDING.desktop_state_dir_name))
+            .join(BRANDING.desktop_state_dir_name()))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -99,6 +99,6 @@ fn default_local_state_dir() -> Result<PathBuf> {
         let base = env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| user_home_dir().unwrap().join(".local/state"));
-        Ok(base.join(BRANDING.slug))
+        Ok(base.join(BRANDING.slug()))
     }
 }

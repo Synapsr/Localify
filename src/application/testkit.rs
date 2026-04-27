@@ -475,7 +475,7 @@ impl DaemonConnection for NotRunningDaemonConnection {
 
 /// Build an exact `DomainPattern` from a domain name string.
 pub fn exact(name: &str) -> DomainPattern {
-    let normalized = name.replace(".roxy", BRANDING.domain_suffix);
+    let normalized = name.replace(".roxy", BRANDING.domain_suffix());
     DomainPattern::from_name(&normalized, false).unwrap()
 }
 

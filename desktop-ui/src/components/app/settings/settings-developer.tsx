@@ -4,6 +4,7 @@ import { SettingsLicensingAdvanced } from "./settings-licensing-advanced";
 import { SettingsPorts } from "./settings-ports";
 import { SettingsProcesses } from "./settings-processes";
 import { SettingsSystem } from "./settings-system";
+import { SettingsUpdatePreview } from "./settings-update-preview";
 
 export const SettingsDeveloper = () => {
   return (
@@ -22,6 +23,7 @@ export const SettingsDeveloper = () => {
       <SettingsProcesses />
       <SettingsPorts />
       <SettingsSystem />
+      <SettingsUpdatePreview />
       <SettingsLicensingAdvanced />
     </section>
   );

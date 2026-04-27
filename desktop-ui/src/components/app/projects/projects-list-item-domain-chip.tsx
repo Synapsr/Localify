@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "motion/react";
 import { type MouseEvent, type PointerEvent } from "react";
@@ -20,7 +20,7 @@ import {
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { projectMutations } from "@/lib/queries";
+import { bootstrapQueries, projectMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
@@ -36,9 +36,20 @@ const actionVariants = {
   hover: { opacity: 1, scale: 1, x: 0 },
 };
 
-function buildUrl(domain: DomainInfoDto): string {
+function portSegment(scheme: "http" | "https", port: number | undefined): string {
+  if (!port) return "";
+  if (scheme === "http" && port === 80) return "";
+  if (scheme === "https" && port === 443) return "";
+  return `:${port}`;
+}
+
+function buildUrl(
+  domain: DomainInfoDto,
+  ports: { httpPort: number; httpsPort: number } | undefined,
+): string {
   const scheme = domain.registration.httpsEnabled ? "https" : "http";
-  return `${scheme}://${domain.registration.domain}`;
+  const port = domain.registration.httpsEnabled ? ports?.httpsPort : ports?.httpPort;
+  return `${scheme}://${domain.registration.domain}${portSegment(scheme, port)}`;
 }
 
 function extractPort(target: string | undefined): string | null {
@@ -62,13 +73,14 @@ function getPrimaryLaunchTarget(domain: DomainInfoDto): string | null {
 }
 
 export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChipProps) => {
+  const { data } = useQuery(bootstrapQueries.read());
   const queryClient = useQueryClient();
   const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
   const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
   const runLocalDevServer = useMutation(projectMutations.runLocalDevServer(queryClient));
   const stopLocalDevServer = useMutation(projectMutations.stopLocalDevServer(queryClient));
   const { pattern, routes } = domain.registration;
-  const url = buildUrl(domain);
+  const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
   const port = extractPort(routes[0]?.target);
   const launchTarget = getPrimaryLaunchTarget(domain);

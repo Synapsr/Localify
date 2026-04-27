@@ -131,7 +131,7 @@ impl DesktopApi {
             config_path: self.config_path.display().to_string(),
             binary_path: self.binary_path.display().to_string(),
             binary_exists: self.binary_path.exists(),
-            fixed_domain_suffix: BRANDING.domain_suffix.into(),
+            fixed_domain_suffix: BRANDING.domain_suffix().into(),
             cli_helper_ready: self.direct_mode || self.cli_helper_ready(),
             cli_access_ready: self.cli_access_ready(),
             cli_command_path: self.cli_command_path().display().to_string(),
@@ -1768,6 +1768,9 @@ impl DesktopApi {
         if verbose {
             cmd.env(BRANDING.env_var("LOG"), "debug");
         }
+        if let Some(profile) = BRANDING.active_profile() {
+            cmd.env(BRANDING.profile_env(), profile);
+        }
 
         cmd.spawn().map_err(Into::into)
     }
@@ -1902,7 +1905,7 @@ impl DesktopApi {
     }
 
     fn should_use_system_helper(&self) -> bool {
-        !self.direct_mode && self.config_path.starts_with("/etc")
+        !self.direct_mode && (self.config_path.starts_with("/etc") || BRANDING.is_dev_profile())
     }
 
     fn cli_helper_ready(&self) -> bool {
@@ -2100,12 +2103,12 @@ impl DesktopApi {
             return Ok(None);
         }
 
-        if self.helper_matches_binary_path()? {
+        if self.helper_matches_binary_path()? && self.helper_matches_runtime_config(&client)? {
             return Ok(Some(client));
         }
 
         eprintln!(
-            "ignoring running {} helper because it does not match the current CLI binary at {}",
+            "ignoring running {} helper because it does not match the current runtime at {}",
             BRANDING.app_name,
             self.binary_path.display()
         );
@@ -2115,7 +2118,10 @@ impl DesktopApi {
     fn ensure_helper_running(&self) -> Result<SystemHelperClient> {
         let socket_path = self.helper_socket_path()?;
         let client = SystemHelperClient::new(socket_path.clone());
-        if client.ping().is_ok() && self.helper_matches_binary_path()? {
+        if client.ping().is_ok()
+            && self.helper_matches_binary_path()?
+            && self.helper_matches_runtime_config(&client)?
+        {
             return Ok(client);
         }
 
@@ -2141,6 +2147,24 @@ impl DesktopApi {
             "{} system helper did not become ready in time.",
             BRANDING.app_name
         )
+    }
+
+    fn helper_matches_runtime_config(&self, client: &SystemHelperClient) -> Result<bool> {
+        if !BRANDING.is_dev_profile() {
+            return Ok(true);
+        }
+
+        let helper_config = match client.get_config() {
+            Ok(config) => config,
+            Err(_) => return Ok(false),
+        };
+        let current_config = self.config_store().load()?;
+        let expected_path = self.config_path.display().to_string();
+
+        Ok(helper_config.config_path == expected_path
+            && helper_config.daemon.http_port == current_config.daemon.http_port
+            && helper_config.daemon.https_port == current_config.daemon.https_port
+            && helper_config.daemon.dns_port == current_config.daemon.dns_port)
     }
 
     #[cfg(target_os = "macos")]
@@ -2303,7 +2327,7 @@ impl DesktopApi {
 
         let probe_path = parent.join(format!(
             ".{}-write-test-{}",
-            BRANDING.slug,
+            BRANDING.slug(),
             std::process::id()
         ));
         match OpenOptions::new()
@@ -2975,11 +2999,20 @@ fn is_missing_macos_certificate_error(message: &str) -> bool {
 }
 
 fn cli_shell_command(binary_path: &Path, config_path: &Path, args: &[String]) -> String {
-    let mut parts = vec![
+    let mut parts = Vec::new();
+    if let Some(profile) = BRANDING.active_profile() {
+        parts.push(format!(
+            "{}={}",
+            BRANDING.profile_env(),
+            shell_escape(&profile)
+        ));
+    }
+
+    parts.extend([
         shell_escape(&binary_path.to_string_lossy()),
         shell_escape("--config"),
         shell_escape(&config_path.to_string_lossy()),
-    ];
+    ]);
     parts.extend(args.iter().map(|arg| shell_escape(arg)));
     parts.join(" ")
 }

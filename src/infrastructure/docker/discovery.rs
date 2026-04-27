@@ -175,7 +175,7 @@ fn resolve_domain(info: &ContainerInfo) -> Option<DomainName> {
     let project = info.labels.get("com.docker.compose.project")?;
     let service = info.labels.get("com.docker.compose.service")?;
 
-    let domain_str = format!("{service}.{project}{}", BRANDING.domain_suffix);
+    let domain_str = format!("{service}.{project}{}", BRANDING.domain_suffix());
     match DomainName::new(&domain_str) {
         Ok(d) => Some(d),
         Err(e) => {
@@ -248,7 +248,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| {
                     let key = k.replace("roxy.", "localify.");
-                    let value = v.replace(".roxy", BRANDING.domain_suffix);
+                    let value = v.replace(".roxy", BRANDING.domain_suffix());
                     (key, value)
                 })
                 .collect(),

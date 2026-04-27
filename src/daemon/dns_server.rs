@@ -146,11 +146,11 @@ fn handle_query(query: &[u8], ttl: u32, response_ip: Ipv4Addr) -> Vec<u8> {
 
     if !domain
         .trim_end_matches('.')
-        .ends_with(BRANDING.domain_suffix)
+        .ends_with(BRANDING.domain_suffix())
     {
         debug!(
             domain = %domain,
-            suffix = BRANDING.domain_suffix,
+            suffix = BRANDING.domain_suffix(),
             "DNS refused (unexpected suffix)"
         );
         return build_refused_response(&packet);

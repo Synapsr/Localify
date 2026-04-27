@@ -1,6 +1,11 @@
 mod commands;
 
+use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::io::Write;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use commands::{AppState, DeepLinkPayloadDto, DeepLinkRouteDto};
@@ -8,20 +13,18 @@ use roxy::branding::BRANDING;
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
     DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, RunLocalDevServerRequest,
-    StartDaemonRequest,
+    StartDaemonRequest, StopLocalDevServerRequest,
 };
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 #[cfg(target_os = "macos")]
-use tauri::{
-    async_runtime,
-    menu::{AboutMetadata, Submenu},
-};
+use tauri::{async_runtime, menu::AboutMetadata};
 use tauri_plugin_deep_link::DeepLinkExt;
 #[cfg(target_os = "macos")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_opener::OpenerExt;
 
 const TRAY_ID: &str = "localify-tray";
 const TRAY_OPEN: &str = "tray-open";
@@ -29,6 +32,11 @@ const TRAY_START: &str = "tray-start";
 const TRAY_STOP: &str = "tray-stop";
 const TRAY_RESTART: &str = "tray-restart";
 const TRAY_QUIT: &str = "tray-quit";
+const TRAY_DOMAIN_START_PREFIX: &str = "tray-domain-start:";
+const TRAY_DOMAIN_STOP_PREFIX: &str = "tray-domain-stop:";
+const TRAY_DOMAIN_COPY_PREFIX: &str = "tray-domain-copy:";
+const TRAY_DOMAIN_OPEN_PREFIX: &str = "tray-domain-open:";
+const TRAY_PROJECT_LIMIT: usize = 10;
 #[cfg(target_os = "macos")]
 const MENU_CHECK_UPDATES: &str = "menu-check-updates";
 const TRAY_TEMPLATE_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
@@ -492,12 +500,148 @@ fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     };
 
     let open = MenuItem::with_id(app, TRAY_OPEN, "Open Localify", true, None::<&str>)?;
+    let top_separator = PredefinedMenuItem::separator(app)?;
     let toggle = MenuItem::with_id(app, toggle_id, toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, TRAY_RESTART, "Restart daemon", running, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
+    let bottom_separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit Localify", true, None::<&str>)?;
 
-    Menu::with_items(app, &[&open, &toggle, &restart, &separator, &quit])
+    let menu = Menu::with_items(app, &[&open, &top_separator])?;
+    append_tray_project_items(app, &menu)?;
+    menu.append(&separator)?;
+    menu.append(&toggle)?;
+    menu.append(&restart)?;
+    menu.append(&bottom_separator)?;
+    menu.append(&quit)?;
+    Ok(menu)
+}
+
+fn append_tray_project_items<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
+    let state = app.state::<AppState>();
+    let projects = tray_visible_projects(state.api.list_projects().unwrap_or_default());
+    let domains = state.api.list_domains().unwrap_or_default();
+    let domains_by_project = tray_domains_by_project(domains);
+
+    if projects.is_empty() {
+        menu.append(&MenuItem::with_id(
+            app,
+            "tray-projects-empty",
+            "No projects",
+            false,
+            None::<&str>,
+        )?)?;
+        return Ok(());
+    }
+
+    for project in projects {
+        let project_menu = build_tray_project_menu(app, &project, &domains_by_project)?;
+        menu.append(&project_menu)?;
+    }
+
+    Ok(())
+}
+
+fn build_tray_project_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    project: &ProjectInfoDto,
+    domains_by_project: &HashMap<String, Vec<DomainInfoDto>>,
+) -> tauri::Result<Submenu<R>> {
+    let project_menu = Submenu::new(app, &project.name, project.enabled)?;
+    let domains = domains_by_project
+        .get(&project.id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    if domains.is_empty() {
+        project_menu.append(&MenuItem::with_id(
+            app,
+            format!("tray-project-empty:{}", project.id),
+            "No domains",
+            false,
+            None::<&str>,
+        )?)?;
+        return Ok(project_menu);
+    }
+
+    for domain in domains {
+        let domain_menu = build_tray_domain_menu(app, domain, project.root_path.as_deref())?;
+        project_menu.append(&domain_menu)?;
+    }
+
+    Ok(project_menu)
+}
+
+fn build_tray_domain_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    domain: &DomainInfoDto,
+    root_path: Option<&str>,
+) -> tauri::Result<Submenu<R>> {
+    let domain_name = &domain.registration.domain;
+    let launch_target = primary_launch_target(domain);
+    let can_toggle = launch_target.is_some() && (domain.target_reachable || root_path.is_some());
+    let toggle_id = if domain.target_reachable {
+        format!("{TRAY_DOMAIN_STOP_PREFIX}{domain_name}")
+    } else {
+        format!("{TRAY_DOMAIN_START_PREFIX}{domain_name}")
+    };
+    let toggle_label = if domain.target_reachable {
+        "Stop"
+    } else {
+        "Start"
+    };
+    let domain_menu = Submenu::new(app, domain_name, domain.project_enabled)?;
+    domain_menu.append(&MenuItem::with_id(
+        app,
+        toggle_id,
+        toggle_label,
+        can_toggle,
+        None::<&str>,
+    )?)?;
+    domain_menu.append(&MenuItem::with_id(
+        app,
+        format!("{TRAY_DOMAIN_COPY_PREFIX}{domain_name}"),
+        "Copy URL",
+        true,
+        None::<&str>,
+    )?)?;
+    domain_menu.append(&MenuItem::with_id(
+        app,
+        format!("{TRAY_DOMAIN_OPEN_PREFIX}{domain_name}"),
+        "Open in Browser",
+        true,
+        None::<&str>,
+    )?)?;
+    Ok(domain_menu)
+}
+
+fn tray_visible_projects(mut projects: Vec<ProjectInfoDto>) -> Vec<ProjectInfoDto> {
+    projects.sort_by(|left, right| {
+        right
+            .enabled
+            .cmp(&left.enabled)
+            .then_with(|| right.has_reachable_domain.cmp(&left.has_reachable_domain))
+            .then_with(|| right.domain_count.cmp(&left.domain_count))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    projects.truncate(TRAY_PROJECT_LIMIT);
+    projects
+}
+
+fn tray_domains_by_project(domains: Vec<DomainInfoDto>) -> HashMap<String, Vec<DomainInfoDto>> {
+    let mut grouped = HashMap::<String, Vec<DomainInfoDto>>::new();
+    for domain in domains {
+        let Some(project_id) = domain.project_id.clone() else {
+            continue;
+        };
+        grouped.entry(project_id).or_default().push(domain);
+    }
+
+    for domains in grouped.values_mut() {
+        domains.sort_by(|left, right| left.registration.domain.cmp(&right.registration.domain));
+    }
+
+    grouped
 }
 
 pub(crate) fn sync_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -510,6 +654,22 @@ pub(crate) fn sync_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()
 }
 
 fn run_tray_action<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_START_PREFIX) {
+        return start_tray_domain(app, domain);
+    }
+
+    if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_STOP_PREFIX) {
+        return stop_tray_domain(app, domain);
+    }
+
+    if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_COPY_PREFIX) {
+        return copy_tray_domain_url(app, domain);
+    }
+
+    if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_OPEN_PREFIX) {
+        return open_tray_domain_url(app, domain);
+    }
+
     match id {
         TRAY_OPEN => open_main_window(app).map_err(|error| error.to_string()),
         TRAY_START => {
@@ -547,6 +707,166 @@ fn run_tray_action<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
         }
         _ => Ok(()),
     }
+}
+
+fn start_tray_domain<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let domain = find_tray_domain(&state.api, domain)?
+        .ok_or_else(|| format!("No Localify domain named '{domain}' was found."))?;
+    let project_id = domain.project_id.as_deref().ok_or_else(|| {
+        format!(
+            "No Localify project is linked to '{}'.",
+            domain.registration.domain
+        )
+    })?;
+    let root_path = project_root_path(
+        &state
+            .api
+            .list_projects()
+            .map_err(|error| error.to_string())?,
+        project_id,
+    )
+    .ok_or_else(|| {
+        format!(
+            "No local project folder is linked to '{}'.",
+            domain.registration.domain
+        )
+    })?;
+    let target = primary_launch_target(&domain).ok_or_else(|| {
+        format!(
+            "Localify could not find a proxy target to launch for '{}'.",
+            domain.registration.domain
+        )
+    })?;
+
+    let result = state
+        .api
+        .run_local_dev_server(RunLocalDevServerRequest { root_path, target })
+        .map_err(|error| error.to_string());
+    sync_tray_menu(app).map_err(|error| error.to_string())?;
+    result
+}
+
+fn stop_tray_domain<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let domain = find_tray_domain(&state.api, domain)?
+        .ok_or_else(|| format!("No Localify domain named '{domain}' was found."))?;
+    let target = primary_launch_target(&domain).ok_or_else(|| {
+        format!(
+            "Localify could not find a proxy target to stop for '{}'.",
+            domain.registration.domain
+        )
+    })?;
+
+    let result = state
+        .api
+        .stop_local_dev_server(StopLocalDevServerRequest { target })
+        .map_err(|error| error.to_string());
+    sync_tray_menu(app).map_err(|error| error.to_string())?;
+    result
+}
+
+fn copy_tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
+    let url = tray_domain_url(app, domain)?;
+    copy_text_to_clipboard(&url)
+}
+
+fn open_tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
+    let url = tray_domain_url(app, domain)?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+fn tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let domain = find_tray_domain(&state.api, domain)?
+        .ok_or_else(|| format!("No Localify domain named '{domain}' was found."))?;
+    let status = state
+        .api
+        .daemon_status()
+        .map_err(|error| error.to_string())?;
+    Ok(build_domain_url(
+        &domain,
+        status.http_port,
+        status.https_port,
+    ))
+}
+
+fn find_tray_domain(api: &DesktopApi, domain: &str) -> Result<Option<DomainInfoDto>, String> {
+    Ok(api
+        .list_domains()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|item| item.registration.domain == domain))
+}
+
+fn build_domain_url(domain: &DomainInfoDto, http_port: u16, https_port: u16) -> String {
+    let scheme = if domain.registration.https_enabled {
+        "https"
+    } else {
+        "http"
+    };
+    let port = if domain.registration.https_enabled {
+        https_port
+    } else {
+        http_port
+    };
+
+    format!(
+        "{scheme}://{}{}",
+        domain.registration.domain,
+        port_segment(scheme, port)
+    )
+}
+
+fn port_segment(scheme: &str, port: u16) -> String {
+    if (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+        String::new()
+    } else {
+        format!(":{port}")
+    }
+}
+
+fn primary_launch_target(domain: &DomainInfoDto) -> Option<String> {
+    let route = domain
+        .registration
+        .routes
+        .iter()
+        .find(|route| route.path == "/")
+        .or_else(|| domain.registration.routes.first())?;
+    Some(route.target.clone())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_text_to_clipboard(value: &str) -> Result<(), String> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start pbcopy: {error}"))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        return Err("Failed to open pbcopy stdin.".into());
+    };
+
+    stdin
+        .write_all(value.as_bytes())
+        .map_err(|error| format!("Failed to write to pbcopy: {error}"))?;
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for pbcopy: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("pbcopy exited with status {status}."))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_text_to_clipboard(_value: &str) -> Result<(), String> {
+    Err("Tray URL copying is currently only implemented on macOS.".into())
 }
 
 #[cfg(target_os = "macos")]

@@ -39,10 +39,18 @@ application code.
 ## Development Notes
 
 The desktop shell assumes the existing CLI binary is still the process used to
-launch the daemon. By default, the Tauri backend looks for:
+launch the daemon. Production defaults are:
 
 - config at `/etc/localify/config.toml`
 - CLI binary at `target/debug/localify` in debug builds
+
+`pnpm tauri:dev` runs with `LOCALIFY_PROFILE=dev`. That profile is isolated
+from the installed app:
+
+- config at `~/Library/Application Support/Localify Dev/config.toml`
+- data and certificates under `~/Library/Application Support/Localify Dev/data`
+- pid, socket, logs, resolver, and helper names based on `localify-dev`
+- domains under `.localify.test` instead of `.localify`
 
 You can override both when running the desktop app:
 
@@ -64,9 +72,10 @@ pnpm tauri:dev
 
 `pnpm tauri:dev` also merges `src-tauri/tauri.dev.conf.json`, so the dev app
 uses the explicit "Localify (Dev)" name and the dev-only icon asset.
-The dev script also forces `LOCALIFY_CLI_PATH=$PWD/target/debug/localify`, so
-daemon start/restart actions from the dev shell always prefer the repo's debug
-CLI over any installed production binary or stale sibling build.
+The dev script also forces `LOCALIFY_PROFILE=dev` and
+`LOCALIFY_CLI_PATH=$PWD/target/debug/localify`, so daemon start/restart actions
+from the dev shell use the repo's debug CLI, separate runtime files, and the
+dev helper instead of the installed production app.
 
 ## Package It
 

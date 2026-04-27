@@ -31,7 +31,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { bootstrapQueries, licenseMutations } from "@/lib/queries";
 
-const BUY_LICENSE_URL = "https://localify.dev/buy";
+const BUY_LICENSE_URL = "https://localify.dev/#pricing";
 
 const formatLimit = (value: number | null) => (value === null ? "Unlimited" : String(value));
 

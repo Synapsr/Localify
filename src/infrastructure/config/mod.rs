@@ -7,6 +7,7 @@ pub use crate::config::{
 };
 
 use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository, RepositoryError};
+use crate::branding::BRANDING;
 use crate::config::LicensingConfig as RootLicensingConfig;
 use crate::domain::value_objects::{RouteTarget, RouteTargetError};
 use crate::domain::{DomainPattern, DomainRegistration};
@@ -250,7 +251,10 @@ impl ConfigStore {
         }
 
         let content = fs::read_to_string(&self.path).map_err(ConfigError::ReadError)?;
-        let config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        if apply_runtime_profile_defaults(&mut config) {
+            self.save(&config)?;
+        }
         Ok(config)
     }
 
@@ -567,6 +571,22 @@ impl ConfigStore {
     }
 }
 
+fn apply_runtime_profile_defaults(config: &mut Config) -> bool {
+    if !BRANDING.is_dev_profile() {
+        return false;
+    }
+
+    if config.daemon.http_port == 80
+        && config.daemon.https_port == 443
+        && config.daemon.dns_port == 1053
+    {
+        config.daemon = DaemonConfig::default();
+        return true;
+    }
+
+    false
+}
+
 fn enforce_project_limit(config: &Config) -> Result<(), ConfigError> {
     let limits = config.license_limits();
     let Some(max_projects) = limits.max_projects else {
@@ -743,7 +763,7 @@ mod tests {
     }
 
     fn proxy_registration(domain: &str, port: u16) -> DomainRegistration {
-        let normalized = domain.replace(".roxy", BRANDING.domain_suffix);
+        let normalized = domain.replace(".roxy", BRANDING.domain_suffix());
         let pattern = DomainPattern::from_name(&normalized, false).unwrap();
         let route = Route::parse(&format!("/={port}")).unwrap();
         DomainRegistration::new(pattern, vec![route])
@@ -952,7 +972,7 @@ mod tests {
             .map(|registration| registration.display_pattern())
             .collect::<Vec<_>>();
 
-        assert_eq!(patterns, vec![format!("plain{}", BRANDING.domain_suffix)]);
+        assert_eq!(patterns, vec![format!("plain{}", BRANDING.domain_suffix())]);
     }
 
     #[test]
@@ -976,7 +996,7 @@ mod tests {
         assert!(configured.project_enabled);
         assert_eq!(
             configured.registration.display_pattern(),
-            format!("app{}", BRANDING.domain_suffix)
+            format!("app{}", BRANDING.domain_suffix())
         );
     }
 
@@ -1003,7 +1023,7 @@ mod tests {
         assert_eq!(domains.len(), 1);
         assert_eq!(
             domains[0].registration.display_pattern(),
-            format!("new{}", BRANDING.domain_suffix)
+            format!("new{}", BRANDING.domain_suffix())
         );
         assert_eq!(domains[0].project_id.as_deref(), Some(project.id.as_str()));
     }

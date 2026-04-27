@@ -12,7 +12,7 @@ import {
 import { tauriClient } from "@/lib/tauri-client";
 import type { AppUpdateInfoDto } from "@/types/roxy";
 
-type AppUpdateStatus =
+export type AppUpdateStatus =
   | "idle"
   | "checking"
   | "available"

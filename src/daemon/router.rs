@@ -532,7 +532,7 @@ fn build_open_app_actions(href: &str) -> String {
 
 fn wildcard_base_domain(domain: &str) -> Option<String> {
     let domain = domain.trim_end_matches('.');
-    if !domain.ends_with(crate::branding::BRANDING.domain_suffix) {
+    if !domain.ends_with(crate::branding::BRANDING.domain_suffix()) {
         return None;
     }
 
@@ -599,7 +599,7 @@ mod tests {
     use crate::domain::{DomainName, DomainPattern, DomainRegistration, Route};
 
     fn reg(domain: &str, wildcard: bool) -> DomainRegistration {
-        let normalized = domain.replace(".roxy", BRANDING.domain_suffix);
+        let normalized = domain.replace(".roxy", BRANDING.domain_suffix());
         let domain = DomainName::new(normalized).unwrap();
         let pattern = if wildcard {
             DomainPattern::Wildcard(domain)

@@ -8,14 +8,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::branding::BRANDING;
-use crate::domain::ProxyTarget;
+use crate::domain::{ProxyTarget, ProxyTargetScheme};
 
 use super::theme;
 
@@ -28,6 +27,8 @@ const X_FORWARDED_PROTO: &str = "x-forwarded-proto";
 const KEEP_ALIVE: &str = "keep-alive";
 const PROXY_ERROR_TEMPLATE: &str = include_str!("templates/proxy_error.html");
 const PROXY_ERROR_CSS: &str = include_str!("templates/proxy_error.css");
+type ProxyConnector =
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
 
 #[derive(Clone, Copy)]
 enum ProxyErrorKind {
@@ -73,6 +74,32 @@ fn is_websocket_upgrade(request: &Request) -> bool {
         .and_then(|h| h.to_str().ok())
         .map(|s| s.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false)
+}
+
+fn build_proxy_client() -> Client<ProxyConnector, Body> {
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_all_versions()
+        .build();
+
+    Client::builder(TokioExecutor::new()).build(connector)
+}
+
+fn build_target_uri(target: &ProxyTarget, path: &str, query: Option<&str>) -> Result<Uri, String> {
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+    let uri_string = format!(
+        "{}://{}:{}{}{}",
+        target.uri_scheme(),
+        target.host(),
+        target.port(),
+        path,
+        query
+    );
+
+    uri_string
+        .parse()
+        .map_err(|error| format!("Invalid URI: {error}"))
 }
 
 /// Build HTTP upgrade request string to send to backend
@@ -158,6 +185,17 @@ async fn proxy_websocket(
     client_ip: Option<IpAddr>,
     project_root_path: Option<&str>,
 ) -> Response {
+    if target.scheme() == ProxyTargetScheme::Https {
+        return build_proxy_error_response(
+            StatusCode::BAD_GATEWAY,
+            host,
+            target,
+            ProxyErrorKind::WebSocketUpgrade,
+            "WebSocket routes to HTTPS targets are not supported yet. Use an HTTP target for WebSocket dev servers.",
+            project_root_path,
+        );
+    }
+
     // Connect to backend
     let backend_addr = format!("{}:{}", target.host(), target.port());
     debug!(target = %target, "Connecting to backend for WebSocket");
@@ -396,27 +434,11 @@ pub async fn proxy_request(
     debug!(target = %target, "Proxying HTTP request");
 
     // Regular HTTP proxy
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-
-    let client = Client::builder(TokioExecutor::new()).build(connector);
+    let client = build_proxy_client();
 
     // Rewrite the URI to target the backend
     let path = request.uri().path();
-    let query = request
-        .uri()
-        .query()
-        .map(|q| format!("?{}", q))
-        .unwrap_or_default();
-    let uri_string = format!(
-        "http://{}:{}{}{}",
-        target.host(),
-        target.port(),
-        path,
-        query
-    );
-
-    let uri: Uri = match uri_string.parse() {
+    let uri = match build_target_uri(target, path, request.uri().query()) {
         Ok(u) => u,
         Err(e) => {
             return build_proxy_error_response(
@@ -424,7 +446,7 @@ pub async fn proxy_request(
                 host,
                 target,
                 ProxyErrorKind::InvalidTargetUri,
-                &format!("Invalid URI: {e}"),
+                &e,
                 project_root_path,
             );
         }
@@ -1057,6 +1079,24 @@ mod tests {
         let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
 
         assert!(raw.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn target_uri_uses_http_for_legacy_targets() {
+        let target = ProxyTarget::parse("3000").unwrap();
+
+        let uri = build_target_uri(&target, "/api/users", Some("page=1")).unwrap();
+
+        assert_eq!(uri.to_string(), "http://127.0.0.1:3000/api/users?page=1");
+    }
+
+    #[test]
+    fn target_uri_preserves_explicit_https_targets() {
+        let target = ProxyTarget::parse("https://localhost:8443").unwrap();
+
+        let uri = build_target_uri(&target, "/api/users", None).unwrap();
+
+        assert_eq!(uri.to_string(), "https://localhost:8443/api/users");
     }
 
     #[test]

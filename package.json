@@ -36,7 +36,7 @@
     "publish:update:r2": "pnpm desktop:publish-r2",
     "version:desktop": "node scripts/set-desktop-version.mjs",
     "tauri": "tauri",
-    "tauri:dev": "LOCALIFY_CLI_PATH=\"$PWD/target/debug/localify\" tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev": "LOCALIFY_PROFILE=dev LOCALIFY_CLI_PATH=\"$PWD/target/debug/localify\" tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "bash scripts/run-tauri-build.sh",
     "tauri:package": "pnpm tauri:build"
   },

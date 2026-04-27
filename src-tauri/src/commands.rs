@@ -327,96 +327,132 @@ pub async fn uninstall_roxy(
 
 #[tauri::command]
 pub fn create_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: CreateProjectRequest,
 ) -> Result<ProjectInfoDto, String> {
-    state.api.create_project(request).map_err(map_error)
+    let result = state.api.create_project(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn create_project_with_domains(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: CreateProjectWithDomainsRequest,
 ) -> Result<ProjectInfoDto, String> {
-    state
+    let result = state
         .api
         .create_project_with_domains(request)
-        .map_err(map_error)
+        .map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn init_project_from_folder(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: InitProjectFromFolderRequest,
 ) -> Result<InitProjectFromFolderResultDto, String> {
-    state
+    let result = state
         .api
         .init_project_from_folder(request)
-        .map_err(map_error)
+        .map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn update_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: UpdateProjectRequest,
 ) -> Result<ProjectInfoDto, String> {
-    state.api.update_project(request).map_err(map_error)
+    let result = state.api.update_project(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn remove_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: RemoveProjectRequest,
 ) -> Result<RemoveProjectResultDto, String> {
-    state.api.remove_project(request).map_err(map_error)
+    let result = state.api.remove_project(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn assign_domain_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: AssignDomainProjectRequest,
 ) -> Result<DomainInfoDto, String> {
-    state.api.assign_domain_project(request).map_err(map_error)
+    let result = state
+        .api
+        .assign_domain_project(request)
+        .map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn register_domain(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: RegisterDomainRequest,
 ) -> Result<RegisterDomainResultDto, String> {
-    state.api.register_domain(request).map_err(map_error)
+    let result = state.api.register_domain(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn update_domain(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: UpdateDomainRequest,
 ) -> Result<RegisterDomainResultDto, String> {
-    state.api.update_domain(request).map_err(map_error)
+    let result = state.api.update_domain(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn unregister_domain(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: DomainPatternRequest,
 ) -> Result<UnregisterDomainResultDto, String> {
-    state.api.unregister_domain(request).map_err(map_error)
+    let result = state.api.unregister_domain(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn add_route(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: AddRouteRequest,
 ) -> Result<RegistrationMutationDto, String> {
-    state.api.add_route(request).map_err(map_error)
+    let result = state.api.add_route(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn remove_route(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: RemoveRouteRequest,
 ) -> Result<RegistrationMutationDto, String> {
-    state.api.remove_route(request).map_err(map_error)
+    let result = state.api.remove_route(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -485,18 +521,25 @@ pub fn open_in_editor(
 
 #[tauri::command]
 pub fn run_local_dev_server(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: RunLocalDevServerRequest,
 ) -> Result<(), String> {
-    state.api.run_local_dev_server(request).map_err(map_error)
+    state.api.run_local_dev_server(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)
 }
 
 #[tauri::command]
 pub fn stop_local_dev_server(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: StopLocalDevServerRequest,
 ) -> Result<(), String> {
-    state.api.stop_local_dev_server(request).map_err(map_error)
+    state
+        .api
+        .stop_local_dev_server(request)
+        .map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)
 }
 
 #[tauri::command]
