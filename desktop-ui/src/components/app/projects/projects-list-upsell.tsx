@@ -1,14 +1,19 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "motion/react";
 
 import { ArrowRightIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { pricingQueries } from "@/lib/queries/pricing.queries";
 
 const BUY_URL = "https://localify.dev/#pricing";
 
 export const ProjectsListUpsell = () => {
+  const { data: pricing } = useQuery(pricingQueries.localized());
+  const priceLabel = pricing?.plans.single.label ?? "$59";
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -25,8 +30,8 @@ export const ProjectsListUpsell = () => {
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <div className="flex items-baseline gap-2.5">
             <h3 className="text-[17px] font-semibold tracking-tight text-balance text-foreground">
-              Upgrade to Pro from <br /> €49/
-              <span className=" text-muted-foreground tabular-nums">Lifetime</span>
+              Upgrade to Pro from {priceLabel} <br />
+              <span className=" text-muted-foreground tabular-nums">Lifetime license</span>
             </h3>
           </div>
           <p className="max-w-md text-[13.5px] leading-normal text-pretty text-muted-foreground">
