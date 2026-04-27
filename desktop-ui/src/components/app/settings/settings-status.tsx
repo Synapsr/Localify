@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "motion/react";
 import { useState } from "react";
+import { toast } from "sonner";
 
 import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
 import { CheckIcon, ServersIcon, TerminalIcon } from "@/components/icons";
@@ -18,8 +19,36 @@ import {
 } from "@/components/ui/dialog";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import type { InstallResultDto } from "@/types/roxy";
 
 type Status = "setup" | "off" | "running";
+
+function getInstallWarningMessage(result: InstallResultDto): string | null {
+  const warnings = result.steps.filter((step) => step.status === "warning");
+
+  if (warnings.length === 0) {
+    return null;
+  }
+
+  return warnings
+    .map((step) => (step.label ? `${step.label}: ${step.message}` : step.message))
+    .join("\n");
+}
+
+async function copySetupError(errorMessage: string) {
+  await navigator.clipboard.writeText(errorMessage);
+  toast.success("Setup error copied");
+}
+
+function showSetupFailureToast(errorMessage: string) {
+  toast.error("Setup failed", {
+    description: errorMessage,
+    action: {
+      label: "Copy error",
+      onClick: () => void copySetupError(errorMessage),
+    },
+  });
+}
 
 export const SettingsStatus = () => {
   const { data } = useQuery(bootstrapQueries.read());
@@ -27,6 +56,7 @@ export const SettingsStatus = () => {
   const install = useMutation(systemMutations.install(queryClient));
   const startDaemon = useMutation(daemonMutations.start(queryClient));
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [setupWarning, setSetupWarning] = useState<string | null>(null);
 
   if (!data) return null;
 
@@ -55,10 +85,28 @@ export const SettingsStatus = () => {
   const installError = install.error instanceof Error ? install.error.message : null;
   const daemonError =
     startDaemon.error instanceof Error ? startDaemon.error.message : null;
+  const setupError = installError ?? setupWarning;
   const portConflict = Boolean(
-    (status === "setup" && installError?.includes("already in use")) ||
+    (status === "setup" && setupError?.includes("already in use")) ||
       (status === "off" && daemonError?.includes("already in use")),
   );
+
+  async function handleInstall() {
+    setSetupWarning(null);
+
+    try {
+      const result = await install.mutateAsync();
+      const warning = getInstallWarningMessage(result);
+
+      if (warning) {
+        setSetupWarning(warning);
+        showSetupFailureToast(warning);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showSetupFailureToast(message);
+    }
+  }
 
   const primaryAction =
     status === "setup" ? (
@@ -66,7 +114,7 @@ export const SettingsStatus = () => {
         size="lg"
         variant="primary"
         loading={install.isPending}
-        onClick={() => install.mutate()}
+        onClick={handleInstall}
       >
         Set up
       </Button>
@@ -107,8 +155,10 @@ export const SettingsStatus = () => {
         </div>
       </motion.div>
 
-      {installError || daemonError ? (
-        <p className="px-1 text-xs text-[--color-danger]">{installError ?? daemonError}</p>
+      {setupError || daemonError ? (
+        <p className="px-1 text-xs text-[--color-danger] whitespace-pre-line">
+          {setupError ?? daemonError}
+        </p>
       ) : null}
 
       <DaemonPortConflicts visible={portConflict} />

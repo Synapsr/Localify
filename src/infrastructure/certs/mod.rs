@@ -59,7 +59,7 @@ pub enum CertError {
     TrustStoreError(String),
 
     #[error(
-        "Permission denied. Trust store modification requires root privileges.\nRun with: sudo {} register <domain> ...",
+        "Permission denied. Trust store modification requires root privileges.\nRun with: sudo {} install",
         BRANDING.cli_command()
     )]
     PermissionDenied,
