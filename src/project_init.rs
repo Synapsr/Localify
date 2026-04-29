@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::branding::BRANDING;
+use crate::domain::DomainName;
 
 const SYNTHETIC_PRIMARY_SERVICE_ID: &str = "__primary__";
 
@@ -252,23 +253,23 @@ pub fn resolve_folder_init_selection(
             bail!("Duplicate domain in init-project plan: {domain}");
         }
 
+        let package_update = if selection.update_dev_script {
+            build_package_update(blueprint, &target, &domain)?
+        } else {
+            None
+        };
+
         if let Some(update) = build_next_config_update(blueprint, &domain) {
             next_config_updates.push(update);
+        }
+        if let Some(update) = package_update {
+            package_updates.push(update);
         }
 
         services.push(ServicePlan {
             domain,
             target: target.clone(),
         });
-
-        if !selection.update_dev_script {
-            continue;
-        }
-
-        let update = build_package_update(blueprint, &target)?;
-        if let Some(update) = update {
-            package_updates.push(update);
-        }
     }
 
     if services.is_empty() {
@@ -581,6 +582,7 @@ fn read_workspace_app(
 fn build_package_update(
     blueprint: &FolderServiceBlueprint,
     target: &str,
+    domain: &str,
 ) -> Result<Option<PackageScriptUpdate>> {
     let Some(package_json_path) = blueprint.package_json_path.as_ref() else {
         bail!(
@@ -605,6 +607,7 @@ fn build_package_update(
             blueprint.display_path
         );
     };
+    let script = prepend_localify_url_banner(script, domain)?;
 
     Ok(Some(PackageScriptUpdate {
         package_json_path: package_json_path.clone(),
@@ -616,6 +619,20 @@ fn build_package_update(
 
 fn is_port_target(target: &str) -> bool {
     target.parse::<u16>().is_ok()
+}
+
+fn prepend_localify_url_banner(script: String, domain: &str) -> Result<String> {
+    let domain = DomainName::new(domain).with_context(|| {
+        format!(
+            "Cannot update the dev script: '{}' is not a valid Localify domain",
+            domain
+        )
+    })?;
+
+    Ok(format!(
+        "echo Localify URL: https://{} && {script}",
+        domain.as_str()
+    ))
 }
 
 fn build_next_config_update(
@@ -1455,11 +1472,36 @@ mod tests {
         assert_eq!(resolved.next_config_updates.len(), 1);
         assert_eq!(
             resolved.package_updates[0].script,
-            "next dev --hostname 127.0.0.1 --port 4010"
+            "echo Localify URL: https://demo.localify && next dev --hostname 127.0.0.1 --port 4010"
         );
         assert_eq!(
             resolved.next_config_updates[0].allowed_dev_origin,
             format!("demo{}", BRANDING.domain_suffix())
+        );
+    }
+
+    #[test]
+    fn resolve_folder_init_selection_rejects_unsafe_domain_for_package_update() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        write_package_json(&root.join("apps/web/package.json"), "next dev");
+
+        let plan = detect_folder_init_plan(root, Some("Demo")).unwrap();
+        let selection = FolderInitSelection {
+            id: plan.services[0].id.clone(),
+            domain: "demo;rm".into(),
+            target: "4010".into(),
+            enabled: true,
+            update_dev_script: true,
+        };
+
+        let error = resolve_folder_init_selection(root, "Demo", &[selection])
+            .expect_err("unsafe shell characters should not reach dev-localify");
+
+        assert!(
+            error.to_string().contains("is not a valid Localify domain"),
+            "{error}"
         );
     }
 

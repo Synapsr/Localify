@@ -1,10 +1,12 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { bootstrapQueries, systemMutations } from "@/lib/queries";
+import { getInstallWarningMessage } from "@/lib/util.install-result";
 
 import { SettingsRow } from "./settings-row";
 
@@ -14,6 +16,23 @@ export const SettingsSystem = () => {
   const install = useMutation(systemMutations.install(queryClient));
 
   if (!data) return null;
+
+  async function handleReinstall() {
+    try {
+      const result = await install.mutateAsync();
+      const warning = getInstallWarningMessage(result);
+
+      if (warning) {
+        toast.error("Setup needs attention", { description: warning });
+        return;
+      }
+
+      toast.success("System setup refreshed");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error("Setup failed", { description: message });
+    }
+  }
 
   return (
     <Card className="p-5">
@@ -47,7 +66,7 @@ export const SettingsSystem = () => {
           <Button
             variant="secondary"
             loading={install.isPending}
-            onClick={() => install.mutate()}
+            onClick={handleReinstall}
           >
             Reinstall
           </Button>

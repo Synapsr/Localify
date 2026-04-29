@@ -18,22 +18,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
+import { getInstallWarningMessage } from "@/lib/util.install-result";
 import { cn } from "@/lib/utils";
-import type { InstallResultDto } from "@/types/roxy";
 
 type Status = "setup" | "off" | "running";
-
-function getInstallWarningMessage(result: InstallResultDto): string | null {
-  const warnings = result.steps.filter((step) => step.status === "warning");
-
-  if (warnings.length === 0) {
-    return null;
-  }
-
-  return warnings
-    .map((step) => (step.label ? `${step.label}: ${step.message}` : step.message))
-    .join("\n");
-}
 
 async function copySetupError(errorMessage: string) {
   await navigator.clipboard.writeText(errorMessage);

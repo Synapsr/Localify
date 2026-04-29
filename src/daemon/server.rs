@@ -109,7 +109,7 @@ impl Server {
             "Localify daemon starting"
         );
 
-        let dns_handle = spawn_dns_server(self.dns_port, self.lan_ip);
+        let dns_handle = spawn_dns_server(self.dns_port);
         spawn_reload_listener(
             self.state.clone(),
             self.reload_rx,
@@ -142,8 +142,8 @@ impl Server {
     }
 }
 
-fn spawn_dns_server(port: u16, lan_ip: Ipv4Addr) -> tokio::task::JoinHandle<()> {
-    let dns_server = DnsServer::new(port, lan_ip);
+fn spawn_dns_server(port: u16) -> tokio::task::JoinHandle<()> {
+    let dns_server = DnsServer::new(port);
     tokio::spawn(async move {
         if let Err(e) = dns_server.run().await {
             error!(error = %e, "DNS server error");

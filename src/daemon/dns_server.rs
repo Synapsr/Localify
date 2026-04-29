@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -9,21 +9,41 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tracing::{debug, info};
 
 use crate::branding::BRANDING;
+use crate::infrastructure::network::get_lan_ip;
 
-/// Resolves the configured local suffix to the LAN IP.
+type LanIpProvider = Arc<dyn Fn() -> Ipv4Addr + Send + Sync>;
+
+/// Resolves the configured local suffix to the best host address for the caller.
 #[derive(Clone)]
 pub struct IpResolver {
-    lan_ip: Ipv4Addr,
+    lan_ip: LanIpProvider,
 }
 
 impl IpResolver {
-    pub fn new(lan_ip: Ipv4Addr) -> Self {
-        Self { lan_ip }
+    pub fn new() -> Self {
+        Self {
+            lan_ip: Arc::new(get_lan_ip),
+        }
     }
 
-    /// Returns the LAN IP for all queries.
-    pub fn resolve(&self) -> Ipv4Addr {
-        self.lan_ip
+    #[cfg(test)]
+    fn with_lan_ip(lan_ip: Ipv4Addr) -> Self {
+        Self {
+            lan_ip: Arc::new(move || lan_ip),
+        }
+    }
+
+    /// Local callers should never depend on the current network interface.
+    pub fn resolve(&self, client_ip: IpAddr) -> Ipv4Addr {
+        if client_ip.is_loopback() {
+            Ipv4Addr::LOCALHOST
+        } else {
+            (self.lan_ip)()
+        }
+    }
+
+    fn current_lan_ip(&self) -> Ipv4Addr {
+        (self.lan_ip)()
     }
 }
 
@@ -34,11 +54,11 @@ pub struct DnsServer {
 }
 
 impl DnsServer {
-    pub fn new(port: u16, lan_ip: Ipv4Addr) -> Self {
+    pub fn new(port: u16) -> Self {
         Self {
             port,
             ttl: 1,
-            ip_resolver: Arc::new(IpResolver::new(lan_ip)),
+            ip_resolver: Arc::new(IpResolver::new()),
         }
     }
 
@@ -60,13 +80,13 @@ impl DnsServer {
             info!(
                 ipv4 = %ipv4_addr,
                 ipv6 = %ipv6_addr,
-                response_ip = %self.ip_resolver.lan_ip,
+                current_lan_ip = %self.ip_resolver.current_lan_ip(),
                 "DNS server listening"
             );
         } else {
             info!(
                 ipv4 = %ipv4_addr,
-                response_ip = %self.ip_resolver.lan_ip,
+                current_lan_ip = %self.ip_resolver.current_lan_ip(),
                 "DNS server listening (IPv6 unavailable, using IPv4 dual-stack)"
             );
         }
@@ -89,28 +109,27 @@ impl DnsServer {
 
 async fn serve_udp(socket: UdpSocket, ttl: u32, resolver: Arc<IpResolver>) -> Result<()> {
     let mut buf = [0u8; 512]; // Standard DNS UDP size
-    let response_ip = resolver.resolve();
 
     loop {
         let (len, addr) = socket.recv_from(&mut buf).await?;
+        let response_ip = resolver.resolve(addr.ip());
         let response = handle_query(&buf[..len], ttl, response_ip);
         let _ = socket.send_to(&response, addr).await;
     }
 }
 
 async fn serve_tcp(listener: TcpListener, ttl: u32, resolver: Arc<IpResolver>) -> Result<()> {
-    let response_ip = resolver.resolve();
-
     loop {
-        let (stream, _addr) = listener.accept().await?;
-        tokio::spawn(handle_tcp_connection(stream, ttl, response_ip));
+        let (stream, addr) = listener.accept().await?;
+        tokio::spawn(handle_tcp_connection(stream, ttl, resolver.clone(), addr));
     }
 }
 
 async fn handle_tcp_connection(
     mut stream: TcpStream,
     ttl: u32,
-    response_ip: Ipv4Addr,
+    resolver: Arc<IpResolver>,
+    addr: SocketAddr,
 ) -> Result<()> {
     // TCP DNS uses 2-byte length prefix
     let mut len_buf = [0u8; 2];
@@ -120,6 +139,7 @@ async fn handle_tcp_connection(
     let mut query_buf = vec![0u8; len];
     stream.read_exact(&mut query_buf).await?;
 
+    let response_ip = resolver.resolve(addr.ip());
     let response = handle_query(&query_buf, ttl, response_ip);
 
     // Send response with length prefix
@@ -291,13 +311,29 @@ mod tests {
     const TEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 100);
 
     fn test_resolver() -> IpResolver {
-        IpResolver::new(TEST_IP)
+        IpResolver::with_lan_ip(TEST_IP)
     }
 
     #[test]
-    fn test_ip_resolver_returns_configured_ip() {
+    fn test_ip_resolver_returns_loopback_for_local_clients() {
         let resolver = test_resolver();
-        assert_eq!(resolver.resolve(), TEST_IP);
+        assert_eq!(
+            resolver.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Ipv4Addr::LOCALHOST
+        );
+        assert_eq!(
+            resolver.resolve(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            Ipv4Addr::LOCALHOST
+        );
+    }
+
+    #[test]
+    fn test_ip_resolver_returns_lan_ip_for_remote_clients() {
+        let resolver = test_resolver();
+        assert_eq!(
+            resolver.resolve(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))),
+            TEST_IP
+        );
     }
 
     #[test]

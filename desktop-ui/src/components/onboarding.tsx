@@ -24,6 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { captureDesktopEvent } from "@/lib/analytics";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
+import { assertInstallCompleted } from "@/lib/util.install-result";
 import { cn } from "@/lib/utils";
 
 interface OnboardingProps {
@@ -736,13 +737,17 @@ function ActivateStep({
   const showPortConflicts = state === "error" && Boolean(portConflictMessage);
 
   async function activate() {
+    let activationPhase: "install" | "start" | null = null;
     setState("running");
     setPortConflictMessage(null);
     captureDesktopEvent("desktop_onboarding_activation_started");
     try {
+      activationPhase = "install";
       setPhase("install");
       await waitForNextPaint();
-      await install.mutateAsync();
+      const installResult = await install.mutateAsync();
+      assertInstallCompleted(installResult);
+      activationPhase = "start";
       setPhase("start");
       await startDaemon.mutateAsync({ verbose: false });
       await queryClient.fetchQuery(bootstrapQueries.read());
@@ -754,10 +759,13 @@ function ActivateStep({
       const msg = err instanceof Error ? err.message : String(err);
       setState("error");
       captureDesktopEvent("desktop_onboarding_activation_failed", {
-        phase,
-        reason: phase === "start" && msg.includes("already in use") ? "port_conflict" : "unknown",
+        phase: activationPhase,
+        reason:
+          activationPhase === "start" && msg.includes("already in use")
+            ? "port_conflict"
+            : "unknown",
       });
-      if (phase === "start" && msg.includes("already in use")) {
+      if (activationPhase === "start" && msg.includes("already in use")) {
         setPortConflictMessage(msg);
       } else {
         setPortConflictMessage(null);

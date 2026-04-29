@@ -1240,20 +1240,7 @@ impl DesktopApi {
 
     pub fn install(&self) -> Result<InstallResultDto> {
         if self.should_use_system_helper() {
-            let mut result = self.ensure_helper_running()?.install_roxy()?;
-
-            if let Some(step) = self.ensure_desktop_ca_trust_step()? {
-                result.steps.push(step);
-            }
-
-            result
-                .steps
-                .push(self.cli_access_step_with(|helper| helper.setup_cli_access()));
-            if let Some(step) = self.node_trust_step() {
-                result.steps.push(step);
-            }
-
-            return Ok(result);
+            return self.install_with_system_helper();
         }
 
         let (config, paths) = self.load_config_and_paths()?;
@@ -1286,6 +1273,36 @@ impl DesktopApi {
 
         Ok(InstallResultDto {
             lan_ip: result.lan_ip.to_string(),
+            steps,
+        })
+    }
+
+    fn install_with_system_helper(&self) -> Result<InstallResultDto> {
+        self.run_privileged_desktop_install()?;
+
+        let helper = self.ensure_helper_running()?;
+        let mut steps = vec![StepDto {
+            label: Some("System setup".into()),
+            status: "success".into(),
+            message: format!(
+                "{} system setup completed with administrator privileges.",
+                BRANDING.app_name
+            ),
+        }];
+
+        if let Some(step) = self.ensure_desktop_ca_trust_step()? {
+            steps.push(step);
+        }
+
+        let status = self.daemon_status()?;
+        steps.push(root_ca_verification_step(status.ca_installed));
+        steps.push(self.cli_access_step_with(|_| helper.setup_cli_access()));
+        if let Some(step) = self.node_trust_step() {
+            steps.push(step);
+        }
+
+        Ok(InstallResultDto {
+            lan_ip: status.lan_ip,
             steps,
         })
     }
@@ -2149,6 +2166,31 @@ impl DesktopApi {
         )
     }
 
+    fn run_privileged_desktop_install(&self) -> Result<()> {
+        let socket_path = self.helper_socket_path()?;
+        let uid = current_uid()?;
+        let commands = [
+            vec!["install".into()],
+            vec![
+                "helper".into(),
+                "uninstall-service".into(),
+                "--uid".into(),
+                uid.to_string(),
+            ],
+            vec![
+                "helper".into(),
+                "ensure-running".into(),
+                "--socket".into(),
+                socket_path.display().to_string(),
+                "--uid".into(),
+                uid.to_string(),
+            ],
+        ];
+
+        self.run_cli_commands_with_admin(&commands)?;
+        Ok(())
+    }
+
     fn helper_matches_runtime_config(&self, client: &SystemHelperClient) -> Result<bool> {
         if !BRANDING.is_dev_profile() {
             return Ok(true);
@@ -2200,9 +2242,14 @@ impl DesktopApi {
 
     #[cfg(target_os = "macos")]
     fn run_cli_command_with_admin(&self, args: &[String]) -> Result<String> {
+        self.run_cli_commands_with_admin(&[args.to_vec()])
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_cli_commands_with_admin(&self, commands: &[Vec<String>]) -> Result<String> {
         self.ensure_cli_binary_exists()?;
 
-        let command = cli_shell_command(&self.binary_path, &self.config_path, args);
+        let command = cli_shell_commands(&self.binary_path, &self.config_path, commands);
         let script = format!(
             "do shell script \"{}\" with administrator privileges",
             escape_applescript_string(&command)
@@ -2226,6 +2273,11 @@ impl DesktopApi {
 
     #[cfg(not(target_os = "macos"))]
     fn run_cli_command_with_admin(&self, _args: &[String]) -> Result<String> {
+        self.run_cli_commands_with_admin(&[])
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn run_cli_commands_with_admin(&self, _commands: &[Vec<String>]) -> Result<String> {
         bail!(
             "Desktop system-mode actions currently require macOS administrator integration. \
              Run the equivalent `{}` CLI command manually on this platform.",
@@ -2279,7 +2331,7 @@ impl DesktopApi {
 
     #[cfg(target_os = "macos")]
     fn ensure_desktop_ca_trust_step(&self) -> Result<Option<StepDto>> {
-        Ok(None)
+        Ok(Some(macos_ensure_user_ca_trust(&self.ca_cert_path())?))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2999,6 +3051,22 @@ fn is_missing_macos_certificate_error(message: &str) -> bool {
 }
 
 fn cli_shell_command(binary_path: &Path, config_path: &Path, args: &[String]) -> String {
+    cli_shell_command_parts(binary_path, config_path, args).join(" ")
+}
+
+fn cli_shell_commands(binary_path: &Path, config_path: &Path, commands: &[Vec<String>]) -> String {
+    if let [args] = commands {
+        return cli_shell_command(binary_path, config_path, args);
+    }
+
+    commands
+        .iter()
+        .map(|args| cli_shell_command_parts(binary_path, config_path, args).join(" "))
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+fn cli_shell_command_parts(binary_path: &Path, config_path: &Path, args: &[String]) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(profile) = BRANDING.active_profile() {
         parts.push(format!(
@@ -3014,7 +3082,7 @@ fn cli_shell_command(binary_path: &Path, config_path: &Path, args: &[String]) ->
         shell_escape(&config_path.to_string_lossy()),
     ]);
     parts.extend(args.iter().map(|arg| shell_escape(arg)));
-    parts.join(" ")
+    parts
 }
 
 fn shell_escape(value: &str) -> String {
@@ -3159,6 +3227,22 @@ fn map_cli_access_step(label: Option<String>, result: Result<CliAccessDto>) -> S
     }
 }
 
+fn root_ca_verification_step(ca_installed: bool) -> StepDto {
+    if ca_installed {
+        return StepDto {
+            label: Some("Root CA".into()),
+            status: "success".into(),
+            message: "Root CA is trusted by macOS.".into(),
+        };
+    }
+
+    StepDto {
+        label: Some("Root CA".into()),
+        status: "warning".into(),
+        message: "Root CA setup finished, but macOS still does not trust it. HTTPS certificates will not work until the CA is trusted.".into(),
+    }
+}
+
 fn map_node_trust_dto(
     status: node_trust::NodeTrustStatus,
     already_ready: bool,
@@ -3212,6 +3296,92 @@ fn macos_user_ca_is_trusted(cert_path: &Path) -> Result<bool> {
         ))?;
 
     Ok(output.status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
+    if macos_user_ca_is_trusted(cert_path)? {
+        return Ok(StepDto {
+            label: Some("Trust CA in your macOS account".into()),
+            status: "skipped".into(),
+            message: format!(
+                "The {} CA was already trusted by this macOS account.",
+                BRANDING.app_name
+            ),
+        });
+    }
+
+    if !cert_path.exists() {
+        return Ok(StepDto {
+            label: Some("Trust CA in your macOS account".into()),
+            status: "warning".into(),
+            message: format!(
+                "The {} CA file does not exist yet, so it could not be trusted by this macOS account.",
+                BRANDING.app_name
+            ),
+        });
+    }
+
+    let keychain_path = macos_login_keychain_path()?;
+    if let Err(error) = delete_macos_keychain_certificates(&keychain_path) {
+        return Ok(StepDto {
+            label: Some("Trust CA in your macOS account".into()),
+            status: "warning".into(),
+            message: format!(
+                "macOS could not remove stale {} CA entries before applying trust: {error}",
+                BRANDING.app_name
+            ),
+        });
+    }
+
+    let cert_path_value = path_as_utf8(cert_path)?;
+    let keychain_path_value = path_as_utf8(&keychain_path)?;
+    let output = Command::new("security")
+        .args([
+            "add-trusted-cert",
+            "-r",
+            "trustRoot",
+            "-k",
+            &keychain_path_value,
+            &cert_path_value,
+        ])
+        .output()
+        .context(format!(
+            "Failed to ask macOS to trust the {} CA for this account",
+            BRANDING.app_name
+        ))?;
+
+    if !output.status.success() {
+        return Ok(StepDto {
+            label: Some("Trust CA in your macOS account".into()),
+            status: "warning".into(),
+            message: format!(
+                "macOS did not trust the {} CA for this account: {}",
+                BRANDING.app_name,
+                cli_failure_message(&output)
+            ),
+        });
+    }
+
+    if !macos_user_ca_is_trusted(cert_path)? {
+        return Ok(StepDto {
+            label: Some("Trust CA in your macOS account".into()),
+            status: "warning".into(),
+            message: format!(
+                "macOS accepted the {} CA trust request, but verification still failed.",
+                BRANDING.app_name
+            ),
+        });
+    }
+
+    Ok(StepDto {
+        label: Some("Trust CA in your macOS account".into()),
+        status: "success".into(),
+        message: format!(
+            "The {} CA is trusted by this macOS account.",
+            BRANDING.app_name
+        ),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -3588,7 +3758,7 @@ fn tail_lines(path: &Path, line_count: usize) -> Result<String> {
 mod tests {
     use super::{
         CliRemovalOutcome, DesktopApi, cli_command_points_to_binary, cli_shell_command,
-        ensure_cli_command_link, export_route_string, normalize_desktop_route,
+        cli_shell_commands, ensure_cli_command_link, export_route_string, normalize_desktop_route,
         normalize_project_snapshot_id, parse_desktop_route, remove_cli_command_link, shell_escape,
         validate_settings_snapshot,
     };
@@ -3695,6 +3865,36 @@ mod tests {
         assert_eq!(
             command,
             "'/tmp/localify' '--config' '/etc/localify/config.toml' 'register' 'my app.localify' '--route' '/=3000'"
+        );
+    }
+
+    #[test]
+    fn cli_shell_commands_runs_commands_in_one_admin_session() {
+        let command = cli_shell_commands(
+            Path::new("/tmp/localify"),
+            Path::new("/etc/localify/config.toml"),
+            &[
+                vec!["install".into()],
+                vec![
+                    "helper".into(),
+                    "uninstall-service".into(),
+                    "--uid".into(),
+                    "501".into(),
+                ],
+                vec![
+                    "helper".into(),
+                    "ensure-running".into(),
+                    "--socket".into(),
+                    "/var/run/localify-helper-501.sock".into(),
+                    "--uid".into(),
+                    "501".into(),
+                ],
+            ],
+        );
+
+        assert_eq!(
+            command,
+            "'/tmp/localify' '--config' '/etc/localify/config.toml' 'install' && '/tmp/localify' '--config' '/etc/localify/config.toml' 'helper' 'uninstall-service' '--uid' '501' && '/tmp/localify' '--config' '/etc/localify/config.toml' 'helper' 'ensure-running' '--socket' '/var/run/localify-helper-501.sock' '--uid' '501'"
         );
     }
 
