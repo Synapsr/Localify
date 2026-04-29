@@ -16,6 +16,8 @@ use roxy::desktop::dto::{
     UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use tauri::async_runtime;
 use tauri::{AppHandle, Runtime};
@@ -81,8 +83,33 @@ pub struct AppUpdateCheckDto {
     pub update: Option<AppUpdateInfoDto>,
 }
 
+const INSTALL_ATTRIBUTION_PREFIX: &str = "localify:install-attribution:v1:";
+
 fn map_error<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_text() -> Result<Option<String>, String> {
+    let output = Command::new("pbpaste")
+        .output()
+        .map_err(|error| format!("Failed to read clipboard: {error}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.starts_with(INSTALL_ATTRIBUTION_PREFIX) {
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_clipboard_text() -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 fn build_updater<R: Runtime>(
@@ -156,6 +183,13 @@ pub async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateCheckDto
 #[tauri::command]
 pub async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     install_app_update_with_handle(app).await
+}
+
+#[tauri::command]
+pub async fn read_install_attribution_clipboard() -> Result<Option<String>, String> {
+    async_runtime::spawn_blocking(read_clipboard_text)
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]

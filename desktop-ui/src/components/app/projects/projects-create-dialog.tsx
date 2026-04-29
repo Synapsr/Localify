@@ -9,6 +9,7 @@ import type { CreateProjectDomainRequest } from "@/types/roxy";
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useAppForm } from "@/hooks/form/form";
+import { captureDesktopEvent } from "@/lib/analytics";
 import { bootstrapQueries, projectMutations } from "@/lib/queries";
 import {
   createProjectSchema,
@@ -65,6 +66,10 @@ export const ProjectsCreateDialog = ({ children }: PropsWithChildren) => {
           }));
 
         await createProject.mutateAsync({ name: value.name, domains });
+        captureDesktopEvent("desktop_project_created", {
+          mode: "manual",
+          domain_count: domains.length,
+        });
         closeAndReset();
       } catch (rawError) {
         setSubmitError(rawError instanceof Error ? rawError.message : String(rawError));
@@ -90,6 +95,11 @@ export const ProjectsCreateDialog = ({ children }: PropsWithChildren) => {
             enabled: service.enabled,
             updateDevScript: service.updateDevScript,
           })),
+        });
+        captureDesktopEvent("desktop_project_created", {
+          mode: "folder",
+          service_count: value.services.length,
+          enabled_service_count: value.services.filter((service) => service.enabled).length,
         });
         closeAndReset();
       } catch (rawError) {

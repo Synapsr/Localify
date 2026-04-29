@@ -1,30 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import {
-  createProjectWithDomainsRequestSchema,
-  registerDomainRequestSchema,
-  updateDomainRequestSchema,
-} from "./validators/validator.create-project";
-import {
-  detectProjectInitPlanRequestSchema,
-  initProjectFromFolderRequestSchema,
-} from "./validators/validator.init-project-from-folder";
-import {
-  activateLicenseRequestSchema,
-  importOfflineLicenseRequestSchema,
-  keygenSettingsUpdateRequestSchema,
-} from "./validators/validator.license";
-import { launcherPreferencesSchema } from "./validators/validator.launcher-preferences";
-import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
-import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
-import { removeProjectRequestSchema } from "./validators/validator.remove-project";
-import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
-import { stopLocalDevServerRequestSchema } from "./validators/validator.stop-local-dev-server";
-import {
-  settingsExportRequestSchema,
-  settingsImportPreviewRequestSchema,
-  settingsImportRequestSchema,
-} from "./validators/validator.settings-transfer";
 import type {
   ActivateLicenseRequest,
   AddRouteRequest,
@@ -82,6 +57,32 @@ import type {
   UpdateProjectRequest,
 } from "../types/roxy";
 
+import {
+  createProjectWithDomainsRequestSchema,
+  registerDomainRequestSchema,
+  updateDomainRequestSchema,
+} from "./validators/validator.create-project";
+import {
+  detectProjectInitPlanRequestSchema,
+  initProjectFromFolderRequestSchema,
+} from "./validators/validator.init-project-from-folder";
+import { launcherPreferencesSchema } from "./validators/validator.launcher-preferences";
+import {
+  activateLicenseRequestSchema,
+  importOfflineLicenseRequestSchema,
+  keygenSettingsUpdateRequestSchema,
+} from "./validators/validator.license";
+import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
+import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
+import { removeProjectRequestSchema } from "./validators/validator.remove-project";
+import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
+import {
+  settingsExportRequestSchema,
+  settingsImportPreviewRequestSchema,
+  settingsImportRequestSchema,
+} from "./validators/validator.settings-transfer";
+import { stopLocalDevServerRequestSchema } from "./validators/validator.stop-local-dev-server";
+
 async function tauriInvoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, payload);
@@ -125,14 +126,13 @@ export interface DesktopClient {
   getBootstrap(): Promise<BootstrapDto>;
   checkAppUpdate(): Promise<AppUpdateCheckDto>;
   installAppUpdate(): Promise<void>;
+  readInstallAttributionClipboard(): Promise<string | null>;
   consumePendingDeepLink(): Promise<DeepLinkPayloadDto | null>;
   getConfig(): Promise<AppConfigDto>;
   updateConfig(request: ConfigUpdateRequest): Promise<AppConfigDto>;
   getLicensingStatus(): Promise<LicensingDto>;
   exportSettings(request: SettingsExportRequest): Promise<SettingsExportResultDto>;
-  previewSettingsImport(
-    request: SettingsImportPreviewRequest,
-  ): Promise<SettingsImportPreviewDto>;
+  previewSettingsImport(request: SettingsImportPreviewRequest): Promise<SettingsImportPreviewDto>;
   importSettings(request: SettingsImportRequest): Promise<SettingsImportResultDto>;
   updateKeygenSettings(request: KeygenSettingsUpdateRequest): Promise<LicensingDto>;
   activateLicense(request: ActivateLicenseRequest): Promise<LicensingDto>;
@@ -143,9 +143,7 @@ export interface DesktopClient {
   listDomains(): Promise<DomainInfoDto[]>;
   listProjects(): Promise<ProjectInfoDto[]>;
   getAvailablePort(): Promise<AvailablePortDto>;
-  detectProjectInitPlan(
-    request: DetectProjectInitPlanRequest,
-  ): Promise<DetectProjectInitPlanDto>;
+  detectProjectInitPlan(request: DetectProjectInitPlanRequest): Promise<DetectProjectInitPlanDto>;
   installRoxy(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
   setupNodeTrust(): Promise<NodeTrustDto>;
@@ -154,9 +152,7 @@ export interface DesktopClient {
   getUninstallPreview(): Promise<UninstallPreviewDto>;
   uninstallRoxy(): Promise<UninstallResultDto>;
   createProject(request: CreateProjectRequest): Promise<ProjectInfoDto>;
-  createProjectWithDomains(
-    request: CreateProjectWithDomainsRequest,
-  ): Promise<ProjectInfoDto>;
+  createProjectWithDomains(request: CreateProjectWithDomainsRequest): Promise<ProjectInfoDto>;
   initProjectFromFolder(
     request: InitProjectFromFolderRequest,
   ): Promise<InitProjectFromFolderResultDto>;
@@ -187,6 +183,7 @@ export function createDesktopClient(): DesktopClient {
     getBootstrap: () => tauriInvoke("get_bootstrap"),
     checkAppUpdate: () => tauriInvoke("check_app_update"),
     installAppUpdate: () => tauriInvoke("install_app_update"),
+    readInstallAttributionClipboard: () => tauriInvoke("read_install_attribution_clipboard"),
     consumePendingDeepLink: () => tauriInvoke("consume_pending_deep_link"),
     getConfig: () => tauriInvoke("get_config"),
     updateConfig: (request) => tauriInvoke("update_config", { request }),
@@ -249,8 +246,7 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("remove_project", {
         request: removeProjectRequestSchema.parse(request),
       }),
-    assignDomainProject: (request) =>
-      tauriInvoke("assign_domain_project", { request }),
+    assignDomainProject: (request) => tauriInvoke("assign_domain_project", { request }),
     registerDomain: (request) =>
       tauriInvoke("register_domain", {
         request: registerDomainRequestSchema.parse(request),

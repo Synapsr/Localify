@@ -1182,6 +1182,7 @@ pub fn run() {
             commands::get_bootstrap,
             commands::check_app_update,
             commands::install_app_update,
+            commands::read_install_attribution_clipboard,
             commands::get_config,
             commands::update_config,
             commands::get_licensing_status,

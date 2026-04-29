@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppForm } from "@/hooks/form/form";
+import { captureDesktopEvent } from "@/lib/analytics";
 import { bootstrapQueries, domainMutations, utilityMutations } from "@/lib/queries";
 import {
   type ProjectDomainEntry,
@@ -74,6 +75,10 @@ export const ProjectAddDomainDialog = ({ project, children }: ProjectAddDomainDi
           wildcard: value.wildcard,
           routes: [value.target],
           projectId: project.id,
+        });
+        captureDesktopEvent("desktop_domain_added", {
+          wildcard: value.wildcard,
+          project_attached: true,
         });
         form.reset();
         setOpen(false);

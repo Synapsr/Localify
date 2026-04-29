@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { bootstrapQueries } from "@/lib/queries";
 
+import { SettingsAnalytics } from "./settings-analytics";
 import { SettingsCli } from "./settings-cli";
 import { SettingsDeveloper } from "./settings-developer";
 import { SettingsHeader } from "./settings-header";
@@ -29,6 +30,7 @@ export const SettingsScreen = () => {
         <SettingsStatus />
         <SettingsTroubleshooting />
         <SettingsLaunchers />
+        <SettingsAnalytics />
         <SettingsTransfer />
         <SettingsHotkeys />
         <SettingsCli />

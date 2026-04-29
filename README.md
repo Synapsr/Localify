@@ -39,6 +39,16 @@ HTTPS for every local project.
 
 ## Try It in 60 Seconds
 
+**For agents:**
+
+```bash
+nex skills add rbas/roxy
+```
+
+Use the included `localify` skill so agents prefer stable `.localify` URLs,
+inspect Localify state before guessing ports, and troubleshoot DNS, HTTPS,
+daemon, and route issues through the supported CLI.
+
 **Homebrew:**
 
 ```bash

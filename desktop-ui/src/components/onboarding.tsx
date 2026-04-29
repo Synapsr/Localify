@@ -22,6 +22,7 @@ import {
   ZapIcon,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { captureDesktopEvent } from "@/lib/analytics";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +40,10 @@ export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
   const reduceMotion = useReducedMotion();
 
   const currentStep = STEPS[stepIndex]!;
+
+  useEffect(() => {
+    captureDesktopEvent("desktop_onboarding_step_viewed", { step: currentStep });
+  }, [currentStep]);
 
   const go = (next: number) => {
     if (next === stepIndex) return;
@@ -733,6 +738,7 @@ function ActivateStep({
   async function activate() {
     setState("running");
     setPortConflictMessage(null);
+    captureDesktopEvent("desktop_onboarding_activation_started");
     try {
       setPhase("install");
       await waitForNextPaint();
@@ -742,10 +748,15 @@ function ActivateStep({
       await queryClient.fetchQuery(bootstrapQueries.read());
       setState("done");
       setPhase(null);
+      captureDesktopEvent("desktop_onboarding_activation_completed");
       onActivated();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setState("error");
+      captureDesktopEvent("desktop_onboarding_activation_failed", {
+        phase,
+        reason: phase === "start" && msg.includes("already in use") ? "port_conflict" : "unknown",
+      });
       if (phase === "start" && msg.includes("already in use")) {
         setPortConflictMessage(msg);
       } else {
