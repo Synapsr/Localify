@@ -34,6 +34,12 @@ interface OnboardingProps {
 
 type StepId = "welcome" | "why" | "how" | "activate";
 const STEPS: readonly StepId[] = ["welcome", "why", "how", "activate"] as const;
+const FLOW_VIDEOS = [
+  "/videos/flow-2-web.mp4",
+  "/videos/flow-3-web.mp4",
+  "/videos/flow-4-web.mp4",
+] as const;
+const warmedFlowVideos = new Map<string, HTMLVideoElement>();
 
 export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
   const [stepIndex, setStepIndex] = useState(0);
@@ -45,6 +51,10 @@ export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
   useEffect(() => {
     captureDesktopEvent("desktop_onboarding_step_viewed", { step: currentStep });
   }, [currentStep]);
+
+  useEffect(() => {
+    warmFlowVideos();
+  }, []);
 
   const go = (next: number) => {
     if (next === stepIndex) return;
@@ -119,6 +129,22 @@ export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
       <StepIndicator current={stepIndex} count={STEPS.length} onSelect={go} />
     </div>
   );
+}
+
+function warmFlowVideos() {
+  if (typeof document === "undefined") return;
+
+  for (const src of FLOW_VIDEOS) {
+    if (warmedFlowVideos.has(src)) continue;
+
+    const video = document.createElement("video");
+    video.src = src;
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+    video.load();
+    warmedFlowVideos.set(src, video);
+  }
 }
 
 function BackgroundDecor() {
@@ -532,18 +558,18 @@ function HowItWorksStep({
     {
       title: "Drop a folder, get a project",
       description: `Localify scans the folder, detects each app, and proposes ${suffix} hostnames. Works for a single project or a whole monorepo.`,
-      video: "/videos/flow-2-web.mp4",
+      video: FLOW_VIDEOS[0],
     },
     {
       title: "Or run localify init from your editor",
       description:
         "Same result, interactive prompts. The project shows up in the app, ready to go.",
-      video: "/videos/flow-3-web.mp4",
+      video: FLOW_VIDEOS[1],
     },
     {
       title: "Projects by name, not by port",
       description: `Every project gets a fixed ${suffix} hostname with trusted HTTPS. No port drift, demos that look like a product.`,
-      video: "/videos/flow-4-web.mp4",
+      video: FLOW_VIDEOS[2],
     },
   ];
 
@@ -619,7 +645,7 @@ function FlowVideo({ src, onOpen }: { src: string; onOpen: () => void }) {
         loop
         muted
         playsInline
-        preload="metadata"
+        preload="auto"
       />
       <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/0 opacity-0 transition duration-200 group-hover:bg-black/40 group-hover:opacity-100 group-focus-visible:bg-black/40 group-focus-visible:opacity-100">
         <div className="flex items-center gap-1.5 rounded-full bg-background/90 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm backdrop-blur">
@@ -677,6 +703,7 @@ function FlowVideoModal({ src, onClose }: { src: string | null; onClose: () => v
               loop
               muted
               playsInline
+              preload="auto"
             />
           </motion.div>
         </motion.div>
