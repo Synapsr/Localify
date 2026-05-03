@@ -24,21 +24,21 @@ use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
-    AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
-    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
-    DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, EnvironmentDto,
-    FolderInitServiceDto, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
-    InitProjectFromFolderResultDto, InitProjectRequest, InitProjectResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherAvailabilityDto, LogsDto,
-    LogsRequest, NodeTrustDto, OpenInEditorRequest, PortConflictDto, ProjectInfoDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RouteDto,
-    RunLocalDevServerRequest, SettingsExportRequest, SettingsExportResultDto,
-    SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
-    SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
-    SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
-    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
+    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
+    DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest,
+    EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
+    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
+    InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
+    LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest,
+    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, RouteDto, RunLocalDevServerRequest, SettingsExportRequest,
+    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewProjectDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSettingsDto,
+    SettingsTransferSnapshotDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::home_dir::user_home_dir;
@@ -1243,6 +1243,10 @@ impl DesktopApi {
             return self.install_with_system_helper();
         }
 
+        let daemon_was_running = self
+            .daemon_status()
+            .map(|status| status.running)
+            .unwrap_or(false);
         let (config, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
         let dns = get_dns_service()?;
@@ -1264,6 +1268,11 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
+        let refresh = self.refresh_domain_certificates_local()?;
+        steps.extend(refresh.steps);
+        if refresh.refreshed {
+            steps.push(self.restart_daemon_after_certificate_refresh_step(daemon_was_running));
+        }
         if !self.direct_mode {
             steps.push(self.cli_access_step_with(|_| self.install_cli_access()));
             if let Some(step) = self.node_trust_step() {
@@ -1281,6 +1290,10 @@ impl DesktopApi {
         self.run_privileged_desktop_install()?;
 
         let helper = self.ensure_helper_running()?;
+        let daemon_was_running = helper
+            .get_daemon_status()
+            .map(|status| status.running)
+            .unwrap_or(false);
         let mut steps = vec![StepDto {
             label: Some("System setup".into()),
             status: "success".into(),
@@ -1294,6 +1307,15 @@ impl DesktopApi {
             steps.push(step);
         }
 
+        let refresh = helper.refresh_domain_certificates()?;
+        steps.extend(refresh.steps);
+        if refresh.refreshed {
+            steps.push(restart_daemon_after_certificate_refresh_step_with(
+                daemon_was_running,
+                || helper.restart_daemon(StartDaemonRequest { verbose: false }),
+            ));
+        }
+
         let status = self.daemon_status()?;
         steps.push(root_ca_verification_step(status.ca_installed));
         steps.push(self.cli_access_step_with(|_| helper.setup_cli_access()));
@@ -1304,6 +1326,82 @@ impl DesktopApi {
         Ok(InstallResultDto {
             lan_ip: status.lan_ip,
             steps,
+        })
+    }
+
+    pub fn refresh_domain_certificates(&self) -> Result<CertificateRefreshDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.refresh_domain_certificates();
+        }
+
+        self.refresh_domain_certificates_local()
+    }
+
+    fn refresh_domain_certificates_local(&self) -> Result<CertificateRefreshDto> {
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let configured_domains = self.config_store().list_configured_domains()?;
+        let https_domains = configured_domains
+            .iter()
+            .filter(|domain| domain.registration.is_https_enabled())
+            .collect::<Vec<_>>();
+
+        if https_domains.is_empty() {
+            return Ok(CertificateRefreshDto {
+                refreshed: false,
+                steps: vec![StepDto {
+                    label: Some("Domain certificates".into()),
+                    status: "skipped".into(),
+                    message: "No HTTPS domain certificates need to be refreshed.".into(),
+                }],
+            });
+        }
+
+        let mut refreshed = 0usize;
+        let mut failures = Vec::new();
+        for domain in https_domains {
+            match certs.create_and_install(domain.registration.pattern()) {
+                Ok(()) => refreshed += 1,
+                Err(error) => failures.push(format!("{}: {error}", domain.registration.pattern())),
+            }
+        }
+
+        let message = if failures.is_empty() {
+            format!(
+                "Refreshed {refreshed} HTTPS domain certificate{}.",
+                plural_suffix(refreshed)
+            )
+        } else {
+            let preview = failures
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "Refreshed {refreshed} HTTPS domain certificate{}, but {} failed: {preview}",
+                plural_suffix(refreshed),
+                failures.len()
+            )
+        };
+
+        Ok(CertificateRefreshDto {
+            refreshed: refreshed > 0,
+            steps: vec![StepDto {
+                label: Some("Domain certificates".into()),
+                status: if failures.is_empty() {
+                    "success".into()
+                } else {
+                    "warning".into()
+                },
+                message,
+            }],
+        })
+    }
+
+    fn restart_daemon_after_certificate_refresh_step(&self, daemon_was_running: bool) -> StepDto {
+        restart_daemon_after_certificate_refresh_step_with(daemon_was_running, || {
+            self.restart_daemon(StartDaemonRequest { verbose: false })
         })
     }
 
@@ -3741,6 +3839,42 @@ fn map_step(label: Option<String>, outcome: StepOutcome) -> StepDto {
     }
 }
 
+fn restart_daemon_after_certificate_refresh_step_with(
+    daemon_was_running: bool,
+    restart: impl FnOnce() -> Result<DaemonLaunchDto>,
+) -> StepDto {
+    if !daemon_was_running {
+        return StepDto {
+            label: Some("Daemon restart".into()),
+            status: "skipped".into(),
+            message: "Daemon was not running; refreshed certificates will be used on next start."
+                .into(),
+        };
+    }
+
+    match restart() {
+        Ok(launch) => StepDto {
+            label: Some("Daemon restart".into()),
+            status: "success".into(),
+            message: format!(
+                "Daemon restarted so HTTPS uses refreshed certificates (PID {}).",
+                launch.pid
+            ),
+        },
+        Err(error) => StepDto {
+            label: Some("Daemon restart".into()),
+            status: "warning".into(),
+            message: format!(
+                "Refreshed HTTPS certificates, but failed to restart the daemon: {error}. Restart Localify before retrying HTTPS."
+            ),
+        },
+    }
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
 fn tail_lines(path: &Path, line_count: usize) -> Result<String> {
     let content = fs::read_to_string(path).context("Failed to read log file")?;
     let lines: Vec<&str> = content.lines().collect();
@@ -3759,7 +3893,8 @@ mod tests {
     use super::{
         CliRemovalOutcome, DesktopApi, cli_command_points_to_binary, cli_shell_command,
         cli_shell_commands, ensure_cli_command_link, export_route_string, normalize_desktop_route,
-        normalize_project_snapshot_id, parse_desktop_route, remove_cli_command_link, shell_escape,
+        normalize_project_snapshot_id, parse_desktop_route, remove_cli_command_link,
+        restart_daemon_after_certificate_refresh_step_with, shell_escape,
         validate_settings_snapshot,
     };
     use crate::config::RoxyPaths;
@@ -4160,6 +4295,26 @@ mod tests {
 
         assert!(!domain.target_reachable);
         assert!(!listed_project.has_reachable_domain);
+    }
+
+    #[test]
+    fn refresh_domain_certificates_skips_when_no_https_domains_exist() {
+        let (_temp_dir, api, _store) = temp_api();
+
+        let result = api.refresh_domain_certificates_local().unwrap();
+
+        assert!(!result.refreshed);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].status, "skipped");
+    }
+
+    #[test]
+    fn certificate_refresh_restart_step_skips_stopped_daemon() {
+        let step = restart_daemon_after_certificate_refresh_step_with(false, || {
+            panic!("restart should not run for a stopped daemon")
+        });
+
+        assert_eq!(step.status, "skipped");
     }
 
     #[test]

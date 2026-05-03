@@ -570,6 +570,13 @@ pub struct InstallResultDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CertificateRefreshDto {
+    pub refreshed: bool,
+    pub steps: Vec<StepDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CliAccessDto {
     pub ready: bool,
     pub command_path: String,

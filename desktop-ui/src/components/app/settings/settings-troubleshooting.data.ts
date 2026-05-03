@@ -36,6 +36,27 @@ export const buildTroubleshootingIssues = (
 
   return [
     {
+      id: "browser-cert-authority-invalid",
+      title: "Chrome shows net::ERR_CERT_AUTHORITY_INVALID",
+      tone: "warning",
+      summary:
+        "This means the browser does not trust the certificate chain currently served for this .localify domain.",
+      symptoms: [
+        "Chrome shows “Your connection is not private”.",
+        "The error details mention `net::ERR_CERT_AUTHORITY_INVALID`.",
+        "The warning can appear for a local domain such as `porteportfolio.localify`.",
+      ],
+      solutions: [
+        "Run the HTTPS repair so Localify refreshes macOS trust, regenerates local HTTPS certificates, and restarts the background service.",
+        "Fully quit and reopen the browser after the repair so it reloads the macOS trust state.",
+        "If the warning still appears after the repair and browser restart, contact support@localify.dev.",
+      ],
+      action: {
+        id: "install",
+        label: "Repair HTTPS",
+      },
+    },
+    {
       id: "ca-trust",
       title: "Local HTTPS is trusted by macOS",
       tone: data.daemon.caInstalled ? "success" : "warning",

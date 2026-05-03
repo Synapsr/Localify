@@ -13,16 +13,16 @@ use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
-    AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
-    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
-    DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest, InitProjectResultDto,
-    InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto,
-    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateDomainRequest, UpdateProjectRequest,
+    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
+    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
+    DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest,
+    InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
+    LicensingDto, LogsDto, LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
+    SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,6 +38,7 @@ pub enum HelperCommand {
     ListDomains,
     ListProjects,
     InstallRoxy,
+    RefreshDomainCertificates,
     GetUninstallPreview,
     UninstallRoxy,
     CreateProject {
@@ -167,6 +168,10 @@ impl SystemHelperClient {
 
     pub fn install_roxy(&self) -> Result<InstallResultDto> {
         self.send(HelperCommand::InstallRoxy)
+    }
+
+    pub fn refresh_domain_certificates(&self) -> Result<CertificateRefreshDto> {
+        self.send(HelperCommand::RefreshDomainCertificates)
     }
 
     pub fn get_uninstall_preview(&self) -> Result<UninstallPreviewDto> {
@@ -467,6 +472,9 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
             serde_json::to_value(api.list_projects()?).map_err(Into::into)
         }
         HelperCommand::InstallRoxy => serde_json::to_value(api.install()?).map_err(Into::into),
+        HelperCommand::RefreshDomainCertificates => {
+            serde_json::to_value(api.refresh_domain_certificates()?).map_err(Into::into)
+        }
         HelperCommand::GetUninstallPreview => {
             serde_json::to_value(api.uninstall_preview()?).map_err(Into::into)
         }

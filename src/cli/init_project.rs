@@ -9,8 +9,8 @@ use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
 use roxy::desktop::{DesktopApi, ProjectRootStore};
 use roxy::project_init::{
     FolderInitSelection, FolderInitServicePlan, NextConfigUpdate, PackageScriptUpdate, ServicePlan,
-    apply_local_app_updates, build_init_plan, detect_folder_init_plan,
-    plan_current_dir_local_app_updates, resolve_folder_init_selection,
+    apply_local_app_updates, build_init_plan, detect_current_dir_localify_target,
+    detect_folder_init_plan, plan_current_dir_local_app_updates, resolve_folder_init_selection,
 };
 
 pub struct InitProjectArgs {
@@ -150,9 +150,13 @@ fn resolve_args(args: InitProjectArgs) -> Result<ResolvedInitProjectArgs> {
 
 fn resolve_non_interactive_args(
     name: String,
-    args: InitProjectArgs,
+    mut args: InitProjectArgs,
 ) -> Result<ResolvedInitProjectArgs> {
     let current_dir = env::current_dir().context("Failed to determine the current directory")?;
+    if !args.project_only && args.target.is_none() {
+        args.target = detect_current_dir_localify_target(&current_dir)?;
+    }
+
     let init_plan = build_init_plan(
         &name,
         args.domain,

@@ -5,6 +5,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { AppShell } from "./components/app-shell";
+import { DesktopErrorBoundary } from "./components/shared/desktop-error-boundary";
 import { InstallAttributionBridge } from "./components/shared/install-attribution-bridge";
 import { SharedProvider } from "./components/shared/shared-provider";
 import { initDesktopAnalytics } from "./lib/analytics";
@@ -21,10 +22,12 @@ initDesktopAnalytics();
 createRoot(container).render(
   <StrictMode>
     <SharedProvider>
-      <InstallAttributionBridge />
-      <AppShell>
-        <RouterProvider router={router} />
-      </AppShell>
+      <DesktopErrorBoundary>
+        <InstallAttributionBridge />
+        <AppShell>
+          <RouterProvider router={router} />
+        </AppShell>
+      </DesktopErrorBoundary>
       {import.meta.env.DEV && <Agentation />}
     </SharedProvider>
   </StrictMode>,

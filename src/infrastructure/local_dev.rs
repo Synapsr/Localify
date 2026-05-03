@@ -421,7 +421,7 @@ fn extract_target_port(target: &str) -> Result<u16> {
     })
 }
 
-fn extract_script_port(script: &str) -> Option<u16> {
+pub(crate) fn extract_script_port(script: &str) -> Option<u16> {
     let tokens = script.split_whitespace().collect::<Vec<_>>();
     let mut index = 0;
 

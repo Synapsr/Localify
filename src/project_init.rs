@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::branding::BRANDING;
 use crate::domain::DomainName;
+use crate::infrastructure::local_dev::extract_script_port;
 
 const SYNTHETIC_PRIMARY_SERVICE_ID: &str = "__primary__";
 
@@ -98,6 +99,7 @@ struct WorkspaceAppCandidate {
     display_path: String,
     package_json_path: PathBuf,
     dev_script: String,
+    localify_target: Option<String>,
     is_root: bool,
     next_config_path: Option<PathBuf>,
 }
@@ -418,6 +420,7 @@ fn workspace_service_blueprints(
             .get(index)
             .cloned()
             .unwrap_or_else(|| "3000".into());
+        let target = app.localify_target.clone().unwrap_or(target);
 
         services.push(FolderServiceBlueprint {
             id: app.id.clone(),
@@ -523,10 +526,11 @@ fn read_workspace_app(
         .with_context(|| format!("Failed to read '{}'", package_json_path.display()))?;
     let manifest: PackageJsonManifest = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse '{}'", package_json_path.display()))?;
-    let Some(dev_script) = manifest
-        .scripts
-        .as_ref()
-        .and_then(|scripts| scripts.get("dev"))
+    let Some(scripts) = manifest.scripts.as_ref() else {
+        return Ok(None);
+    };
+    let Some(dev_script) = scripts
+        .get("dev")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -574,9 +578,34 @@ fn read_workspace_app(
         display_path,
         package_json_path: package_json_path.to_path_buf(),
         dev_script: dev_script.to_string(),
+        localify_target: scripts
+            .get("dev-localify")
+            .and_then(Value::as_str)
+            .and_then(detect_localify_target),
         is_root: package_dir == root,
         next_config_path: resolve_next_config_path(package_dir, dev_script),
     }))
+}
+
+/// Reuses the checked-in `dev-localify` port for CLI init defaults so teams can
+/// share stable local ports without passing `--target` on every machine.
+pub fn detect_current_dir_localify_target(root: &Path) -> Result<Option<String>> {
+    let package_json_path = root.join("package.json");
+    if !package_json_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&package_json_path)
+        .with_context(|| format!("Failed to read '{}'", package_json_path.display()))?;
+    let manifest: PackageJsonManifest = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse '{}'", package_json_path.display()))?;
+
+    Ok(manifest
+        .scripts
+        .as_ref()
+        .and_then(|scripts| scripts.get("dev-localify"))
+        .and_then(Value::as_str)
+        .and_then(detect_localify_target))
 }
 
 fn build_package_update(
@@ -619,6 +648,10 @@ fn build_package_update(
 
 fn is_port_target(target: &str) -> bool {
     target.parse::<u16>().is_ok()
+}
+
+fn detect_localify_target(script: &str) -> Option<String> {
+    extract_script_port(script).map(|port| port.to_string())
 }
 
 fn prepend_localify_url_banner(script: String, domain: &str) -> Result<String> {
@@ -1236,6 +1269,23 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    fn write_package_json_with_localify_script(
+        path: &Path,
+        dev_script: &str,
+        localify_script: &str,
+    ) {
+        let package_json = format!(
+            r#"{{
+  "name": "test-app",
+  "scripts": {{
+    "dev": "{dev_script}",
+    "dev-localify": "{localify_script}"
+  }}
+}}"#
+        );
+        fs::write(path, package_json).unwrap();
+    }
+
     #[test]
     fn build_init_plan_defaults_to_slugged_primary_domain() {
         let plan = build_init_plan("Test 1", None, None, false, None, None, false).unwrap();
@@ -1271,6 +1321,37 @@ mod tests {
             plan.services[0].domain,
             format!("demo-app{}", BRANDING.domain_suffix())
         );
+    }
+
+    #[test]
+    fn detect_folder_init_plan_reuses_dev_localify_port() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        write_package_json_with_localify_script(
+            &root.join("package.json"),
+            "vite",
+            "echo Localify URL: https://demo.localify && vite --host 127.0.0.1 --port 4217",
+        );
+
+        let plan = detect_folder_init_plan(root, Some("Demo")).unwrap();
+
+        assert_eq!(plan.services.len(), 1);
+        assert_eq!(plan.services[0].target, "4217");
+    }
+
+    #[test]
+    fn detect_current_dir_localify_target_reads_existing_script_port() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        write_package_json_with_localify_script(
+            &root.join("package.json"),
+            "react-scripts start",
+            "echo Localify URL: https://demo.localify && HOST=127.0.0.1 PORT=4318 react-scripts start",
+        );
+
+        let target = detect_current_dir_localify_target(root).unwrap();
+
+        assert_eq!(target.as_deref(), Some("4318"));
     }
 
     #[test]
