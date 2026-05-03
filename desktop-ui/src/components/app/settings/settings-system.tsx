@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { bootstrapQueries, systemMutations } from "@/lib/queries";
+import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
 import { getInstallWarningMessage } from "@/lib/util.install-result";
 
 import { SettingsRow } from "./settings-row";
@@ -14,8 +14,11 @@ export const SettingsSystem = () => {
   const { data } = useQuery(bootstrapQueries.read());
   const queryClient = useQueryClient();
   const install = useMutation(systemMutations.install(queryClient));
+  const startDaemon = useMutation(daemonMutations.start(queryClient));
 
   if (!data) return null;
+
+  const daemonRunning = data.daemon.running;
 
   async function handleReinstall() {
     try {
@@ -25,6 +28,10 @@ export const SettingsSystem = () => {
       if (warning) {
         toast.error("Setup needs attention", { description: warning });
         return;
+      }
+
+      if (!daemonRunning) {
+        await startDaemon.mutateAsync({ verbose: false });
       }
 
       toast.success("System setup refreshed");
@@ -65,7 +72,7 @@ export const SettingsSystem = () => {
         <div className="flex justify-end">
           <Button
             variant="secondary"
-            loading={install.isPending}
+            loading={install.isPending || startDaemon.isPending}
             onClick={handleReinstall}
           >
             Reinstall

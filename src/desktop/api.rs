@@ -31,15 +31,15 @@ use crate::desktop::dto::{
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest,
-    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, RouteDto, RunLocalDevServerRequest, SettingsExportRequest,
-    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewProjectDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSettingsDto,
-    SettingsTransferSnapshotDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
-    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
+    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewProjectDto, SettingsImportPreviewRequest, SettingsImportRequest,
+    SettingsImportResultDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
+    SettingsTransferSettingsDto, SettingsTransferSnapshotDto, StartDaemonRequest, StepDto,
+    StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::home_dir::user_home_dir;
 use crate::desktop::node_trust;
@@ -796,6 +796,10 @@ impl DesktopApi {
         crate::desktop::editor::open_in_editor(Path::new(&request.path))
     }
 
+    pub fn open_project_url(&self, request: OpenProjectUrlRequest) -> Result<()> {
+        crate::desktop::browser::open_project_url(&request.url, request.browser)
+    }
+
     pub fn update_launcher_preferences(
         &self,
         request: UpdateLauncherPreferencesRequest,
@@ -1026,6 +1030,7 @@ impl DesktopApi {
             self.update_launcher_preferences(UpdateLauncherPreferencesRequest {
                 editor: settings.launcher_preferences.editor,
                 terminal: settings.launcher_preferences.terminal,
+                browser: settings.launcher_preferences.browser,
                 run_action: settings.launcher_preferences.run_action,
             })?;
             true
@@ -1972,6 +1977,7 @@ impl DesktopApi {
                     .copied()
                     .unwrap_or(crate::desktop::TerminalPreference::Terminal)
             },
+            browser: preferences.browser,
             run_action: preferences.run_action,
         }
     }

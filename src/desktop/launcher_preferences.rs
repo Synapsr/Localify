@@ -19,6 +19,19 @@ pub enum RunActionPreference {
     EditorAndTerminal,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserPreference {
+    #[default]
+    Default,
+    Helium,
+    Arc,
+    Chrome,
+    Safari,
+    Firefox,
+    Brave,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LauncherPreferences {
@@ -26,6 +39,8 @@ pub struct LauncherPreferences {
     pub editor: EditorPreference,
     #[serde(default)]
     pub terminal: TerminalPreference,
+    #[serde(default)]
+    pub browser: BrowserPreference,
     #[serde(default)]
     pub run_action: RunActionPreference,
 }

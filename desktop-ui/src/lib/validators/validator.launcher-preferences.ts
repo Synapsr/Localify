@@ -3,6 +3,7 @@ import { z } from "zod";
 export const launcherPreferencesSchema = z.object({
   editor: z.enum(["auto", "cursor", "vsCode", "windsurf", "zed", "sublimeText", "nova"]),
   terminal: z.enum(["terminal", "ghostty", "iTerm", "wezTerm"]),
+  browser: z.enum(["default", "helium", "arc", "chrome", "safari", "firefox", "brave"]),
   runAction: z.enum(["terminalOnly", "editorAndTerminal"]),
 });
 

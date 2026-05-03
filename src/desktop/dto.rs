@@ -5,7 +5,8 @@ use crate::config::{
     KEYGEN_PUBLIC_KEY, RoxyPaths,
 };
 use crate::desktop::{
-    EditorPreference, LauncherPreferences, RunActionPreference, TerminalPreference,
+    BrowserPreference, EditorPreference, LauncherPreferences, RunActionPreference,
+    TerminalPreference,
 };
 
 fn default_project_enabled() -> bool {
@@ -253,6 +254,8 @@ pub struct LauncherPreferencesDto {
     #[serde(default)]
     pub terminal: TerminalPreference,
     #[serde(default)]
+    pub browser: BrowserPreference,
+    #[serde(default)]
     pub run_action: RunActionPreference,
 }
 
@@ -399,6 +402,7 @@ impl From<LauncherPreferences> for LauncherPreferencesDto {
         Self {
             editor: value.editor,
             terminal: value.terminal,
+            browser: value.browser,
             run_action: value.run_action,
         }
     }
@@ -409,6 +413,7 @@ impl From<LauncherPreferencesDto> for LauncherPreferences {
         Self {
             editor: value.editor,
             terminal: value.terminal,
+            browser: value.browser,
             run_action: value.run_action,
         }
     }
@@ -419,6 +424,7 @@ impl From<UpdateLauncherPreferencesRequest> for LauncherPreferences {
         Self {
             editor: value.editor,
             terminal: value.terminal,
+            browser: value.browser,
             run_action: value.run_action,
         }
     }
@@ -703,6 +709,14 @@ pub struct OpenInEditorRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OpenProjectUrlRequest {
+    pub url: String,
+    #[serde(default)]
+    pub browser: BrowserPreference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunLocalDevServerRequest {
     pub root_path: String,
     pub target: String,
@@ -721,6 +735,8 @@ pub struct UpdateLauncherPreferencesRequest {
     pub editor: EditorPreference,
     #[serde(default)]
     pub terminal: TerminalPreference,
+    #[serde(default)]
+    pub browser: BrowserPreference,
     #[serde(default)]
     pub run_action: RunActionPreference,
 }

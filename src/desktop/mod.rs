@@ -1,4 +1,5 @@
 mod api;
+mod browser;
 pub mod dto;
 mod editor;
 mod home_dir;
@@ -11,6 +12,6 @@ pub use crate::infrastructure::editor::EditorPreference;
 pub use crate::infrastructure::local_dev::TerminalPreference;
 pub use api::DesktopApi;
 pub use launcher_preferences::{
-    LauncherPreferences, LauncherPreferencesStore, RunActionPreference,
+    BrowserPreference, LauncherPreferences, LauncherPreferencesStore, RunActionPreference,
 };
 pub use project_roots::ProjectRootStore;

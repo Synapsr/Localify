@@ -118,11 +118,20 @@ export type EditorPreference =
   | "sublimeText"
   | "nova";
 export type TerminalPreference = "terminal" | "ghostty" | "iTerm" | "wezTerm";
+export type BrowserPreference =
+  | "default"
+  | "helium"
+  | "arc"
+  | "chrome"
+  | "safari"
+  | "firefox"
+  | "brave";
 export type RunActionPreference = "terminalOnly" | "editorAndTerminal";
 
 export interface LauncherPreferencesDto {
   editor: EditorPreference;
   terminal: TerminalPreference;
+  browser: BrowserPreference;
   runAction: RunActionPreference;
 }
 
@@ -464,6 +473,11 @@ export interface OpenInEditorRequest {
   path: string;
 }
 
+export interface OpenProjectUrlRequest {
+  url: string;
+  browser: BrowserPreference;
+}
+
 export interface RunLocalDevServerRequest {
   rootPath: string;
   target: string;
@@ -476,6 +490,7 @@ export interface StopLocalDevServerRequest {
 export interface UpdateLauncherPreferencesRequest {
   editor: EditorPreference;
   terminal: TerminalPreference;
+  browser: BrowserPreference;
   runAction: RunActionPreference;
 }
 

@@ -1,9 +1,9 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "motion/react";
 import { type MouseEvent, type PointerEvent } from "react";
+import { toast } from "sonner";
 
 import type { DomainInfoDto } from "@/types/roxy";
 
@@ -21,6 +21,7 @@ import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { bootstrapQueries, projectMutations } from "@/lib/queries";
+import { tauriClient } from "@/lib/tauri-client";
 import { cn } from "@/lib/utils";
 
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
@@ -112,10 +113,19 @@ export const ProjectDomainChip = ({ domain, projectRootPath }: ProjectDomainChip
     await copyPort(port);
   };
 
-  const handleOpen = (event: MouseEvent) => {
+  const handleOpen = async (event: MouseEvent) => {
     event.stopPropagation();
     event.preventDefault();
-    void openUrl(url);
+
+    try {
+      await tauriClient.openProjectUrl({
+        url,
+        browser: data?.launcherPreferences.browser ?? "default",
+      });
+    } catch (error) {
+      const description = error instanceof Error ? error.message : "Unable to open this URL.";
+      toast.error("Open in browser failed", { description });
+    }
   };
 
   const handleToggleLocalDevServer = async (event: MouseEvent) => {

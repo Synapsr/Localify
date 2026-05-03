@@ -1,6 +1,8 @@
 import posthog from "posthog-js";
 import { z } from "zod";
 
+import type { BootstrapDto, ProjectInfoDto } from "@/types/roxy";
+
 export type AnalyticsEventData = Record<string, boolean | number | string | null | undefined>;
 type DesktopErrorSource =
   | "react_error_boundary"
@@ -18,7 +20,9 @@ const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 const INSTALL_ATTRIBUTION_PREFIX = "localify:install-attribution:v1:";
 const ATTRIBUTION_CONSUMED_STORAGE_KEY = "localify.installAttribution.consumedId";
 const SESSION_REPLAY_CONSENT_STORAGE_KEY = "localify.analytics.sessionReplayConsent";
+const USAGE_SNAPSHOT_STORAGE_KEY = "localify.analytics.usageSnapshot";
 const ERROR_DEDUPE_WINDOW_MS = 2_000;
+const USAGE_SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const MAX_ERROR_FIELD_LENGTH = 500;
 
 let initialized = false;
@@ -30,6 +34,11 @@ const installAttributionSchema = z.object({
   distinctId: z.string().min(1),
   source: z.string().min(1),
   createdAt: z.string().min(1),
+});
+
+const usageSnapshotStorageSchema = z.object({
+  signature: z.string().min(1),
+  capturedAt: z.number().finite(),
 });
 
 const isPostHogConfigured = () => {
@@ -108,6 +117,31 @@ export const initDesktopAnalytics = () => {
 export const captureDesktopEvent = (name: string, data?: AnalyticsEventData) => {
   if (!initialized || !isDesktopAnalyticsEnabled()) return;
   posthog.capture(name, data);
+};
+
+export const captureDesktopUsageSnapshot = (bootstrap: BootstrapDto) => {
+  if (!initialized || !isDesktopAnalyticsEnabled()) return;
+
+  const properties = buildDesktopUsageProperties(bootstrap);
+  posthog.register(properties);
+
+  const signature = JSON.stringify(properties);
+  const previousSnapshot = readUsageSnapshotStorage();
+  const now = Date.now();
+
+  if (
+    previousSnapshot?.signature === signature &&
+    now - previousSnapshot.capturedAt < USAGE_SNAPSHOT_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  posthog.setPersonProperties(properties);
+  captureDesktopEvent("desktop_usage_snapshot", {
+    ...properties,
+    usage_snapshot_changed: previousSnapshot?.signature !== signature,
+  });
+  writeUsageSnapshotStorage(signature, now);
 };
 
 export const captureDesktopError = (error: unknown, options: CaptureDesktopErrorOptions) => {
@@ -193,6 +227,85 @@ const parseInstallAttribution = (token: string) => {
     return installAttributionSchema.parse(JSON.parse(atob(encoded)));
   } catch {
     return null;
+  }
+};
+
+const buildDesktopUsageProperties = (bootstrap: BootstrapDto): AnalyticsEventData => {
+  const projects = bootstrap.projects;
+  const domains = bootstrap.domains;
+  const assignedDomainCount = domains.filter((domain) => domain.projectId !== null).length;
+  const standaloneDomainCount = domains.length - assignedDomainCount;
+  const projectsWithDomainsCount = projects.filter((project) => project.domainCount > 0).length;
+  const maxDomainsPerProject = getMaxDomainsPerProject(projects);
+
+  return {
+    usage_project_count: projects.length,
+    usage_enabled_project_count: projects.filter((project) => project.enabled).length,
+    usage_projects_with_domains_count: projectsWithDomainsCount,
+    usage_projects_with_reachable_domain_count: projects.filter(
+      (project) => project.hasReachableDomain,
+    ).length,
+    usage_project_root_path_count: projects.filter((project) => project.rootPath !== null).length,
+    usage_domain_count: domains.length,
+    usage_assigned_domain_count: assignedDomainCount,
+    usage_standalone_domain_count: standaloneDomainCount,
+    usage_wildcard_domain_count: domains.filter((domain) => domain.registration.wildcard).length,
+    usage_https_domain_count: domains.filter((domain) => domain.registration.httpsEnabled).length,
+    usage_active_domain_count: domains.filter((domain) => domain.active).length,
+    usage_reachable_domain_count: domains.filter((domain) => domain.targetReachable).length,
+    usage_cert_present_domain_count: domains.filter((domain) => domain.hasCert).length,
+    usage_cert_trusted_domain_count: domains.filter((domain) => domain.certTrusted === true).length,
+    usage_cert_untrusted_domain_count: domains.filter((domain) => domain.certTrusted === false)
+      .length,
+    usage_domains_per_project_max: maxDomainsPerProject,
+    usage_domains_per_project_avg:
+      projects.length === 0 ? 0 : roundToTwoDecimals(domains.length / projects.length),
+    usage_has_projects: projects.length > 0,
+    usage_has_domains: domains.length > 0,
+    usage_has_standalone_domains: standaloneDomainCount > 0,
+    usage_daemon_running: bootstrap.daemon.running,
+    usage_ca_installed: bootstrap.daemon.caInstalled,
+    usage_cli_helper_ready: bootstrap.environment.cliHelperReady,
+    usage_cli_access_ready: bootstrap.environment.cliAccessReady,
+    usage_node_trust_ready: bootstrap.environment.nodeTrust.ready,
+    usage_license_status: bootstrap.licensing.status,
+    usage_license_plan: bootstrap.licensing.limits.plan,
+    usage_license_configured: bootstrap.licensing.configured,
+    usage_license_offline_cache_present: bootstrap.licensing.offlineCachePresent,
+  };
+};
+
+const getMaxDomainsPerProject = (projects: ProjectInfoDto[]) => {
+  return projects.reduce((max, project) => Math.max(max, project.domainCount), 0);
+};
+
+const roundToTwoDecimals = (value: number) => {
+  return Math.round(value * 100) / 100;
+};
+
+const readUsageSnapshotStorage = () => {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const rawValue = window.localStorage.getItem(USAGE_SNAPSHOT_STORAGE_KEY);
+    if (!rawValue) return null;
+    const parsed = usageSnapshotStorageSchema.safeParse(JSON.parse(rawValue));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeUsageSnapshotStorage = (signature: string, capturedAt: number) => {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      USAGE_SNAPSHOT_STORAGE_KEY,
+      JSON.stringify({ signature, capturedAt }),
+    );
+  } catch {
+    // Storage failures should not prevent analytics.
   }
 };
 

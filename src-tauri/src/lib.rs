@@ -1224,6 +1224,7 @@ pub fn run() {
             commands::reload_daemon,
             commands::read_logs,
             commands::open_in_editor,
+            commands::open_project_url,
             commands::run_local_dev_server,
             commands::stop_local_dev_server,
             commands::update_launcher_preferences,

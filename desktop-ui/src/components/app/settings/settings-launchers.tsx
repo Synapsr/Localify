@@ -3,9 +3,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import type { RunActionPreference } from "@/types/roxy";
+import type { BrowserPreference, RunActionPreference } from "@/types/roxy";
 
-import { ChevronDownIcon, CodeIcon, PlayIcon, TerminalIcon } from "@/components/icons";
+import { ChevronDownIcon, CodeIcon, ExternalLinkIcon, PlayIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { bootstrapQueries, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,16 @@ const runActionOptions = [
   { value: "terminalOnly", label: "Terminal only" },
   { value: "editorAndTerminal", label: "Editor + terminal" },
 ] satisfies Array<{ value: RunActionPreference; label: string }>;
+
+const browserOptions = [
+  { value: "default", label: "Default" },
+  { value: "helium", label: "Helium" },
+  { value: "arc", label: "Arc" },
+  { value: "chrome", label: "Chrome" },
+  { value: "safari", label: "Safari" },
+  { value: "firefox", label: "Firefox" },
+  { value: "brave", label: "Brave" },
+] satisfies Array<{ value: BrowserPreference; label: string }>;
 
 export const SettingsLaunchers = () => {
   const { data } = useQuery(bootstrapQueries.read());
@@ -43,10 +53,12 @@ export const SettingsLaunchers = () => {
     editorOptions.find((option) => option.value === preferences.editor)?.label ?? "Auto";
   const terminalLabel =
     terminalOptions.find((option) => option.value === preferences.terminal)?.label ?? "None";
+  const browserLabel =
+    browserOptions.find((option) => option.value === preferences.browser)?.label ?? "Default";
   const runActionLabel =
     runActionOptions.find((option) => option.value === preferences.runAction)?.label ??
     "Terminal only";
-  const summary = [editorLabel, terminalLabel, runActionLabel].join(" · ");
+  const summary = [editorLabel, terminalLabel, browserLabel, runActionLabel].join(" · ");
 
   return (
     <SettingsCard
@@ -84,21 +96,14 @@ export const SettingsLaunchers = () => {
               title="Editor"
               description="Used when launch mode reopens the project folder."
             >
-              {editorOptions.map((option) => (
-                <PreferenceButton
-                  key={option.value}
-                  active={preferences.editor === option.value}
-                  disabled={updatePreferences.isPending}
-                  onClick={() =>
-                    updatePreferences.mutate({
-                      ...preferences,
-                      editor: option.value,
-                    })
-                  }
-                >
-                  {option.label}
-                </PreferenceButton>
-              ))}
+              <PreferenceSelect
+                value={preferences.editor}
+                disabled={updatePreferences.isPending}
+                options={editorOptions}
+                onChange={(value) =>
+                  updatePreferences.mutate({ ...preferences, editor: value })
+                }
+              />
             </LauncherRow>
 
             <LauncherRow
@@ -107,21 +112,14 @@ export const SettingsLaunchers = () => {
               description="Used for dev server commands launched from project chips."
             >
               {terminalOptions.length > 0 ? (
-                terminalOptions.map((option) => (
-                  <PreferenceButton
-                    key={option.value}
-                    active={preferences.terminal === option.value}
-                    disabled={updatePreferences.isPending}
-                    onClick={() =>
-                      updatePreferences.mutate({
-                        ...preferences,
-                        terminal: option.value,
-                      })
-                    }
-                  >
-                    {option.label}
-                  </PreferenceButton>
-                ))
+                <PreferenceSelect
+                  value={preferences.terminal}
+                  disabled={updatePreferences.isPending}
+                  options={terminalOptions}
+                  onChange={(value) =>
+                    updatePreferences.mutate({ ...preferences, terminal: value })
+                  }
+                />
               ) : (
                 <span className="text-xs text-muted-foreground">
                   No supported terminal detected
@@ -130,25 +128,39 @@ export const SettingsLaunchers = () => {
             </LauncherRow>
 
             <LauncherRow
+              icon={<ExternalLinkIcon />}
+              title="Browser"
+              description="Used when opening Localify project URLs."
+            >
+              <PreferenceSelect
+                value={preferences.browser}
+                disabled={updatePreferences.isPending}
+                options={browserOptions}
+                onChange={(value) =>
+                  updatePreferences.mutate({
+                    ...preferences,
+                    browser: value as BrowserPreference,
+                  })
+                }
+              />
+            </LauncherRow>
+
+            <LauncherRow
               icon={<PlayIcon />}
               title="When running a linked app"
               description="Open only the terminal, or also reopen the project folder."
             >
-              {runActionOptions.map((option) => (
-                <PreferenceButton
-                  key={option.value}
-                  active={preferences.runAction === option.value}
-                  disabled={updatePreferences.isPending}
-                  onClick={() =>
-                    updatePreferences.mutate({
-                      ...preferences,
-                      runAction: option.value,
-                    })
-                  }
-                >
-                  {option.label}
-                </PreferenceButton>
-              ))}
+              <PreferenceSelect
+                value={preferences.runAction}
+                disabled={updatePreferences.isPending}
+                options={runActionOptions}
+                onChange={(value) =>
+                  updatePreferences.mutate({
+                    ...preferences,
+                    runAction: value as RunActionPreference,
+                  })
+                }
+              />
             </LauncherRow>
           </div>
 
@@ -185,27 +197,39 @@ const LauncherRow = ({
   </div>
 );
 
-const PreferenceButton = ({
-  active,
+const PreferenceSelect = <T extends string>({
+  value,
+  options,
   disabled,
-  onClick,
-  children,
+  onChange,
 }: {
-  active: boolean;
+  value: T;
+  options: ReadonlyArray<{ value: T; label: string }>;
   disabled?: boolean;
-  onClick: () => void;
-  children: string;
+  onChange: (value: T) => void;
 }) => {
   return (
-    <Button
-      type="button"
-      size="xs"
-      variant={active ? "primary" : "outline"}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn("min-w-20", active && "shadow-none")}
-    >
-      {children}
-    </Button>
+    <div className="relative">
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value as T)}
+        className={cn(
+          "h-8 min-w-32 appearance-none rounded-md border border-input bg-background py-1 pr-7 pl-2.5 text-sm text-foreground transition-[color,box-shadow] outline-none",
+          "hover:border-ring/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
+          "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50",
+        )}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <ChevronDownIcon
+        aria-hidden
+        className="pointer-events-none absolute top-1/2 right-2 size-3.5 -translate-y-1/2 text-muted-foreground"
+      />
+    </div>
   );
 };

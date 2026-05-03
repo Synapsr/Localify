@@ -6,14 +6,14 @@ use roxy::desktop::dto::{
     DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
     KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherPreferencesDto, LicensingDto,
-    LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest, PortConflictDto, ProjectInfoDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
-    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    StartDaemonRequest, StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateDomainRequest, UpdateLauncherPreferencesRequest,
-    UpdateProjectRequest,
+    LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest, OpenProjectUrlRequest,
+    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, RunLocalDevServerRequest, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
+    SettingsImportResultDto, StartDaemonRequest, StopLocalDevServerRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
@@ -551,6 +551,14 @@ pub fn open_in_editor(
     request: OpenInEditorRequest,
 ) -> Result<(), String> {
     state.api.open_in_editor(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn open_project_url(
+    state: tauri::State<'_, AppState>,
+    request: OpenProjectUrlRequest,
+) -> Result<(), String> {
+    state.api.open_project_url(request).map_err(map_error)
 }
 
 #[tauri::command]

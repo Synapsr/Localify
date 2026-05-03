@@ -31,6 +31,7 @@ import type {
   LogsRequest,
   NodeTrustDto,
   OpenInEditorRequest,
+  OpenProjectUrlRequest,
   PortConflictDto,
   ProjectInfoDto,
   RegisterDomainRequest,
@@ -73,6 +74,7 @@ import {
   keygenSettingsUpdateRequestSchema,
 } from "./validators/validator.license";
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
+import { openProjectUrlRequestSchema } from "./validators/validator.open-project-url";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
@@ -171,6 +173,7 @@ export interface DesktopClient {
   reloadDaemon(request: StartDaemonRequest): Promise<DaemonLaunchDto>;
   readLogs(request: LogsRequest): Promise<LogsDto>;
   openInEditor(request: OpenInEditorRequest): Promise<void>;
+  openProjectUrl(request: OpenProjectUrlRequest): Promise<void>;
   runLocalDevServer(request: RunLocalDevServerRequest): Promise<void>;
   stopLocalDevServer(request: StopLocalDevServerRequest): Promise<void>;
   updateLauncherPreferences(
@@ -267,6 +270,10 @@ export function createDesktopClient(): DesktopClient {
     openInEditor: (request) =>
       tauriInvoke("open_in_editor", {
         request: openInEditorRequestSchema.parse(request),
+      }),
+    openProjectUrl: (request) =>
+      tauriInvoke("open_project_url", {
+        request: openProjectUrlRequestSchema.parse(request),
       }),
     runLocalDevServer: (request) =>
       tauriInvoke("run_local_dev_server", {

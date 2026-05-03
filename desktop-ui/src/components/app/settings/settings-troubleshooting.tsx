@@ -56,6 +56,8 @@ export const SettingsTroubleshooting = () => {
 
   if (!data) return null;
 
+  const daemonRunning = data.daemon.running;
+
   async function runTroubleshootingAction(action: TroubleshootingAction) {
     setActionError(null);
 
@@ -68,6 +70,10 @@ export const SettingsTroubleshooting = () => {
           setActionError(warning);
           showTroubleshootingFailureToast(warning);
           return;
+        }
+
+        if (!daemonRunning) {
+          await startDaemon.mutateAsync({ verbose: false });
         }
 
         toast.success("HTTPS repair completed");

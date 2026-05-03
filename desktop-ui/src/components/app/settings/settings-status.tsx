@@ -53,7 +53,8 @@ export const SettingsStatus = () => {
     data.environment.cliHelperReady &&
     data.environment.cliAccessReady &&
     data.daemon.caInstalled;
-  const status: Status = !isSetup ? "setup" : data.daemon.running ? "running" : "off";
+  const daemonRunning = data.daemon.running;
+  const status: Status = !isSetup ? "setup" : daemonRunning ? "running" : "off";
 
   const copy = {
     setup: {
@@ -89,6 +90,11 @@ export const SettingsStatus = () => {
       if (warning) {
         setSetupWarning(warning);
         showSetupFailureToast(warning);
+        return;
+      }
+
+      if (!daemonRunning) {
+        await startDaemon.mutateAsync({ verbose: false });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
