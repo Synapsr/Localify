@@ -3,9 +3,32 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DEFAULT_UPDATER_KEY_PATH="${HOME}/.tauri/localify-updater.key"
 PRODUCT_NAME="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('$ROOT_DIR/src-tauri/tauri.conf.json', 'utf8')).productName)")"
+VERSION="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('$ROOT_DIR/src-tauri/tauri.conf.json', 'utf8')).version)")"
 APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/$PRODUCT_NAME.app"
-DMG_PATH="$(find "$ROOT_DIR/src-tauri/target/release/bundle/dmg" -maxdepth 1 -name "${PRODUCT_NAME}_*.dmg" | head -n 1)"
+MACOS_BUNDLE_DIR="$ROOT_DIR/src-tauri/target/release/bundle/macos"
+DMG_BUNDLE_DIR="$ROOT_DIR/src-tauri/target/release/bundle/dmg"
+DMG_ARCH="$(uname -m)"
+if [ "$DMG_ARCH" = "arm64" ]; then
+  DMG_ARCH="aarch64"
+fi
+DMG_PATH="$DMG_BUNDLE_DIR/${PRODUCT_NAME}_${VERSION}_${DMG_ARCH}.dmg"
+ARCHIVE_PATH="$MACOS_BUNDLE_DIR/$PRODUCT_NAME.app.tar.gz"
+ARCHIVE_SIGNATURE_PATH="$ARCHIVE_PATH.sig"
+NOTARY_ATTEMPTS="${LOCALIFY_NOTARY_ATTEMPTS:-3}"
+NOTARY_EXTRA_ARGS=()
+
+if [ "${LOCALIFY_NOTARY_S3_ACCELERATION:-0}" != "1" ]; then
+  NOTARY_EXTRA_ARGS+=(--no-s3-acceleration)
+fi
+
+if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "$DEFAULT_UPDATER_KEY_PATH" ]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$(cat "$DEFAULT_UPDATER_KEY_PATH")"
+elif [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -f "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$(cat "${TAURI_SIGNING_PRIVATE_KEY}")"
+fi
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "Skipping macOS post-processing on non-macOS host"
@@ -17,11 +40,6 @@ if [ ! -d "$APP_PATH" ]; then
   exit 0
 fi
 
-if [ -z "$DMG_PATH" ] || [ ! -f "$DMG_PATH" ]; then
-  echo "Skipping macOS post-processing because dmg is missing"
-  exit 0
-fi
-
 has_notary_credentials=1
 for var in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
   if [ -z "${!var:-}" ]; then
@@ -29,17 +47,74 @@ for var in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
   fi
 done
 
+submit_for_notarization() {
+  local artifact_path="$1"
+  local attempt=1
+
+  while [ "$attempt" -le "$NOTARY_ATTEMPTS" ]; do
+    echo "Submitting $(basename "$artifact_path") for notarization (attempt $attempt/$NOTARY_ATTEMPTS)"
+    if xcrun notarytool submit \
+      "$artifact_path" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID" \
+      "${NOTARY_EXTRA_ARGS[@]}" \
+      --wait; then
+      return 0
+    fi
+
+    if [ "$attempt" -eq "$NOTARY_ATTEMPTS" ]; then
+      return 1
+    fi
+
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
 if [ "$has_notary_credentials" -eq 1 ]; then
+  if xcrun stapler validate "$APP_PATH" >/dev/null 2>&1; then
+    echo "App bundle already has a stapled notarization ticket"
+  else
+    echo "Submitting app bundle for notarization"
+    app_zip_path="$MACOS_BUNDLE_DIR/$PRODUCT_NAME.app.zip"
+    rm -f "$app_zip_path"
+    ditto -c -k --keepParent "$APP_PATH" "$app_zip_path"
+    submit_for_notarization "$app_zip_path"
+    rm -f "$app_zip_path"
+
+    echo "Stapling app bundle notarization ticket"
+    xcrun stapler staple "$APP_PATH"
+  fi
+
+  echo "Rebuilding updater archive from notarized app bundle"
+  rm -f "$ARCHIVE_PATH" "$ARCHIVE_SIGNATURE_PATH"
+  COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_PATH" -C "$MACOS_BUNDLE_DIR" "$PRODUCT_NAME.app"
+  pnpm --silent tauri signer sign "$ARCHIVE_PATH" >/dev/null
+
+  echo "Rebuilding DMG from notarized app bundle"
+  rm -f "$DMG_BUNDLE_DIR"/"${PRODUCT_NAME}"_*.dmg
+  staging_dir="$(mktemp -d)"
+  cp -R "$APP_PATH" "$staging_dir/"
+  ln -s /Applications "$staging_dir/Applications"
+  hdiutil create \
+    -volname "$PRODUCT_NAME" \
+    -srcfolder "$staging_dir" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH"
+  rm -rf "$staging_dir"
+
+  if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    echo "Signing DMG"
+    codesign -s "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
+  fi
+
   if xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
     echo "DMG already has a stapled notarization ticket"
   else
     echo "Submitting DMG for notarization"
-    xcrun notarytool submit \
-      "$DMG_PATH" \
-      --apple-id "$APPLE_ID" \
-      --password "$APPLE_PASSWORD" \
-      --team-id "$APPLE_TEAM_ID" \
-      --wait
+    submit_for_notarization "$DMG_PATH"
 
     echo "Stapling DMG notarization ticket"
     xcrun stapler staple "$DMG_PATH"

@@ -24,7 +24,13 @@ cd "$ROOT_DIR"
 
 pnpm desktop:check-version-sync
 pnpm desktop:prepare-sidecar
-pnpm tauri build --bundles app,dmg
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  rm -rf "$ROOT_DIR/src-tauri/target/release/bundle/macos"
+  rm -rf "$ROOT_DIR/src-tauri/target/release/bundle/dmg"
+fi
+
+env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID pnpm tauri build --bundles app,dmg
 pnpm desktop:postprocess-macos-bundles
 
 if [ -n "${LOCALIFY_UPDATER_BASE_URL:-}" ]; then

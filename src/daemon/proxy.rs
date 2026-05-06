@@ -23,6 +23,7 @@ use super::theme;
 /// so we define these ourselves to avoid scattered string literals.
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const X_FORWARDED_HOST: &str = "x-forwarded-host";
+const X_FORWARDED_PORT: &str = "x-forwarded-port";
 const X_FORWARDED_PROTO: &str = "x-forwarded-proto";
 const KEEP_ALIVE: &str = "keep-alive";
 const PROXY_ERROR_TEMPLATE: &str = include_str!("templates/proxy_error.html");
@@ -105,7 +106,6 @@ fn build_target_uri(target: &ProxyTarget, path: &str, query: Option<&str>) -> Re
 /// Build HTTP upgrade request string to send to backend
 fn build_upgrade_request(
     request: &Request,
-    target: &ProxyTarget,
     host: &str,
     scheme: &str,
     client_ip: Option<IpAddr>,
@@ -117,16 +117,14 @@ fn build_upgrade_request(
         .map(|q| format!("?{}", q))
         .unwrap_or_default();
 
-    let mut req = format!(
-        "GET {}{} HTTP/1.1\r\nHost: {}:{}\r\n",
-        path,
-        query,
-        target.host(),
-        target.port()
-    );
+    let mut req = format!("GET {}{} HTTP/1.1\r\nHost: {}\r\n", path, query, host);
 
     // Forwarding headers
     req.push_str(&format!("X-Forwarded-Host: {}\r\n", host));
+    req.push_str(&format!(
+        "X-Forwarded-Port: {}\r\n",
+        forwarded_port_for_scheme(scheme)
+    ));
     req.push_str(&format!("X-Forwarded-Proto: {}\r\n", scheme));
     if let Some(ip) = client_ip {
         let existing = request
@@ -156,6 +154,7 @@ fn build_upgrade_request(
     for (name, value) in request.headers() {
         if name == header::HOST
             || name.as_str() == X_FORWARDED_HOST
+            || name.as_str() == X_FORWARDED_PORT
             || name.as_str() == X_FORWARDED_PROTO
             || name.as_str() == X_FORWARDED_FOR
             || name == header::PROXY_AUTHENTICATE
@@ -216,7 +215,7 @@ async fn proxy_websocket(
     let start_time = Instant::now();
 
     // Build and send the upgrade request to backend
-    let upgrade_request = build_upgrade_request(&request, target, host, scheme, client_ip);
+    let upgrade_request = build_upgrade_request(&request, host, scheme, client_ip);
 
     if let Err(e) = backend.write_all(upgrade_request.as_bytes()).await {
         return build_proxy_error_response(
@@ -364,8 +363,14 @@ fn set_forwarding_headers(
     scheme: &str,
     client_ip: Option<IpAddr>,
 ) {
+    let forwarded_port = forwarded_port_for_scheme(scheme);
+
     if let Ok(value) = HeaderValue::from_str(host) {
         headers.insert(X_FORWARDED_HOST, value);
+    }
+
+    if let Ok(value) = HeaderValue::from_str(forwarded_port) {
+        headers.insert(X_FORWARDED_PORT, value);
     }
 
     if let Ok(value) = HeaderValue::from_str(scheme) {
@@ -382,10 +387,18 @@ fn set_forwarding_headers(
 
     debug!(
         x_forwarded_host = %host,
+        x_forwarded_port = %forwarded_port,
         x_forwarded_proto = %scheme,
         x_forwarded_for = %client_ip.map(|ip| ip.to_string()).unwrap_or_default(),
         "Forwarding headers set"
     );
+}
+
+fn forwarded_port_for_scheme(scheme: &str) -> &'static str {
+    match scheme {
+        "https" => "443",
+        _ => "80",
+    }
 }
 
 /// Remove hop-by-hop headers that must not be forwarded (RFC 7230 §6.1).
@@ -455,11 +468,15 @@ pub async fn proxy_request(
     let mut request = request;
     *request.uri_mut() = uri;
 
-    // Set forwarding headers before removing Host
-    set_forwarding_headers(request.headers_mut(), host, scheme, client_ip);
+    // Preserve the public host so frameworks behind Localify generate
+    // redirects and absolute URLs for the .localify origin, not the upstream
+    // loopback target.
+    if let Ok(value) = HeaderValue::from_str(host) {
+        request.headers_mut().insert(header::HOST, value);
+    }
 
-    // Remove original Host header (hyper client sets it for the target)
-    request.headers_mut().remove(header::HOST);
+    // Set forwarding headers before stripping hop-by-hop headers.
+    set_forwarding_headers(request.headers_mut(), host, scheme, client_ip);
 
     // Strip hop-by-hop headers
     strip_hop_by_hop_headers(request.headers_mut());
@@ -830,6 +847,7 @@ mod tests {
         set_forwarding_headers(&mut headers, "myapp.roxy", "https", Some(LOCALHOST));
 
         assert_eq!(headers.get(X_FORWARDED_HOST).unwrap(), "myapp.roxy");
+        assert_eq!(headers.get(X_FORWARDED_PORT).unwrap(), "443");
         assert_eq!(headers.get(X_FORWARDED_PROTO).unwrap(), "https");
         assert_eq!(headers.get(X_FORWARDED_FOR).unwrap(), "127.0.0.1");
     }
@@ -840,6 +858,7 @@ mod tests {
         set_forwarding_headers(&mut headers, "myapp.roxy", "http", None);
 
         assert_eq!(headers.get(X_FORWARDED_HOST).unwrap(), "myapp.roxy");
+        assert_eq!(headers.get(X_FORWARDED_PORT).unwrap(), "80");
         assert_eq!(headers.get(X_FORWARDED_PROTO).unwrap(), "http");
         assert!(headers.get(X_FORWARDED_FOR).is_none());
     }
@@ -935,10 +954,6 @@ mod tests {
 
     // --- build_upgrade_request ---
 
-    fn make_target() -> ProxyTarget {
-        ProxyTarget::parse("3000").unwrap()
-    }
-
     fn ws_request(path: &str) -> Request<Body> {
         Request::builder()
             .uri(path)
@@ -953,11 +968,11 @@ mod tests {
     #[test]
     fn upgrade_request_contains_forwarding_headers() {
         let req = ws_request("/ws");
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", Some(LOCALHOST));
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", Some(LOCALHOST));
 
         assert!(raw.contains("X-Forwarded-Host: myapp.roxy\r\n"));
+        assert!(raw.contains("X-Forwarded-Port: 443\r\n"));
         assert!(raw.contains("X-Forwarded-Proto: https\r\n"));
         assert!(raw.contains("X-Forwarded-For: 127.0.0.1\r\n"));
     }
@@ -965,11 +980,11 @@ mod tests {
     #[test]
     fn upgrade_request_omits_xff_without_client_ip() {
         let req = ws_request("/ws");
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", None);
 
         assert!(raw.contains("X-Forwarded-Host: myapp.roxy\r\n"));
+        assert!(raw.contains("X-Forwarded-Port: 443\r\n"));
         assert!(raw.contains("X-Forwarded-Proto: https\r\n"));
         assert!(!raw.contains("X-Forwarded-For"));
     }
@@ -984,22 +999,20 @@ mod tests {
             .header(X_FORWARDED_FOR, "10.0.0.1")
             .body(Body::empty())
             .unwrap();
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", Some(LOCALHOST));
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", Some(LOCALHOST));
 
         assert!(raw.contains("X-Forwarded-For: 10.0.0.1, 127.0.0.1\r\n"));
     }
 
     #[test]
-    fn upgrade_request_does_not_forward_original_host() {
+    fn upgrade_request_preserves_public_host() {
         let req = ws_request("/ws");
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", Some(LOCALHOST));
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", Some(LOCALHOST));
 
-        // Should have the backend Host, not the original
-        assert!(raw.contains("Host: 127.0.0.1:3000\r\n"));
+        assert!(raw.contains("Host: myapp.roxy\r\n"));
+        assert!(!raw.contains("Host: 127.0.0.1:3000\r\n"));
         // The original Host header should NOT appear as a repeated header.
         // Count lines starting with "Host:" (not substring matches like "X-Forwarded-Host:").
         let host_count = raw.lines().filter(|l| l.starts_with("Host:")).count();
@@ -1009,9 +1022,8 @@ mod tests {
     #[test]
     fn upgrade_request_preserves_connection_and_upgrade() {
         let req = ws_request("/ws");
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", None);
 
         assert!(raw.contains("upgrade: websocket\r\n"));
         assert!(raw.contains("connection: Upgrade\r\n"));
@@ -1031,9 +1043,8 @@ mod tests {
             .header(KEEP_ALIVE, "timeout=5")
             .body(Body::empty())
             .unwrap();
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", None);
 
         assert!(!raw.contains("proxy-authorization:"));
         assert!(!raw.contains("te:"));
@@ -1053,9 +1064,8 @@ mod tests {
             .header("x-safe", "kept")
             .body(Body::empty())
             .unwrap();
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", None);
 
         assert!(!raw.contains("x-secret:"));
         assert!(raw.contains("x-safe: kept\r\n"));
@@ -1064,9 +1074,8 @@ mod tests {
     #[test]
     fn upgrade_request_includes_query_string() {
         let req = ws_request("/ws?token=abc");
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", None);
 
         assert!(raw.starts_with("GET /ws?token=abc HTTP/1.1\r\n"));
     }
@@ -1074,9 +1083,8 @@ mod tests {
     #[test]
     fn upgrade_request_ends_with_blank_line() {
         let req = ws_request("/ws");
-        let target = make_target();
 
-        let raw = build_upgrade_request(&req, &target, "myapp.roxy", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.roxy", "https", None);
 
         assert!(raw.ends_with("\r\n\r\n"));
     }

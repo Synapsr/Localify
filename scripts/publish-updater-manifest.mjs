@@ -74,6 +74,7 @@ const publishedArchiveName = "localify-desktop.app.tar.gz";
 const publishedSignatureName = "localify-desktop.app.tar.gz.sig";
 const publishedDmgName = "localify.dmg";
 const legacyPublishedDmgName = "localify-desktop.dmg";
+const archiveSignature = readSignatureFile(artifacts.signature);
 
 cpSync(artifacts.archive, join(publishedDir, publishedArchiveName));
 cpSync(artifacts.signature, join(publishedDir, publishedSignatureName));
@@ -88,7 +89,7 @@ const latestManifest = {
   pub_date: new Date().toISOString(),
   platforms: {
     "darwin-aarch64": {
-      signature: readFileSync(artifacts.signature, "utf8").trim(),
+      signature: archiveSignature,
       url: new URL(`${version}/${publishedArchiveName}`, `${updaterBaseUrl.replace(/\/+$/u, "")}/`)
         .toString(),
     },
@@ -126,4 +127,14 @@ function removeIfExists(filePath) {
   if (existsSync(filePath)) {
     unlinkSync(filePath);
   }
+}
+
+function readSignatureFile(filePath) {
+  const signature = readFileSync(filePath, "utf8").trim();
+  if (!/^[A-Za-z0-9+/=]+$/u.test(signature)) {
+    throw new Error(
+      `Invalid updater signature file: ${filePath}. Expected a base64 signature only.`,
+    );
+  }
+  return signature;
 }

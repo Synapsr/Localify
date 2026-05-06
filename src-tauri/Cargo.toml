@@ -1,6 +1,6 @@
 [package]
 name = "localify-desktop"
-version = "0.1.10"
+version = "0.1.14"
 description = "Desktop shell for Localify"
 authors = ["Localify contributors"]
 edition = "2024"
