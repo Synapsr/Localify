@@ -22,8 +22,7 @@ use time::format_description::well_known::{Rfc2822, Rfc3339};
 
 use crate::config::{KeygenConfig, LicensingConfig, OfflineLicenseFile, StoredLicense};
 
-pub const FREE_MAX_PROJECTS: usize = 3;
-pub const FREE_MAX_DOMAINS_PER_PROJECT: usize = 2;
+pub const FREE_MAX_PROJECTS: usize = 5;
 const KEYGEN_SIGNATURE_HEADER: &str = "Keygen-Signature";
 const KEYGEN_SIGNATURE_ACCEPT_HEADER: &str = r#"algorithm="ed25519""#;
 const KEYGEN_EXPECTED_SIGNATURE_ALGORITHM: &str = "ed25519";
@@ -45,7 +44,7 @@ impl PlanLimits {
         Self {
             plan: "Free".into(),
             max_projects: Some(FREE_MAX_PROJECTS),
-            max_domains_per_project: Some(FREE_MAX_DOMAINS_PER_PROJECT),
+            max_domains_per_project: None,
         }
     }
 }

@@ -1085,14 +1085,16 @@ mod tests {
         store.create_project("One").unwrap();
         store.create_project("Two").unwrap();
         store.create_project("Three").unwrap();
+        store.create_project("Four").unwrap();
+        store.create_project("Five").unwrap();
 
-        let error = store.create_project("Four").unwrap_err();
+        let error = store.create_project("Six").unwrap_err();
 
         assert!(matches!(error, ConfigError::LicenseLimitExceeded(_)));
     }
 
     #[test]
-    fn free_plan_limits_domains_per_project() {
+    fn free_plan_allows_unlimited_domains_per_project() {
         let (_dir, store) = temp_store();
         let project = store.create_project("Demo").unwrap();
 
@@ -1109,14 +1111,12 @@ mod tests {
             )
             .unwrap();
 
-        let error = store
+        store
             .add_domain_with_project(
                 proxy_registration("three.roxy", 3002),
                 Some(project.id.clone()),
             )
-            .unwrap_err();
-
-        assert!(matches!(error, ConfigError::LicenseLimitExceeded(_)));
+            .unwrap();
     }
 
     #[test]

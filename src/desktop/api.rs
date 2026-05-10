@@ -53,7 +53,7 @@ use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, Confi
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::licensing::{
-    FREE_MAX_DOMAINS_PER_PROJECT, FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus,
+    FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus,
     build_offline_imported_license, current_machine_fingerprint, mask_license_key,
     resolve_license_state,
 };
@@ -3682,7 +3682,7 @@ fn map_licensing_status(
         free_limits: crate::desktop::dto::LicenseLimitsDto {
             plan: "Free".into(),
             max_projects: Some(FREE_MAX_PROJECTS),
-            max_domains_per_project: Some(FREE_MAX_DOMAINS_PER_PROJECT),
+            max_domains_per_project: None,
         },
         project_count,
         domain_count,

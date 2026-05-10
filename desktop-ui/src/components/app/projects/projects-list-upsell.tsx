@@ -35,7 +35,7 @@ export const ProjectsListUpsell = () => {
             </h3>
           </div>
           <p className="max-w-md text-[13.5px] leading-normal text-pretty text-muted-foreground">
-            Unlock unlimited projects and domains. Pay once, keep it forever.
+            Unlock unlimited projects. Pay once, keep it forever.
           </p>
         </div>
 

@@ -35,6 +35,8 @@ import { pricingQueries } from "@/lib/queries/pricing.queries";
 const BUY_LICENSE_URL = "https://localify.dev/#pricing";
 
 const formatLimit = (value: number | null) => (value === null ? "Unlimited" : String(value));
+const formatLimitsSummary = (limits: LicensingDto["limits"]) =>
+  `${formatLimit(limits.maxProjects)} projects, ${formatLimit(limits.maxDomainsPerProject).toLowerCase()} domains per project`;
 
 const formatDate = (value: string | null) => {
   if (!value) return null;
@@ -113,9 +115,8 @@ const UnlicensedView = ({
               </h3>
             </div>
             <p className="max-w-md text-[13.5px] leading-normal text-pretty text-muted-foreground">
-              Unlock unlimited projects and domains. Currently up to{" "}
-              {formatLimit(licensing.freeLimits.maxProjects)} projects and{" "}
-              {formatLimit(licensing.freeLimits.maxDomainsPerProject)} domains per project.
+              Unlock unlimited projects. Currently up to{" "}
+              {formatLimitsSummary(licensing.freeLimits)}.
             </p>
           </div>
 
@@ -247,8 +248,7 @@ const LicenseDetailsDialog = ({
         <DialogHeader>
           <DialogTitle>License details</DialogTitle>
           <DialogDescription>
-            {licensing.limits.plan} plan — {formatLimit(licensing.limits.maxProjects)} projects,{" "}
-            {formatLimit(licensing.limits.maxDomainsPerProject)} domains per project.
+            {licensing.limits.plan} plan — {formatLimitsSummary(licensing.limits)}.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="pb-4">

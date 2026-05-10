@@ -10,6 +10,8 @@ import { bootstrapQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 const formatLimit = (value: number | null) => (value === null ? "Unlimited" : String(value));
+const formatLimitsSummary = (maxProjects: number | null, maxDomainsPerProject: number | null) =>
+  `${formatLimit(maxProjects)} projects / ${formatLimit(maxDomainsPerProject)} domains`;
 
 export const ProjectsLicenseBanner = () => {
   const { data } = useQuery(bootstrapQueries.read());
@@ -32,8 +34,10 @@ export const ProjectsLicenseBanner = () => {
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium text-foreground">{licensing.limits.plan}</span>
             <Badge tone={licensing.status === "licensed" ? "accent" : "muted"}>
-              {formatLimit(licensing.limits.maxProjects)} projects /{" "}
-              {formatLimit(licensing.limits.maxDomainsPerProject)} domains
+              {formatLimitsSummary(
+                licensing.limits.maxProjects,
+                licensing.limits.maxDomainsPerProject,
+              )}
             </Badge>
           </div>
           <p className="text-xs text-muted-foreground">

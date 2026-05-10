@@ -540,13 +540,13 @@ impl Default for LicensingDto {
             public_key: Some(KEYGEN_PUBLIC_KEY.into()),
             limits: LicenseLimitsDto {
                 plan: "Free".into(),
-                max_projects: Some(3),
-                max_domains_per_project: Some(2),
+                max_projects: Some(5),
+                max_domains_per_project: None,
             },
             free_limits: LicenseLimitsDto {
                 plan: "Free".into(),
-                max_projects: Some(3),
-                max_domains_per_project: Some(2),
+                max_projects: Some(5),
+                max_domains_per_project: None,
             },
             project_count: 0,
             domain_count: 0,
