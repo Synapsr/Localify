@@ -53,9 +53,8 @@ use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, Confi
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::licensing::{
-    FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus,
-    build_offline_imported_license, current_machine_fingerprint, mask_license_key,
-    resolve_license_state,
+    FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus, build_offline_imported_license,
+    current_machine_fingerprint, mask_license_key, resolve_license_state,
 };
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::network::{get_lan_ip, get_network_info};

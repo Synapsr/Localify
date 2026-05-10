@@ -18,9 +18,10 @@ use roxy::desktop::dto::{
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use tauri::async_runtime;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
 pub struct AppState {
@@ -84,9 +85,82 @@ pub struct AppUpdateCheckDto {
 }
 
 const INSTALL_ATTRIBUTION_PREFIX: &str = "localify:install-attribution:v1:";
+const POST_UPDATE_DAEMON_RESTART_MARKER: &str = "post-update-daemon-restart";
 
 fn map_error<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+fn desktop_state_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| "Failed to resolve the user home directory.".to_string())?;
+
+    Ok(home
+        .join("Library/Application Support")
+        .join(roxy::branding::BRANDING.desktop_state_dir_name()))
+}
+
+fn post_update_daemon_restart_marker_path() -> Result<PathBuf, String> {
+    Ok(desktop_state_dir()?.join(POST_UPDATE_DAEMON_RESTART_MARKER))
+}
+
+fn write_post_update_daemon_restart_marker() -> Result<(), String> {
+    let path = post_update_daemon_restart_marker_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Failed to resolve the update marker directory.".to_string())?;
+    std::fs::create_dir_all(parent).map_err(map_error)?;
+    std::fs::write(path, "restart\n").map_err(map_error)
+}
+
+fn remove_post_update_daemon_restart_marker() -> Result<(), String> {
+    let path = post_update_daemon_restart_marker_path()?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(map_error(error)),
+    }
+}
+
+fn post_update_daemon_restart_marker_exists() -> Result<bool, String> {
+    Ok(post_update_daemon_restart_marker_path()?.exists())
+}
+
+fn mark_daemon_restart_after_update_if_running<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let status = state.api.daemon_status().map_err(map_error)?;
+
+    if status.running {
+        write_post_update_daemon_restart_marker()?;
+    } else {
+        remove_post_update_daemon_restart_marker()?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn consume_post_update_daemon_restart<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<bool, String> {
+    if !post_update_daemon_restart_marker_exists()? {
+        return Ok(false);
+    }
+
+    remove_post_update_daemon_restart_marker()?;
+
+    let state = app.state::<AppState>();
+    state
+        .api
+        .restart_daemon(StartDaemonRequest { verbose: false })
+        .map_err(map_error)?;
+
+    super::sync_tray_menu(app).map_err(map_error)?;
+
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -167,10 +241,17 @@ pub(crate) async fn install_app_update_with_handle<R: Runtime>(
         return Ok(());
     };
 
-    update
+    mark_daemon_restart_after_update_if_running(&app)?;
+
+    let install_result = update
         .download_and_install(|_, _| {}, || {})
         .await
-        .map_err(map_error)?;
+        .map_err(map_error);
+
+    if let Err(error) = install_result {
+        let _ = remove_post_update_daemon_restart_marker();
+        return Err(error);
+    }
 
     app.restart()
 }

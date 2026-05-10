@@ -709,6 +709,44 @@ fn run_tray_action<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
     }
 }
 
+fn handle_tray_action_error<R: Runtime>(app: &AppHandle<R>, id: &str, error: String) {
+    eprintln!("tray action '{id}' failed: {error}");
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+
+    #[cfg(target_os = "macos")]
+    show_message_dialog(
+        app,
+        "Localify Action Failed",
+        error,
+        MessageDialogKind::Error,
+    );
+}
+
+fn recover_daemon_after_app_update<R: Runtime + 'static>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match commands::consume_post_update_daemon_restart(&app) {
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("failed to restart daemon after app update: {error}");
+
+                #[cfg(target_os = "macos")]
+                show_message_dialog(
+                    &app,
+                    "Daemon Restart Failed",
+                    format!(
+                        "Localify was updated, but the background daemon could not be restarted automatically.\n\n{error}"
+                    ),
+                    MessageDialogKind::Error,
+                );
+            }
+        }
+    });
+}
+
 fn start_tray_domain<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
     let domain = find_tray_domain(&state.api, domain)?
@@ -1083,8 +1121,9 @@ fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .tooltip(runtime_desktop_name())
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
-            if let Err(error) = run_tray_action(app, event.id().as_ref()) {
-                eprintln!("tray action '{}' failed: {error}", event.id().as_ref());
+            let id = event.id().as_ref();
+            if let Err(error) = run_tray_action(app, id) {
+                handle_tray_action_error(app, id, error);
             }
         });
 
@@ -1158,6 +1197,7 @@ pub fn run() {
             }
             setup_app_menu(app.handle())?;
             setup_tray(app.handle())?;
+            recover_daemon_after_app_update(app.handle());
             if let Err(error) = handle_startup_deep_links(app.handle()) {
                 eprintln!("failed to process startup deep links: {error}");
             }

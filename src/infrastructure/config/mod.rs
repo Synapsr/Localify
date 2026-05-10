@@ -1157,4 +1157,30 @@ mod tests {
 
         assert_eq!(store.list_projects().unwrap().len(), 4);
     }
+
+    #[test]
+    fn config_loads_external_wildcard_domains() {
+        let (dir, store) = temp_store();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[domains."*.store.example.com"]
+pattern = "*.store.example.com"
+https_enabled = true
+
+[[domains."*.store.example.com".routes]]
+path = "/"
+target = "127.0.0.1:61092"
+"#,
+        )
+        .unwrap();
+
+        let config = store.load().unwrap();
+        let registration = config.registrations().into_iter().next().unwrap();
+
+        assert_eq!(
+            registration.pattern().display_pattern(),
+            "*.store.example.com"
+        );
+    }
 }

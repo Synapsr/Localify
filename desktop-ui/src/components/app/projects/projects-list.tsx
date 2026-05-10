@@ -4,7 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Reorder } from "motion/react";
 import { useMemo } from "react";
 
-import { bootstrapQueries, domainQueries, projectQueries } from "@/lib/queries";
+import { AppStartupScreen } from "@/components/shared/app-startup-screen";
+import { bootstrapQueries } from "@/lib/queries";
 import { buildProjectGroups } from "@/lib/util.project-groups";
 import { useProjectOrder } from "@/lib/use-project-order";
 
@@ -18,17 +19,7 @@ interface ProjectsListProps {
 }
 
 export const ProjectsList = ({ query }: ProjectsListProps) => {
-  const { data: projects, isLoading: loadingProjects } = useQuery({
-    ...projectQueries.list(),
-    refetchInterval: 5000,
-  });
-  const { data: domains, isLoading: loadingDomains } = useQuery({
-    ...domainQueries.list(),
-    refetchInterval: 5000,
-  });
-  const { data: bootstrap } = useQuery(bootstrapQueries.read());
-
-  const isLoading = loadingProjects || loadingDomains;
+  const { data: bootstrap, error, isPending } = useQuery(bootstrapQueries.read());
 
   const licensing = bootstrap?.licensing;
   const atProjectLimit =
@@ -39,8 +30,8 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
     licensing.projectCount >= licensing.limits.maxProjects;
 
   const groups = useMemo(
-    () => buildProjectGroups(projects ?? [], domains ?? []),
-    [projects, domains],
+    () => buildProjectGroups(bootstrap?.projects ?? [], bootstrap?.domains ?? []),
+    [bootstrap?.domains, bootstrap?.projects],
   );
   const groupById = useMemo(
     () => new Map(groups.map((group) => [group.project.id, group])),
@@ -59,8 +50,19 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
   );
   const hasSearchQuery = query.trim().length > 0;
 
-  if (isLoading) {
+  if (isPending && !bootstrap) {
     return <ProjectListSkeleton />;
+  }
+
+  if (error && !bootstrap) {
+    return (
+      <AppStartupScreen
+        eyebrow="Projects"
+        title="Cannot load projects"
+        message="Localify could not read your desktop projects."
+        error={error.message}
+      />
+    );
   }
 
   if (groups.length === 0) {

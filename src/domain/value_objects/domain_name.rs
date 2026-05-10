@@ -1,55 +1,44 @@
 use std::fmt;
 
-use crate::branding::BRANDING;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DomainName(String);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DomainNameError {
-    #[error("Domain must end with '{suffix}', got: {name}")]
-    InvalidSuffix { name: String, suffix: String },
-
     #[error("Domain name too short: {0}")]
     TooShort(String),
 
     #[error("Domain name contains invalid characters: {0}")]
     InvalidCharacters(String),
+
+    #[error("Domain name has an invalid label: {0}")]
+    InvalidLabel(String),
 }
 
 impl DomainName {
     pub fn new(name: impl Into<String>) -> Result<Self, DomainNameError> {
-        let name = name.into().to_lowercase();
-        let suffix = BRANDING.domain_suffix();
+        let name = name.into().trim().trim_end_matches('.').to_lowercase();
 
-        if !name.ends_with(suffix) {
-            return Err(DomainNameError::InvalidSuffix {
-                name,
-                suffix: suffix.to_string(),
-            });
-        }
-
-        if name.len() <= suffix.len() {
+        if name.len() < 3 || !name.contains('.') {
             return Err(DomainNameError::TooShort(name));
         }
 
-        let prefix = &name[..name.len() - suffix.len()];
-
-        // Validate characters (alphanumeric, hyphens, dots for subdomains)
-        if !prefix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        if name.len() > 253
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
         {
             return Err(DomainNameError::InvalidCharacters(name));
         }
 
-        // Cannot start or end with hyphen or dot
-        if prefix.starts_with('-')
-            || prefix.starts_with('.')
-            || prefix.ends_with('-')
-            || prefix.ends_with('.')
-        {
-            return Err(DomainNameError::InvalidCharacters(name));
+        for label in name.split('.') {
+            if label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+            {
+                return Err(DomainNameError::InvalidLabel(name));
+            }
         }
 
         Ok(Self(name))
@@ -94,15 +83,18 @@ mod tests {
         assert!(DomainName::new("app.localify").is_ok());
         assert!(DomainName::new("my-app.localify").is_ok());
         assert!(DomainName::new("sub.domain.localify").is_ok());
+        assert!(DomainName::new("dev.store.fr").is_ok());
+        assert!(DomainName::new("tenant.dev.store.fr").is_ok());
         assert!(DomainName::new("APP.LOCALIFY").is_ok());
     }
 
     #[test]
     fn test_invalid_domain_names() {
-        assert!(DomainName::new("app.test").is_err());
+        assert!(DomainName::new("app").is_err());
         assert!(DomainName::new(".localify").is_err());
         assert!(DomainName::new("-app.localify").is_err());
         assert!(DomainName::new("app-.localify").is_err());
         assert!(DomainName::new("app_name.localify").is_err());
+        assert!(DomainName::new("app..localify").is_err());
     }
 }

@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
+import { AppStartupScreen } from "@/components/shared/app-startup-screen";
 import { bootstrapQueries } from "@/lib/queries";
 
 import { SettingsAnalytics } from "./settings-analytics";
@@ -18,9 +19,38 @@ import { SettingsUninstall } from "./settings-uninstall";
 import { SettingsUpdates } from "./settings-updates";
 
 export const SettingsScreen = () => {
-  const { data } = useQuery(bootstrapQueries.read());
+  const { data, error, isPending } = useQuery(bootstrapQueries.read());
 
-  if (!data || !data.config.daemon) return null;
+  if (isPending && !data) {
+    return (
+      <AppStartupScreen
+        eyebrow="Settings"
+        title="Loading settings"
+        message="Localify is reading your desktop configuration."
+      />
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <AppStartupScreen
+        eyebrow="Settings"
+        title="Cannot load settings"
+        message="Localify could not read the desktop configuration."
+        error={error.message}
+      />
+    );
+  }
+
+  if (!data) {
+    return (
+      <AppStartupScreen
+        eyebrow="Settings"
+        title="Waiting for settings"
+        message="The desktop shell is still waiting for configuration data."
+      />
+    );
+  }
 
   return (
     <div id="settings-screen" className="screen-wrapper space-y-8 pb-12">
