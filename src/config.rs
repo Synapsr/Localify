@@ -232,8 +232,6 @@ pub struct StoredLicense {
     pub response_signature_verified: bool,
     #[serde(default)]
     pub response_signature_date: Option<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

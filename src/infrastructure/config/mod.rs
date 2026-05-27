@@ -754,7 +754,6 @@ mod tests {
     use super::*;
     use crate::branding::BRANDING;
     use crate::domain::Route;
-    use serde_json::json;
 
     fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -1142,11 +1141,6 @@ mod tests {
                 machine_platform: None,
                 response_signature_verified: false,
                 response_signature_date: None,
-                metadata: json!({
-                    "plan": "Pro",
-                    "maxProjects": 5,
-                    "maxDomainsPerProject": 4
-                }),
             }))
             .unwrap();
 
@@ -1156,6 +1150,24 @@ mod tests {
         store.create_project("Four").unwrap();
 
         assert_eq!(store.list_projects().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn license_save_omits_raw_json_metadata() {
+        let (_dir, store) = temp_store();
+
+        store
+            .store_license(Some(StoredLicense {
+                key: "TEST-KEY-1234".into(),
+                license_id: "lic_123".into(),
+                ..StoredLicense::default()
+            }))
+            .unwrap();
+
+        let content = std::fs::read_to_string(&store.path).unwrap();
+
+        assert!(!content.contains("metadata"));
+        assert!(store.load().unwrap().licensing.license.is_some());
     }
 
     #[test]

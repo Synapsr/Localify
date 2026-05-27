@@ -565,7 +565,6 @@ pub fn build_offline_imported_license(
             machine_platform: None,
             response_signature_verified: false,
             response_signature_date: None,
-            metadata: verified.metadata,
         },
         offline_license,
     ))
@@ -684,7 +683,6 @@ fn parse_validation_response(
             machine_platform: machine.map(|value| value.platform.clone()),
             response_signature_verified: response.signature_verified,
             response_signature_date: response.signature_date,
-            metadata: license.attributes.metadata,
         },
         offline_license: None,
     })
@@ -1235,11 +1233,12 @@ struct KeygenErrorItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEYGEN_OFFLINE_ALGORITHM, ResolvedLicenseStatus, decode_hex, mask_fingerprint,
-        parse_ioplatform_uuid, parse_signature_header, resolve_license_state,
-        should_activate_machine,
+        KEYGEN_OFFLINE_ALGORITHM, KeygenHttpResponse, ResolvedLicenseStatus, decode_hex,
+        mask_fingerprint, parse_ioplatform_uuid, parse_signature_header, parse_validation_response,
+        resolve_license_state, should_activate_machine,
     };
     use crate::config::{LicensingConfig, OfflineLicenseFile, StoredLicense};
+    use reqwest::StatusCode;
 
     #[test]
     fn parses_ioplatform_uuid_from_ioreg_output() {
@@ -1258,6 +1257,38 @@ mod tests {
         assert!(should_activate_machine("FINGERPRINT_SCOPE_MISMATCH"));
         assert!(should_activate_machine("NO_MACHINE"));
         assert!(!should_activate_machine("EXPIRED"));
+    }
+
+    #[test]
+    fn validation_response_accepts_null_metadata() {
+        let response = KeygenHttpResponse {
+            status: StatusCode::OK,
+            body: serde_json::json!({
+                "meta": {
+                    "valid": true,
+                    "code": "VALID",
+                    "detail": "is valid"
+                },
+                "data": {
+                    "id": "lic_123",
+                    "attributes": {
+                        "name": "Pro",
+                        "metadata": null
+                    }
+                }
+            })
+            .to_string(),
+            signature_verified: false,
+            signature_date: None,
+        };
+
+        let validation = parse_validation_response(response, "TEST-KEY-1234", None).unwrap();
+
+        assert!(validation.valid);
+        assert_eq!(validation.license.license_id, "lic_123");
+        assert_eq!(validation.license.plan, None);
+        assert_eq!(validation.license.max_projects, None);
+        assert_eq!(validation.license.max_domains_per_project, None);
     }
 
     #[test]
