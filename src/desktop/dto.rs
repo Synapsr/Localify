@@ -216,6 +216,21 @@ pub struct ProjectInfoDto {
     pub root_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsResolutionDto {
+    #[serde(default)]
+    pub checked: bool,
+    #[serde(default)]
+    pub healthy: bool,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub resolved_ips: Vec<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonStatusDto {
@@ -226,6 +241,8 @@ pub struct DaemonStatusDto {
     pub http_port: u16,
     pub https_port: u16,
     pub dns_port: u16,
+    #[serde(default)]
+    pub dns_resolution: DnsResolutionDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

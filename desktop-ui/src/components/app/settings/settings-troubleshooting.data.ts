@@ -28,6 +28,9 @@ export const buildTroubleshootingIssues = (
   const appName = data.environment.appName;
   const cliCommand = appName.toLowerCase();
   const nodeTrust = data.environment.nodeTrust;
+  const dnsResolution = data.daemon.dnsResolution;
+  const dnsProbeHostname = dnsResolution.hostname || `localify-healthcheck${data.environment.fixedDomainSuffix}`;
+  const dnsResolvedIps = dnsResolution.resolvedIps.join(", ");
   const caCertPath = nodeTrust.caCertPath || `${data.config.paths.dataDir}/ca.crt`;
   const setupComplete =
     data.environment.cliHelperReady &&
@@ -138,6 +141,46 @@ export const buildTroubleshootingIssues = (
             ]
           : [
               "Finish the initial Localify setup first, then start the background service.",
+            ],
+      action: data.daemon.running
+        ? undefined
+        : {
+            id: setupComplete ? "startDaemon" : "install",
+            label: setupComplete ? "Start service" : "Finish setup",
+          },
+    },
+    {
+      id: "dns-resolution",
+      title: `${data.environment.fixedDomainSuffix} DNS resolves through macOS`,
+      tone: !data.daemon.running || !dnsResolution.checked
+        ? "info"
+        : dnsResolution.healthy
+          ? "success"
+          : "warning",
+      summary: !data.daemon.running
+        ? "DNS resolution is checked after the background service starts."
+        : dnsResolution.healthy
+          ? `macOS resolves ${dnsProbeHostname} locally${dnsResolvedIps ? ` to ${dnsResolvedIps}` : ""}.`
+          : (dnsResolution.message ??
+            `macOS is not resolving ${dnsProbeHostname} through Localify.`),
+      symptoms: dnsResolution.healthy
+        ? [`${dnsProbeHostname} reaches Localify through the system resolver.`]
+        : [
+            "Chrome shows `ERR_NAME_NOT_RESOLVED` for a `.localify` URL.",
+            "A VPN, custom DNS provider, or DNS leak-protection setting is active.",
+            "The daemon is running, but browser lookups never reach Localify's DNS server.",
+          ],
+      solutions: !data.daemon.running
+        ? ["Start the background service first, then reopen this guide."]
+        : dnsResolution.healthy
+          ? [
+              "If one browser tab still fails, reload it or fully quit and reopen the browser.",
+              "If only one project fails, check that the project's target server is running.",
+            ]
+          : [
+              "Keep the Localify background service running, then check the active VPN DNS settings.",
+              "Allow local DNS or split DNS for the `.localify` suffix when the VPN supports it.",
+              "An exact `/etc/hosts` entry can bypass DNS for one hostname, but it does not cover wildcard subdomains.",
             ],
       action: data.daemon.running
         ? undefined

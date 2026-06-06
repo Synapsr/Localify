@@ -16,6 +16,14 @@ impl MacOsDnsService {
         Self
     }
 
+    fn resolver_content(port: u16) -> String {
+        format!(
+            "domain {}\nnameserver 127.0.0.1\nnameserver ::1\nport {}\nsearch_order 1\ntimeout 1\noptions attempts:1\n",
+            BRANDING.domain_label(),
+            port
+        )
+    }
+
     fn ensure_resolver_dir(&self) -> Result<(), DnsError> {
         let path = Path::new(RESOLVER_DIR);
         if !path.exists() {
@@ -45,7 +53,7 @@ impl DnsService for MacOsDnsService {
         self.ensure_resolver_dir()?;
         let resolver_file = BRANDING.resolver_file();
 
-        let content = format!("nameserver 127.0.0.1\nnameserver ::1\nport {}\n", port);
+        let content = Self::resolver_content(port);
 
         fs::write(&resolver_file, content).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -160,13 +168,21 @@ impl DnsManager for MacOsDnsService {
 
 #[cfg(test)]
 mod tests {
+    use crate::branding::BRANDING;
+
+    use super::MacOsDnsService;
+
     #[test]
     fn test_resolver_content_format() {
-        let content = format!("nameserver 127.0.0.1\nnameserver ::1\nport {}\n", 1053);
+        let content = MacOsDnsService::resolver_content(1053);
         assert!(content.ends_with('\n'));
+        assert!(content.contains(&format!("domain {}", BRANDING.domain_label())));
         assert!(content.contains("nameserver"));
         assert!(content.contains("127.0.0.1"));
         assert!(content.contains("::1"));
         assert!(content.contains("port 1053"));
+        assert!(content.contains("search_order 1"));
+        assert!(content.contains("timeout 1"));
+        assert!(content.contains("options attempts:1"));
     }
 }

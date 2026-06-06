@@ -11,6 +11,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use crate::application::start_daemon::StartDaemon;
 use crate::branding::BRANDING;
 use crate::config::DaemonConfig;
+use crate::infrastructure::dns::check_system_resolution;
 use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
@@ -44,6 +45,7 @@ pub fn execute(
         ready.http_port, ready.https_port
     );
     println!("LAN IP: {}", lan_ip);
+    print_dns_resolution_warning();
     if !lan_ip.is_loopback() {
         println!("\nAccess from other devices: https://yourdomain.localify");
     }
@@ -51,6 +53,25 @@ pub fn execute(
     println!("Use 'localify stop' to stop the daemon");
 
     Ok(())
+}
+
+fn print_dns_resolution_warning() {
+    let check = check_system_resolution(Duration::from_millis(1500));
+    if check.healthy {
+        return;
+    }
+
+    println!();
+    println!(
+        "Warning: system DNS lookup for {} is not reaching Localify.",
+        check.hostname
+    );
+    if let Some(message) = check.message {
+        println!("  {}", message);
+    }
+    println!(
+        "  If a VPN is active, its DNS or leak-protection settings may be bypassing macOS /etc/resolver."
+    );
 }
 
 fn spawn_background_daemon(exe: &Path, config_path: &Path, verbose: bool) -> Result<Child> {

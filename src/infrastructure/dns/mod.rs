@@ -6,6 +6,9 @@ use crate::application::ports::DnsConfigError;
 use crate::application::ports::DnsManager;
 use crate::branding::BRANDING;
 
+mod system_resolution;
+pub use system_resolution::{SystemResolutionCheck, check_system_resolution};
+
 #[derive(Error, Debug)]
 pub enum DnsError {
     #[error(

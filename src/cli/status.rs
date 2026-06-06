@@ -1,10 +1,12 @@
 use anyhow::Result;
+use std::time::Duration;
 
 use super::context::AppContext;
 use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::list_all_domains::ListAllDomains;
 use crate::config::DaemonConfig;
 use crate::domain::RegistrationSource;
+use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution};
 use crate::infrastructure::network::get_network_info;
 
 pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
@@ -32,6 +34,7 @@ pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
             println!("  Root CA: {}", ca_label);
             println!("  HTTP:  http://localhost:{}", daemon_config.http_port);
             println!("  HTTPS: https://localhost:{}", daemon_config.https_port);
+            print_dns_resolution_status(check_system_resolution(Duration::from_millis(1500)));
             if !status.lan_ip.is_loopback() {
                 println!(
                     "\n  Access from other devices: use http://{}",
@@ -74,4 +77,28 @@ pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_dns_resolution_status(check: SystemResolutionCheck) {
+    if check.healthy {
+        let ips = check
+            .resolved_ips
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  DNS: {} resolves locally ({})", check.hostname, ips);
+        return;
+    }
+
+    println!(
+        "  DNS: system lookup for {} is not reaching Localify",
+        check.hostname
+    );
+    if let Some(message) = check.message {
+        println!("       {}", message);
+    }
+    println!(
+        "       If a VPN is active, its DNS or leak-protection settings may be bypassing macOS /etc/resolver."
+    );
 }

@@ -26,8 +26,8 @@ use crate::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
     AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
     CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
-    DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest,
-    EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
+    DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DnsResolutionDto, DomainInfoDto,
+    DomainPatternRequest, EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest,
@@ -50,7 +50,7 @@ use crate::desktop::{LauncherPreferencesStore, ProjectRootStore, RunActionPrefer
 use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, ConfiguredProject};
-use crate::infrastructure::dns::get_dns_service;
+use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution, get_dns_service};
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::licensing::{
     FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus, build_offline_imported_license,
@@ -81,6 +81,32 @@ pub struct DesktopApi {
     config_path: PathBuf,
     binary_path: PathBuf,
     direct_mode: bool,
+}
+
+fn dns_resolution_status(daemon_running: bool) -> DnsResolutionDto {
+    if !daemon_running {
+        return DnsResolutionDto {
+            checked: false,
+            message: Some("DNS resolution is checked after the daemon starts.".into()),
+            ..DnsResolutionDto::default()
+        };
+    }
+
+    map_dns_resolution_check(check_system_resolution(Duration::from_millis(1500)))
+}
+
+fn map_dns_resolution_check(check: SystemResolutionCheck) -> DnsResolutionDto {
+    DnsResolutionDto {
+        checked: true,
+        healthy: check.healthy,
+        hostname: check.hostname,
+        resolved_ips: check
+            .resolved_ips
+            .into_iter()
+            .map(|address| address.to_string())
+            .collect(),
+        message: check.message,
+    }
 }
 
 impl DesktopApi {
@@ -428,6 +454,7 @@ impl DesktopApi {
             http_port: config.daemon.http_port,
             https_port: config.daemon.https_port,
             dns_port: config.daemon.dns_port,
+            dns_resolution: dns_resolution_status(status.pid.is_some()),
         })
     }
 

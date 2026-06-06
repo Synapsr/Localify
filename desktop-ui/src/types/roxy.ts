@@ -88,6 +88,14 @@ export interface ProjectInfoDto {
   rootPath: string | null;
 }
 
+export interface DnsResolutionDto {
+  checked: boolean;
+  healthy: boolean;
+  hostname: string;
+  resolvedIps: string[];
+  message: string | null;
+}
+
 export interface DaemonStatusDto {
   running: boolean;
   pid: number | null;
@@ -96,6 +104,7 @@ export interface DaemonStatusDto {
   httpPort: number;
   httpsPort: number;
   dnsPort: number;
+  dnsResolution: DnsResolutionDto;
 }
 
 export interface BootstrapDto {

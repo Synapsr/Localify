@@ -19,6 +19,13 @@ export const SettingsSystem = () => {
   if (!data) return null;
 
   const daemonRunning = data.daemon.running;
+  const dnsResolution = data.daemon.dnsResolution;
+  const dnsResolutionValue =
+    daemonRunning && dnsResolution.checked
+      ? dnsResolution.healthy
+        ? "Healthy"
+        : "Blocked"
+      : "Not checked";
 
   async function handleReinstall() {
     try {
@@ -64,6 +71,7 @@ export const SettingsSystem = () => {
             label="CLI command installed"
             value={data.environment.cliAccessReady ? "Yes" : "No"}
           />
+          <SettingsRow label="DNS resolution" value={dnsResolutionValue} />
           <SettingsRow label="LAN IP" value={data.daemon.lanIp} />
           <SettingsRow label="Config" value={data.environment.configPath} mono />
           <SettingsRow label="CLI command" value={data.environment.cliCommandPath} mono />
