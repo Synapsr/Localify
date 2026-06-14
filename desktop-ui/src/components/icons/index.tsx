@@ -47,4 +47,6 @@ export {
   InboxDown as InboxDownIcon,
   InboxCheck as InboxCheckIcon,
   Sparkles as SparklesIcon,
+  Pin as PinIcon,
+  PinSolid as PinSolidIcon,
 } from "@mynaui/icons-react";

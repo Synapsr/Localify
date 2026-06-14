@@ -8,6 +8,7 @@ import { useState, type PointerEvent } from "react";
 
 import type { DomainInfoDto, ProjectInfoDto } from "@/types/roxy";
 
+import { PinIcon, PinSolidIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,12 +34,16 @@ import { ProjectDomainList } from "./projects-list-item-domains";
 interface ProjectsListItemProps {
   project: ProjectInfoDto;
   domains: DomainInfoDto[];
+  isPinned?: boolean;
+  onTogglePinned?: () => void;
   reorderEnabled?: boolean;
 }
 
 export const ProjectsListItem = ({
   project,
   domains,
+  isPinned = false,
+  onTogglePinned,
   reorderEnabled = true,
 }: ProjectsListItemProps) => {
   const navigate = useNavigate();
@@ -54,6 +59,7 @@ export const ProjectsListItem = ({
   const containerClassName = cn(
     "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
     "hover:border-border",
+    isPinned && "bg-primary/[0.04] dark:bg-primary/[0.08]",
     !project.enabled && "opacity-60",
   );
 
@@ -110,9 +116,17 @@ export const ProjectsListItem = ({
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex items-center gap-2">
           <span className="truncate text-lg font-medium">{project.name}</span>
+          {isPinned ? (
+            <PinSolidIcon
+              aria-label="Pinned project"
+              className="size-4 shrink-0 text-muted-foreground"
+            />
+          ) : null}
         </div>
         <ProjectDomainList project={project} domains={domains} />
-        {editorError ? <p className="text-xs text-destructive">{editorError}</p> : null}
+        {editorError ? (
+          <p className="text-xs text-destructive">{editorError}</p>
+        ) : null}
       </div>
 
       <DropdownMenu>
@@ -125,13 +139,34 @@ export const ProjectsListItem = ({
           }
         />
         <DropdownMenuContent align="end">
+          {onTogglePinned ? (
+            <DropdownMenuItem
+              onClick={onTogglePinned}
+              disabled={removeProject.isPending}
+              className="text-nowrap"
+            >
+              {isPinned ? (
+                <PinSolidIcon className="size-4" />
+              ) : (
+                <PinIcon className="size-4" />
+              )}
+              {isPinned ? "Unpin project" : "Pin project"}
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem
             onClick={() => void handleOpenInEditor()}
-            disabled={!project.rootPath || openInEditor.isPending || removeProject.isPending}
+            disabled={
+              !project.rootPath ||
+              openInEditor.isPending ||
+              removeProject.isPending
+            }
           >
             Open in editor
           </DropdownMenuItem>
-          <DropdownMenuItem onClick={handleViewLogs} disabled={removeProject.isPending}>
+          <DropdownMenuItem
+            onClick={handleViewLogs}
+            disabled={removeProject.isPending}
+          >
             View logs
           </DropdownMenuItem>
           <DropdownMenuItem
@@ -195,7 +230,8 @@ export const ProjectsListItem = ({
           <DialogHeader>
             <DialogTitle>Delete {project.name}?</DialogTitle>
             <DialogDescription>
-              This permanently removes the project and unregisters every attached domain.
+              This permanently removes the project and unregisters every
+              attached domain.
             </DialogDescription>
           </DialogHeader>
 
@@ -222,7 +258,9 @@ export const ProjectsListItem = ({
               ) : null}
             </div>
 
-            {deleteError ? <p className="text-sm text-destructive">{deleteError}</p> : null}
+            {deleteError ? (
+              <p className="text-sm text-destructive">{deleteError}</p>
+            ) : null}
           </DialogBody>
 
           <DialogFooter>

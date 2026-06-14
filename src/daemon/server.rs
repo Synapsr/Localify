@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use super::dns_server::DnsServer;
 use super::proxy::{ClientAddr, Scheme};
-use super::router::{RuntimeState, SharedState, create_router};
+use super::router::{DomainAccessLog, RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
 use crate::application::ports::RegistrationProvider;
 use crate::infrastructure::config::Config;
@@ -75,10 +75,14 @@ impl Server {
             .map(|d| d.pattern().clone())
             .collect();
 
-        let state: SharedState = Arc::new(ArcSwap::from_pointee(RuntimeState::with_project_roots(
-            registrations,
-            project_roots,
-        )));
+        let domain_accesses = DomainAccessLog::default();
+        let state: SharedState = Arc::new(ArcSwap::from_pointee(
+            RuntimeState::with_project_roots_and_access_log(
+                registrations,
+                project_roots,
+                domain_accesses.clone(),
+            ),
+        ));
 
         let tls_acceptor = create_tls_acceptor(&https_patterns, &paths.certs_dir, &paths.data_dir)?;
 
@@ -110,11 +114,13 @@ impl Server {
         );
 
         let dns_handle = spawn_dns_server(self.dns_port);
+        let domain_accesses = self.state.load().domain_access_log();
         spawn_reload_listener(
             self.state.clone(),
             self.reload_rx,
             self.reload_provider,
             self.config_path,
+            domain_accesses,
             cancel.clone(),
         );
         spawn_mgmt_socket(
@@ -156,6 +162,7 @@ fn spawn_reload_listener(
     mut reload_rx: mpsc::Receiver<()>,
     reload_provider: Arc<dyn RegistrationProvider>,
     config_path: PathBuf,
+    domain_accesses: DomainAccessLog,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -168,7 +175,11 @@ fn spawn_reload_listener(
                             Ok(regs) => {
                                 let count = regs.len();
                                 let project_roots = load_project_root_paths_from_store(Path::new(&config_path));
-                                let new = Arc::new(RuntimeState::with_project_roots(regs, project_roots));
+                                let new = Arc::new(RuntimeState::with_project_roots_and_access_log(
+                                    regs,
+                                    project_roots,
+                                    domain_accesses.clone(),
+                                ));
                                 state.store(new);
                                 info!(count, "Runtime state reloaded");
                             }

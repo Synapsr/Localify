@@ -199,6 +199,8 @@ pub struct DomainInfoDto {
     pub active: bool,
     #[serde(default)]
     pub target_reachable: bool,
+    #[serde(default)]
+    pub last_accessed_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +216,8 @@ pub struct ProjectInfoDto {
     pub has_reachable_domain: bool,
     #[serde(default)]
     pub root_path: Option<String>,
+    #[serde(default)]
+    pub last_accessed_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

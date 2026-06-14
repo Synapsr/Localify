@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -34,6 +35,7 @@ pub struct RuntimeState {
     /// All registrations sorted by pattern specificity (most specific first).
     registrations: Vec<DomainRegistration>,
     project_roots: HashMap<String, String>,
+    domain_accesses: DomainAccessLog,
 }
 
 impl RuntimeState {
@@ -42,9 +44,22 @@ impl RuntimeState {
         Self::with_project_roots(registrations, HashMap::new())
     }
 
+    #[cfg(test)]
     pub fn with_project_roots(
+        registrations: Vec<DomainRegistration>,
+        project_roots: HashMap<String, String>,
+    ) -> Self {
+        Self::with_project_roots_and_access_log(
+            registrations,
+            project_roots,
+            DomainAccessLog::default(),
+        )
+    }
+
+    pub fn with_project_roots_and_access_log(
         mut registrations: Vec<DomainRegistration>,
         project_roots: HashMap<String, String>,
+        domain_accesses: DomainAccessLog,
     ) -> Self {
         // Most-specific first: longer base domain wins.
         // At equal specificity, exact patterns come before wildcards.
@@ -58,6 +73,7 @@ impl RuntimeState {
         Self {
             registrations,
             project_roots,
+            domain_accesses,
         }
     }
 
@@ -80,10 +96,54 @@ impl RuntimeState {
             .get(&registration.display_pattern())
             .map(String::as_str)
     }
+
+    pub fn record_access_for_registration(&self, registration: &DomainRegistration) {
+        self.domain_accesses.record(registration.display_pattern());
+    }
+
+    pub fn last_accessed_at_for_registration(
+        &self,
+        registration: &DomainRegistration,
+    ) -> Option<u64> {
+        self.domain_accesses.get(&registration.display_pattern())
+    }
+
+    pub fn domain_access_log(&self) -> DomainAccessLog {
+        self.domain_accesses.clone()
+    }
 }
 
 /// Shared, atomically-swappable runtime state. Lock-free reads.
 pub type SharedState = Arc<ArcSwap<RuntimeState>>;
+
+#[derive(Clone, Default)]
+pub struct DomainAccessLog {
+    entries: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl DomainAccessLog {
+    fn record(&self, pattern: String) {
+        let Some(timestamp) = current_unix_millis() else {
+            return;
+        };
+
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(pattern, timestamp);
+        }
+    }
+
+    fn get(&self, pattern: &str) -> Option<u64> {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(pattern).copied())
+    }
+}
+
+fn current_unix_millis() -> Option<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(duration.as_millis()).ok()
+}
 
 /// Pure result of resolving a request to a route. No I/O.
 #[derive(Debug)]
@@ -196,6 +256,7 @@ async fn handle_request(
             host,
             path,
         } => {
+            state.record_access_for_registration(registration);
             info!(host = %host, path = %path, "No route found");
             build_no_route_response(registration, &host, &path)
         }
@@ -203,6 +264,7 @@ async fn handle_request(
             registration,
             route,
         } => {
+            state.record_access_for_registration(registration);
             let host = host_header.as_deref().unwrap_or("");
             debug!(
                 method = %method,
@@ -645,6 +707,18 @@ mod tests {
             state.project_root_for_registration(matched),
             Some("/tmp/app")
         );
+    }
+
+    #[test]
+    fn runtime_state_records_registration_access() {
+        let state = RuntimeState::new(vec![reg("app.roxy", false)]);
+        let matched = state.get_domain("app.localify").unwrap();
+
+        assert_eq!(state.last_accessed_at_for_registration(matched), None);
+
+        state.record_access_for_registration(matched);
+
+        assert!(state.last_accessed_at_for_registration(matched).is_some());
     }
 
     #[test]

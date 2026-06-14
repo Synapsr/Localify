@@ -10,7 +10,10 @@ import { buildProjectGroups } from "@/lib/util.project-groups";
 import { useProjectOrder } from "@/lib/use-project-order";
 
 import { ProjectsListEmptyState } from "./projects-list-empty-state";
-import { ProjectListItemSkeleton, ProjectsListItem } from "./projects-list-item";
+import {
+  ProjectListItemSkeleton,
+  ProjectsListItem,
+} from "./projects-list-item";
 import { ProjectsListUpsell } from "./projects-list-upsell";
 import { filterProjectGroups } from "./util.project-search";
 
@@ -19,7 +22,11 @@ interface ProjectsListProps {
 }
 
 export const ProjectsList = ({ query }: ProjectsListProps) => {
-  const { data: bootstrap, error, isPending } = useQuery(bootstrapQueries.read());
+  const {
+    data: bootstrap,
+    error,
+    isPending,
+  } = useQuery(bootstrapQueries.read());
 
   const licensing = bootstrap?.licensing;
   const atProjectLimit =
@@ -30,16 +37,36 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
     licensing.projectCount >= licensing.limits.maxProjects;
 
   const groups = useMemo(
-    () => buildProjectGroups(bootstrap?.projects ?? [], bootstrap?.domains ?? []),
+    () =>
+      buildProjectGroups(bootstrap?.projects ?? [], bootstrap?.domains ?? []),
     [bootstrap?.domains, bootstrap?.projects],
   );
   const groupById = useMemo(
     () => new Map(groups.map((group) => [group.project.id, group])),
     [groups],
   );
-  const knownIds = useMemo(() => groups.map((group) => group.project.id), [groups]);
-  const { order, setOrder } = useProjectOrder(knownIds);
-  const filteredGroups = useMemo(() => filterProjectGroups(groups, query), [groups, query]);
+  const knownIds = useMemo(
+    () => groups.map((group) => group.project.id),
+    [groups],
+  );
+  const projectActivities = useMemo(
+    () =>
+      groups.map((group) => ({
+        id: group.project.id,
+        hasReachableDomain: group.project.hasReachableDomain,
+        lastAccessedAt: group.project.lastAccessedAt,
+      })),
+    [groups],
+  );
+  const { order, pinnedIds, setOrder, togglePinned } = useProjectOrder(
+    knownIds,
+    projectActivities,
+  );
+  const pinnedProjectIds = useMemo(() => new Set(pinnedIds), [pinnedIds]);
+  const filteredGroups = useMemo(
+    () => filterProjectGroups(groups, query),
+    [groups, query],
+  );
   const filteredIds = useMemo(
     () => new Set(filteredGroups.map((group) => group.project.id)),
     [filteredGroups],
@@ -85,6 +112,8 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
               key={id}
               project={group.project}
               domains={group.domains}
+              isPinned={pinnedProjectIds.has(id)}
+              onTogglePinned={() => togglePinned(id)}
               reorderEnabled={false}
             />
           );
@@ -109,6 +138,8 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
               key={id}
               project={group.project}
               domains={group.domains}
+              isPinned={pinnedProjectIds.has(id)}
+              onTogglePinned={() => togglePinned(id)}
             />
           );
         })}

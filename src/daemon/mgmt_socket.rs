@@ -156,6 +156,7 @@ pub async fn serve(
                                 "pattern": r.display_pattern(),
                                 "source": r.source().to_string(),
                                 "https": r.is_https_enabled(),
+                                "last_accessed_at": snapshot.last_accessed_at_for_registration(r),
                                 "routes": routes,
                             })
                         })
@@ -319,6 +320,7 @@ mod tests {
         assert_eq!(domains[0]["pattern"], "app.localify");
         assert_eq!(domains[0]["source"], "config");
         assert_eq!(domains[0]["https"], false);
+        assert_eq!(domains[0]["last_accessed_at"], serde_json::Value::Null);
         let routes = domains[0]["routes"].as_array().unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["path"], "/");

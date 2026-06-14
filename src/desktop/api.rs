@@ -469,40 +469,53 @@ impl DesktopApi {
         let configured_domains = self.config_store().list_configured_domains()?;
         let daemon = MgmtSocketClient::new(&paths.socket_path);
 
-        let (active_config_domains, external_domains) = match daemon.list_registrations() {
+        let (active_config_domains, external_domains) = match daemon.list_registration_info() {
             Ok(registrations) => {
-                let mut active_patterns = std::collections::HashSet::new();
+                let mut active_patterns = HashMap::new();
                 let mut external = Vec::new();
 
-                for registration in registrations {
-                    if registration.source().to_string() == "config" {
-                        active_patterns.insert(registration.display_pattern());
+                for info in registrations {
+                    if info.registration.source().to_string() == "config" {
+                        active_patterns
+                            .insert(info.registration.display_pattern(), info.last_accessed_at);
                     } else {
-                        external.push(registration);
+                        external.push(info);
                     }
                 }
 
                 (active_patterns, external)
             }
-            Err(_) => (std::collections::HashSet::new(), Vec::new()),
+            Err(_) => (HashMap::new(), Vec::new()),
         };
 
         let mut domains = configured_domains
             .into_iter()
             .map(|domain| {
                 let has_cert = certs.exists(domain.registration.pattern());
-                let active = active_config_domains.contains(&domain.registration.display_pattern());
+                let last_accessed_at = active_config_domains
+                    .get(&domain.registration.display_pattern())
+                    .copied()
+                    .flatten();
+                let active =
+                    active_config_domains.contains_key(&domain.registration.display_pattern());
                 let target_reachable = registration_has_reachable_target(&domain.registration);
 
-                map_configured_domain_info(domain, has_cert, cert_trusted, active, target_reachable)
+                map_configured_domain_info(
+                    domain,
+                    has_cert,
+                    cert_trusted,
+                    active,
+                    target_reachable,
+                    last_accessed_at,
+                )
             })
             .collect::<Vec<_>>();
 
-        domains.extend(external_domains.into_iter().map(|registration| {
-            let has_cert = certs.exists(registration.pattern());
-            let target_reachable = registration_has_reachable_target(&registration);
+        domains.extend(external_domains.into_iter().map(|info| {
+            let has_cert = certs.exists(info.registration.pattern());
+            let target_reachable = registration_has_reachable_target(&info.registration);
             map_domain_info(
-                registration,
+                info.registration,
                 DomainInfoDetails {
                     has_cert,
                     cert_trusted,
@@ -511,6 +524,7 @@ impl DesktopApi {
                     project_enabled: true,
                     active: true,
                     target_reachable,
+                    last_accessed_at: info.last_accessed_at,
                 },
             )
         }));
@@ -524,14 +538,20 @@ impl DesktopApi {
             return self.enrich_projects_with_local_paths(helper.list_projects()?);
         }
 
+        let (_, paths) = self.load_config_and_paths()?;
+        let domain_accesses = daemon_domain_accesses(&paths.socket_path);
         let configured_domains = self.config_store().list_configured_domains()?;
         let project_statuses = configured_domains.into_iter().fold(
-            std::collections::HashMap::<String, (usize, bool)>::new(),
+            HashMap::<String, (usize, bool, Option<u64>)>::new(),
             |mut statuses, domain| {
                 if let Some(project_id) = domain.project_id {
-                    let status = statuses.entry(project_id).or_insert((0, false));
+                    let access = domain_accesses
+                        .get(&domain.registration.display_pattern())
+                        .copied();
+                    let status = statuses.entry(project_id).or_insert((0, false, None));
                     status.0 += 1;
                     status.1 |= registration_has_reachable_target(&domain.registration);
+                    status.2 = latest_accessed_at(status.2, access);
                 }
                 statuses
             },
@@ -542,11 +562,16 @@ impl DesktopApi {
             .list_projects()?
             .into_iter()
             .map(|project| {
-                let (domain_count, has_reachable_domain) = project_statuses
+                let (domain_count, has_reachable_domain, last_accessed_at) = project_statuses
                     .get(&project.id)
                     .copied()
-                    .unwrap_or((0, false));
-                map_project_info(project, domain_count, has_reachable_domain)
+                    .unwrap_or((0, false, None));
+                map_project_info(
+                    project,
+                    domain_count,
+                    has_reachable_domain,
+                    last_accessed_at,
+                )
             })
             .collect::<Vec<_>>();
         projects = self.enrich_projects_with_local_paths(projects)?;
@@ -561,7 +586,7 @@ impl DesktopApi {
 
         self.ensure_config_writable()?;
         let project = self.config_store().create_project(&request.name)?;
-        Ok(map_project_info(project, 0, false))
+        Ok(map_project_info(project, 0, false, None))
     }
 
     pub fn create_project_with_domains(
@@ -652,6 +677,7 @@ impl DesktopApi {
             project,
             request.domains.len(),
             has_reachable_domain,
+            None,
         ))
     }
 
@@ -708,7 +734,7 @@ impl DesktopApi {
         let has_reachable_domain = project_domain_summary(&config_store, &project.id)?.1;
 
         Ok(InitProjectResultDto {
-            project: map_project_info(project, services.len(), has_reachable_domain),
+            project: map_project_info(project, services.len(), has_reachable_domain, None),
             services,
             daemon_reloaded,
         })
@@ -811,7 +837,7 @@ impl DesktopApi {
         let project = self
             .config_store()
             .update_project(&id, name, enabled, None)?;
-        let project = map_project_info(project, domain_count, has_reachable_domain);
+        let project = map_project_info(project, domain_count, has_reachable_domain, None);
         let mut projects = self.enrich_projects_with_local_paths(vec![project])?;
         Ok(projects
             .pop()
@@ -1199,7 +1225,7 @@ impl DesktopApi {
         };
 
         Ok(RemoveProjectResultDto {
-            project: map_project_info(project, domain_count, false),
+            project: map_project_info(project, domain_count, false, None),
             removed_domains,
             daemon_reloaded,
         })
@@ -1234,14 +1260,17 @@ impl DesktopApi {
             .ok_or_else(|| anyhow::anyhow!("Domain '{}' not registered", pattern))?;
 
         let daemon = MgmtSocketClient::new(&paths.socket_path);
-        let active = daemon
-            .list_registrations()
+        let (active, last_accessed_at) = daemon
+            .list_registration_info()
             .map(|registrations| {
-                registrations
-                    .iter()
-                    .any(|registration| registration.display_pattern() == pattern.display_pattern())
+                registrations.into_iter().find_map(|info| {
+                    (info.registration.display_pattern() == pattern.display_pattern())
+                        .then_some(info.last_accessed_at)
+                })
             })
-            .unwrap_or(false);
+            .ok()
+            .flatten()
+            .map_or((false, None), |last_accessed_at| (true, last_accessed_at));
 
         let has_cert = certs.exists(configured_domain.registration.pattern());
         let target_reachable = registration_has_reachable_target(&configured_domain.registration);
@@ -1251,6 +1280,7 @@ impl DesktopApi {
             cert_trusted,
             active,
             target_reachable,
+            last_accessed_at,
         ))
     }
 
@@ -3740,6 +3770,7 @@ fn map_configured_domain_info(
     cert_trusted: Option<bool>,
     active: bool,
     target_reachable: bool,
+    last_accessed_at: Option<u64>,
 ) -> DomainInfoDto {
     map_domain_info(
         value.registration,
@@ -3751,6 +3782,7 @@ fn map_configured_domain_info(
             project_enabled: value.project_enabled,
             active,
             target_reachable,
+            last_accessed_at,
         },
     )
 }
@@ -3763,6 +3795,7 @@ struct DomainInfoDetails {
     project_enabled: bool,
     active: bool,
     target_reachable: bool,
+    last_accessed_at: Option<u64>,
 }
 
 fn map_domain_info(
@@ -3778,6 +3811,7 @@ fn map_domain_info(
         project_enabled: details.project_enabled,
         active: details.active,
         target_reachable: details.target_reachable,
+        last_accessed_at: details.last_accessed_at,
     }
 }
 
@@ -3785,6 +3819,7 @@ fn map_project_info(
     value: ConfiguredProject,
     domain_count: usize,
     has_reachable_domain: bool,
+    last_accessed_at: Option<u64>,
 ) -> ProjectInfoDto {
     ProjectInfoDto {
         id: value.id,
@@ -3793,6 +3828,30 @@ fn map_project_info(
         domain_count,
         has_reachable_domain,
         root_path: value.root_path,
+        last_accessed_at,
+    }
+}
+
+fn daemon_domain_accesses(socket_path: &Path) -> HashMap<String, u64> {
+    MgmtSocketClient::new(socket_path)
+        .list_registration_info()
+        .map(|registrations| {
+            registrations
+                .into_iter()
+                .filter_map(|info| {
+                    info.last_accessed_at
+                        .map(|timestamp| (info.registration.display_pattern(), timestamp))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn latest_accessed_at(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 

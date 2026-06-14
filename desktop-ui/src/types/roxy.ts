@@ -77,6 +77,7 @@ export interface DomainInfoDto {
   projectEnabled: boolean;
   active: boolean;
   targetReachable: boolean;
+  lastAccessedAt: number | null;
 }
 
 export interface ProjectInfoDto {
@@ -86,6 +87,7 @@ export interface ProjectInfoDto {
   domainCount: number;
   hasReachableDomain: boolean;
   rootPath: string | null;
+  lastAccessedAt: number | null;
 }
 
 export interface DnsResolutionDto {

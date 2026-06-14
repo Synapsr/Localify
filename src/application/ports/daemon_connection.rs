@@ -1,6 +1,13 @@
 use crate::domain::DomainRegistration;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // The CLI target does not read daemon registration metadata directly.
+pub struct DaemonRegistrationInfo {
+    pub registration: DomainRegistration,
+    pub last_accessed_at: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)] // Used by trait impls; no production caller for status() yet.
 pub struct DaemonRuntimeInfo {
     pub pid: u32,
@@ -27,4 +34,15 @@ pub trait DaemonConnection {
     fn status(&self) -> Result<DaemonRuntimeInfo, DaemonConnectionError>;
     fn reload(&self) -> Result<(), DaemonConnectionError>;
     fn list_registrations(&self) -> Result<Vec<DomainRegistration>, DaemonConnectionError>;
+    fn list_registration_info(&self) -> Result<Vec<DaemonRegistrationInfo>, DaemonConnectionError> {
+        self.list_registrations().map(|registrations| {
+            registrations
+                .into_iter()
+                .map(|registration| DaemonRegistrationInfo {
+                    registration,
+                    last_accessed_at: None,
+                })
+                .collect()
+        })
+    }
 }

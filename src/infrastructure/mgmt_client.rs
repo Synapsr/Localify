@@ -3,7 +3,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::application::ports::{DaemonConnection, DaemonConnectionError, DaemonRuntimeInfo};
+use crate::application::ports::{
+    DaemonConnection, DaemonConnectionError, DaemonRegistrationInfo, DaemonRuntimeInfo,
+};
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
 };
@@ -89,6 +91,15 @@ impl DaemonConnection for MgmtSocketClient {
     }
 
     fn list_registrations(&self) -> Result<Vec<DomainRegistration>, DaemonConnectionError> {
+        self.list_registration_info().map(|items| {
+            items
+                .into_iter()
+                .map(|item| item.registration)
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn list_registration_info(&self) -> Result<Vec<DaemonRegistrationInfo>, DaemonConnectionError> {
         let resp = self.send_command("list")?;
         let domains = resp["data"]["domains"]
             .as_array()
@@ -148,7 +159,10 @@ impl DaemonConnection for MgmtSocketClient {
                 reg.enable_https();
             }
 
-            registrations.push(reg);
+            registrations.push(DaemonRegistrationInfo {
+                registration: reg,
+                last_accessed_at: d["last_accessed_at"].as_u64(),
+            });
         }
 
         Ok(registrations)
