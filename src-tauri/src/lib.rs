@@ -21,11 +21,15 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::{async_runtime, menu::AboutMetadata};
+#[cfg(desktop)]
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
 #[cfg(target_os = "macos")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
+#[cfg(desktop)]
+const AUTOSTART_ARG: &str = "--autostart";
 const TRAY_ID: &str = "localify-tray";
 const TRAY_OPEN: &str = "tray-open";
 const TRAY_START: &str = "tray-start";
@@ -149,6 +153,63 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     window.show()?;
     let _ = window.unminimize();
     window.set_focus()?;
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn argv_has_autostart_arg(argv: &[String]) -> bool {
+    argv.iter().any(|arg| arg == AUTOSTART_ARG)
+}
+
+#[cfg(desktop)]
+fn launched_from_autostart() -> bool {
+    std::env::args().any(|arg| arg == AUTOSTART_ARG)
+}
+
+#[cfg(not(desktop))]
+fn launched_from_autostart() -> bool {
+    false
+}
+
+#[cfg(desktop)]
+pub(crate) fn autostart_enabled<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(desktop))]
+pub(crate) fn autostart_enabled<R: Runtime>(_app: &AppHandle<R>) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(desktop)]
+pub(crate) fn enable_autostart<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if autostart_enabled(app)? {
+        return Ok(());
+    }
+
+    app.autolaunch().enable().map_err(|error| error.to_string())
+}
+
+#[cfg(not(desktop))]
+pub(crate) fn enable_autostart<R: Runtime>(_app: &AppHandle<R>) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(desktop)]
+pub(crate) fn disable_autostart<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if !autostart_enabled(app)? {
+        return Ok(());
+    }
+
+    app.autolaunch()
+        .disable()
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(desktop))]
+pub(crate) fn disable_autostart<R: Runtime>(_app: &AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
@@ -727,7 +788,8 @@ fn handle_tray_action_error<R: Runtime>(app: &AppHandle<R>, id: &str, error: Str
 fn recover_daemon_after_app_update<R: Runtime + 'static>(app: &AppHandle<R>) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        match commands::consume_post_update_daemon_restart(&app) {
+        let result = commands::consume_post_update_daemon_restart(&app);
+        match result {
             Ok(true) => {}
             Ok(false) => {}
             Err(error) => {
@@ -743,6 +805,35 @@ fn recover_daemon_after_app_update<R: Runtime + 'static>(app: &AppHandle<R>) {
                     MessageDialogKind::Error,
                 );
             }
+        }
+    });
+}
+
+fn start_daemon_after_login<R: Runtime + 'static>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let status = match state.api.daemon_status() {
+            Ok(status) => status,
+            Err(error) => {
+                eprintln!("failed to inspect daemon status during login start: {error}");
+                return;
+            }
+        };
+
+        if status.running || !status.ca_installed {
+            return;
+        }
+
+        if let Err(error) = state
+            .api
+            .start_daemon(StartDaemonRequest { verbose: false })
+        {
+            eprintln!("failed to start daemon during login start: {error}");
+        }
+
+        if let Err(error) = sync_tray_menu(&app) {
+            eprintln!("failed to refresh tray after login start: {error}");
         }
     });
 }
@@ -1155,9 +1246,15 @@ pub fn run() {
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            let _ = open_main_window(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !argv_has_autostart_arg(&argv) {
+                let _ = open_main_window(app);
+            }
         }));
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![AUTOSTART_ARG]),
+        ));
     }
 
     let builder = builder
@@ -1198,6 +1295,12 @@ pub fn run() {
             setup_app_menu(app.handle())?;
             setup_tray(app.handle())?;
             recover_daemon_after_app_update(app.handle());
+            let autostart_launch = launched_from_autostart();
+            if autostart_launch {
+                start_daemon_after_login(app.handle());
+            } else {
+                open_main_window(app.handle())?;
+            }
             if let Err(error) = handle_startup_deep_links(app.handle()) {
                 eprintln!("failed to process startup deep links: {error}");
             }
@@ -1220,6 +1323,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap,
+            commands::get_autostart_status,
+            commands::set_autostart_enabled,
             commands::check_app_update,
             commands::install_app_update,
             commands::read_install_attribution_clipboard,

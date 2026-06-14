@@ -6,6 +6,7 @@ import type {
   AssignDomainProjectRequest,
   AvailablePortDto,
   AppConfigDto,
+  AutostartStatusDto,
   DeepLinkPayloadDto,
   AppUpdateCheckDto,
   BootstrapDto,
@@ -52,12 +53,14 @@ import type {
   StartDaemonRequest,
   UninstallPreviewDto,
   UninstallResultDto,
+  UpdateAutostartRequest,
   UnregisterDomainResultDto,
   UpdateDomainRequest,
   UpdateLauncherPreferencesRequest,
   UpdateProjectRequest,
 } from "../types/roxy";
 
+import { updateAutostartRequestSchema } from "./validators/validator.autostart";
 import {
   createProjectWithDomainsRequestSchema,
   registerDomainRequestSchema,
@@ -126,6 +129,8 @@ function formatTauriError(error: unknown, command: string): string {
 
 export interface DesktopClient {
   getBootstrap(): Promise<BootstrapDto>;
+  getAutostartStatus(): Promise<AutostartStatusDto>;
+  setAutostartEnabled(request: UpdateAutostartRequest): Promise<AutostartStatusDto>;
   checkAppUpdate(): Promise<AppUpdateCheckDto>;
   installAppUpdate(): Promise<void>;
   readInstallAttributionClipboard(): Promise<string | null>;
@@ -184,6 +189,11 @@ export interface DesktopClient {
 export function createDesktopClient(): DesktopClient {
   return {
     getBootstrap: () => tauriInvoke("get_bootstrap"),
+    getAutostartStatus: () => tauriInvoke("get_autostart_status"),
+    setAutostartEnabled: (request) =>
+      tauriInvoke("set_autostart_enabled", {
+        request: updateAutostartRequestSchema.parse(request),
+      }),
     checkAppUpdate: () => tauriInvoke("check_app_update"),
     installAppUpdate: () => tauriInvoke("install_app_update"),
     readInstallAttributionClipboard: () => tauriInvoke("read_install_attribution_clipboard"),

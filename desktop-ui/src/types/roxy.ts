@@ -118,6 +118,10 @@ export interface BootstrapDto {
   projects: ProjectInfoDto[];
 }
 
+export interface AutostartStatusDto {
+  enabled: boolean;
+}
+
 export type EditorPreference =
   | "auto"
   | "cursor"
@@ -501,6 +505,10 @@ export interface UpdateLauncherPreferencesRequest {
   terminal: TerminalPreference;
   browser: BrowserPreference;
   runAction: RunActionPreference;
+}
+
+export interface UpdateAutostartRequest {
+  enabled: boolean;
 }
 
 export interface InitProjectFromFolderResultDto {

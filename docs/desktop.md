@@ -77,6 +77,20 @@ The dev script also forces `LOCALIFY_PROFILE=dev` and
 from the dev shell use the repo's debug CLI, separate runtime files, and the
 dev helper instead of the installed production app.
 
+## Launch at Login
+
+Successful desktop activation registers Localify with the official Tauri
+autostart plugin. The login item passes `--autostart`; that launch path keeps
+the main window hidden, creates the tray icon, and starts the daemon only when
+Localify is already installed and the daemon is not running.
+
+The production Settings screen exposes the same login item as a "Launch at
+login" toggle so users can verify, disable, or re-enable it without
+reinstalling.
+
+Desktop uninstall disables the same login item so the app does not keep a stale
+startup entry.
+
 ## Package It
 
 The packaged desktop app needs the `localify` CLI inside the bundle. The

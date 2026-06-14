@@ -12,6 +12,7 @@ import { SettingsHeader } from "./settings-header";
 import { SettingsHotkeys } from "./settings-hotkeys";
 import { SettingsLaunchers } from "./settings-launchers";
 import { SettingsLicensing } from "./settings-licensing";
+import { SettingsStartup } from "./settings-startup";
 import { SettingsStatus } from "./settings-status";
 import { SettingsTransfer } from "./settings-transfer";
 import { SettingsTroubleshooting } from "./settings-troubleshooting";
@@ -58,6 +59,7 @@ export const SettingsScreen = () => {
       <div className="space-y-4">
         <SettingsLicensing />
         <SettingsStatus />
+        <SettingsStartup />
         <SettingsTroubleshooting />
         <SettingsLaunchers />
         <SettingsAnalytics />

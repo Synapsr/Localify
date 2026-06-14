@@ -11,14 +11,14 @@ use roxy::desktop::dto::{
     RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
     RemoveRouteRequest, RunLocalDevServerRequest, SettingsExportRequest, SettingsExportResultDto,
     SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, StartDaemonRequest, StopLocalDevServerRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    SettingsImportResultDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use tauri::async_runtime;
 use tauri::{AppHandle, Manager, Runtime};
@@ -84,11 +84,69 @@ pub struct AppUpdateCheckDto {
     pub update: Option<AppUpdateInfoDto>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutostartStatusDto {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAutostartRequest {
+    pub enabled: bool,
+}
+
 const INSTALL_ATTRIBUTION_PREFIX: &str = "localify:install-attribution:v1:";
 const POST_UPDATE_DAEMON_RESTART_MARKER: &str = "post-update-daemon-restart";
 
 fn map_error<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+fn install_completed(result: &InstallResultDto) -> bool {
+    result.steps.iter().all(|step| step.status != "warning")
+}
+
+fn autostart_install_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
+    match super::enable_autostart(app) {
+        Ok(()) => StepDto {
+            label: Some("Launch at login".into()),
+            status: "success".into(),
+            message: format!(
+                "{} will open at login and restart the background daemon automatically.",
+                roxy::branding::BRANDING.app_name
+            ),
+        },
+        Err(error) => StepDto {
+            label: Some("Launch at login".into()),
+            status: "warning".into(),
+            message: format!(
+                "{} was installed, but launch at login could not be enabled: {error}",
+                roxy::branding::BRANDING.app_name
+            ),
+        },
+    }
+}
+
+fn autostart_uninstall_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
+    match super::disable_autostart(app) {
+        Ok(()) => StepDto {
+            label: Some("Launch at login".into()),
+            status: "success".into(),
+            message: format!(
+                "{} will no longer open automatically at login.",
+                roxy::branding::BRANDING.app_name
+            ),
+        },
+        Err(error) => StepDto {
+            label: Some("Launch at login".into()),
+            status: "warning".into(),
+            message: format!(
+                "{} was uninstalled, but launch at login could not be disabled: {error}",
+                roxy::branding::BRANDING.app_name
+            ),
+        },
+    }
 }
 
 fn desktop_state_dir() -> Result<PathBuf, String> {
@@ -262,6 +320,27 @@ pub async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateCheckDto
 }
 
 #[tauri::command]
+pub fn get_autostart_status(app: tauri::AppHandle) -> Result<AutostartStatusDto, String> {
+    Ok(AutostartStatusDto {
+        enabled: super::autostart_enabled(&app)?,
+    })
+}
+
+#[tauri::command]
+pub fn set_autostart_enabled(
+    app: tauri::AppHandle,
+    request: UpdateAutostartRequest,
+) -> Result<AutostartStatusDto, String> {
+    if request.enabled {
+        super::enable_autostart(&app)?;
+    } else {
+        super::disable_autostart(&app)?;
+    }
+
+    get_autostart_status(app)
+}
+
+#[tauri::command]
 pub async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     install_app_update_with_handle(app).await
 }
@@ -389,12 +468,21 @@ pub fn detect_project_init_plan(
 }
 
 #[tauri::command]
-pub async fn install_roxy(state: tauri::State<'_, AppState>) -> Result<InstallResultDto, String> {
+pub async fn install_roxy(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<InstallResultDto, String> {
     let api = state.api.clone();
 
-    async_runtime::spawn_blocking(move || api.install().map_err(map_error))
+    let mut result = async_runtime::spawn_blocking(move || api.install().map_err(map_error))
         .await
-        .map_err(map_error)?
+        .map_err(map_error)??;
+
+    if install_completed(&result) {
+        result.steps.push(autostart_install_step(&app));
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -431,13 +519,18 @@ pub fn get_uninstall_preview(
 
 #[tauri::command]
 pub async fn uninstall_roxy(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<UninstallResultDto, String> {
     let api = state.api.clone();
 
-    async_runtime::spawn_blocking(move || api.uninstall().map_err(map_error))
+    let mut result = async_runtime::spawn_blocking(move || api.uninstall().map_err(map_error))
         .await
-        .map_err(map_error)?
+        .map_err(map_error)??;
+
+    result.steps.push(autostart_uninstall_step(&app));
+
+    Ok(result)
 }
 
 #[tauri::command]
