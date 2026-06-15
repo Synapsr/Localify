@@ -32,6 +32,8 @@ import { DomainTargetFields } from "./create-dialog/domain-target-fields";
 
 interface ProjectEditDomainDialogProps extends PropsWithChildren {
   domain: DomainInfoDto;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 const editDomainSchema = projectDomainEntrySchema.superRefine((value, ctx) => {
@@ -58,9 +60,14 @@ function buildDefaults(domain: DomainInfoDto, normalizedSuffix: string): EditDom
   };
 }
 
-export const ProjectEditDomainDialog = ({ domain, children }: ProjectEditDomainDialogProps) => {
+export const ProjectEditDomainDialog = ({
+  domain,
+  children,
+  open: controlledOpen,
+  onOpenChange,
+}: ProjectEditDomainDialogProps) => {
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const updateDomain = useMutation(domainMutations.update(queryClient));
@@ -69,6 +76,14 @@ export const ProjectEditDomainDialog = ({ domain, children }: ProjectEditDomainD
   const { data } = useQuery(bootstrapQueries.read());
   const suffix = data?.environment.fixedDomainSuffix ?? "";
   const normalizedSuffix = normalizeSuffix(suffix);
+  const open = controlledOpen ?? uncontrolledOpen;
+
+  const setOpen = (nextOpen: boolean) => {
+    if (controlledOpen === undefined) {
+      setUncontrolledOpen(nextOpen);
+    }
+    onOpenChange?.(nextOpen);
+  };
 
   const form = useAppForm({
     defaultValues: emptyDomainEntry() as EditDomainInput,
@@ -91,6 +106,7 @@ export const ProjectEditDomainDialog = ({ domain, children }: ProjectEditDomainD
           projectId: domain.projectId,
         });
         setOpen(false);
+        setSubmitError(null);
       } catch (rawError) {
         setSubmitError(rawError instanceof Error ? rawError.message : String(rawError));
       }
