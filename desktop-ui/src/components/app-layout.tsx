@@ -18,7 +18,7 @@ export function AppLayout() {
       data-tauri-drag-region
       className="flex h-full flex-col bg-neutral-50 p-1.5 pt-8 dark:bg-neutral-950/40 "
     >
-      <div className="flex h-full flex-col rounded-lg bg-background">
+      <div className="flex h-full flex-col rounded-lg bg-background ">
         <DesktopAnalytics />
         <SharedNavigation />
         <main className="flex-1 overflow-hidden  rounded-lg">

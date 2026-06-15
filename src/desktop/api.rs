@@ -1078,7 +1078,7 @@ impl DesktopApi {
                 paths: None,
                 docker: Some(settings.docker),
             })?;
-            self.update_keygen_settings(settings.keygen)?;
+            self.apply_imported_keygen_settings(settings.keygen)?;
             self.update_launcher_preferences(UpdateLauncherPreferencesRequest {
                 editor: settings.launcher_preferences.editor,
                 terminal: settings.launcher_preferences.terminal,
@@ -1173,6 +1173,16 @@ impl DesktopApi {
                 project
             })
             .collect())
+    }
+
+    fn apply_imported_keygen_settings(&self, request: KeygenSettingsUpdateRequest) -> Result<()> {
+        let licensing = self.licensing_status()?;
+        if licensing.active_license.is_some() || licensing.offline_license.is_some() {
+            return Ok(());
+        }
+
+        self.update_keygen_settings(request)?;
+        Ok(())
     }
 
     pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
@@ -2536,6 +2546,14 @@ impl DesktopApi {
                 self.config_path.display()
             );
         };
+
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create config directory {}.\n{}",
+                parent.display(),
+                self.config_write_guidance()
+            )
+        })?;
 
         let probe_path = parent.join(format!(
             ".{}-write-test-{}",
@@ -3988,11 +4006,11 @@ mod tests {
         restart_daemon_after_certificate_refresh_step_with, shell_escape,
         validate_settings_snapshot,
     };
-    use crate::config::RoxyPaths;
+    use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
-        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, LogsRequest,
-        RemoveProjectRequest, RouteDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
-        SettingsTransferSnapshotDto,
+        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, KeygenSettingsUpdateRequest,
+        LogsRequest, RemoveProjectRequest, RouteDto, SettingsTransferDomainDto,
+        SettingsTransferProjectDto, SettingsTransferSnapshotDto,
     };
     use crate::domain::RouteTarget;
     use crate::infrastructure::config::{Config, ConfigStore};
@@ -4216,6 +4234,82 @@ mod tests {
 
         assert!(matches!(outcome, CliRemovalOutcome::Unmanaged(_)));
         assert!(command_path.exists());
+    }
+
+    #[test]
+    fn ensure_config_writable_creates_missing_parent_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("missing").join("config.toml");
+        let api = DesktopApi::new_direct(config_path.clone(), temp_dir.path().join("localify"));
+
+        api.ensure_config_writable().unwrap();
+
+        assert!(config_path.parent().unwrap().is_dir());
+        assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn imported_keygen_settings_apply_when_unlicensed() {
+        let (_temp_dir, api, store) = temp_api();
+
+        api.apply_imported_keygen_settings(KeygenSettingsUpdateRequest {
+            api_url: "https://keygen.example.test".into(),
+            account: "account_123".into(),
+            product: Some("product_123".into()),
+            public_key: Some("public_key_123".into()),
+        })
+        .unwrap();
+
+        let config = store.load().unwrap();
+        assert_eq!(
+            config.licensing.keygen.api_url,
+            "https://keygen.example.test"
+        );
+        assert_eq!(config.licensing.keygen.account, "account_123");
+        assert_eq!(
+            config.licensing.keygen.product.as_deref(),
+            Some("product_123")
+        );
+        assert_eq!(
+            config.licensing.keygen.public_key.as_deref(),
+            Some("public_key_123")
+        );
+        assert!(config.licensing.license.is_none());
+    }
+
+    #[test]
+    fn imported_keygen_settings_preserve_active_license() {
+        let (_temp_dir, api, store) = temp_api();
+
+        store
+            .store_license(Some(StoredLicense {
+                key: "TEST-KEY-1234".into(),
+                license_id: "lic_123".into(),
+                name: Some("Pro".into()),
+                max_projects: Some(10),
+                validation_code: Some("VALID".into()),
+                ..StoredLicense::default()
+            }))
+            .unwrap();
+
+        api.apply_imported_keygen_settings(KeygenSettingsUpdateRequest {
+            api_url: "https://keygen.example.test".into(),
+            account: "account_123".into(),
+            product: Some("product_123".into()),
+            public_key: Some("public_key_123".into()),
+        })
+        .unwrap();
+
+        let config = store.load().unwrap();
+        assert!(config.licensing.license.is_some());
+        assert_ne!(
+            config.licensing.keygen.api_url,
+            "https://keygen.example.test"
+        );
+
+        for index in 1..=6 {
+            store.create_project(&format!("Project {index}")).unwrap();
+        }
     }
 
     #[test]

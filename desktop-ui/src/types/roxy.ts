@@ -290,13 +290,7 @@ export interface OfflineLicenseDto {
 }
 
 export interface LicensingDto {
-  status:
-    | "notConfigured"
-    | "unlicensed"
-    | "licensed"
-    | "licensedOffline"
-    | "invalid"
-    | string;
+  status: "notConfigured" | "unlicensed" | "licensed" | "licensedOffline" | "invalid" | string;
   configured: boolean;
   apiUrl: string;
   account: string;

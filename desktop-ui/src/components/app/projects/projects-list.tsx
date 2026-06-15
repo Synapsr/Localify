@@ -123,7 +123,7 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2 pb-(--bottom-padding-navigation)">
       <Reorder.Group
         axis="y"
         values={order}
