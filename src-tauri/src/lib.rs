@@ -26,7 +26,6 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
 #[cfg(target_os = "macos")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_opener::OpenerExt;
 
 #[cfg(desktop)]
 const AUTOSTART_ARG: &str = "--autostart";
@@ -901,9 +900,11 @@ fn copy_tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<
 }
 
 fn open_tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let url = tray_domain_url(app, domain)?;
-    app.opener()
-        .open_url(url, None::<&str>)
+    state
+        .api
+        .open_project_url_with_preferred_browser(&url)
         .map_err(|error| error.to_string())
 }
 

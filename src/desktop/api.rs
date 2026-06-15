@@ -852,6 +852,11 @@ impl DesktopApi {
         crate::desktop::browser::open_project_url(&request.url, request.browser)
     }
 
+    pub fn open_project_url_with_preferred_browser(&self, url: &str) -> Result<()> {
+        let preferences = self.effective_launcher_preferences()?;
+        crate::desktop::browser::open_project_url(url, preferences.browser)
+    }
+
     pub fn update_launcher_preferences(
         &self,
         request: UpdateLauncherPreferencesRequest,
