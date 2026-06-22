@@ -1,9 +1,11 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
@@ -24,6 +26,13 @@ use crate::desktop::dto::{
     SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
     UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
 };
+
+const HELPER_PING_TIMEOUT: Duration = Duration::from_secs(1);
+const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const HELPER_MUTATION_TIMEOUT: Duration = Duration::from_secs(45);
+const HELPER_INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
+const HELPER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const HELPER_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "camelCase")]
@@ -117,6 +126,75 @@ pub enum HelperCommand {
         request: LogsRequest,
     },
     GetAvailablePort,
+}
+
+impl HelperCommand {
+    fn response_timeout(&self) -> Duration {
+        match self {
+            Self::Ping => HELPER_PING_TIMEOUT,
+            Self::GetBootstrap
+            | Self::GetConfig
+            | Self::GetDaemonStatus
+            | Self::ListDomains
+            | Self::ListProjects
+            | Self::GetLicensingStatus
+            | Self::GetUninstallPreview
+            | Self::ListPortConflicts
+            | Self::ListRoutes { .. }
+            | Self::ReadLogs { .. }
+            | Self::GetAvailablePort => HELPER_READ_TIMEOUT,
+            Self::InstallRoxy | Self::UninstallRoxy | Self::ImportSettings { .. } => {
+                HELPER_INSTALL_TIMEOUT
+            }
+            Self::UpdateConfig { .. }
+            | Self::RefreshDomainCertificates
+            | Self::CreateProject { .. }
+            | Self::CreateProjectWithDomains { .. }
+            | Self::ExportSettings { .. }
+            | Self::PreviewSettingsImport { .. }
+            | Self::UpdateKeygenSettings { .. }
+            | Self::ActivateLicense { .. }
+            | Self::ImportOfflineLicense { .. }
+            | Self::ClearLicense
+            | Self::RefreshLicense
+            | Self::InitProject { .. }
+            | Self::UpdateProject { .. }
+            | Self::RemoveProject { .. }
+            | Self::SetupCliAccess
+            | Self::KillPortConflict { .. }
+            | Self::AssignDomainProject { .. }
+            | Self::RegisterDomain { .. }
+            | Self::UpdateDomain { .. }
+            | Self::UnregisterDomain { .. }
+            | Self::AddRoute { .. }
+            | Self::RemoveRoute { .. }
+            | Self::StartDaemon { .. }
+            | Self::StopDaemon
+            | Self::RestartDaemon { .. }
+            | Self::ReloadDaemon { .. } => HELPER_MUTATION_TIMEOUT,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::GetBootstrap => "read desktop configuration",
+            Self::GetConfig => "read config",
+            Self::GetDaemonStatus => "read daemon status",
+            Self::ListDomains => "list domains",
+            Self::ListProjects => "list projects",
+            Self::InstallRoxy => "install Localify",
+            Self::GetUninstallPreview => "read uninstall preview",
+            Self::UninstallRoxy => "uninstall Localify",
+            Self::ImportSettings { .. } => "import settings",
+            Self::GetLicensingStatus => "read licensing status",
+            Self::ListPortConflicts => "list port conflicts",
+            Self::ListRoutes { .. } => "list routes",
+            Self::ReadLogs { .. } => "read logs",
+            Self::GetAvailablePort => "find available port",
+            _ => "run a system helper command",
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -340,15 +418,32 @@ impl SystemHelperClient {
                 self.socket_path.display()
             )
         })?;
+        let timeout = command.response_timeout();
+        let command_label = command.label();
+
+        stream
+            .set_read_timeout(Some(timeout))
+            .context("Failed to configure helper response timeout")?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .context("Failed to configure helper request timeout")?;
 
         let payload = serde_json::to_string(&command)?;
-        stream.write_all(payload.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
+        write_helper_payload(&mut stream, payload.as_bytes(), command_label, timeout)?;
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        match reader.read_line(&mut line) {
+            Ok(_) => {}
+            Err(error) if is_io_timeout(&error) => {
+                bail!(helper_timeout_message(command_label, timeout));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to read the {command_label} response from the system helper")
+                });
+            }
+        }
         if line.trim().is_empty() {
             bail!(
                 "{} system helper closed the connection without replying. \
@@ -377,6 +472,44 @@ impl SystemHelperClient {
         let data = response.data.unwrap_or(serde_json::Value::Null);
         serde_json::from_value(data).map_err(Into::into)
     }
+}
+
+fn write_helper_payload(
+    stream: &mut UnixStream,
+    payload: &[u8],
+    command_label: &str,
+    timeout: Duration,
+) -> Result<()> {
+    stream
+        .write_all(payload)
+        .and_then(|_| stream.write_all(b"\n"))
+        .and_then(|_| stream.flush())
+        .map_err(|error| {
+            if is_io_timeout(&error) {
+                anyhow::anyhow!(helper_timeout_message(command_label, timeout))
+            } else {
+                anyhow::anyhow!(error)
+            }
+        })
+        .with_context(|| format!("Failed to send the {command_label} request to the system helper"))
+}
+
+fn helper_timeout_message(command_label: &str, timeout: Duration) -> String {
+    format!(
+        "{} system helper did not reply while trying to {} within {} seconds.\n\
+         Restart the helper from Settings, or run: sudo {} helper uninstall-service --uid {}",
+        BRANDING.app_name,
+        command_label,
+        timeout.as_secs(),
+        BRANDING.cli_command(),
+        current_uid()
+            .map(|uid| uid.to_string())
+            .unwrap_or_else(|_| "$(id -u)".into())
+    )
+}
+
+fn is_io_timeout(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
 }
 
 pub fn helper_socket_path(uid: u32) -> PathBuf {
@@ -423,14 +556,36 @@ pub fn serve(socket_path: &Path, allowed_uid: u32, api: &DesktopApi) -> Result<(
 
     loop {
         let (stream, _) = listener.accept()?;
-        handle_connection(stream, api)?;
+        let api = api.clone();
+        thread::spawn(move || {
+            if let Err(error) = handle_connection(stream, &api) {
+                eprintln!("{} helper connection failed: {error}", BRANDING.app_name);
+            }
+        });
     }
 }
 
 fn handle_connection(stream: UnixStream, api: &DesktopApi) -> Result<()> {
+    stream
+        .set_read_timeout(Some(HELPER_REQUEST_TIMEOUT))
+        .context("Failed to configure helper request read timeout")?;
+    stream
+        .set_write_timeout(Some(HELPER_RESPONSE_WRITE_TIMEOUT))
+        .context("Failed to configure helper response write timeout")?;
+
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    match reader.read_line(&mut line) {
+        Ok(_) => {}
+        Err(error) if is_io_timeout(&error) => {
+            bail!(
+                "{} helper connection did not send a full request within {} seconds.",
+                BRANDING.app_name,
+                HELPER_REQUEST_TIMEOUT.as_secs()
+            );
+        }
+        Err(error) => return Err(error).context("Failed to read helper request"),
+    }
 
     let command = serde_json::from_str::<HelperCommand>(&line).context(format!(
         "Failed to parse {} helper command",

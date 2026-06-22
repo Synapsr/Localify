@@ -1,6 +1,4 @@
-import { SharedLogo } from "@/components/shared/shared-logo";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 
 interface AppStartupScreenProps {
   eyebrow?: string;
@@ -10,11 +8,13 @@ interface AppStartupScreenProps {
   error?: string | null;
   primaryActionLabel?: string;
   secondaryActionLabel?: string;
+  primaryActionLoading?: boolean;
+  secondaryActionLoading?: boolean;
   onPrimaryAction?: () => void;
   onSecondaryAction?: () => void;
 }
 
-export function AppStartupScreen({
+export const AppStartupScreen = ({
   eyebrow,
   title,
   message,
@@ -22,47 +22,54 @@ export function AppStartupScreen({
   error,
   primaryActionLabel,
   secondaryActionLabel,
+  primaryActionLoading = false,
+  secondaryActionLoading = false,
   onPrimaryAction,
   onSecondaryAction,
-}: AppStartupScreenProps) {
+}: AppStartupScreenProps) => {
   return (
-    <div className="flex h-full items-center justify-center px-6 py-12">
-      <Card className="w-full max-w-xl overflow-hidden border-[--color-border] bg-[--color-surface] shadow-[0_24px_80px_rgba(15,23,42,0.08)]">
-        <div className="border-b border-[--color-border] bg-[linear-gradient(135deg,rgba(15,23,42,0.045),rgba(15,23,42,0.01))] px-6 py-5">
-          <div className="flex items-center gap-3">
-            <div className="flex size-11 items-center justify-center rounded-2xl border border-[--color-border] bg-[--color-bg] text-base font-semibold text-[--color-ink]">
-              <SharedLogo />
-            </div>
-            <div className="space-y-1">
-              <p className="text-[11px] font-semibold tracking-[0.24em] text-[--color-muted] uppercase">
-                {eyebrow ?? "Desktop startup"}
-              </p>
-              <h1 className="text-lg font-semibold text-[--color-ink]">{title}</h1>
-            </div>
-          </div>
+    <div className="screen-wrapper flex min-h-full items-center justify-center px-6 py-14">
+      <section className="w-full max-w-2xl space-y-6">
+        <div className="min-w-0 space-y-1.5">
+          <p className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+            {eyebrow ?? "Desktop startup"}
+          </p>
+          <h1 className="text-[22px] leading-tight font-semibold tracking-tight text-foreground">
+            {title}
+          </h1>
         </div>
-        <div className="space-y-4 px-6 py-6">
-          <p className="text-sm leading-6 text-[--color-ink]">{message}</p>
-          {detail ? <p className="text-sm text-[--color-muted]">{detail}</p> : null}
+
+        <div className="space-y-5 border-t border-border/70 pt-6">
+          <p className="max-w-xl text-sm leading-6 text-foreground">{message}</p>
+          {detail ? (
+            <p className="max-w-xl text-sm leading-6 text-muted-foreground">{detail}</p>
+          ) : null}
           {error ? (
-            <div className="rounded-xl border border-[--color-danger]/20 bg-[--color-danger]/5 px-4 py-3 text-sm text-[--color-danger]">
+            <div className="max-w-2xl border-l-2 border-destructive/50 bg-destructive/4 px-4 py-3 text-sm leading-6 text-foreground whitespace-pre-wrap dark:bg-destructive/6">
               {error}
             </div>
           ) : null}
           {primaryActionLabel || secondaryActionLabel ? (
-            <div className="flex flex-wrap gap-2 pt-2">
+            <div className="flex flex-wrap items-center gap-2 pt-1">
               {primaryActionLabel && onPrimaryAction ? (
-                <Button onClick={onPrimaryAction}>{primaryActionLabel}</Button>
+                <Button size="lg" loading={primaryActionLoading} onClick={onPrimaryAction}>
+                  {primaryActionLabel}
+                </Button>
               ) : null}
               {secondaryActionLabel && onSecondaryAction ? (
-                <Button variant="outline" onClick={onSecondaryAction}>
+                <Button
+                  size="lg"
+                  variant="outline"
+                  loading={secondaryActionLoading}
+                  onClick={onSecondaryAction}
+                >
                   {secondaryActionLabel}
                 </Button>
               ) : null}
             </div>
           ) : null}
         </div>
-      </Card>
+      </section>
     </div>
   );
-}
+};

@@ -1347,6 +1347,7 @@ pub fn run() {
             commands::detect_project_init_plan,
             commands::install_roxy,
             commands::setup_cli_access,
+            commands::restart_system_helper,
             commands::setup_node_trust,
             commands::get_agent_skill_status,
             commands::install_agent_skill,

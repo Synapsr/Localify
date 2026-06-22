@@ -10,6 +10,7 @@ export const bootstrapQueries = {
     queryOptions<BootstrapDto, Error>({
       queryKey: bootstrapQueries.all(),
       queryFn: () => tauriClient.getBootstrap(),
-      refetchInterval: 5000,
+      retry: false,
+      refetchInterval: (query) => (query.state.data ? 5000 : false),
     }),
 } as const;

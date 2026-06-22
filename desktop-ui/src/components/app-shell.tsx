@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
-import { bootstrapQueries } from "@/lib/queries";
+import { bootstrapQueries, systemMutations } from "@/lib/queries";
 import {
   loadStoredOnboardingCompleted,
   markStoredOnboardingCompleted,
@@ -18,10 +19,10 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const DEFAULT_DESKTOP_NAME = "Localify";
-
-export function AppShell({ children }: AppShellProps) {
-  const { data, isLoading, error } = useQuery(bootstrapQueries.read());
+export const AppShell = ({ children }: AppShellProps) => {
+  const queryClient = useQueryClient();
+  const { data, isPending, error } = useQuery(bootstrapQueries.read());
+  const restartHelper = useMutation(systemMutations.restartHelper(queryClient));
   const [onboardingCompleted, setOnboardingCompleted] = useState(loadStoredOnboardingCompleted);
 
   useEffect(() => {
@@ -31,17 +32,18 @@ export function AppShell({ children }: AppShellProps) {
     }
   }, [data?.daemon.caInstalled]);
 
-  if (isLoading && !data) {
-    return onboardingCompleted ? (
-      <AppUpdateProvider desktopName={DEFAULT_DESKTOP_NAME} enabled={false}>
-        <>{children}</>
-      </AppUpdateProvider>
-    ) : (
-      <div className="h-full w-full bg-background">
-        <SpinnerIcon className="animate-spin" />
-      </div>
-    );
-  }
+  const handleRestartHelper = () => {
+    restartHelper.mutate(undefined, {
+      onSuccess: () => {
+        toast.success("Background helper restarted");
+      },
+      onError: (restartError) => {
+        toast.error("Could not restart the background helper", {
+          description: restartError.message,
+        });
+      },
+    });
+  };
 
   if (error && !data) {
     return (
@@ -50,7 +52,26 @@ export function AppShell({ children }: AppShellProps) {
         title="Cannot reach the desktop backend"
         message="Localify could not finish booting the desktop shell."
         error={error.message}
+        primaryActionLabel={
+          restartHelper.isPending ? "Repairing background helper..." : "Repair background helper"
+        }
+        primaryActionLoading={restartHelper.isPending}
+        onPrimaryAction={handleRestartHelper}
       />
+    );
+  }
+
+  if (isPending && !data) {
+    return onboardingCompleted ? (
+      <AppStartupScreen
+        eyebrow="Desktop startup"
+        title="Starting Localify"
+        message="Localify is reading your desktop configuration."
+      />
+    ) : (
+      <div className="flex h-full w-full items-center justify-center bg-background">
+        <SpinnerIcon className="animate-spin" />
+      </div>
     );
   }
 
@@ -81,4 +102,4 @@ export function AppShell({ children }: AppShellProps) {
       )}
     </AppUpdateProvider>
   );
-}
+};

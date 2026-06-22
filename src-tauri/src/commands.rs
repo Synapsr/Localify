@@ -354,8 +354,11 @@ pub async fn read_install_attribution_clipboard() -> Result<Option<String>, Stri
 }
 
 #[tauri::command]
-pub fn get_bootstrap(state: tauri::State<'_, AppState>) -> Result<BootstrapDto, String> {
-    state.api.bootstrap().map_err(map_error)
+pub async fn get_bootstrap(state: tauri::State<'_, AppState>) -> Result<BootstrapDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.bootstrap().map_err(map_error))
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]
@@ -489,6 +492,15 @@ pub async fn install_roxy(
 #[tauri::command]
 pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDto, String> {
     state.api.setup_cli_access().map_err(map_error)
+}
+
+#[tauri::command]
+pub async fn restart_system_helper(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.restart_system_helper().map_err(map_error))
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]

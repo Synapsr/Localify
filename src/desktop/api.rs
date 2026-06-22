@@ -173,6 +173,37 @@ impl DesktopApi {
         self.install_cli_access()
     }
 
+    /// Recreates the privileged helper so the desktop app can recover from a
+    /// stale launchd service or a helper that accepts connections but stops
+    /// answering requests.
+    pub fn restart_system_helper(&self) -> Result<()> {
+        if !self.should_use_system_helper() {
+            return Ok(());
+        }
+
+        let socket_path = self.helper_socket_path()?;
+        let uid = current_uid()?;
+        let commands = [
+            vec![
+                "helper".into(),
+                "uninstall-service".into(),
+                "--uid".into(),
+                uid.to_string(),
+            ],
+            vec![
+                "helper".into(),
+                "ensure-running".into(),
+                "--socket".into(),
+                socket_path.display().to_string(),
+                "--uid".into(),
+                uid.to_string(),
+            ],
+        ];
+
+        self.run_cli_commands_with_admin(&commands)?;
+        Ok(())
+    }
+
     pub fn setup_node_trust(&self) -> Result<NodeTrustDto> {
         let setup = node_trust::install(&self.ca_cert_path())?;
         Ok(map_node_trust_dto(setup.status, setup.already_ready, None))

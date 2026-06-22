@@ -155,6 +155,7 @@ export interface DesktopClient {
   detectProjectInitPlan(request: DetectProjectInitPlanRequest): Promise<DetectProjectInitPlanDto>;
   installRoxy(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
+  restartSystemHelper(): Promise<void>;
   setupNodeTrust(): Promise<NodeTrustDto>;
   getAgentSkillStatus(): Promise<AgentSkillStatusDto>;
   installAgentSkill(): Promise<AgentSkillInstallResultDto>;
@@ -241,6 +242,7 @@ export function createDesktopClient(): DesktopClient {
       }),
     installRoxy: () => tauriInvoke("install_roxy"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
+    restartSystemHelper: () => tauriInvoke("restart_system_helper"),
     setupNodeTrust: () => tauriInvoke("setup_node_trust"),
     getAgentSkillStatus: () => tauriInvoke("get_agent_skill_status"),
     installAgentSkill: () => tauriInvoke("install_agent_skill"),

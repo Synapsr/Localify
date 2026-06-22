@@ -71,6 +71,11 @@ export const systemMutations = {
       mutationFn: () => tauriClient.setupCliAccess(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
+  restartHelper: (queryClient: QueryClient) =>
+    mutationOptions<void, Error, void>({
+      mutationFn: () => tauriClient.restartSystemHelper(),
+      onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
   setupNodeTrust: (queryClient: QueryClient) =>
     mutationOptions<NodeTrustDto, Error, void>({
       mutationFn: () => tauriClient.setupNodeTrust(),
