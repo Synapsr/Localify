@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivateLicenseRequest,
   AddRouteRequest,
+  AgentSkillInstallResultDto,
+  AgentSkillStatusDto,
   AssignDomainProjectRequest,
   AvailablePortDto,
   AppConfigDto,
@@ -154,6 +156,8 @@ export interface DesktopClient {
   installRoxy(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
   setupNodeTrust(): Promise<NodeTrustDto>;
+  getAgentSkillStatus(): Promise<AgentSkillStatusDto>;
+  installAgentSkill(): Promise<AgentSkillInstallResultDto>;
   listPortConflicts(): Promise<PortConflictDto[]>;
   killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
@@ -238,6 +242,8 @@ export function createDesktopClient(): DesktopClient {
     installRoxy: () => tauriInvoke("install_roxy"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
     setupNodeTrust: () => tauriInvoke("setup_node_trust"),
+    getAgentSkillStatus: () => tauriInvoke("get_agent_skill_status"),
+    installAgentSkill: () => tauriInvoke("install_agent_skill"),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),
     killPortConflict: (request) =>
       tauriInvoke("kill_port_conflict", {

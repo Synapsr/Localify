@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AppStartupScreen } from "@/components/shared/app-startup-screen";
 import { bootstrapQueries } from "@/lib/queries";
 
+import { SettingsAgents } from "./settings-agents";
 import { SettingsAnalytics } from "./settings-analytics";
 import { SettingsCli } from "./settings-cli";
 import { SettingsDeveloper } from "./settings-developer";
@@ -62,6 +63,7 @@ export const SettingsScreen = () => {
         <SettingsStartup />
         <SettingsTroubleshooting />
         <SettingsLaunchers />
+        <SettingsAgents config={data.config} />
         <SettingsAnalytics />
         <SettingsTransfer />
         <SettingsHotkeys />

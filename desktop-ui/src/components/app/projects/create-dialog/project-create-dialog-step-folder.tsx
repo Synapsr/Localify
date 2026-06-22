@@ -288,8 +288,8 @@ export const ProjectCreateDialogStepFolder = withForm({
                                       >
                                         {(field) => (
                                           <field.CheckboxField
-                                            label="Update package.json dev script"
-                                            description="Rewrite the detected dev command to use the selected local port when possible."
+                                            label="Update package.json scripts"
+                                            description="Create dev-localify and apply the default Localify dev-script policy when possible."
                                           />
                                         )}
                                       </form.AppField>

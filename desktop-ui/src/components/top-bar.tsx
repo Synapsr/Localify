@@ -22,8 +22,6 @@ export function TopBar() {
   } = useRouterState();
 
   const running = data?.daemon.running ?? false;
-  const suffix = data?.environment.fixedDomainSuffix ?? "";
-  const appName = data?.environment.appName ?? "Localify";
   const daemonError = startDaemon.error ?? stopDaemon.error;
   const daemonErrorMessage = daemonError instanceof Error ? daemonError.message : null;
   const showPortConflicts = Boolean(daemonErrorMessage?.includes("already in use"));

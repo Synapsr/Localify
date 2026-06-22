@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    DaemonConfig, DockerConfig, KEYGEN_ACCOUNT_ID, KEYGEN_API_URL, KEYGEN_PRODUCT_ID,
+    AgentConfig, DaemonConfig, DockerConfig, KEYGEN_ACCOUNT_ID, KEYGEN_API_URL, KEYGEN_PRODUCT_ID,
     KEYGEN_PUBLIC_KEY, RoxyPaths,
 };
 use crate::desktop::{
@@ -56,6 +56,34 @@ pub struct EnvironmentDto {
     pub cli_command_path: String,
     #[serde(default)]
     pub node_trust: NodeTrustDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillAgentDto {
+    pub id: String,
+    pub label: String,
+    pub detected: bool,
+    pub installed: bool,
+    pub skills_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillStatusDto {
+    pub skill_dir: String,
+    pub npx_available: bool,
+    pub detected_agents: Vec<AgentSkillAgentDto>,
+    pub install_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillInstallResultDto {
+    pub status: AgentSkillStatusDto,
+    pub installed_agents: Vec<String>,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,11 +175,43 @@ impl From<DockerConfigDto> for DockerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentConfigDto {
+    pub install_skill: bool,
+    pub promote_dev_script: bool,
+}
+
+impl Default for AgentConfigDto {
+    fn default() -> Self {
+        AgentConfig::default().into()
+    }
+}
+
+impl From<AgentConfig> for AgentConfigDto {
+    fn from(value: AgentConfig) -> Self {
+        Self {
+            install_skill: value.install_skill,
+            promote_dev_script: value.promote_dev_script,
+        }
+    }
+}
+
+impl From<AgentConfigDto> for AgentConfig {
+    fn from(value: AgentConfigDto) -> Self {
+        Self {
+            install_skill: value.install_skill,
+            promote_dev_script: value.promote_dev_script,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppConfigDto {
     pub config_path: String,
     pub daemon: DaemonConfigDto,
     pub paths: RoxyPathsDto,
     pub docker: DockerConfigDto,
+    pub agent: AgentConfigDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +220,7 @@ pub struct ConfigUpdateRequest {
     pub daemon: Option<DaemonConfigDto>,
     pub paths: Option<RoxyPathsDto>,
     pub docker: Option<DockerConfigDto>,
+    pub agent: Option<AgentConfigDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +369,8 @@ pub struct LauncherAvailabilityDto {
 pub struct SettingsTransferSettingsDto {
     pub daemon: DaemonConfigDto,
     pub docker: DockerConfigDto,
+    #[serde(default)]
+    pub agent: AgentConfigDto,
     pub keygen: KeygenSettingsUpdateRequest,
     pub launcher_preferences: LauncherPreferencesDto,
 }

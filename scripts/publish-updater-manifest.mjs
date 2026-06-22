@@ -28,9 +28,7 @@ if (existsSync(envPath)) {
 
     const key = line.slice(0, separatorIndex).trim();
     const value = line.slice(separatorIndex + 1).trim().replace(/^(['"])(.*)\1$/u, "$2");
-    if (!(key in process.env)) {
-      process.env[key] = value;
-    }
+    process.env[key] = value;
   }
 }
 

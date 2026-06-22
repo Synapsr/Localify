@@ -8,8 +8,8 @@ use crate::branding::BRANDING;
 use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
 use roxy::desktop::{DesktopApi, ProjectRootStore};
 use roxy::project_init::{
-    FolderInitSelection, FolderInitServicePlan, NextConfigUpdate, PackageScriptUpdate, ServicePlan,
-    apply_local_app_updates, build_init_plan, detect_current_dir_localify_target,
+    FolderInitSelection, FolderInitServicePlan, LocalAppUpdatePolicy, NextConfigUpdate,
+    PackageScriptUpdate, ServicePlan, ViteConfigUpdate, apply_local_app_updates, build_init_plan,
     detect_folder_init_plan, plan_current_dir_local_app_updates, resolve_folder_init_selection,
 };
 
@@ -21,6 +21,7 @@ pub struct InitProjectArgs {
     pub api_domain: Option<String>,
     pub api_target: Option<String>,
     pub project_only: bool,
+    pub yes: bool,
 }
 
 struct ResolvedInitProjectArgs {
@@ -28,10 +29,15 @@ struct ResolvedInitProjectArgs {
     services: Vec<ServicePlan>,
     package_updates: Vec<PackageScriptUpdate>,
     next_config_updates: Vec<NextConfigUpdate>,
+    vite_config_updates: Vec<ViteConfigUpdate>,
 }
 
-pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
-    let resolved = resolve_args(args)?;
+pub fn execute(
+    args: InitProjectArgs,
+    config_path: &Path,
+    policy: LocalAppUpdatePolicy,
+) -> Result<()> {
+    let resolved = resolve_args(args, policy)?;
     let current_dir = env::current_dir().context("Failed to determine the current directory")?;
     let binary_path = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
@@ -64,8 +70,11 @@ pub fn execute(args: InitProjectArgs, config_path: &Path) -> Result<()> {
         }
     }
 
-    let update_results =
-        apply_local_app_updates(&resolved.package_updates, &resolved.next_config_updates);
+    let update_results = apply_local_app_updates(
+        &resolved.package_updates,
+        &resolved.next_config_updates,
+        &resolved.vite_config_updates,
+    );
     if !update_results.updated.is_empty() {
         println!("  Updated local app files:");
         for updated in &update_results.updated {
@@ -104,7 +113,10 @@ fn validate_init_project_flags(
     Ok(())
 }
 
-fn resolve_args(args: InitProjectArgs) -> Result<ResolvedInitProjectArgs> {
+fn resolve_args(
+    args: InitProjectArgs,
+    policy: LocalAppUpdatePolicy,
+) -> Result<ResolvedInitProjectArgs> {
     let current_dir = env::current_dir().context("Failed to determine the current directory")?;
     let default_name = args
         .name
@@ -120,8 +132,8 @@ fn resolve_args(args: InitProjectArgs) -> Result<ResolvedInitProjectArgs> {
         bail!("--project-only cannot be combined with API initialization options");
     }
 
-    if !is_interactive_terminal() {
-        return resolve_non_interactive_args(default_name, args);
+    if args.yes || !is_interactive_terminal() {
+        return resolve_non_interactive_args(default_name, args, policy);
     }
 
     let name = prompt_string("Project name", &default_name)?;
@@ -131,30 +143,32 @@ fn resolve_args(args: InitProjectArgs) -> Result<ResolvedInitProjectArgs> {
             services: Vec::new(),
             package_updates: Vec::new(),
             next_config_updates: Vec::new(),
+            vite_config_updates: Vec::new(),
         });
     }
 
     if has_explicit_service_args(&args) {
-        return resolve_non_interactive_args(name, args);
+        return resolve_non_interactive_args(name, args, policy);
     }
 
     let detected = detect_folder_init_plan(&current_dir, Some(&name))?;
     let services = detected.services;
 
     if services.len() == 1 && services[0].id == "__primary__" {
-        return resolve_single_service_interactive(name, &current_dir, &services[0]);
+        return resolve_single_service_interactive(name, &current_dir, &services[0], policy);
     }
 
-    resolve_workspace_services_interactive(name, &current_dir, &services)
+    resolve_workspace_services_interactive(name, &current_dir, &services, policy)
 }
 
 fn resolve_non_interactive_args(
     name: String,
-    mut args: InitProjectArgs,
+    args: InitProjectArgs,
+    policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
     let current_dir = env::current_dir().context("Failed to determine the current directory")?;
-    if !args.project_only && args.target.is_none() {
-        args.target = detect_current_dir_localify_target(&current_dir)?;
+    if !args.project_only && !has_explicit_service_args(&args) {
+        return resolve_detected_defaults(name, &current_dir, policy);
     }
 
     let init_plan = build_init_plan(
@@ -166,14 +180,43 @@ fn resolve_non_interactive_args(
         args.api_target,
         args.project_only,
     )?;
-    let next_config_updates =
-        plan_current_dir_local_app_updates(&current_dir, &name, &init_plan.services)?;
+    let (package_updates, next_config_updates, vite_config_updates) =
+        plan_current_dir_local_app_updates(&current_dir, &name, &init_plan.services, policy)?;
 
     Ok(ResolvedInitProjectArgs {
         name,
         services: init_plan.services,
-        package_updates: Vec::new(),
+        package_updates,
         next_config_updates,
+        vite_config_updates,
+    })
+}
+
+fn resolve_detected_defaults(
+    name: String,
+    current_dir: &Path,
+    policy: LocalAppUpdatePolicy,
+) -> Result<ResolvedInitProjectArgs> {
+    let detected = detect_folder_init_plan(current_dir, Some(&name))?;
+    let selections = detected
+        .services
+        .into_iter()
+        .map(|service| FolderInitSelection {
+            id: service.id,
+            domain: service.domain,
+            target: service.target,
+            enabled: service.enabled,
+            update_dev_script: service.can_update_dev_script,
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_folder_init_selection(current_dir, &name, &selections, policy)?;
+
+    Ok(ResolvedInitProjectArgs {
+        name,
+        services: resolved.services,
+        package_updates: resolved.package_updates,
+        next_config_updates: resolved.next_config_updates,
+        vite_config_updates: resolved.vite_config_updates,
     })
 }
 
@@ -189,6 +232,7 @@ fn resolve_single_service_interactive(
     name: String,
     current_dir: &Path,
     service: &FolderInitServicePlan,
+    policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
     let domain = prompt_string("Primary domain", &service.domain)?;
     let target = prompt_string("Primary target", &service.target)?;
@@ -202,6 +246,7 @@ fn resolve_single_service_interactive(
             enabled: true,
             update_dev_script: false,
         }],
+        policy,
     )?;
 
     Ok(ResolvedInitProjectArgs {
@@ -209,6 +254,7 @@ fn resolve_single_service_interactive(
         services: resolved.services,
         package_updates: resolved.package_updates,
         next_config_updates: resolved.next_config_updates,
+        vite_config_updates: resolved.vite_config_updates,
     })
 }
 
@@ -216,6 +262,7 @@ fn resolve_workspace_services_interactive(
     name: String,
     current_dir: &Path,
     services: &[FolderInitServicePlan],
+    policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
     let mut selections = Vec::with_capacity(services.len());
 
@@ -251,12 +298,13 @@ fn resolve_workspace_services_interactive(
         });
     }
 
-    let resolved = resolve_folder_init_selection(current_dir, &name, &selections)?;
+    let resolved = resolve_folder_init_selection(current_dir, &name, &selections, policy)?;
     Ok(ResolvedInitProjectArgs {
         name,
         services: resolved.services,
         package_updates: resolved.package_updates,
         next_config_updates: resolved.next_config_updates,
+        vite_config_updates: resolved.vite_config_updates,
     })
 }
 

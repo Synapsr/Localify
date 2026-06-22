@@ -1,18 +1,19 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
-    ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
-    AvailablePortDto, BootstrapDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
-    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
-    DetectProjectInitPlanRequest, DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest,
-    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherPreferencesDto, LicensingDto,
-    LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest, OpenProjectUrlRequest,
-    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, RunLocalDevServerRequest, SettingsExportRequest, SettingsExportResultDto,
-    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    ActivateLicenseRequest, AddRouteRequest, AgentSkillInstallResultDto, AgentSkillStatusDto,
+    AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto, CliAccessDto,
+    ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto,
+    DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DomainInfoDto,
+    DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
+    InitProjectFromFolderResultDto, InstallResultDto, KeygenSettingsUpdateRequest,
+    KillPortConflictRequest, LauncherPreferencesDto, LicensingDto, LogsDto, LogsRequest,
+    NodeTrustDto, OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
+    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -493,6 +494,20 @@ pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDt
 #[tauri::command]
 pub fn setup_node_trust(state: tauri::State<'_, AppState>) -> Result<NodeTrustDto, String> {
     state.api.setup_node_trust().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn get_agent_skill_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<AgentSkillStatusDto, String> {
+    state.api.agent_skill_status().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn install_agent_skill(
+    state: tauri::State<'_, AppState>,
+) -> Result<AgentSkillInstallResultDto, String> {
+    state.api.install_agent_skill().map_err(map_error)
 }
 
 #[tauri::command]

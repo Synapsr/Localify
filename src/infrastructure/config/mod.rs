@@ -3,7 +3,8 @@ pub mod watcher;
 
 // Re-export shared config types so existing CLI/daemon code keeps compiling.
 pub use crate::config::{
-    DaemonConfig, DockerConfig, KeygenConfig, OfflineLicenseFile, RoxyPaths, StoredLicense,
+    AgentConfig, DaemonConfig, DockerConfig, KeygenConfig, OfflineLicenseFile, RoxyPaths,
+    StoredLicense,
 };
 
 use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository, RepositoryError};
@@ -89,6 +90,9 @@ pub struct Config {
 
     #[serde(default)]
     pub docker: DockerConfig,
+
+    #[serde(default)]
+    pub agent: AgentConfig,
 
     #[serde(default)]
     pub licensing: RootLicensingConfig,

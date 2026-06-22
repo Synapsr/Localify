@@ -98,7 +98,13 @@ impl<'a> Install<'a> {
 
     fn configure_dns(&self, dns_port: u16, steps: &mut Vec<(String, StepOutcome)>) -> Result<()> {
         let dns_outcome = if self.dns.is_configured() {
-            StepOutcome::Skipped("DNS already configured.".into())
+            match self.dns.validate() {
+                Ok(()) => StepOutcome::Skipped("DNS already configured.".into()),
+                Err(_) => {
+                    self.dns.setup(dns_port)?;
+                    StepOutcome::Success("DNS configuration repaired.".into())
+                }
+            }
         } else {
             self.dns.setup(dns_port)?;
             StepOutcome::Success("DNS configured successfully.".into())
@@ -193,6 +199,25 @@ mod tests {
             .find(|(label, _)| label == "DNS configuration")
             .unwrap();
         assert!(matches!(dns_step.1, StepOutcome::Skipped(_)));
+    }
+
+    #[test]
+    fn install_repairs_invalid_existing_dns() {
+        let certs = InMemoryCertificateManager::new();
+        let config = InMemoryConfigLoader::new();
+        let dns = InMemoryDnsManager::invalid_existing();
+        let network = InMemoryNetworkInfo::with_ip(Ipv4Addr::LOCALHOST);
+        let system = InMemorySystemSetup::new();
+        let svc = make_install(&certs, &config, &dns, &network, &system);
+
+        let result = svc.execute().unwrap();
+
+        let dns_step = result
+            .steps
+            .iter()
+            .find(|(label, _)| label == "DNS configuration")
+            .unwrap();
+        assert!(matches!(dns_step.1, StepOutcome::Success(_)));
     }
 
     #[test]

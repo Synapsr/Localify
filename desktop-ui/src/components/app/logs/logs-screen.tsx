@@ -116,7 +116,7 @@ export function LogsScreen() {
       replace: true,
     });
   };
-  const setDomain = (next: string) => {
+  const setDomain = useCallback((next: string) => {
     setDomainState(next);
     persist(DOMAIN_STORAGE_KEY, next);
     void navigate({
@@ -128,7 +128,7 @@ export function LogsScreen() {
       }),
       replace: true,
     });
-  };
+  }, [navigate]);
   const setViewMode = (next: LogsViewMode) => {
     setViewModeState(next);
     persist(VIEW_STORAGE_KEY, next);
@@ -271,7 +271,7 @@ export function LogsScreen() {
     if (!projectDomains.some((d) => d.registration.domain === domain)) {
       setDomain("all");
     }
-  }, [domain, projectId, projectDomains]);
+  }, [domain, projectId, projectDomains, setDomain]);
 
   useEffect(() => {
     const nextViewMode =

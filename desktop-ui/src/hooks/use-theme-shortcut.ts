@@ -66,5 +66,5 @@ export const useThemeShortcut = () => {
         // Ignore cleanup races during hot reload and StrictMode re-mounts.
       });
     };
-  }, [globalShortcut, handleShortcutPressed]);
+  }, [globalShortcut]);
 };

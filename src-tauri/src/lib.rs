@@ -1348,6 +1348,8 @@ pub fn run() {
             commands::install_roxy,
             commands::setup_cli_access,
             commands::setup_node_trust,
+            commands::get_agent_skill_status,
+            commands::install_agent_skill,
             commands::list_port_conflicts,
             commands::kill_port_conflict,
             commands::get_uninstall_preview,

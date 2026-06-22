@@ -141,6 +141,36 @@ pub struct DockerConfig {
     pub enabled: bool,
 }
 
+fn default_agent_install_skill() -> bool {
+    true
+}
+
+fn default_agent_promote_dev_script() -> bool {
+    true
+}
+
+/// Agent workflow preferences shared by CLI and desktop flows.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfig {
+    /// Offer/install the bundled Localify Agent Skill for detected coding agents.
+    #[serde(default = "default_agent_install_skill")]
+    pub install_skill: bool,
+
+    /// Make Localify the default package `dev` script during project bootstrap.
+    #[serde(default = "default_agent_promote_dev_script")]
+    pub promote_dev_script: bool,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            install_skill: default_agent_install_skill(),
+            promote_dev_script: default_agent_promote_dev_script(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeygenConfig {

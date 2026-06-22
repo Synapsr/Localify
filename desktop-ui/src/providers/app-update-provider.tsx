@@ -207,7 +207,7 @@ export const AppUpdateProvider = ({
 
     backgroundCheckStartedRef.current = true;
     void checkForUpdatesEvent("background");
-  }, [checkForUpdatesEvent, enabled]);
+  }, [enabled]);
 
   const value = useMemo<AppUpdateContextValue>(
     () => ({
@@ -221,7 +221,7 @@ export const AppUpdateProvider = ({
         await installUpdateEvent(state.availableUpdate, "manual");
       },
     }),
-    [checkForUpdatesEvent, installUpdateEvent, state],
+    [state],
   );
 
   return <AppUpdateContext.Provider value={value}>{children}</AppUpdateContext.Provider>;

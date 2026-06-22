@@ -38,6 +38,7 @@ const FLOW_VIDEOS = [
   "/videos/flow-2-web.mp4",
   "/videos/flow-3-web.mp4",
   "/videos/flow-4-web.mp4",
+  "/videos/agent.mp4",
 ] as const;
 const warmedFlowVideos = new Map<string, HTMLVideoElement>();
 
@@ -570,6 +571,12 @@ function HowItWorksStep({
       title: "Projects by name, not by port",
       description: `Every project gets a fixed ${suffix} hostname with trusted HTTPS. No port drift, demos that look like a product.`,
       video: FLOW_VIDEOS[2],
+    },
+    {
+      title: "Or let your agent do it — /localify",
+      description:
+        "In any project, run /localify with Claude, Codex, or Cursor. It sets everything up, then you just talk to your agent to fix anything.",
+      video: FLOW_VIDEOS[3],
     },
   ];
 

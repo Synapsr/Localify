@@ -21,6 +21,28 @@ export interface EnvironmentDto {
   nodeTrust: NodeTrustDto;
 }
 
+export interface AgentSkillAgentDto {
+  id: string;
+  label: string;
+  detected: boolean;
+  installed: boolean;
+  skillsDir: string;
+}
+
+export interface AgentSkillStatusDto {
+  skillDir: string;
+  npxAvailable: boolean;
+  detectedAgents: AgentSkillAgentDto[];
+  installCommand: string;
+}
+
+export interface AgentSkillInstallResultDto {
+  status: AgentSkillStatusDto;
+  installedAgents: string[];
+  stdout: string;
+  stderr: string;
+}
+
 export interface DaemonConfigDto {
   httpPort: number;
   httpsPort: number;
@@ -40,17 +62,24 @@ export interface DockerConfigDto {
   enabled: boolean;
 }
 
+export interface AgentConfigDto {
+  installSkill: boolean;
+  promoteDevScript: boolean;
+}
+
 export interface AppConfigDto {
   configPath: string;
   daemon: DaemonConfigDto;
   paths: RoxyPathsDto;
   docker: DockerConfigDto;
+  agent: AgentConfigDto;
 }
 
 export interface ConfigUpdateRequest {
   daemon?: DaemonConfigDto;
   paths?: RoxyPathsDto;
   docker?: DockerConfigDto;
+  agent?: AgentConfigDto;
 }
 
 export interface RouteDto {
@@ -168,6 +197,7 @@ export interface LauncherAvailabilityDto {
 export interface SettingsTransferSettingsDto {
   daemon: DaemonConfigDto;
   docker: DockerConfigDto;
+  agent: AgentConfigDto;
   keygen: KeygenSettingsUpdateRequest;
   launcherPreferences: LauncherPreferencesDto;
 }

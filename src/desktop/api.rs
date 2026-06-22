@@ -23,11 +23,12 @@ use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
-    ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
-    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
-    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
-    DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DnsResolutionDto, DomainInfoDto,
-    DomainPatternRequest, EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
+    ActivateLicenseRequest, AddRouteRequest, AgentSkillAgentDto, AgentSkillInstallResultDto,
+    AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
+    CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
+    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
+    DetectProjectInitPlanRequest, DnsResolutionDto, DomainInfoDto, DomainPatternRequest,
+    EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest,
@@ -64,7 +65,7 @@ use crate::infrastructure::port_check::ensure_daemon_ports_available;
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
 use crate::project_init::{
-    FolderInitSelection, apply_local_app_updates, detect_folder_init_plan,
+    FolderInitSelection, LocalAppUpdatePolicy, apply_local_app_updates, detect_folder_init_plan,
     resolve_folder_init_selection,
 };
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
@@ -177,6 +178,14 @@ impl DesktopApi {
         Ok(map_node_trust_dto(setup.status, setup.already_ready, None))
     }
 
+    pub fn agent_skill_status(&self) -> Result<AgentSkillStatusDto> {
+        map_agent_skill_status(crate::agent_skill::agent_skill_status()?)
+    }
+
+    pub fn install_agent_skill(&self) -> Result<AgentSkillInstallResultDto> {
+        map_agent_skill_install_result(crate::agent_skill::install_agent_skill()?)
+    }
+
     pub fn read_config(&self) -> Result<AppConfigDto> {
         if let Some(helper) = self.connected_helper_client()? {
             return helper.get_config();
@@ -202,6 +211,9 @@ impl DesktopApi {
         }
         if let Some(docker) = request.docker {
             config.docker = docker.into();
+        }
+        if let Some(agent) = request.agent {
+            config.agent = agent.into();
         }
 
         config.validate()?;
@@ -783,7 +795,15 @@ impl DesktopApi {
                 update_dev_script: service.update_dev_script,
             })
             .collect::<Vec<_>>();
-        let resolved = resolve_folder_init_selection(&root_path, &request.name, &selections)?;
+        let config = self.config_store().load()?;
+        let resolved = resolve_folder_init_selection(
+            &root_path,
+            &request.name,
+            &selections,
+            LocalAppUpdatePolicy {
+                promote_dev_script: config.agent.promote_dev_script,
+            },
+        )?;
         let init_result = self.init_project(InitProjectRequest {
             name: request.name,
             root_path: Some(root_path.display().to_string()),
@@ -799,8 +819,11 @@ impl DesktopApi {
         self.store_project_root_path(&init_result.project.id, &root_path)?;
         let mut project = init_result.project;
         project.root_path = Some(root_path.display().to_string());
-        let update_results =
-            apply_local_app_updates(&resolved.package_updates, &resolved.next_config_updates);
+        let update_results = apply_local_app_updates(
+            &resolved.package_updates,
+            &resolved.next_config_updates,
+            &resolved.vite_config_updates,
+        );
 
         Ok(InitProjectFromFolderResultDto {
             project,
@@ -1034,6 +1057,7 @@ impl DesktopApi {
         let settings = include_all.then_some(SettingsTransferSettingsDto {
             daemon: bootstrap.config.daemon,
             docker: bootstrap.config.docker,
+            agent: bootstrap.config.agent,
             keygen: KeygenSettingsUpdateRequest {
                 api_url: bootstrap.licensing.api_url,
                 account: bootstrap.licensing.account,
@@ -1082,6 +1106,7 @@ impl DesktopApi {
                 daemon: Some(settings.daemon),
                 paths: None,
                 docker: Some(settings.docker),
+                agent: Some(settings.agent),
             })?;
             self.apply_imported_keygen_settings(settings.keygen)?;
             self.update_launcher_preferences(UpdateLauncherPreferencesRequest {
@@ -1355,6 +1380,9 @@ impl DesktopApi {
                 steps.push(step);
             }
         }
+        if let Some(step) = agent_skill_install_step(config.agent.install_skill) {
+            steps.push(step);
+        }
 
         Ok(InstallResultDto {
             lan_ip: result.lan_ip.to_string(),
@@ -1396,6 +1424,14 @@ impl DesktopApi {
         steps.push(root_ca_verification_step(status.ca_installed));
         steps.push(self.cli_access_step_with(|_| helper.setup_cli_access()));
         if let Some(step) = self.node_trust_step() {
+            steps.push(step);
+        }
+        let install_agent_skill = self
+            .config_store()
+            .load()
+            .map(|config| config.agent.install_skill)
+            .unwrap_or(true);
+        if let Some(step) = agent_skill_install_step(install_agent_skill) {
             steps.push(step);
         }
 
@@ -3483,17 +3519,6 @@ fn macos_user_ca_is_trusted(cert_path: &Path) -> Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
-    if macos_user_ca_is_trusted(cert_path)? {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: "skipped".into(),
-            message: format!(
-                "The {} CA was already trusted by this macOS account.",
-                BRANDING.app_name
-            ),
-        });
-    }
-
     if !cert_path.exists() {
         return Ok(StepDto {
             label: Some("Trust CA in your macOS account".into()),
@@ -3506,6 +3531,44 @@ fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
     }
 
     let keychain_path = macos_login_keychain_path()?;
+    let removed_stale = match delete_stale_macos_keychain_certificates(&keychain_path, cert_path) {
+        Ok(removed) => removed,
+        Err(error) => {
+            return Ok(StepDto {
+                label: Some("Trust CA in your macOS account".into()),
+                status: "warning".into(),
+                message: format!(
+                    "macOS could not remove stale {} CA entries before applying trust: {error}",
+                    BRANDING.app_name
+                ),
+            });
+        }
+    };
+
+    if macos_keychain_contains_certificate(&keychain_path, cert_path)?
+        && macos_user_ca_is_trusted(cert_path)?
+    {
+        return Ok(StepDto {
+            label: Some("Trust CA in your macOS account".into()),
+            status: if removed_stale > 0 {
+                "success".into()
+            } else {
+                "skipped".into()
+            },
+            message: if removed_stale > 0 {
+                format!(
+                    "Removed stale {} CA entries and verified the current CA trust for this macOS account.",
+                    BRANDING.app_name
+                )
+            } else {
+                format!(
+                    "The {} CA was already trusted by this macOS account.",
+                    BRANDING.app_name
+                )
+            },
+        });
+    }
+
     if let Err(error) = delete_macos_keychain_certificates(&keychain_path) {
         return Ok(StepDto {
             label: Some("Trust CA in your macOS account".into()),
@@ -3546,7 +3609,9 @@ fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
         });
     }
 
-    if !macos_user_ca_is_trusted(cert_path)? {
+    if !macos_keychain_contains_certificate(&keychain_path, cert_path)?
+        || !macos_user_ca_is_trusted(cert_path)?
+    {
         return Ok(StepDto {
             label: Some("Trust CA in your macOS account".into()),
             status: "warning".into(),
@@ -3639,43 +3704,150 @@ fn macos_login_keychain_path() -> Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn delete_macos_keychain_certificates(keychain_path: &Path) -> Result<usize> {
-    let keychain_path = path_as_utf8(keychain_path)?;
     let mut removed = 0;
 
-    loop {
-        let output = Command::new("security")
-            .args([
-                "delete-certificate",
-                "-c",
-                BRANDING.ca_name().as_str(),
-                &keychain_path,
-            ])
-            .output()
-            .context(format!(
-                "Failed to remove a stale {} CA from the macOS login keychain",
-                BRANDING.app_name
-            ))?;
-
-        if output.status.success() {
-            removed += 1;
-            continue;
-        }
-
-        let message = cli_failure_message(&output);
-        let not_found = is_missing_macos_certificate_error(&message);
-
-        if not_found {
-            break;
-        }
-
-        bail!(
-            "Failed to delete the {} CA from your macOS login keychain: {}",
-            BRANDING.app_name,
-            message
-        );
+    for hash in find_macos_keychain_certificate_hashes(keychain_path)? {
+        delete_macos_keychain_certificate_hash(keychain_path, &hash)?;
+        removed += 1;
     }
 
     Ok(removed)
+}
+
+#[cfg(target_os = "macos")]
+fn delete_stale_macos_keychain_certificates(
+    keychain_path: &Path,
+    cert_path: &Path,
+) -> Result<usize> {
+    let current_hash = certificate_sha1(cert_path)?;
+    let mut removed = 0;
+
+    for hash in find_macos_keychain_certificate_hashes(keychain_path)? {
+        if hash != current_hash {
+            delete_macos_keychain_certificate_hash(keychain_path, &hash)?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keychain_contains_certificate(keychain_path: &Path, cert_path: &Path) -> Result<bool> {
+    let current_hash = certificate_sha1(cert_path)?;
+    Ok(find_macos_keychain_certificate_hashes(keychain_path)?
+        .iter()
+        .any(|hash| hash == &current_hash))
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_keychain_certificate_hashes(keychain_path: &Path) -> Result<Vec<String>> {
+    let keychain_path = path_as_utf8(keychain_path)?;
+    let output = Command::new("security")
+        .args([
+            "find-certificate",
+            "-c",
+            BRANDING.ca_name().as_str(),
+            "-a",
+            "-Z",
+            &keychain_path,
+        ])
+        .output()
+        .context(format!(
+            "Failed to find {} CA entries in the macOS login keychain",
+            BRANDING.app_name
+        ))?;
+
+    if output.status.success() {
+        return Ok(parse_security_sha1_hashes(&String::from_utf8_lossy(
+            &output.stdout,
+        )));
+    }
+
+    let message = cli_failure_message(&output);
+    if is_missing_macos_certificate_error(&message) {
+        return Ok(Vec::new());
+    }
+
+    bail!(
+        "Failed to find {} CA entries in your macOS login keychain: {}",
+        BRANDING.app_name,
+        message
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_keychain_certificate_hash(keychain_path: &Path, hash: &str) -> Result<()> {
+    let keychain_path = path_as_utf8(keychain_path)?;
+    let output = Command::new("security")
+        .args(["delete-certificate", "-Z", hash, &keychain_path])
+        .output()
+        .context(format!(
+            "Failed to remove a stale {} CA from the macOS login keychain",
+            BRANDING.app_name
+        ))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let message = cli_failure_message(&output);
+    if is_missing_macos_certificate_error(&message) {
+        return Ok(());
+    }
+
+    bail!(
+        "Failed to delete the {} CA from your macOS login keychain: {}",
+        BRANDING.app_name,
+        message
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn certificate_sha1(cert_path: &Path) -> Result<String> {
+    let cert_path = path_as_utf8(cert_path)?;
+    let output = Command::new("openssl")
+        .args(["x509", "-in", &cert_path, "-noout", "-fingerprint", "-sha1"])
+        .output()
+        .context(format!(
+            "Failed to calculate the {} CA fingerprint with openssl",
+            BRANDING.app_name
+        ))?;
+
+    if output.status.success() {
+        return parse_openssl_certificate_sha1(&String::from_utf8_lossy(&output.stdout));
+    }
+
+    bail!(
+        "Failed to calculate the {} CA fingerprint: {}",
+        BRANDING.app_name,
+        cli_failure_message(&output)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn parse_security_sha1_hashes(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("SHA-1 hash:"))
+        .map(normalize_certificate_hash)
+        .filter(|hash| !hash.is_empty())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_openssl_certificate_sha1(output: &str) -> Result<String> {
+    output
+        .lines()
+        .find_map(|line| line.split_once('=').map(|(_, value)| value))
+        .map(normalize_certificate_hash)
+        .filter(|hash| !hash.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Unexpected openssl fingerprint output: {}", output.trim()))
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_certificate_hash(value: &str) -> String {
+    value.trim().replace(':', "").to_ascii_uppercase()
 }
 
 #[cfg(target_os = "macos")]
@@ -3784,7 +3956,40 @@ fn map_config(config_path: &Path, config: Config) -> AppConfigDto {
         daemon: config.daemon.into(),
         paths: config.paths.into(),
         docker: config.docker.into(),
+        agent: config.agent.into(),
     }
+}
+
+fn map_agent_skill_status(
+    status: crate::agent_skill::AgentSkillStatus,
+) -> Result<AgentSkillStatusDto> {
+    Ok(AgentSkillStatusDto {
+        skill_dir: status.skill_dir.display().to_string(),
+        npx_available: status.npx_available,
+        detected_agents: status
+            .detected_agents
+            .into_iter()
+            .map(|agent| AgentSkillAgentDto {
+                id: agent.id.into(),
+                label: agent.label.into(),
+                detected: agent.detected,
+                installed: agent.installed,
+                skills_dir: agent.skills_dir.display().to_string(),
+            })
+            .collect(),
+        install_command: status.install_command,
+    })
+}
+
+fn map_agent_skill_install_result(
+    result: crate::agent_skill::AgentSkillInstallResult,
+) -> Result<AgentSkillInstallResultDto> {
+    Ok(AgentSkillInstallResultDto {
+        status: map_agent_skill_status(result.status)?,
+        installed_agents: result.installed_agents,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    })
 }
 
 fn map_configured_domain_info(
@@ -3953,6 +4158,28 @@ fn map_step(label: Option<String>, outcome: StepOutcome) -> StepDto {
     }
 }
 
+fn agent_skill_install_step(enabled: bool) -> Option<StepDto> {
+    if !enabled {
+        return None;
+    }
+
+    Some(match crate::agent_skill::install_agent_skill() {
+        Ok(result) => StepDto {
+            label: Some("Agent skill".into()),
+            status: "success".into(),
+            message: format!(
+                "Installed the Localify skill for {}.",
+                result.installed_agents.join(", ")
+            ),
+        },
+        Err(error) => StepDto {
+            label: Some("Agent skill".into()),
+            status: "skipped".into(),
+            message: format!("Automatic skill installation skipped: {error}"),
+        },
+    })
+}
+
 fn restart_daemon_after_certificate_refresh_step_with(
     daemon_was_running: bool,
     restart: impl FnOnce() -> Result<DaemonLaunchDto>,
@@ -4096,6 +4323,37 @@ mod tests {
     #[test]
     fn shell_escape_quotes_single_quotes_safely() {
         assert_eq!(shell_escape("my'app"), "'my'\"'\"'app'");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_security_sha1_hashes_extracts_hashes() {
+        let output = "\
+SHA-256 hash: AE97C0D9A5C003B5CC12D1AC0DCF40FB6FF54A54559B537AB9132E1E3055237B
+SHA-1 hash: C8:DE:C7:92:EA:38:EF:36:4E:DC:AE:D5:33:41:41:5A:E8:46:0A:D5
+keychain: \"/Users/test/Library/Keychains/login.keychain-db\"
+SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
+";
+
+        assert_eq!(
+            super::parse_security_sha1_hashes(output),
+            vec![
+                "C8DEC792EA38EF364EDCAED53341415AE8460AD5",
+                "EF0D835649DD3E4D1D109862315A09B1EA40C27F"
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_openssl_certificate_sha1_normalizes_hash() {
+        let output =
+            "sha1 Fingerprint=C8:DE:C7:92:EA:38:EF:36:4E:DC:AE:D5:33:41:41:5A:E8:46:0A:D5\n";
+
+        assert_eq!(
+            super::parse_openssl_certificate_sha1(output).unwrap(),
+            "C8DEC792EA38EF364EDCAED53341415AE8460AD5"
+        );
     }
 
     #[test]

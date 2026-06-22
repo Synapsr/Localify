@@ -90,6 +90,10 @@ enum Commands {
         /// Create only the project metadata without any domains
         #[arg(long)]
         project_only: bool,
+
+        /// Accept the detected project bootstrap plan without interactive prompts
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Unregister a domain
@@ -130,6 +134,18 @@ enum Commands {
         /// Skip the preview and execute immediately
         #[arg(long)]
         force: bool,
+    },
+
+    /// Manage project-scoped local development setup
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+
+    /// Manage coding-agent integration
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
     },
 
     /// Start the Localify daemon
@@ -253,6 +269,44 @@ enum RouteCommands {
 }
 
 #[derive(Subcommand)]
+enum ProjectCommands {
+    /// Reapply local dev scripts and framework config for the current project
+    ConfigureDev {
+        /// Project ID when the current folder is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// Add a missing app/service to an existing project
+    AddService {
+        /// App folder relative to the current project root
+        #[arg(long)]
+        path: PathBuf,
+
+        /// Project ID when the current folder is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Local domain for this service. Defaults to the detected app label and project name.
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Local target. Defaults to an automatically selected free port.
+        #[arg(long)]
+        target: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Install the bundled Localify skill for detected coding agents
+    InstallSkill,
+
+    /// Show Localify skill installation status
+    SkillStatus,
+}
+
+#[derive(Subcommand)]
 enum LicenseCommands {
     /// Show the current licensing status and limits
     Status,
@@ -350,6 +404,7 @@ fn main() -> Result<()> {
             api_domain,
             api_target,
             project_only,
+            yes,
         } => cli::init_project::execute(
             cli::init_project::InitProjectArgs {
                 name,
@@ -359,8 +414,12 @@ fn main() -> Result<()> {
                 api_domain,
                 api_target,
                 project_only,
+                yes,
             },
             config_path,
+            roxy::project_init::LocalAppUpdatePolicy {
+                promote_dev_script: config.agent.promote_dev_script,
+            },
         ),
         Commands::Unregister {
             domain,
@@ -388,6 +447,60 @@ fn main() -> Result<()> {
             delete_domains,
             force,
         } => cli::remove_project::execute(project_id, delete_domains, force, &ctx),
+        Commands::Project { command } => {
+            let policy = roxy::project_init::LocalAppUpdatePolicy {
+                promote_dev_script: config.agent.promote_dev_script,
+            };
+            match command {
+                ProjectCommands::ConfigureDev { project } => cli::project::configure_dev(
+                    cli::project::ConfigureDevArgs { project },
+                    config_path,
+                    policy,
+                ),
+                ProjectCommands::AddService {
+                    path,
+                    project,
+                    domain,
+                    target,
+                } => cli::project::add_service(
+                    cli::project::AddServiceArgs {
+                        path,
+                        project,
+                        domain,
+                        target,
+                    },
+                    config_path,
+                    policy,
+                ),
+            }
+        }
+        Commands::Agent { command } => match command {
+            AgentCommands::InstallSkill => {
+                let result = roxy::agent_skill::install_agent_skill()?;
+                println!("Installed Localify skill for:");
+                for agent in result.installed_agents {
+                    println!("  {agent}");
+                }
+                Ok(())
+            }
+            AgentCommands::SkillStatus => {
+                let status = roxy::agent_skill::agent_skill_status()?;
+                println!("Bundled skill: {}", status.skill_dir.display());
+                println!(
+                    "npx available: {}",
+                    if status.npx_available { "yes" } else { "no" }
+                );
+                println!("Detected agents:");
+                for agent in status.detected_agents {
+                    if agent.detected {
+                        println!("  {} ({})", agent.label, agent.id);
+                    }
+                }
+                println!("Install command:");
+                println!("  {}", status.install_command);
+                Ok(())
+            }
+        },
         Commands::Start { foreground } => {
             cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
         }

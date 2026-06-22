@@ -1,6 +1,8 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import type {
+  AgentSkillInstallResultDto,
+  AgentSkillStatusDto,
   AutostartStatusDto,
   CliAccessDto,
   InstallResultDto,
@@ -26,6 +28,7 @@ import { invalidateBootstrapAnd } from "./shared";
 
 const systemQueryKeys = {
   all: () => ["system"] as const,
+  agentSkillStatus: () => [...systemQueryKeys.all(), "agent-skill-status"] as const,
   autostartStatus: () => [...systemQueryKeys.all(), "autostart-status"] as const,
   uninstallPreview: () => [...systemQueryKeys.all(), "uninstall-preview"] as const,
 } as const;
@@ -40,6 +43,11 @@ const systemMutationInvalidations = [
 
 export const systemQueries = {
   all: systemQueryKeys.all,
+  agentSkillStatus: () =>
+    queryOptions<AgentSkillStatusDto, Error>({
+      queryKey: systemQueryKeys.agentSkillStatus(),
+      queryFn: () => tauriClient.getAgentSkillStatus(),
+    }),
   autostartStatus: () =>
     queryOptions<AutostartStatusDto, Error>({
       queryKey: systemQueryKeys.autostartStatus(),
@@ -66,6 +74,11 @@ export const systemMutations = {
   setupNodeTrust: (queryClient: QueryClient) =>
     mutationOptions<NodeTrustDto, Error, void>({
       mutationFn: () => tauriClient.setupNodeTrust(),
+      onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
+  installAgentSkill: (queryClient: QueryClient) =>
+    mutationOptions<AgentSkillInstallResultDto, Error, void>({
+      mutationFn: () => tauriClient.installAgentSkill(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
   exportSettings: () =>

@@ -6,6 +6,7 @@ pub mod license;
 pub mod list;
 pub mod list_projects;
 pub mod logs;
+pub mod project;
 pub mod register;
 pub mod reload;
 pub mod remove_project;

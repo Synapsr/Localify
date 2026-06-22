@@ -18,7 +18,8 @@ Use Localify when an agent needs to:
 - debug a local domain that does not resolve, does not trust HTTPS, or reaches the wrong target
 - inspect local proxy, daemon, DNS, certificate, Docker, or desktop app state
 
-Do not invent random localhost ports when a `.localify` route exists or can be created.
+Do not choose framework default ports like `3000` yourself during project bootstrap. Let
+`localify init-project --yes` reserve an available port and update supported dev scripts.
 
 ## Mental model
 
@@ -44,10 +45,10 @@ localify list
 Create a project from the current folder:
 
 ```bash
-localify init-project
+localify init-project --yes
 ```
 
-Create an explicit route:
+Create an explicit route only when the user gives you the target:
 
 ```bash
 localify register myapp.localify --route "/=3000"
@@ -67,7 +68,7 @@ https://myapp.localify
 
 ## Preferred agent workflow
 
-Before using a local app:
+When entering an existing repo or after creating a new app:
 
 1. Check whether Localify is installed and running:
 
@@ -75,25 +76,44 @@ Before using a local app:
    localify status
    ```
 
-2. List configured projects and domains:
+2. Bootstrap the repo once if it is not already a Localify project:
+
+   ```bash
+   localify init-project --yes
+   ```
+
+   This creates or links the Localify Project, creates the primary Local Domains, chooses available
+   local ports, and updates supported package scripts/framework config.
+
+3. List configured projects and domains:
 
    ```bash
    localify list-projects
    localify list
    ```
 
-3. Use the `.localify` URL shown by Localify instead of a guessed localhost URL.
+4. Use the `.localify` URL shown by Localify instead of a guessed localhost URL.
 
-4. If no route exists, create one with `init-project` or `register`.
+5. If a relevant monorepo app was not selected by the bootstrap heuristic, add it explicitly:
 
-5. If the target does not respond, check that the underlying dev server is running on the mapped port.
+   ```bash
+   localify project add-service --path apps/admin
+   ```
+
+6. If scripts/config drift after setup, repair the existing Project instead of rerunning bootstrap:
+
+   ```bash
+   localify project configure-dev
+   ```
+
+7. If the target does not respond, check that the underlying dev server is running on the mapped port.
 
 ## Project setup
 
 For a normal app folder, prefer:
 
 ```bash
-localify init-project
+localify init-project --yes
 ```
 
 This lets Localify infer a project name, suggest domains, reserve local targets, and prepare supported frontend config updates where applicable.
@@ -101,14 +121,27 @@ This lets Localify infer a project name, suggest domains, reserve local targets,
 For explicit setup:
 
 ```bash
-localify init-project myapp --domain myapp --target 3000
+localify init-project myapp --domain myapp --yes
 ```
 
 For separate web and API domains:
 
 ```bash
-localify init-project myapp --domain myapp --target 3000 --with-api --api-domain api.myapp --api-target 3001
+localify init-project myapp --domain myapp --with-api --api-domain api.myapp --yes
 ```
+
+Only pass `--target` or `--api-target` when the user explicitly requested a fixed upstream target
+or an existing Localify `dev-localify` script already defines one. Do not copy a running `next dev`
+or Vite default port such as `3000`, `5173`, or `4321` into the Localify project unless that fixed
+port is intentional.
+
+`init-project --yes` is an initial bootstrap command, not a generic repair loop. After it succeeds,
+use targeted commands like `project configure-dev`, `project add-service`, `route list`, `logs`, and
+`status` to investigate or repair specific issues.
+
+When Localify's "default dev script" setting is enabled, bootstrap may rewrite package `dev` scripts
+to the Localify-compatible command and preserve the original as `dev-localhost` when that script name
+is available. `dev-localify` is kept aligned either way.
 
 For direct domain management without project metadata:
 
@@ -224,9 +257,11 @@ Common failures:
 - Keep project routes explicit and small.
 - Use wildcard domains only when the app actually needs tenant or subdomain testing.
 - For app code changes, update local callback, OAuth, webhook, CORS, and cookie origins to the `.localify` URL when that is the route under test.
+- After creating a Next.js or Vite project, run `localify init-project --yes` before handing the URL to the user.
+- For Next.js, expect Localify to patch an existing `next.config.*` with `allowedDevOrigins` and Localify-compatible `images.remotePatterns`.
+- For Vite, expect Localify to patch an existing `vite.config.*` with an explicit `server.allowedHosts` entry. Do not set `allowedHosts: true`.
 
 ## Current limitation
 
 Localify does not yet provide a `localify run` command equivalent to `portless run`.
 Until that exists, start the app's dev server normally, then register or use the matching Localify project/domain.
-

@@ -295,18 +295,28 @@ impl DaemonControl for InMemoryDaemonControl {
 
 pub struct InMemoryDnsManager {
     configured: RefCell<bool>,
+    valid: RefCell<bool>,
 }
 
 impl InMemoryDnsManager {
     pub fn new() -> Self {
         Self {
             configured: RefCell::new(false),
+            valid: RefCell::new(false),
         }
     }
 
     pub fn already_configured() -> Self {
         Self {
             configured: RefCell::new(true),
+            valid: RefCell::new(true),
+        }
+    }
+
+    pub fn invalid_existing() -> Self {
+        Self {
+            configured: RefCell::new(true),
+            valid: RefCell::new(false),
         }
     }
 }
@@ -314,15 +324,22 @@ impl InMemoryDnsManager {
 impl DnsManager for InMemoryDnsManager {
     fn setup(&self, _port: u16) -> Result<(), DnsConfigError> {
         *self.configured.borrow_mut() = true;
+        *self.valid.borrow_mut() = true;
         Ok(())
     }
 
     fn cleanup(&self) -> Result<(), DnsConfigError> {
         *self.configured.borrow_mut() = false;
+        *self.valid.borrow_mut() = false;
         Ok(())
     }
 
     fn validate(&self) -> Result<(), DnsConfigError> {
+        if !*self.valid.borrow() {
+            return Err(DnsConfigError::ValidationFailed(
+                "Resolver file has incorrect content".into(),
+            ));
+        }
         Ok(())
     }
 
