@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::application::StepOutcome;
 use crate::application::daemon_status::QueryDaemonStatus;
@@ -32,7 +32,8 @@ use crate::desktop::dto::{
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest,
-    OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    OpenProjectUrlRequest, PortConflictDto, ProjectEnvironmentInfoDto,
+    ProjectEnvironmentServiceInfoDto, ProjectInfoDto, ProjectServiceInfoDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
     SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
@@ -50,7 +51,10 @@ use crate::desktop::port_conflicts::{
 use crate::desktop::{LauncherPreferencesStore, ProjectRootStore, RunActionPreference};
 use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
-use crate::infrastructure::config::{Config, ConfigStore, ConfiguredDomain, ConfiguredProject};
+use crate::infrastructure::config::{
+    Config, ConfigStore, ConfiguredDomain, ConfiguredProject, ConfiguredProjectEnvironment,
+    ConfiguredService, ProjectServiceConfig,
+};
 use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution, get_dns_service};
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::licensing::{
@@ -135,6 +139,8 @@ impl DesktopApi {
             bootstrap.launcher_preferences = self.effective_launcher_preferences()?.into();
             bootstrap.launcher_availability = self.launcher_availability();
             bootstrap.projects = self.enrich_projects_with_local_paths(bootstrap.projects)?;
+            bootstrap.services = self.list_project_services()?;
+            bootstrap.project_environments = self.list_project_environments()?;
             return Ok(bootstrap);
         }
 
@@ -147,6 +153,8 @@ impl DesktopApi {
             launcher_availability: self.launcher_availability(),
             domains: self.list_domains()?,
             projects: self.list_projects()?,
+            services: self.list_project_services()?,
+            project_environments: self.list_project_environments()?,
         })
     }
 
@@ -622,6 +630,24 @@ impl DesktopApi {
         Ok(projects)
     }
 
+    pub fn list_project_services(&self) -> Result<Vec<ProjectServiceInfoDto>> {
+        Ok(self
+            .config_store()
+            .list_services()?
+            .into_iter()
+            .map(map_project_service_info)
+            .collect())
+    }
+
+    pub fn list_project_environments(&self) -> Result<Vec<ProjectEnvironmentInfoDto>> {
+        Ok(self
+            .config_store()
+            .list_project_environments(None)?
+            .into_iter()
+            .map(map_project_environment_info)
+            .collect())
+    }
+
     pub fn create_project(&self, request: CreateProjectRequest) -> Result<ProjectInfoDto> {
         if self.should_use_system_helper() {
             return self.ensure_helper_running()?.create_project(request);
@@ -758,6 +784,22 @@ impl DesktopApi {
             created_patterns.push(pattern);
         }
 
+        let project_services = services
+            .iter()
+            .filter_map(init_project_service_config)
+            .collect::<Vec<_>>();
+        if !project_services.is_empty()
+            && let Err(error) = config_store.set_project_services(&project.id, project_services)
+        {
+            rollback_created_project(
+                &config_store,
+                &unregister_domain,
+                &project.id,
+                &created_patterns,
+            )?;
+            return Err(error.into());
+        }
+
         let daemon_reloaded = match MgmtSocketClient::new(&paths.socket_path).reload() {
             Ok(()) => true,
             Err(crate::application::ports::DaemonConnectionError::NotRunning) => false,
@@ -800,6 +842,9 @@ impl DesktopApi {
                     id: service.id,
                     label: service.label,
                     display_path: service.display_path,
+                    service_name: service.service_name,
+                    service_path: service.service_path,
+                    command: service.command,
                     domain: service.domain,
                     target: service.target,
                     enabled: service.enabled,
@@ -824,16 +869,23 @@ impl DesktopApi {
                 target: service.target.clone(),
                 enabled: service.enabled,
                 update_dev_script: service.update_dev_script,
+                service_name: service.service_name.clone(),
+                service_path: service.service_path.clone(),
+                command: service.command.clone(),
             })
             .collect::<Vec<_>>();
         let config = self.config_store().load()?;
+        let writes_package_scripts = request
+            .services
+            .iter()
+            .any(|service| service.update_dev_script)
+            || config.agent.promote_dev_script;
         let resolved = resolve_folder_init_selection(
             &root_path,
             &request.name,
             &selections,
-            LocalAppUpdatePolicy {
-                promote_dev_script: config.agent.promote_dev_script,
-            },
+            LocalAppUpdatePolicy::from_dev_script_preference(config.agent.promote_dev_script)
+                .with_package_scripts(writes_package_scripts),
         )?;
         let init_result = self.init_project(InitProjectRequest {
             name: request.name,
@@ -844,6 +896,9 @@ impl DesktopApi {
                 .map(|service| crate::desktop::dto::InitProjectServiceRequest {
                     domain: service.domain.clone(),
                     target: service.target.clone(),
+                    service_name: service.service_name.clone(),
+                    service_path: service.service_path.clone(),
+                    command: service.command.clone(),
                 })
                 .collect(),
         })?;
@@ -893,9 +948,12 @@ impl DesktopApi {
             .update_project(&id, name, enabled, None)?;
         let project = map_project_info(project, domain_count, has_reachable_domain, None);
         let mut projects = self.enrich_projects_with_local_paths(vec![project])?;
-        Ok(projects
-            .pop()
-            .expect("enrich_projects_with_local_paths preserves project count"))
+        projects.pop().ok_or_else(|| {
+            anyhow!(
+                "Failed to enrich updated project '{}': no project was returned",
+                id
+            )
+        })
     }
 
     pub fn open_in_editor(&self, request: OpenInEditorRequest) -> Result<()> {
@@ -2952,6 +3010,23 @@ fn export_domain_snapshot(registration: RegistrationDto) -> Result<SettingsTrans
     })
 }
 
+fn init_project_service_config(
+    service: &crate::desktop::dto::InitProjectServiceRequest,
+) -> Option<ProjectServiceConfig> {
+    let name = service.service_name.as_ref()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    Some(ProjectServiceConfig {
+        name: name.to_string(),
+        primary_domain: service.domain.clone(),
+        domains: Vec::new(),
+        path: service.service_path.clone(),
+        command: service.command.clone(),
+    })
+}
+
 fn export_route_string(route: RouteDto) -> Result<String> {
     let path = route.path.trim();
     let target = route.target.trim();
@@ -4091,6 +4166,50 @@ fn map_project_info(
     }
 }
 
+fn map_project_service_info(value: ConfiguredService) -> ProjectServiceInfoDto {
+    let public_host = value
+        .primary_domain
+        .strip_prefix("*.")
+        .unwrap_or(&value.primary_domain)
+        .to_string();
+
+    ProjectServiceInfoDto {
+        id: value.id,
+        name: value.name,
+        project_id: value.project_id,
+        project_name: value.project_name,
+        project_enabled: value.project_enabled,
+        primary_domain: value.primary_domain,
+        url: format!("https://{public_host}"),
+        domains: value.domains,
+        path: value.path,
+        command: value.command,
+        target: value.primary_target.map(|target| target.to_string()),
+        inferred: value.inferred,
+    }
+}
+
+fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {
+    ProjectEnvironmentInfoDto {
+        project_id: value.project_id,
+        project_name: value.project_name,
+        name: value.name,
+        slug: value.slug,
+        primary: value.primary,
+        root_path: value.root_path,
+        git_common_dir: value.git_common_dir,
+        git_branch: value.git_branch,
+        services: value
+            .services
+            .into_iter()
+            .map(|service| ProjectEnvironmentServiceInfoDto {
+                service_id: service.service_id,
+                domain: service.domain,
+            })
+            .collect(),
+    }
+}
+
 fn daemon_domain_accesses(socket_path: &Path) -> HashMap<String, u64> {
     MgmtSocketClient::new(socket_path)
         .list_registration_info()
@@ -4271,9 +4390,10 @@ mod tests {
     };
     use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
-        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, KeygenSettingsUpdateRequest,
-        LogsRequest, RemoveProjectRequest, RouteDto, SettingsTransferDomainDto,
-        SettingsTransferProjectDto, SettingsTransferSnapshotDto,
+        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, InitProjectRequest,
+        InitProjectServiceRequest, KeygenSettingsUpdateRequest, LogsRequest, RemoveProjectRequest,
+        RouteDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
+        SettingsTransferSnapshotDto,
     };
     use crate::domain::RouteTarget;
     use crate::infrastructure::config::{Config, ConfigStore};
@@ -4642,6 +4762,41 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
                 .iter()
                 .all(|domain| domain.project_id.as_deref() == Some(project.id.as_str()))
         );
+    }
+
+    #[test]
+    fn init_project_persists_explicit_services() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("repo");
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+
+        let result = api
+            .init_project(InitProjectRequest {
+                name: "Client App".into(),
+                root_path: Some(root.display().to_string()),
+                services: vec![InitProjectServiceRequest {
+                    domain: "client-app.localify".into(),
+                    target: "3000".into(),
+                    service_name: Some("web".into()),
+                    service_path: Some("apps/web".into()),
+                    command: Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()]),
+                }],
+            })
+            .unwrap();
+
+        let services = store.list_services().unwrap();
+
+        assert_eq!(result.services.len(), 1);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].project_id, result.project.id);
+        assert_eq!(services[0].id, "web");
+        assert_eq!(services[0].primary_domain, "client-app.localify");
+        assert_eq!(services[0].path.as_deref(), Some("apps/web"));
+        assert_eq!(
+            services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()])
+        );
+        assert!(!services[0].inferred);
     }
 
     #[test]

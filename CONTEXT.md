@@ -8,6 +8,10 @@ Localify gives local development projects stable local domains and can expose se
 A local development workspace that groups one or more local domains.
 _Avoid_: App, repository
 
+**Project Namespace**:
+The local domain label used to generate default service domains for a project. A project namespace is not itself a service or local domain unless the user assigns that hostname to a service.
+_Avoid_: Project domain, root domain, canonical domain
+
 **Agent Skill**:
 A reusable instruction package that teaches coding agents how to use Localify consistently across projects.
 _Avoid_: Prompt, plugin, script
@@ -16,9 +20,29 @@ _Avoid_: Prompt, plugin, script
 A project created or bootstrapped by a coding agent with Localify local domains and framework settings configured from the start.
 _Avoid_: Generated app, AI app
 
+**Service**:
+A runnable local entrypoint inside a project, such as a web app, API, docs app, or background HTTP service. A service has one primary local domain as its canonical URL and may have additional local domains.
+_Avoid_: App, package, script, route
+
+**Unavailable Service**:
+A project service that cannot be run in a specific project environment because its local checkout does not contain the service path or required launch metadata.
+_Avoid_: Broken service, deleted service
+
+**Project Environment**:
+A local checkout variant of a project, usually tied to a git worktree or branch, that can run the same services with distinct local domains and ports.
+_Avoid_: Project, branch project, clone
+
+**Primary Environment**:
+The canonical project environment that owns the project's existing local domains unless another project environment is selected explicitly.
+_Avoid_: Main branch, default branch
+
 **Local Domain**:
 A stable `.localify` hostname for one local entrypoint in a project.
 _Avoid_: Public URL, tunnel
+
+**Route**:
+A path mapping on a local domain that sends matching requests to a local target. A route may point at a service's local target, but it is not itself a service.
+_Avoid_: Service, public URL
 
 **Public URL**:
 An internet-reachable address attached to a public endpoint. A public URL owns its own access protection settings.

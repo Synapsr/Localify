@@ -281,6 +281,53 @@ pub struct ProjectInfoDto {
     pub last_accessed_at: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectServiceInfoDto {
+    pub id: String,
+    pub name: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub project_enabled: bool,
+    pub primary_domain: String,
+    pub url: String,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub inferred: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEnvironmentServiceInfoDto {
+    pub service_id: String,
+    pub domain: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEnvironmentInfoDto {
+    pub project_id: String,
+    pub project_name: String,
+    pub name: String,
+    pub slug: String,
+    pub primary: bool,
+    #[serde(default)]
+    pub root_path: Option<String>,
+    #[serde(default)]
+    pub git_common_dir: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub services: Vec<ProjectEnvironmentServiceInfoDto>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DnsResolutionDto {
@@ -326,6 +373,10 @@ pub struct BootstrapDto {
     pub domains: Vec<DomainInfoDto>,
     #[serde(default)]
     pub projects: Vec<ProjectInfoDto>,
+    #[serde(default)]
+    pub services: Vec<ProjectServiceInfoDto>,
+    #[serde(default)]
+    pub project_environments: Vec<ProjectEnvironmentInfoDto>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -774,6 +825,12 @@ pub struct CreateProjectWithDomainsRequest {
 pub struct InitProjectServiceRequest {
     pub domain: String,
     pub target: String,
+    #[serde(default)]
+    pub service_name: Option<String>,
+    #[serde(default)]
+    pub service_path: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -885,6 +942,11 @@ pub struct FolderInitServiceDto {
     pub id: String,
     pub label: String,
     pub display_path: String,
+    pub service_name: String,
+    #[serde(default)]
+    pub service_path: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
     pub domain: String,
     pub target: String,
     pub enabled: bool,
@@ -908,6 +970,12 @@ pub struct InitProjectFromFolderServiceRequest {
     pub target: String,
     pub enabled: bool,
     pub update_dev_script: bool,
+    #[serde(default)]
+    pub service_name: Option<String>,
+    #[serde(default)]
+    pub service_path: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

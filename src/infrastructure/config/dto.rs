@@ -33,6 +33,44 @@ pub struct ProjectDto {
     pub enabled: bool,
     #[serde(default)]
     pub root_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ProjectServiceDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<ProjectEnvironmentDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectServiceDto {
+    pub name: String,
+    pub primary_domain: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectEnvironmentDto {
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    pub primary: bool,
+    #[serde(default)]
+    pub root_path: Option<String>,
+    #[serde(default)]
+    pub git_common_dir: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ProjectEnvironmentServiceDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectEnvironmentServiceDto {
+    pub service: String,
+    pub domain: String,
 }
 
 impl From<DomainRegistration> for RegistrationDto {

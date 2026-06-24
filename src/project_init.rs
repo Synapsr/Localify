@@ -17,6 +17,9 @@ const SYNTHETIC_PRIMARY_SERVICE_ID: &str = "__primary__";
 pub struct ServicePlan {
     pub domain: String,
     pub target: String,
+    pub service_name: Option<String>,
+    pub service_path: Option<String>,
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,9 @@ pub struct FolderInitServicePlan {
     pub id: String,
     pub label: String,
     pub display_path: String,
+    pub service_name: String,
+    pub service_path: Option<String>,
+    pub command: Option<Vec<String>>,
     pub domain: String,
     pub target: String,
     pub enabled: bool,
@@ -49,6 +55,9 @@ pub struct FolderInitSelection {
     pub target: String,
     pub enabled: bool,
     pub update_dev_script: bool,
+    pub service_name: Option<String>,
+    pub service_path: Option<String>,
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +84,31 @@ pub struct ViteConfigUpdate {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LocalAppUpdatePolicy {
+    pub write_package_scripts: bool,
     pub promote_dev_script: bool,
+}
+
+impl LocalAppUpdatePolicy {
+    pub fn runtime_only() -> Self {
+        Self {
+            write_package_scripts: false,
+            promote_dev_script: false,
+        }
+    }
+
+    pub fn from_dev_script_preference(promote_dev_script: bool) -> Self {
+        Self {
+            write_package_scripts: promote_dev_script,
+            promote_dev_script,
+        }
+    }
+
+    pub fn with_package_scripts(self, write_package_scripts: bool) -> Self {
+        Self {
+            write_package_scripts,
+            ..self
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +130,10 @@ struct FolderServiceBlueprint {
     id: String,
     label: String,
     display_path: String,
+    service_name: String,
+    service_path: Option<String>,
+    package_command: Option<Vec<String>>,
+    script_name: String,
     domain: String,
     target: String,
     enabled: bool,
@@ -107,11 +144,31 @@ struct FolderServiceBlueprint {
     vite_config_path: Option<PathBuf>,
 }
 
+impl FolderServiceBlueprint {
+    fn package_command_for(&self, update_dev_script: bool) -> Option<Vec<String>> {
+        let mut command = self.package_command.clone()?;
+        let script_name = if update_dev_script {
+            "dev-localify"
+        } else {
+            &self.script_name
+        };
+        if command.len() == 2 && command[0] == "yarn" {
+            command[1] = script_name.into();
+        } else if command.len() >= 3 {
+            command[2] = script_name.into();
+        }
+        Some(command)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WorkspaceAppCandidate {
     id: String,
     label: String,
     display_path: String,
+    service_path: Option<String>,
+    package_command: Vec<String>,
+    script_name: String,
     package_json_path: PathBuf,
     dev_script: String,
     scripts: Map<String, Value>,
@@ -124,6 +181,8 @@ struct WorkspaceAppCandidate {
 struct PackageJsonManifest {
     scripts: Option<Map<String, Value>>,
     workspaces: Option<Value>,
+    #[serde(rename = "packageManager")]
+    package_manager: Option<String>,
 }
 
 /// Builds the service plan used by `localify init-project` when explicit flags
@@ -157,9 +216,19 @@ pub fn build_init_plan(
 
     let auto_targets = reserve_auto_targets(auto_target_count)?;
     let mut next_auto_target = auto_targets.into_iter();
-    let target = target.unwrap_or_else(|| next_auto_target.next().unwrap());
+    let target = match target {
+        Some(target) => target,
+        None => next_auto_target
+            .next()
+            .ok_or_else(|| anyhow!("Failed to reserve a target port for the primary service"))?,
+    };
     let api_target = if with_api {
-        Some(api_target.unwrap_or_else(|| next_auto_target.next().unwrap()))
+        Some(match api_target {
+            Some(target) => target,
+            None => next_auto_target
+                .next()
+                .ok_or_else(|| anyhow!("Failed to reserve a target port for the API service"))?,
+        })
     } else {
         None
     };
@@ -169,12 +238,24 @@ pub fn build_init_plan(
         bail!("Duplicate domain in init-project plan: {domain}");
     }
 
-    let mut services = vec![ServicePlan { domain, target }];
+    let mut services = vec![ServicePlan {
+        domain,
+        target,
+        service_name: None,
+        service_path: None,
+        command: None,
+    }];
     if let (Some(domain), Some(target)) = (api_domain, api_target) {
         if !seen_domains.insert(domain.clone()) {
             bail!("Duplicate domain in init-project plan: {domain}");
         }
-        services.push(ServicePlan { domain, target });
+        services.push(ServicePlan {
+            domain,
+            target,
+            service_name: None,
+            service_path: None,
+            command: None,
+        });
     }
 
     Ok(InitPlan { services })
@@ -207,11 +288,14 @@ pub fn detect_folder_init_plan(root: &Path, project_name: Option<&str>) -> Resul
                 id: service.id,
                 label: service.label,
                 display_path: service.display_path,
+                service_name: service.service_name,
+                service_path: service.service_path,
+                command: service.package_command,
                 domain: service.domain,
                 target: service.target,
                 enabled: service.enabled,
                 can_update_dev_script,
-                update_dev_script: can_update_dev_script,
+                update_dev_script: false,
             }
         })
         .collect();
@@ -287,9 +371,25 @@ pub fn resolve_folder_init_selection(
         }
         package_updates.extend(package_update);
 
+        let command = selection
+            .command
+            .clone()
+            .or_else(|| blueprint.package_command_for(selection.update_dev_script));
+        let service_name = selection
+            .service_name
+            .as_deref()
+            .and_then(non_empty_string)
+            .or_else(|| command.as_ref().map(|_| blueprint.service_name.clone()));
+
         services.push(ServicePlan {
             domain,
             target: target.clone(),
+            service_name,
+            service_path: selection
+                .service_path
+                .clone()
+                .or_else(|| blueprint.service_path.clone()),
+            command,
         });
     }
 
@@ -303,6 +403,11 @@ pub fn resolve_folder_init_selection(
         next_config_updates,
         vite_config_updates,
     })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Applies planned local app file rewrites after a project has been
@@ -365,7 +470,15 @@ pub fn apply_local_app_updates(
         }
     }
 
+    dedup_preserve_order(&mut results.updated);
+    dedup_preserve_order(&mut results.skipped);
+
     results
+}
+
+fn dedup_preserve_order(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 /// Plans local app file updates for `localify init-project` in the current
@@ -447,6 +560,10 @@ fn synthetic_primary_service(project_name: &str) -> Result<Vec<FolderServiceBlue
         id: SYNTHETIC_PRIMARY_SERVICE_ID.into(),
         label: "Primary app".into(),
         display_path: "Primary app".into(),
+        service_name: "web".into(),
+        service_path: None,
+        package_command: None,
+        script_name: "dev".into(),
         domain: normalize_domain(slug),
         target,
         enabled: true,
@@ -465,9 +582,11 @@ fn workspace_service_blueprints(
     let slug = slugify(project_name)?;
     let default_targets = reserve_auto_targets(workspace_apps.len())?;
     let mut services = Vec::with_capacity(workspace_apps.len());
+    let has_app_service = workspace_apps.iter().any(is_apps_service);
 
     for (index, app) in workspace_apps.iter().enumerate() {
-        let enabled = default_workspace_service_enabled(app, index, workspace_apps.len());
+        let enabled =
+            default_workspace_service_enabled(app, index, workspace_apps.len(), has_app_service);
         let domain = default_workspace_domain(&slug, &app.label, services.is_empty(), app.is_root);
         let target = default_targets
             .get(index)
@@ -477,6 +596,10 @@ fn workspace_service_blueprints(
             id: app.id.clone(),
             label: app.label.clone(),
             display_path: app.display_path.clone(),
+            service_name: default_service_name(app),
+            service_path: app.service_path.clone(),
+            package_command: Some(app.package_command.clone()),
+            script_name: app.script_name.clone(),
             domain,
             target,
             enabled,
@@ -495,12 +618,30 @@ fn default_workspace_service_enabled(
     app: &WorkspaceAppCandidate,
     index: usize,
     app_count: usize,
+    has_app_service: bool,
 ) -> bool {
     if app.is_root && app_count > 1 {
         return false;
     }
+    if has_app_service && !is_apps_service(app) {
+        return false;
+    }
 
     index == 0 || matches!(app.label.as_str(), "web" | "app" | "server" | "api")
+}
+
+fn is_apps_service(app: &WorkspaceAppCandidate) -> bool {
+    app.service_path
+        .as_deref()
+        .is_some_and(|path| path.starts_with("apps/"))
+}
+
+fn default_service_name(app: &WorkspaceAppCandidate) -> String {
+    if app.is_root {
+        "web".into()
+    } else {
+        app.label.clone()
+    }
 }
 
 fn default_workspace_domain(
@@ -532,8 +673,25 @@ fn detect_workspace_apps(root: &Path) -> Result<Vec<WorkspaceAppCandidate>> {
     if root_is_workspace && apps.iter().any(|app| !app.is_root) {
         apps.retain(|app| !app.is_root);
     }
+    apps.sort_by(|left, right| {
+        workspace_app_rank(left)
+            .cmp(&workspace_app_rank(right))
+            .then_with(|| left.display_path.cmp(&right.display_path))
+    });
 
     Ok(apps)
+}
+
+fn workspace_app_rank(app: &WorkspaceAppCandidate) -> usize {
+    match app.service_path.as_deref() {
+        Some("apps/web") | Some("apps/app") => 0,
+        Some("apps/server") | Some("apps/api") => 1,
+        Some(path) if path.starts_with("apps/") => 2,
+        Some(path) if path.starts_with("services/") => 3,
+        Some(path) if path.starts_with("packages/") => 4,
+        _ if app.is_root => 5,
+        _ => 6,
+    }
 }
 
 fn candidate_manifests(root: &Path) -> Result<Vec<PathBuf>> {
@@ -571,6 +729,98 @@ fn package_json_declares_workspaces(package_json_path: &Path) -> Result<bool> {
     Ok(manifest.workspaces.is_some())
 }
 
+fn package_script_command(
+    root: &Path,
+    package_dir: &Path,
+    manifest: &PackageJsonManifest,
+    script_name: &str,
+) -> Result<Vec<String>> {
+    let package_manager = detect_package_manager(root, package_dir, manifest)?;
+    Ok(match package_manager {
+        PackageManager::Yarn => vec!["yarn".into(), script_name.into()],
+        PackageManager::Npm => vec!["npm".into(), "run".into(), script_name.into()],
+        PackageManager::Pnpm => vec!["pnpm".into(), "run".into(), script_name.into()],
+        PackageManager::Bun => vec!["bun".into(), "run".into(), script_name.into()],
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PackageManager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+}
+
+fn detect_package_manager(
+    root: &Path,
+    package_dir: &Path,
+    manifest: &PackageJsonManifest,
+) -> Result<PackageManager> {
+    if let Some(package_manager) = manifest
+        .package_manager
+        .as_deref()
+        .and_then(parse_package_manager)
+    {
+        return Ok(package_manager);
+    }
+
+    let root_manifest_path = root.join("package.json");
+    if package_dir != root && root_manifest_path.exists() {
+        let content = fs::read_to_string(&root_manifest_path)
+            .with_context(|| format!("Failed to read '{}'", root_manifest_path.display()))?;
+        let root_manifest: PackageJsonManifest = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse '{}'", root_manifest_path.display()))?;
+        if let Some(package_manager) = root_manifest
+            .package_manager
+            .as_deref()
+            .and_then(parse_package_manager)
+        {
+            return Ok(package_manager);
+        }
+    }
+
+    for directory in package_dir.ancestors() {
+        if !directory.starts_with(root) {
+            break;
+        }
+
+        if directory.join("bun.lockb").exists() || directory.join("bun.lock").exists() {
+            return Ok(PackageManager::Bun);
+        }
+        if directory.join("pnpm-lock.yaml").exists() {
+            return Ok(PackageManager::Pnpm);
+        }
+        if directory.join("yarn.lock").exists() {
+            return Ok(PackageManager::Yarn);
+        }
+        if directory.join("package-lock.json").exists()
+            || directory.join("npm-shrinkwrap.json").exists()
+        {
+            return Ok(PackageManager::Npm);
+        }
+    }
+
+    Ok(PackageManager::Npm)
+}
+
+fn parse_package_manager(value: &str) -> Option<PackageManager> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized == "pnpm" || normalized.starts_with("pnpm@") {
+        return Some(PackageManager::Pnpm);
+    }
+    if normalized == "yarn" || normalized.starts_with("yarn@") {
+        return Some(PackageManager::Yarn);
+    }
+    if normalized == "bun" || normalized.starts_with("bun@") {
+        return Some(PackageManager::Bun);
+    }
+    if normalized == "npm" || normalized.starts_with("npm@") {
+        return Some(PackageManager::Npm);
+    }
+    None
+}
+
 fn read_workspace_app(
     root: &Path,
     package_json_path: &Path,
@@ -582,12 +832,7 @@ fn read_workspace_app(
     let Some(scripts) = manifest.scripts.as_ref() else {
         return Ok(None);
     };
-    let Some(dev_script) = scripts
-        .get("dev")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some((script_name, dev_script)) = select_dev_script(scripts, package_json_path)? else {
         return Ok(None);
     };
 
@@ -617,25 +862,89 @@ fn read_workspace_app(
     let display_path = if relative_dir.is_empty() || relative_dir == "." {
         label.clone()
     } else {
-        relative_dir
+        relative_dir.clone()
     };
+    let service_path = if package_dir == root {
+        None
+    } else {
+        Some(relative_dir)
+    };
+    let package_command = package_script_command(root, package_dir, &manifest, &script_name)?;
     let relative_manifest = package_json_path
         .strip_prefix(root)
         .unwrap_or(package_json_path)
         .display()
         .to_string();
+    let next_config_path = resolve_next_config_path(package_dir, &dev_script);
+    let vite_config_path = resolve_vite_config_path(package_dir, &dev_script);
 
     Ok(Some(WorkspaceAppCandidate {
         id: relative_manifest,
         label,
         display_path,
+        service_path,
+        package_command,
+        script_name,
         package_json_path: package_json_path.to_path_buf(),
-        dev_script: dev_script.to_string(),
+        dev_script,
         scripts: scripts.clone(),
         is_root: package_dir == root,
-        next_config_path: resolve_next_config_path(package_dir, dev_script),
-        vite_config_path: resolve_vite_config_path(package_dir, dev_script),
+        next_config_path,
+        vite_config_path,
     }))
+}
+
+fn select_dev_script(
+    scripts: &Map<String, Value>,
+    package_json_path: &Path,
+) -> Result<Option<(String, String)>> {
+    let package_label = package_json_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let mut candidates = scripts
+        .iter()
+        .filter_map(|(script_name, script_value)| {
+            let script = script_value.as_str()?.trim();
+            if script.is_empty() {
+                return None;
+            }
+            Some((
+                dev_script_priority(script_name, package_label)?,
+                script_name.clone(),
+                script.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(candidates
+        .into_iter()
+        .next()
+        .map(|(_, script_name, script)| (script_name, script)))
+}
+
+fn dev_script_priority(script_name: &str, package_label: &str) -> Option<usize> {
+    if script_name == "dev" {
+        return Some(0);
+    }
+    if script_name == "dev:bare" {
+        return Some(1);
+    }
+    if !package_label.is_empty() && script_name == format!("dev:{package_label}") {
+        return Some(2);
+    }
+    if !package_label.is_empty() && script_name == format!("{package_label}:dev") {
+        return Some(3);
+    }
+    if script_name.starts_with("dev:") {
+        return Some(4);
+    }
+    if script_name.ends_with(":dev") {
+        return Some(5);
+    }
+    None
 }
 
 /// Reads the checked-in `dev-localify` port for explicit CLI compatibility.
@@ -665,6 +974,10 @@ fn build_package_updates(
     domain: &str,
     policy: LocalAppUpdatePolicy,
 ) -> Result<Vec<PackageScriptUpdate>> {
+    if !policy.write_package_scripts {
+        return Ok(Vec::new());
+    }
+
     let Some(package_json_path) = blueprint.package_json_path.as_ref() else {
         bail!(
             "Cannot update the dev script for '{}': no package.json was detected",
@@ -791,7 +1104,7 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
         );
         return Some(updated);
     }
-    if trimmed == "vite" || trimmed.starts_with("vite ") {
+    if is_vite_dev_script(trimmed) {
         let normalized = strip_script_flags(trimmed, &["--host", "-H", "--port", "-p"], &[]);
         return Some(format!("{normalized} --host 127.0.0.1 --port {port}"));
     }
@@ -830,11 +1143,11 @@ fn is_vite_dev_script(script: &str) -> bool {
     trimmed == "vite" || trimmed.starts_with("vite ") || trimmed.contains(" vite ")
 }
 
-fn resolve_next_config_path(package_dir: &Path, dev_script: &str) -> Option<PathBuf> {
-    if !is_next_dev_script(dev_script) {
-        return None;
-    }
-
+/// Finds an existing Next.js config without creating one.
+///
+/// Runtime commands use this to repair framework allowlists only when a
+/// project has already opted into a checked-in Next.js config.
+pub fn find_existing_next_config_path(package_dir: &Path) -> Option<PathBuf> {
     for file_name in [
         "next.config.ts",
         "next.config.mts",
@@ -852,11 +1165,19 @@ fn resolve_next_config_path(package_dir: &Path, dev_script: &str) -> Option<Path
     None
 }
 
-fn resolve_vite_config_path(package_dir: &Path, dev_script: &str) -> Option<PathBuf> {
-    if !is_vite_dev_script(dev_script) {
+fn resolve_next_config_path(package_dir: &Path, dev_script: &str) -> Option<PathBuf> {
+    if !is_next_dev_script(dev_script) {
         return None;
     }
 
+    find_existing_next_config_path(package_dir)
+}
+
+/// Finds an existing Vite config without creating one.
+///
+/// Runtime commands use this to repair framework allowlists only when a
+/// project has already opted into a checked-in Vite config.
+pub fn find_existing_vite_config_path(package_dir: &Path) -> Option<PathBuf> {
     for file_name in [
         "vite.config.ts",
         "vite.config.mts",
@@ -872,6 +1193,14 @@ fn resolve_vite_config_path(package_dir: &Path, dev_script: &str) -> Option<Path
     }
 
     None
+}
+
+fn resolve_vite_config_path(package_dir: &Path, dev_script: &str) -> Option<PathBuf> {
+    if !is_vite_dev_script(dev_script) {
+        return None;
+    }
+
+    find_existing_vite_config_path(package_dir)
 }
 
 fn strip_script_flags(script: &str, flags: &[&str], env_vars: &[&str]) -> String {
@@ -1075,6 +1404,30 @@ fn apply_next_config_update(update: &NextConfigUpdate) -> Result<()> {
     Ok(())
 }
 
+/// Adds a Localify host to Next.js `allowedDevOrigins` without touching images.
+///
+/// Full project bootstrap also updates `images.remotePatterns`; `localify run`
+/// only needs to satisfy the Next.js dev-server origin check for the current
+/// ephemeral worktree domain.
+pub fn apply_next_allowed_dev_origin(
+    next_config_path: &Path,
+    allowed_dev_origin: &str,
+) -> Result<bool> {
+    let content = fs::read_to_string(next_config_path)
+        .with_context(|| format!("Failed to read '{}'", next_config_path.display()))?;
+    let origin = normalize_domain(allowed_dev_origin.to_string());
+    let updated = update_next_allowed_dev_origins_content(&content, &origin)?;
+
+    if updated == content {
+        return Ok(false);
+    }
+
+    fs::write(next_config_path, updated)
+        .with_context(|| format!("Failed to write '{}'", next_config_path.display()))?;
+
+    Ok(true)
+}
+
 fn apply_vite_config_update(update: &ViteConfigUpdate) -> Result<()> {
     let content = fs::read_to_string(&update.vite_config_path)
         .with_context(|| format!("Failed to read '{}'", update.vite_config_path.display()))?;
@@ -1088,6 +1441,26 @@ fn apply_vite_config_update(update: &ViteConfigUpdate) -> Result<()> {
         .with_context(|| format!("Failed to write '{}'", update.vite_config_path.display()))?;
 
     Ok(())
+}
+
+/// Adds a Localify host to Vite `server.allowedHosts`.
+///
+/// Localify keeps Vite strict by adding the concrete worktree host instead of
+/// using `allowedHosts: true`, which would disable Vite's host allowlist.
+pub fn apply_vite_allowed_host(vite_config_path: &Path, allowed_host: &str) -> Result<bool> {
+    let content = fs::read_to_string(vite_config_path)
+        .with_context(|| format!("Failed to read '{}'", vite_config_path.display()))?;
+    let host = normalize_domain(allowed_host.to_string());
+    let updated = update_vite_config_content(&content, &host)?;
+
+    if updated == content {
+        return Ok(false);
+    }
+
+    fs::write(vite_config_path, updated)
+        .with_context(|| format!("Failed to write '{}'", vite_config_path.display()))?;
+
+    Ok(true)
 }
 
 fn update_vite_config_content(content: &str, host: &str) -> Result<String> {
@@ -1111,11 +1484,18 @@ fn update_vite_config_content(content: &str, host: &str) -> Result<String> {
 
 fn find_vite_config_object_bounds(content: &str) -> Option<(usize, usize)> {
     if let Some(anchor_start) = content.find("defineConfig") {
-        let tail = &content[anchor_start + "defineConfig".len()..];
-        if let Some(open_offset) = tail.find('{') {
-            let open = anchor_start + "defineConfig".len() + open_offset;
-            if let Some(close) = find_matching_delimiter(content, open, b'{', b'}') {
-                return Some((open, close));
+        let tail_start = anchor_start + "defineConfig".len();
+        let tail = &content[tail_start..];
+        if let Some(paren_offset) = tail.find('(') {
+            let paren_open = tail_start + paren_offset;
+            if let Some(paren_close) = find_matching_delimiter(content, paren_open, b'(', b')')
+                && let Some(bounds) = find_vite_config_object_in_define_config_args(
+                    content,
+                    paren_open + 1,
+                    paren_close,
+                )
+            {
+                return Some(bounds);
             }
         }
     }
@@ -1131,6 +1511,60 @@ fn find_vite_config_object_bounds(content: &str) -> Option<(usize, usize)> {
     }
 
     None
+}
+
+fn find_vite_config_object_in_define_config_args(
+    content: &str,
+    args_start: usize,
+    args_end: usize,
+) -> Option<(usize, usize)> {
+    if let Some(return_start) = find_keyword_in_range(content, "return", args_start, args_end)
+        && let Some(bounds) =
+            find_first_object_after(content, return_start + "return".len(), args_end)
+    {
+        return Some(bounds);
+    }
+
+    if let Some(arrow_start) = content[args_start..args_end].find("=>")
+        && let Some(bounds) =
+            find_first_object_after(content, args_start + arrow_start + 2, args_end)
+    {
+        return Some(bounds);
+    }
+
+    find_first_object_after(content, args_start, args_end)
+}
+
+fn find_first_object_after(content: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let open_offset = content[start..end].find('{')?;
+    let open = start + open_offset;
+    let close = find_matching_delimiter(content, open, b'{', b'}')?;
+    if close <= end {
+        Some((open, close))
+    } else {
+        None
+    }
+}
+
+fn find_keyword_in_range(content: &str, keyword: &str, start: usize, end: usize) -> Option<usize> {
+    let mut offset = 0;
+    let haystack = &content[start..end];
+    while let Some(found) = haystack[offset..].find(keyword) {
+        let absolute = start + offset + found;
+        let before = content[..absolute].chars().next_back();
+        let after = content[absolute + keyword.len()..].chars().next();
+        if before.is_none_or(|ch| !is_identifier_char(ch))
+            && after.is_none_or(|ch| !is_identifier_char(ch))
+        {
+            return Some(absolute);
+        }
+        offset += found + keyword.len();
+    }
+    None
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
 fn update_existing_vite_server(
@@ -1227,25 +1661,7 @@ fn update_existing_allowed_hosts(
     ))
 }
 fn update_next_config_content(content: &str, origin: &str) -> Result<String> {
-    let Some((object_open, object_close)) = find_next_config_object_bounds(content) else {
-        bail!("Could not find a supported Next.js config object");
-    };
-
-    let with_origin = {
-        let object_body = &content[object_open + 1..object_close];
-        if let Some(property_offset) = object_body.find("allowedDevOrigins") {
-            let property_start = object_open + 1 + property_offset;
-            update_existing_allowed_dev_origins(
-                content,
-                object_open,
-                object_close,
-                property_start,
-                origin,
-            )?
-        } else {
-            insert_allowed_dev_origins_property(content, object_open, object_close, origin)
-        }
-    };
+    let with_origin = update_next_allowed_dev_origins_content(content, origin)?;
 
     let Some((updated_object_open, updated_object_close)) =
         find_next_config_object_bounds(&with_origin)
@@ -1259,6 +1675,31 @@ fn update_next_config_content(content: &str, origin: &str) -> Result<String> {
         updated_object_close,
         origin,
     )
+}
+
+fn update_next_allowed_dev_origins_content(content: &str, origin: &str) -> Result<String> {
+    let Some((object_open, object_close)) = find_next_config_object_bounds(content) else {
+        bail!("Could not find a supported Next.js config object");
+    };
+
+    let object_body = &content[object_open + 1..object_close];
+    if let Some(property_offset) = object_body.find("allowedDevOrigins") {
+        let property_start = object_open + 1 + property_offset;
+        update_existing_allowed_dev_origins(
+            content,
+            object_open,
+            object_close,
+            property_start,
+            origin,
+        )
+    } else {
+        Ok(insert_allowed_dev_origins_property(
+            content,
+            object_open,
+            object_close,
+            origin,
+        ))
+    }
 }
 
 fn update_next_images_remote_patterns(
@@ -1844,7 +2285,13 @@ mod tests {
         assert_ne!(plan.services[0].target, "3000");
         assert!(plan.services[0].target.parse::<u16>().is_ok());
         assert!(plan.services[0].can_update_dev_script);
-        assert!(plan.services[0].update_dev_script);
+        assert!(!plan.services[0].update_dev_script);
+        assert_eq!(plan.services[0].service_name, "web");
+        assert_eq!(plan.services[0].service_path, None);
+        assert_eq!(
+            plan.services[0].command,
+            Some(vec!["npm".into(), "run".into(), "dev".into()])
+        );
     }
 
     #[test]
@@ -1963,17 +2410,135 @@ mod tests {
 
         assert_eq!(plan.services.len(), 2);
         assert_eq!(plan.services[0].display_path, "apps/web");
+        assert_eq!(plan.services[0].service_name, "web");
+        assert_eq!(plan.services[0].service_path.as_deref(), Some("apps/web"));
+        assert_eq!(
+            plan.services[0].command,
+            Some(vec!["npm".into(), "run".into(), "dev".into()])
+        );
         assert_eq!(
             plan.services[0].domain,
             format!("demo{}", BRANDING.domain_suffix())
         );
         assert!(plan.services[0].enabled);
         assert_eq!(plan.services[1].display_path, "apps/server");
+        assert_eq!(plan.services[1].service_name, "server");
+        assert_eq!(
+            plan.services[1].service_path.as_deref(),
+            Some("apps/server")
+        );
         assert_eq!(
             plan.services[1].domain,
             format!("server.demo{}", BRANDING.domain_suffix())
         );
         assert!(plan.services[1].enabled);
+    }
+
+    #[test]
+    fn detect_workspace_apps_prioritizes_apps_over_packages() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::create_dir_all(root.join("packages/infra")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+  "name": "dev-playground-2",
+  "workspaces": ["apps/*", "packages/*"],
+  "packageManager": "pnpm@11.4.0",
+  "scripts": {
+    "dev": "turbo dev",
+    "dev:web": "turbo -F web dev"
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/web/package.json"),
+            r#"{
+  "name": "web",
+  "scripts": {
+    "dev:bare": "ALCHEMY=false vite dev"
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/web/vite.config.ts"),
+            "import { defineConfig } from 'vite';\nexport default defineConfig({ plugins: [] });\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/infra/package.json"),
+            r#"{
+  "name": "@demo/infra",
+  "scripts": {
+    "dev": "alchemy dev"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let plan = detect_folder_init_plan(root, Some("dev-playground-2")).unwrap();
+
+        assert_eq!(plan.services.len(), 2);
+        assert_eq!(plan.services[0].display_path, "apps/web");
+        assert_eq!(plan.services[0].service_name, "web");
+        assert_eq!(
+            plan.services[0].domain,
+            format!("dev-playground-2{}", BRANDING.domain_suffix())
+        );
+        assert!(plan.services[0].enabled);
+        assert_eq!(
+            plan.services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev:bare".into()])
+        );
+        assert_eq!(plan.services[1].display_path, "packages/infra");
+        assert_eq!(
+            plan.services[1].domain,
+            format!("infra.dev-playground-2{}", BRANDING.domain_suffix())
+        );
+        assert!(!plan.services[1].enabled);
+
+        let selections = plan
+            .services
+            .iter()
+            .map(|service| FolderInitSelection {
+                id: service.id.clone(),
+                domain: service.domain.clone(),
+                target: service.target.clone(),
+                enabled: service.enabled,
+                update_dev_script: service.update_dev_script,
+                service_name: None,
+                service_path: None,
+                command: None,
+            })
+            .collect::<Vec<_>>();
+        let resolved = resolve_folder_init_selection(
+            root,
+            "dev-playground-2",
+            &selections,
+            LocalAppUpdatePolicy {
+                write_package_scripts: true,
+                promote_dev_script: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.services.len(), 1);
+        assert_eq!(resolved.services[0].service_name.as_deref(), Some("web"));
+        assert_eq!(
+            resolved.services[0].service_path.as_deref(),
+            Some("apps/web")
+        );
+        assert_eq!(
+            resolved.services[0].domain,
+            format!("dev-playground-2{}", BRANDING.domain_suffix())
+        );
+        assert_eq!(
+            resolved.services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev:bare".into()])
+        );
     }
 
     #[test]
@@ -2053,6 +2618,9 @@ mod tests {
             target: "4010".into(),
             enabled: true,
             update_dev_script: true,
+            service_name: None,
+            service_path: None,
+            command: None,
         };
 
         let resolved = resolve_folder_init_selection(
@@ -2060,12 +2628,18 @@ mod tests {
             "Demo",
             &[selection],
             LocalAppUpdatePolicy {
+                write_package_scripts: true,
                 promote_dev_script: true,
             },
         )
         .unwrap();
 
         assert_eq!(resolved.services.len(), 1);
+        assert_eq!(resolved.services[0].service_name.as_deref(), Some("web"));
+        assert_eq!(
+            resolved.services[0].command,
+            Some(vec!["npm".into(), "run".into(), "dev-localify".into()])
+        );
         assert_eq!(resolved.package_updates.len(), 3);
         assert_eq!(resolved.next_config_updates.len(), 1);
         assert_eq!(
@@ -2092,6 +2666,9 @@ mod tests {
             target: "4010".into(),
             enabled: true,
             update_dev_script: true,
+            service_name: None,
+            service_path: None,
+            command: None,
         };
 
         let error = resolve_folder_init_selection(
@@ -2099,6 +2676,7 @@ mod tests {
             "Demo",
             &[selection],
             LocalAppUpdatePolicy {
+                write_package_scripts: true,
                 promote_dev_script: true,
             },
         )
@@ -2126,8 +2704,12 @@ mod tests {
             &[ServicePlan {
                 domain: format!("demo{}", BRANDING.domain_suffix()),
                 target: "3000".into(),
+                service_name: None,
+                service_path: None,
+                command: None,
             }],
             LocalAppUpdatePolicy {
+                write_package_scripts: true,
                 promote_dev_script: false,
             },
         )
@@ -2150,8 +2732,12 @@ mod tests {
             &[ServicePlan {
                 domain: format!("demo{}", BRANDING.domain_suffix()),
                 target: "3000".into(),
+                service_name: None,
+                service_path: None,
+                command: None,
             }],
             LocalAppUpdatePolicy {
+                write_package_scripts: true,
                 promote_dev_script: false,
             },
         )
@@ -2211,6 +2797,24 @@ mod tests {
     }
 
     #[test]
+    fn apply_next_allowed_dev_origin_does_not_add_image_remote_patterns() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("next.config.js");
+        let origin = format!("worktree.demo{}", BRANDING.domain_suffix());
+        write_next_config(
+            &config_path,
+            "module.exports = {\n  reactStrictMode: true,\n};\n",
+        );
+
+        assert!(apply_next_allowed_dev_origin(&config_path, &origin).unwrap());
+        assert!(!apply_next_allowed_dev_origin(&config_path, &origin).unwrap());
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains(&format!("allowedDevOrigins: ['{origin}']")));
+        assert!(!updated.contains("remotePatterns"));
+    }
+
+    #[test]
     fn apply_next_config_update_appends_remote_pattern_to_existing_images_config() {
         let temp_dir = tempdir().unwrap();
         let config_path = temp_dir.path().join("next.config.ts");
@@ -2256,6 +2860,46 @@ mod tests {
     }
 
     #[test]
+    fn apply_vite_allowed_host_is_idempotent() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("vite.config.ts");
+        let host = format!("worktree.demo{}", BRANDING.domain_suffix());
+        write_next_config(
+            &config_path,
+            "import { defineConfig } from 'vite';\n\nexport default defineConfig({\n  plugins: [],\n});\n",
+        );
+
+        assert!(apply_vite_allowed_host(&config_path, &host).unwrap());
+        assert!(!apply_vite_allowed_host(&config_path, &host).unwrap());
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains(&format!("server: {{ allowedHosts: ['{host}'] }}")));
+        assert_eq!(updated.matches(&host).count(), 1);
+    }
+
+    #[test]
+    fn apply_vite_config_update_targets_returned_define_config_object() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("vite.config.ts");
+        let host = format!("demo{}", BRANDING.domain_suffix());
+        write_next_config(
+            &config_path,
+            "import { defineConfig } from 'vite';\n\nconst alias = true ? {\n  server: { ignored: true },\n} : {};\n\nexport default defineConfig(async () => {\n  return {\n    server: {\n      port: 3001,\n    },\n    resolve: {\n      alias,\n    },\n  };\n});\n",
+        );
+
+        apply_vite_config_update(&ViteConfigUpdate {
+            vite_config_path: config_path.clone(),
+            display_path: "web".into(),
+            allowed_host: host.clone(),
+        })
+        .unwrap();
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains("server: { ignored: true }"));
+        assert!(updated.contains(&format!("port: 3001,\n      allowedHosts: ['{host}']")));
+    }
+
+    #[test]
     fn apply_vite_config_update_appends_missing_allowed_host_without_duplication() {
         let temp_dir = tempdir().unwrap();
         let config_path = temp_dir.path().join("vite.config.ts");
@@ -2293,6 +2937,10 @@ mod tests {
             id: "app".into(),
             label: "app".into(),
             display_path: "app".into(),
+            service_name: "app".into(),
+            service_path: Some("app".into()),
+            package_command: Some(vec!["npm".into(), "run".into(), "dev".into()]),
+            script_name: "dev".into(),
             domain: format!("demo{}", BRANDING.domain_suffix()),
             target: "4010".into(),
             enabled: true,
@@ -2308,13 +2956,15 @@ mod tests {
             "4010",
             &format!("demo{}", BRANDING.domain_suffix()),
             LocalAppUpdatePolicy {
+                write_package_scripts: true,
                 promote_dev_script: true,
             },
         )
         .unwrap();
-        apply_local_app_updates(&updates, &[], &[]);
+        let results = apply_local_app_updates(&updates, &[], &[]);
 
         let updated = fs::read_to_string(package_json_path).unwrap();
+        assert_eq!(results.updated.len(), 1);
         assert!(updated.contains(r#""dev-localhost": "vite""#));
         assert!(updated.contains(r#""dev-localify": "echo Localify URL: https://demo.localify && vite --host 127.0.0.1 --port 4010""#));
         assert!(updated.contains(r#""dev": "echo Localify URL: https://demo.localify && vite --host 127.0.0.1 --port 4010""#));

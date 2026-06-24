@@ -15,6 +15,7 @@ import { ProjectDomainChip } from "./projects-list-item-domain-chip";
 interface ProjectDomainListProps {
   project: ProjectInfoDto;
   domains: DomainInfoDto[];
+  totalDomainCount?: number;
 }
 
 const chipTransition = { type: "spring", stiffness: 500, damping: 35, mass: 0.6 } as const;
@@ -25,11 +26,15 @@ const chipVariants = {
   exit: { opacity: 0, scale: 0.6, y: -4 },
 };
 
-export const ProjectDomainList = ({ project, domains }: ProjectDomainListProps) => {
+export const ProjectDomainList = ({
+  project,
+  domains,
+  totalDomainCount = domains.length,
+}: ProjectDomainListProps) => {
   const { data } = useQuery(bootstrapQueries.read());
   const maxDomainsPerProject = data?.licensing.limits.maxDomainsPerProject ?? null;
   const addDisabled =
-    maxDomainsPerProject !== null && domains.length >= maxDomainsPerProject;
+    maxDomainsPerProject !== null && totalDomainCount >= maxDomainsPerProject;
 
   return (
     <motion.div layout className="flex flex-wrap items-center gap-1.5">

@@ -94,6 +94,9 @@ export const ProjectsCreateDialog = ({ children }: PropsWithChildren) => {
             target: service.target,
             enabled: service.enabled,
             updateDevScript: service.updateDevScript,
+            serviceName: service.serviceName,
+            servicePath: service.servicePath,
+            command: service.command,
           })),
         });
         captureDesktopEvent("desktop_project_created", {

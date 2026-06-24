@@ -146,7 +146,7 @@ fn default_agent_install_skill() -> bool {
 }
 
 fn default_agent_promote_dev_script() -> bool {
-    true
+    false
 }
 
 /// Agent workflow preferences shared by CLI and desktop flows.
@@ -157,7 +157,7 @@ pub struct AgentConfig {
     #[serde(default = "default_agent_install_skill")]
     pub install_skill: bool,
 
-    /// Make Localify the default package `dev` script during project bootstrap.
+    /// Make Localify write and promote package dev scripts during project bootstrap.
     #[serde(default = "default_agent_promote_dev_script")]
     pub promote_dev_script: bool,
 }

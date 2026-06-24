@@ -6,7 +6,12 @@ import { useNavigate } from "@tanstack/react-router";
 import { Reorder, useDragControls } from "motion/react";
 import { useState, type PointerEvent } from "react";
 
-import type { DomainInfoDto, ProjectInfoDto } from "@/types/roxy";
+import type {
+  DomainInfoDto,
+  ProjectEnvironmentInfoDto,
+  ProjectInfoDto,
+  ProjectServiceInfoDto,
+} from "@/types/roxy";
 
 import { PinIcon, PinSolidIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -30,10 +35,13 @@ import { projectMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 import { ProjectDomainList } from "./projects-list-item-domains";
+import { ProjectsListItemDevDx } from "./projects-list-item-dev-dx";
 
 interface ProjectsListItemProps {
   project: ProjectInfoDto;
   domains: DomainInfoDto[];
+  services: ProjectServiceInfoDto[];
+  environments: ProjectEnvironmentInfoDto[];
   isPinned?: boolean;
   onTogglePinned?: () => void;
   reorderEnabled?: boolean;
@@ -42,6 +50,8 @@ interface ProjectsListItemProps {
 export const ProjectsListItem = ({
   project,
   domains,
+  services,
+  environments,
   isPinned = false,
   onTogglePinned,
   reorderEnabled = true,
@@ -55,6 +65,16 @@ export const ProjectsListItem = ({
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const environmentDomainPatterns = new Set(
+    environments
+      .filter((environment) => !environment.primary)
+      .flatMap((environment) =>
+        environment.services.map((service) => service.domain),
+      ),
+  );
+  const primaryDomains = domains.filter(
+    (domain) => !environmentDomainPatterns.has(domain.registration.pattern),
+  );
 
   const containerClassName = cn(
     "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
@@ -123,7 +143,17 @@ export const ProjectsListItem = ({
             />
           ) : null}
         </div>
-        <ProjectDomainList project={project} domains={domains} />
+        <ProjectDomainList
+          project={project}
+          domains={primaryDomains}
+          totalDomainCount={domains.length}
+        />
+        <ProjectsListItemDevDx
+          domains={domains}
+          services={services}
+          environments={environments}
+          projectRootPath={project.rootPath}
+        />
         {editorError ? (
           <p className="text-xs text-destructive">{editorError}</p>
         ) : null}

@@ -1,0 +1,7 @@
+# Project Environment Local Domain Names
+
+Non-default project environments use one extra label under the project namespace instead of becoming separate projects or adding extra DNS depth such as `environment.service.project.localify`. Single-service projects use `environment.project.localify`; multi-service projects use `service--environment.project.localify`. This keeps the project base domain stable, avoids inventing a fake service name for single-service projects, and avoids introducing multi-level wildcard semantics for branch or worktree previews. The primary environment keeps the existing project local domains.
+
+Agent-created worktrees under directories such as `.claude/worktrees` and `.codex/worktrees` are still project environments when Git proves they share the same common repository as the primary project. Their URL slug should come from a readable worktree name or branch when available, with a stable agent-prefixed fallback such as `codex-8c49` for detached or opaque Codex worktrees.
+
+Agent project cache directories are not project roots and are not worktree environments by themselves. CLI commands should map recognized cache formats back to the linked real checkout when possible and fail with actionable guidance when they cannot, rather than initializing Localify state inside the agent cache. The first supported cache provider is Claude's `.claude/projects/-Users-...` layout; additional cache providers should be added as explicit resolvers when their on-disk formats are observed.

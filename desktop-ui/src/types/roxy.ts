@@ -119,6 +119,38 @@ export interface ProjectInfoDto {
   lastAccessedAt: number | null;
 }
 
+export interface ProjectServiceInfoDto {
+  id: string;
+  name: string;
+  projectId: string;
+  projectName: string;
+  projectEnabled: boolean;
+  primaryDomain: string;
+  url: string;
+  domains: string[];
+  path: string | null;
+  command: string[] | null;
+  target: string | null;
+  inferred: boolean;
+}
+
+export interface ProjectEnvironmentServiceInfoDto {
+  serviceId: string;
+  domain: string;
+}
+
+export interface ProjectEnvironmentInfoDto {
+  projectId: string;
+  projectName: string;
+  name: string;
+  slug: string;
+  primary: boolean;
+  rootPath: string | null;
+  gitCommonDir: string | null;
+  gitBranch: string | null;
+  services: ProjectEnvironmentServiceInfoDto[];
+}
+
 export interface DnsResolutionDto {
   checked: boolean;
   healthy: boolean;
@@ -147,6 +179,8 @@ export interface BootstrapDto {
   launcherAvailability: LauncherAvailabilityDto;
   domains: DomainInfoDto[];
   projects: ProjectInfoDto[];
+  services: ProjectServiceInfoDto[];
+  projectEnvironments: ProjectEnvironmentInfoDto[];
 }
 
 export interface AutostartStatusDto {
@@ -476,6 +510,9 @@ export interface FolderInitServiceDto {
   id: string;
   label: string;
   displayPath: string;
+  serviceName: string;
+  servicePath: string | null;
+  command: string[] | null;
   domain: string;
   target: string;
   enabled: boolean;
@@ -495,6 +532,9 @@ export interface InitProjectFromFolderServiceRequest {
   target: string;
   enabled: boolean;
   updateDevScript: boolean;
+  serviceName?: string | null;
+  servicePath?: string | null;
+  command?: string[] | null;
 }
 
 export interface InitProjectFromFolderRequest {
@@ -506,6 +546,9 @@ export interface InitProjectFromFolderRequest {
 export interface InitProjectServiceRequest {
   domain: string;
   target: string;
+  serviceName?: string | null;
+  servicePath?: string | null;
+  command?: string[] | null;
 }
 
 export interface OpenInEditorRequest {

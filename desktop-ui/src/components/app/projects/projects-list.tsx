@@ -45,6 +45,22 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
     () => new Map(groups.map((group) => [group.project.id, group])),
     [groups],
   );
+  const servicesByProjectId = useMemo(() => {
+    const next = new Map<string, NonNullable<typeof bootstrap>["services"]>();
+    for (const service of bootstrap?.services ?? []) {
+      const services = next.get(service.projectId) ?? [];
+      next.set(service.projectId, [...services, service]);
+    }
+    return next;
+  }, [bootstrap?.services]);
+  const environmentsByProjectId = useMemo(() => {
+    const next = new Map<string, NonNullable<typeof bootstrap>["projectEnvironments"]>();
+    for (const environment of bootstrap?.projectEnvironments ?? []) {
+      const environments = next.get(environment.projectId) ?? [];
+      next.set(environment.projectId, [...environments, environment]);
+    }
+    return next;
+  }, [bootstrap?.projectEnvironments]);
   const knownIds = useMemo(
     () => groups.map((group) => group.project.id),
     [groups],
@@ -112,6 +128,8 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
               key={id}
               project={group.project}
               domains={group.domains}
+              services={servicesByProjectId.get(id) ?? []}
+              environments={environmentsByProjectId.get(id) ?? []}
               isPinned={pinnedProjectIds.has(id)}
               onTogglePinned={() => togglePinned(id)}
               reorderEnabled={false}
@@ -138,6 +156,8 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
               key={id}
               project={group.project}
               domains={group.domains}
+              services={servicesByProjectId.get(id) ?? []}
+              environments={environmentsByProjectId.get(id) ?? []}
               isPinned={pinnedProjectIds.has(id)}
               onTogglePinned={() => togglePinned(id)}
             />

@@ -235,10 +235,15 @@ export const ProjectCreateDialogStepFolder = withForm({
                                 <div className="min-w-0 flex-1">
                                   <div className="flex items-baseline gap-2">
                                     <span className="truncate text-sm font-medium text-foreground">
-                                      {service.label}
+                                      {service.serviceName}
                                     </span>
+                                    {service.label !== service.serviceName ? (
+                                      <span className="truncate text-xs text-muted-foreground">
+                                        {service.label}
+                                      </span>
+                                    ) : null}
                                     <span className="truncate font-mono text-xs text-muted-foreground">
-                                      {service.displayPath}
+                                      {service.servicePath ?? service.displayPath}
                                     </span>
                                   </div>
                                 </div>
@@ -274,6 +279,17 @@ export const ProjectCreateDialogStepFolder = withForm({
                                   style={{ overflow: "hidden" }}
                                 >
                                   <div className="space-y-3 border-t border-border bg-muted/20 px-3 py-3">
+                                    {service.command ? (
+                                      <div className="flex min-w-0 items-center gap-2 text-xs">
+                                        <span className="shrink-0 text-muted-foreground">
+                                          Run command
+                                        </span>
+                                        <code className="min-w-0 truncate rounded-md bg-background px-1.5 py-0.5 font-mono text-foreground">
+                                          {service.command.join(" ")}
+                                        </code>
+                                      </div>
+                                    ) : null}
+
                                     <DomainTargetFields
                                       form={form}
                                       fields={`services[${index}]`}
@@ -289,7 +305,7 @@ export const ProjectCreateDialogStepFolder = withForm({
                                         {(field) => (
                                           <field.CheckboxField
                                             label="Update package.json scripts"
-                                            description="Create dev-localify and apply the default Localify dev-script policy when possible."
+                                            description="Create dev-localify for this repo. Localify dev does not need it."
                                           />
                                         )}
                                       </form.AppField>
