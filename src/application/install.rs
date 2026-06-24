@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use super::StepOutcome;
 use super::ports::{CertificateManager, ConfigLoader, DnsManager, NetworkInfo, SystemSetup};
+use crate::branding::BRANDING;
 
 /// Result of the install operation.
 pub struct InstallResult {
@@ -88,8 +89,9 @@ impl<'a> Install<'a> {
                 Err(e) => StepOutcome::Warning(format!(
                     "Failed to create Root CA: {}. \
                      HTTPS certificates will not work. \
-                     Run 'sudo localify install' to enable HTTPS.",
-                    e
+                     Run 'sudo {} install' to enable HTTPS.",
+                    e,
+                    BRANDING.cli_command()
                 )),
             },
         };

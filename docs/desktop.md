@@ -77,6 +77,15 @@ The dev script also forces `LOCALIFY_PROFILE=dev` and
 from the dev shell use the repo's debug CLI, separate runtime files, and the
 dev helper instead of the installed production app.
 
+When the dev app enables command line access, it installs `localify-dev`.
+Invoking the CLI under that name automatically uses the dev profile, so test
+commands can be run as:
+
+```bash
+localify-dev services list
+localify-dev run web
+```
+
 ## Launch at Login
 
 Successful desktop activation registers Localify with the official Tauri

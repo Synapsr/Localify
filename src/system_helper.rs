@@ -195,6 +195,31 @@ impl HelperCommand {
             _ => "run a system helper command",
         }
     }
+
+    fn may_write_config(&self) -> bool {
+        matches!(
+            self,
+            Self::InstallRoxy
+                | Self::UpdateConfig { .. }
+                | Self::CreateProject { .. }
+                | Self::CreateProjectWithDomains { .. }
+                | Self::ImportSettings { .. }
+                | Self::UpdateKeygenSettings { .. }
+                | Self::ActivateLicense { .. }
+                | Self::ImportOfflineLicense { .. }
+                | Self::ClearLicense
+                | Self::RefreshLicense
+                | Self::InitProject { .. }
+                | Self::UpdateProject { .. }
+                | Self::RemoveProject { .. }
+                | Self::AssignDomainProject { .. }
+                | Self::RegisterDomain { .. }
+                | Self::UpdateDomain { .. }
+                | Self::UnregisterDomain { .. }
+                | Self::AddRoute { .. }
+                | Self::RemoveRoute { .. }
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -545,7 +570,12 @@ pub fn current_uid() -> Result<u32> {
         .context("Failed to parse the current user ID")
 }
 
-pub fn serve(socket_path: &Path, allowed_uid: u32, api: &DesktopApi) -> Result<()> {
+pub fn serve(
+    socket_path: &Path,
+    allowed_uid: u32,
+    config_path: &Path,
+    api: &DesktopApi,
+) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -557,15 +587,21 @@ pub fn serve(socket_path: &Path, allowed_uid: u32, api: &DesktopApi) -> Result<(
     loop {
         let (stream, _) = listener.accept()?;
         let api = api.clone();
+        let config_path = config_path.to_path_buf();
         thread::spawn(move || {
-            if let Err(error) = handle_connection(stream, &api) {
+            if let Err(error) = handle_connection(stream, &api, allowed_uid, &config_path) {
                 eprintln!("{} helper connection failed: {error}", BRANDING.app_name);
             }
         });
     }
 }
 
-fn handle_connection(stream: UnixStream, api: &DesktopApi) -> Result<()> {
+fn handle_connection(
+    stream: UnixStream,
+    api: &DesktopApi,
+    allowed_uid: u32,
+    config_path: &Path,
+) -> Result<()> {
     stream
         .set_read_timeout(Some(HELPER_REQUEST_TIMEOUT))
         .context("Failed to configure helper request read timeout")?;
@@ -591,6 +627,7 @@ fn handle_connection(stream: UnixStream, api: &DesktopApi) -> Result<()> {
         "Failed to parse {} helper command",
         BRANDING.app_name
     ))?;
+    let may_write_config = command.may_write_config();
     let response = match dispatch_command(api, command) {
         Ok(data) => HelperResponse {
             ok: true,
@@ -603,12 +640,104 @@ fn handle_connection(stream: UnixStream, api: &DesktopApi) -> Result<()> {
             data: None,
         },
     };
+    if may_write_config && let Err(error) = restore_user_config_ownership(config_path, allowed_uid)
+    {
+        eprintln!(
+            "{} helper could not restore config ownership for {}: {error}",
+            BRANDING.app_name,
+            config_path.display()
+        );
+    }
 
     let mut writer = stream;
     writer.write_all(serde_json::to_string(&response)?.as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
+}
+
+fn restore_user_config_ownership(config_path: &Path, allowed_uid: u32) -> Result<()> {
+    if config_path.starts_with("/etc") {
+        return Ok(());
+    }
+
+    if let Some(parent) = config_path.parent()
+        && parent.exists()
+        && should_restore_config_parent_ownership(config_path)
+    {
+        chown_path_to_uid(parent, allowed_uid).with_context(|| {
+            format!(
+                "Failed to restore config directory ownership for '{}'",
+                parent.display()
+            )
+        })?;
+    }
+
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    chown_path_to_uid(config_path, allowed_uid).with_context(|| {
+        format!(
+            "Failed to restore config file ownership for '{}'",
+            config_path.display()
+        )
+    })?;
+
+    let mut permissions = fs::metadata(config_path)?.permissions();
+    permissions.set_mode(permissions.mode() | 0o600);
+    fs::set_permissions(config_path, permissions)?;
+    Ok(())
+}
+
+fn should_restore_config_parent_ownership(config_path: &Path) -> bool {
+    let Some(parent) = config_path.parent() else {
+        return false;
+    };
+
+    let state_dir_name = parent.file_name().and_then(|name| name.to_str());
+    let is_localify_state_dir = state_dir_name == Some(BRANDING.desktop_state_dir_name)
+        || state_dir_name == Some(BRANDING.dev_desktop_state_dir_name);
+    if !is_localify_state_dir {
+        return false;
+    }
+
+    let Some(application_support_dir) = parent.parent() else {
+        return false;
+    };
+    if application_support_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("Application Support")
+    {
+        return false;
+    }
+
+    application_support_dir
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        == Some("Library")
+}
+
+fn chown_path_to_uid(path: &Path, uid: u32) -> Result<()> {
+    let output = Command::new("chown")
+        .arg(uid.to_string())
+        .arg(path)
+        .output()
+        .with_context(|| format!("Failed to run chown for '{}'", path.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!(
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string()
+            .if_empty("Failed to change ownership.")
+    );
 }
 
 fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_json::Value> {
@@ -759,5 +888,62 @@ impl StringExt for String {
         } else {
             self
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop::dto::DomainPatternRequest;
+
+    #[test]
+    fn read_commands_do_not_restore_config_ownership() {
+        assert!(!HelperCommand::Ping.may_write_config());
+        assert!(!HelperCommand::GetBootstrap.may_write_config());
+        assert!(!HelperCommand::ListDomains.may_write_config());
+        assert!(!HelperCommand::GetAvailablePort.may_write_config());
+    }
+
+    #[test]
+    fn config_mutations_restore_config_ownership() {
+        assert!(HelperCommand::InstallRoxy.may_write_config());
+        assert!(HelperCommand::ClearLicense.may_write_config());
+        assert!(
+            HelperCommand::UnregisterDomain {
+                request: DomainPatternRequest {
+                    domain: "demo.localify".into(),
+                    wildcard: false,
+                }
+            }
+            .may_write_config()
+        );
+    }
+
+    #[test]
+    fn daemon_mutations_do_not_restore_config_ownership() {
+        assert!(!HelperCommand::StopDaemon.may_write_config());
+        assert!(!HelperCommand::RefreshDomainCertificates.may_write_config());
+    }
+
+    #[test]
+    fn restores_parent_ownership_for_localify_application_support_config() {
+        assert!(should_restore_config_parent_ownership(
+            std::path::Path::new("/Users/dev/Library/Application Support/Localify Dev/config.toml")
+        ));
+        assert!(should_restore_config_parent_ownership(
+            std::path::Path::new(
+                "/Users/dev/Library/Application Support/Localify Desktop/config.toml"
+            )
+        ));
+    }
+
+    #[test]
+    fn does_not_restore_parent_ownership_for_arbitrary_config_paths() {
+        assert!(!should_restore_config_parent_ownership(
+            std::path::Path::new("/tmp/localify/config.toml")
+        ));
+        assert!(!should_restore_config_parent_ownership(
+            std::path::Path::new("/Users/dev/project/config.toml")
+        ));
     }
 }

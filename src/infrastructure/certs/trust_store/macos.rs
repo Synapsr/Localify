@@ -63,8 +63,8 @@ impl TrustStore for MacOsTrustStore {
 
         if !self.is_ca_trusted(cert_path)? {
             return Err(CertError::TrustStoreError(format!(
-                "The {} CA was added to the macOS System keychain but is not trusted for TLS yet",
-                BRANDING.app_name
+                "The {} was added to the macOS System keychain but is not trusted for TLS yet",
+                BRANDING.ca_name()
             )));
         }
 

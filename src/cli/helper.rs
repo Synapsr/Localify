@@ -32,7 +32,7 @@ pub fn serve_forever(config_path: &Path, uid: u32, socket: PathBuf) -> Result<()
         BRANDING.slug()
     ))?;
     let api = DesktopApi::new_direct(config_path.to_path_buf(), binary_path);
-    serve(&socket, uid, &api)
+    serve(&socket, uid, config_path, &api)
 }
 
 pub fn uninstall_service(uid: u32) -> Result<()> {

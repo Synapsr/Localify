@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 const PROFILE_ENV: &str = "LOCALIFY_PROFILE";
 const DEV_PROFILE: &str = "dev";
@@ -39,10 +42,10 @@ impl Branding {
     }
 
     pub fn active_profile(&self) -> Option<String> {
-        std::env::var(PROFILE_ENV)
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty())
+        active_profile_from_env_and_args(
+            std::env::var(PROFILE_ENV).ok().as_deref(),
+            std::env::args_os().next().as_deref(),
+        )
     }
 
     pub fn is_dev_profile(&self) -> bool {
@@ -147,15 +150,21 @@ impl Branding {
     }
 
     pub fn ca_name(&self) -> String {
-        format!("{} Local Development CA", self.app_name)
+        format!(
+            "{} Local Development CA",
+            self.local_runtime_name(self.active_profile().as_deref())
+        )
     }
 
     pub fn local_org_name(&self) -> String {
-        format!("{} Local Development", self.app_name)
+        format!(
+            "{} Local Development",
+            self.local_runtime_name(self.active_profile().as_deref())
+        )
     }
 
     pub fn cli_command(&self) -> &'static str {
-        self.slug
+        self.slug()
     }
 
     pub fn runtime_desktop_name(&self) -> String {
@@ -170,6 +179,14 @@ impl Branding {
         format!("{}_{}", self.env_prefix, suffix)
     }
 
+    fn local_runtime_name(&self, active_profile: Option<&str>) -> &'static str {
+        if active_profile == Some(DEV_PROFILE) {
+            self.dev_desktop_state_dir_name
+        } else {
+            self.app_name
+        }
+    }
+
     fn local_application_support_dir(&self) -> PathBuf {
         user_home_dir()
             .map(|home| {
@@ -182,8 +199,72 @@ impl Branding {
     }
 }
 
+fn active_profile_from_env_and_args(
+    profile_env: Option<&str>,
+    argv0: Option<&OsStr>,
+) -> Option<String> {
+    let explicit_profile = profile_env
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    if explicit_profile.is_some() {
+        return explicit_profile;
+    }
+
+    if argv0_command_name(argv0?) == Some(BRANDING.dev_slug) {
+        return Some(DEV_PROFILE.to_string());
+    }
+
+    None
+}
+
+fn argv0_command_name(argv0: &OsStr) -> Option<&str> {
+    Path::new(argv0).file_stem()?.to_str()
+}
+
 fn user_home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_profile_env_wins_over_invocation_name() {
+        assert_eq!(
+            active_profile_from_env_and_args(
+                Some("prod"),
+                Some(OsStr::new("/usr/local/bin/localify-dev")),
+            ),
+            Some("prod".into())
+        );
+    }
+
+    #[test]
+    fn localify_dev_invocation_uses_dev_profile() {
+        assert_eq!(
+            active_profile_from_env_and_args(None, Some(OsStr::new("/usr/local/bin/localify-dev")),),
+            Some("dev".into())
+        );
+        assert_eq!(
+            active_profile_from_env_and_args(None, Some(OsStr::new("localify-dev.exe"))),
+            Some("dev".into())
+        );
+    }
+
+    #[test]
+    fn localify_invocation_keeps_default_profile() {
+        assert_eq!(
+            active_profile_from_env_and_args(None, Some(OsStr::new("/usr/local/bin/localify"))),
+            None
+        );
+    }
+
+    #[test]
+    fn dev_profile_uses_distinct_local_certificate_identity() {
+        assert_eq!(BRANDING.local_runtime_name(None), "Localify");
+        assert_eq!(BRANDING.local_runtime_name(Some("dev")), "Localify Dev");
+    }
 }
