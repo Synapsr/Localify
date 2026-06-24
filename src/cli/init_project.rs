@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use super::context::effective_current_dir;
 use crate::branding::BRANDING;
 use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
 use roxy::desktop::{DesktopApi, ProjectRootStore};
@@ -22,6 +23,7 @@ pub struct InitProjectArgs {
     pub api_target: Option<String>,
     pub project_only: bool,
     pub yes: bool,
+    pub write_scripts: bool,
 }
 
 struct ResolvedInitProjectArgs {
@@ -38,7 +40,7 @@ pub fn execute(
     policy: LocalAppUpdatePolicy,
 ) -> Result<()> {
     let resolved = resolve_args(args, policy)?;
-    let current_dir = env::current_dir().context("Failed to determine the current directory")?;
+    let current_dir = effective_current_dir()?;
     let binary_path = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
         BRANDING.cli_command()
@@ -53,6 +55,9 @@ pub fn execute(
             .map(|service| InitProjectServiceRequest {
                 domain: service.domain.clone(),
                 target: service.target.clone(),
+                service_name: service.service_name.clone(),
+                service_path: service.service_path.clone(),
+                command: service.command.clone(),
             })
             .collect(),
     })?;
@@ -117,7 +122,7 @@ fn resolve_args(
     args: InitProjectArgs,
     policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
-    let current_dir = env::current_dir().context("Failed to determine the current directory")?;
+    let current_dir = effective_current_dir()?;
     let default_name = args
         .name
         .clone()
@@ -166,7 +171,8 @@ fn resolve_non_interactive_args(
     args: InitProjectArgs,
     policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
-    let current_dir = env::current_dir().context("Failed to determine the current directory")?;
+    let current_dir = effective_current_dir()?;
+    let policy = policy.with_package_scripts(args.write_scripts || policy.write_package_scripts);
     if !args.project_only && !has_explicit_service_args(&args) {
         return resolve_detected_defaults(name, &current_dir, policy);
     }
@@ -206,7 +212,10 @@ fn resolve_detected_defaults(
             domain: service.domain,
             target: service.target,
             enabled: service.enabled,
-            update_dev_script: service.can_update_dev_script,
+            update_dev_script: policy.write_package_scripts && service.can_update_dev_script,
+            service_name: None,
+            service_path: None,
+            command: None,
         })
         .collect::<Vec<_>>();
     let resolved = resolve_folder_init_selection(current_dir, &name, &selections, policy)?;
@@ -245,8 +254,11 @@ fn resolve_single_service_interactive(
             target,
             enabled: true,
             update_dev_script: false,
+            service_name: None,
+            service_path: None,
+            command: None,
         }],
-        policy,
+        policy.with_package_scripts(false),
     )?;
 
     Ok(ResolvedInitProjectArgs {
@@ -275,6 +287,9 @@ fn resolve_workspace_services_interactive(
                 target: service.target.clone(),
                 enabled: false,
                 update_dev_script: false,
+                service_name: None,
+                service_path: None,
+                command: None,
             });
             continue;
         }
@@ -295,10 +310,21 @@ fn resolve_workspace_services_interactive(
             target,
             enabled: true,
             update_dev_script,
+            service_name: None,
+            service_path: None,
+            command: None,
         });
     }
 
-    let resolved = resolve_folder_init_selection(current_dir, &name, &selections, policy)?;
+    let write_package_scripts = selections
+        .iter()
+        .any(|selection| selection.update_dev_script);
+    let resolved = resolve_folder_init_selection(
+        current_dir,
+        &name,
+        &selections,
+        policy.with_package_scripts(write_package_scripts || policy.write_package_scripts),
+    )?;
     Ok(ResolvedInitProjectArgs {
         name,
         services: resolved.services,

@@ -94,6 +94,10 @@ enum Commands {
         /// Accept the detected project bootstrap plan without interactive prompts
         #[arg(long)]
         yes: bool,
+
+        /// Create or update package.json dev-localify scripts during bootstrap
+        #[arg(long)]
+        write_scripts: bool,
     },
 
     /// Unregister a domain
@@ -140,6 +144,66 @@ enum Commands {
     Project {
         #[command(subcommand)]
         command: ProjectCommands,
+    },
+
+    /// Manage project services
+    Services {
+        #[command(subcommand)]
+        command: ServicesCommands,
+    },
+
+    /// Print the primary Localify URL for a service
+    Get {
+        /// Service name or ID
+        service: String,
+
+        /// Project ID/name when service resolution is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Project environment name/slug. Defaults to the primary environment.
+        #[arg(long)]
+        env: Option<String>,
+
+        /// Print structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run a project service with Localify environment variables
+    Run {
+        /// Service name or ID. If omitted, Localify infers it from the current directory or prompts.
+        service: Option<String>,
+
+        /// Project ID/name when service resolution is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Project environment name/slug. Defaults to the primary environment.
+        #[arg(long)]
+        env: Option<String>,
+
+        /// Temporary command override, passed after `--`
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+
+    /// Start a local dev service through Localify without requiring package.json script rewrites
+    Dev {
+        /// Service name or ID. If omitted, Localify infers it from the current directory or prompts.
+        service: Option<String>,
+
+        /// Project ID/name when service resolution is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Project environment name/slug. Defaults to the primary environment.
+        #[arg(long)]
+        env: Option<String>,
+
+        /// Temporary command override, passed after `--`
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
     },
 
     /// Manage coding-agent integration
@@ -270,11 +334,27 @@ enum RouteCommands {
 
 #[derive(Subcommand)]
 enum ProjectCommands {
+    /// Manage project environments
+    Env {
+        #[command(subcommand)]
+        command: ProjectEnvCommands,
+    },
+
+    /// Manage project service domains
+    Domain {
+        #[command(subcommand)]
+        command: ProjectDomainCommands,
+    },
+
     /// Reapply local dev scripts and framework config for the current project
     ConfigureDev {
         /// Project ID when the current folder is ambiguous
         #[arg(long)]
         project: Option<String>,
+
+        /// Create or update package.json dev-localify scripts while repairing config
+        #[arg(long)]
+        write_scripts: bool,
     },
 
     /// Add a missing app/service to an existing project
@@ -294,6 +374,73 @@ enum ProjectCommands {
         /// Local target. Defaults to an automatically selected free port.
         #[arg(long)]
         target: Option<String>,
+
+        /// Create or update package.json dev-localify scripts for this service
+        #[arg(long)]
+        write_scripts: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectDomainCommands {
+    /// Set the primary local domain for a service
+    Set {
+        /// Service name or ID
+        service: String,
+
+        /// New local domain
+        domain: String,
+
+        /// Project ID/name when the current folder is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Project environment name/slug. Defaults to the current worktree environment when detected.
+        #[arg(long)]
+        env: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectEnvCommands {
+    /// List project environments
+    List {
+        /// Project ID/name to filter
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Print structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Ensure a project environment for the current root/worktree
+    Ensure {
+        /// Project ID/name when the current folder is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Environment label. Defaults to the git branch or folder name.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Environment root. Defaults to the current directory or git worktree root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Mark/update the primary environment metadata instead of creating variant domains.
+        #[arg(long)]
+        primary: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServicesCommands {
+    /// List explicit and inferred services
+    List {
+        /// Print structured JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -405,6 +552,7 @@ fn main() -> Result<()> {
             api_target,
             project_only,
             yes,
+            write_scripts,
         } => cli::init_project::execute(
             cli::init_project::InitProjectArgs {
                 name,
@@ -415,11 +563,12 @@ fn main() -> Result<()> {
                 api_target,
                 project_only,
                 yes,
+                write_scripts,
             },
             config_path,
-            roxy::project_init::LocalAppUpdatePolicy {
-                promote_dev_script: config.agent.promote_dev_script,
-            },
+            roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
+                config.agent.promote_dev_script,
+            ),
         ),
         Commands::Unregister {
             domain,
@@ -448,12 +597,54 @@ fn main() -> Result<()> {
             force,
         } => cli::remove_project::execute(project_id, delete_domains, force, &ctx),
         Commands::Project { command } => {
-            let policy = roxy::project_init::LocalAppUpdatePolicy {
-                promote_dev_script: config.agent.promote_dev_script,
-            };
+            let policy = roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
+                config.agent.promote_dev_script,
+            );
             match command {
-                ProjectCommands::ConfigureDev { project } => cli::project::configure_dev(
-                    cli::project::ConfigureDevArgs { project },
+                ProjectCommands::Env { command } => match command {
+                    ProjectEnvCommands::List { project, json } => cli::project_env::list(
+                        cli::project_env::ListEnvArgs { project, json },
+                        &ctx,
+                    ),
+                    ProjectEnvCommands::Ensure {
+                        project,
+                        name,
+                        root,
+                        primary,
+                    } => cli::project_env::ensure(
+                        cli::project_env::EnsureEnvArgs {
+                            project,
+                            name,
+                            root,
+                            primary,
+                        },
+                        &ctx,
+                    ),
+                },
+                ProjectCommands::Domain { command } => match command {
+                    ProjectDomainCommands::Set {
+                        service,
+                        domain,
+                        project,
+                        env,
+                    } => cli::project::set_domain(
+                        cli::project::SetDomainArgs {
+                            service,
+                            domain,
+                            project,
+                            environment: env,
+                        },
+                        &ctx,
+                    ),
+                },
+                ProjectCommands::ConfigureDev {
+                    project,
+                    write_scripts,
+                } => cli::project::configure_dev(
+                    cli::project::ConfigureDevArgs {
+                        project,
+                        write_scripts,
+                    },
                     config_path,
                     policy,
                 ),
@@ -462,18 +653,67 @@ fn main() -> Result<()> {
                     project,
                     domain,
                     target,
+                    write_scripts,
                 } => cli::project::add_service(
                     cli::project::AddServiceArgs {
                         path,
                         project,
                         domain,
                         target,
+                        write_scripts,
                     },
                     config_path,
                     policy,
                 ),
             }
         }
+        Commands::Services { command } => match command {
+            ServicesCommands::List { json } => cli::services::list(&ctx, json),
+        },
+        Commands::Get {
+            service,
+            project,
+            env,
+            json,
+        } => cli::services::get(service, project, env, json, &ctx),
+        Commands::Run {
+            service,
+            project,
+            env,
+            command,
+        } => cli::services::run(
+            cli::services::RunArgs {
+                mode: cli::services::RunMode::Run,
+                service_name: service,
+                project,
+                environment: env,
+                override_command: command,
+            },
+            config_path,
+            roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
+                config.agent.promote_dev_script,
+            ),
+            &ctx,
+            &paths,
+        ),
+        Commands::Dev {
+            service,
+            project,
+            env,
+            command,
+        } => cli::services::run(
+            cli::services::RunArgs {
+                mode: cli::services::RunMode::Dev,
+                service_name: service,
+                project,
+                environment: env,
+                override_command: command,
+            },
+            config_path,
+            roxy::project_init::LocalAppUpdatePolicy::runtime_only(),
+            &ctx,
+            &paths,
+        ),
         Commands::Agent { command } => match command {
             AgentCommands::InstallSkill => {
                 let result = roxy::agent_skill::install_agent_skill()?;

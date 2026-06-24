@@ -53,6 +53,12 @@ pub struct LocalDevLaunchPlan {
     pub script_name: String,
 }
 
+impl LocalDevLaunchPlan {
+    pub(crate) fn command_parts(&self) -> Vec<String> {
+        self.package_manager.command_parts(&self.script_name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
     Npm,
@@ -130,7 +136,10 @@ pub fn open_local_dev_server_with_terminal(
     launch_in_terminal(&launch, terminal)
 }
 
-fn resolve_local_dev_launch(project_root: &Path, target: &str) -> Result<LocalDevLaunchPlan> {
+pub(crate) fn resolve_local_dev_launch(
+    project_root: &Path,
+    target: &str,
+) -> Result<LocalDevLaunchPlan> {
     let target_port = extract_target_port(target)?;
     let mut candidates = detect_local_dev_candidates(project_root)?;
 
@@ -200,6 +209,45 @@ fn resolve_local_dev_launch(project_root: &Path, target: &str) -> Result<LocalDe
         package_manager: selected.package_manager,
         script_name: selected.script_name,
     })
+}
+
+pub fn resolve_portable_local_dev_launch(
+    project_root: &Path,
+    package_scope: Option<&Path>,
+) -> Result<LocalDevLaunchPlan> {
+    let mut candidates = detect_local_dev_candidates(project_root)?;
+
+    if let Some(package_scope) = package_scope {
+        candidates.retain(|candidate| candidate.package_dir.starts_with(package_scope));
+    }
+    candidates.retain(|candidate| candidate.port.is_none());
+
+    if candidates.is_empty() {
+        bail!(
+            "No workspace package in '{}' exposes a launchable local dev script without an explicit port yet.",
+            project_root.display()
+        );
+    }
+
+    let best_priority = candidates
+        .iter()
+        .map(|candidate| candidate.script_priority)
+        .min()
+        .unwrap_or(usize::MAX);
+    candidates.retain(|candidate| candidate.script_priority == best_priority);
+
+    match candidates.as_slice() {
+        [selected] => Ok(LocalDevLaunchPlan {
+            display_path: selected.display_path.clone(),
+            package_dir: selected.package_dir.clone(),
+            package_manager: selected.package_manager,
+            script_name: selected.script_name.clone(),
+        }),
+        _ => bail!(
+            "Multiple workspace scripts can be launched with an injected PORT.\n{}",
+            format_candidates(&candidates)
+        ),
+    }
 }
 
 fn detect_local_dev_candidates(project_root: &Path) -> Result<Vec<LocalDevCandidate>> {
@@ -609,8 +657,7 @@ fn launch_command(launch: &LocalDevLaunchPlan) -> String {
     ];
     parts.extend(
         launch
-            .package_manager
-            .command_parts(&launch.script_name)
+            .command_parts()
             .into_iter()
             .map(|part| shell_escape(&part)),
     );
@@ -619,8 +666,7 @@ fn launch_command(launch: &LocalDevLaunchPlan) -> String {
 
 fn run_script_command(launch: &LocalDevLaunchPlan) -> String {
     launch
-        .package_manager
-        .command_parts(&launch.script_name)
+        .command_parts()
         .into_iter()
         .map(|part| shell_escape(&part))
         .collect::<Vec<_>>()
@@ -814,7 +860,7 @@ mod tests {
 
     use super::{
         PackageManager, detect_local_dev_candidates, extract_script_port,
-        parse_lsof_machine_output, resolve_local_dev_launch,
+        parse_lsof_machine_output, resolve_local_dev_launch, resolve_portable_local_dev_launch,
     };
 
     #[test]
@@ -896,6 +942,72 @@ mod tests {
         assert_eq!(launch.script_name, "dev:admin");
         assert_eq!(launch.package_manager, PackageManager::Pnpm);
         assert_eq!(launch.package_dir, root.join("apps/admin"));
+    }
+
+    #[test]
+    fn resolve_portable_local_dev_launch_prefers_portless_script() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "workspaces": ["apps/*"]
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/web/package.json"),
+            r#"{
+  "name": "web",
+  "scripts": {
+    "dev-localify": "next dev --hostname 127.0.0.1 --port 61092",
+    "dev": "next dev"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let launch = resolve_portable_local_dev_launch(root, None).unwrap();
+
+        assert_eq!(launch.display_path, "apps/web");
+        assert_eq!(launch.script_name, "dev");
+        assert_eq!(launch.package_manager, PackageManager::Pnpm);
+    }
+
+    #[test]
+    fn resolve_portable_local_dev_launch_can_scope_to_package_path() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::create_dir_all(root.join("apps/admin")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "workspaces": ["apps/*"]
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/web/package.json"),
+            r#"{"name":"web","scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/admin/package.json"),
+            r#"{"name":"admin","scripts":{"dev":"vite"}}"#,
+        )
+        .unwrap();
+
+        let launch =
+            resolve_portable_local_dev_launch(root, Some(&root.join("apps/admin"))).unwrap();
+
+        assert_eq!(launch.display_path, "apps/admin");
+        assert_eq!(launch.script_name, "dev");
     }
 
     #[test]

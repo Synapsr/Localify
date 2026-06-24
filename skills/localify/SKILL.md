@@ -19,7 +19,8 @@ Use Localify when an agent needs to:
 - inspect local proxy, daemon, DNS, certificate, Docker, or desktop app state
 
 Do not choose framework default ports like `3000` yourself during project bootstrap. Let
-`localify init-project --yes` reserve an available port and update supported dev scripts.
+`localify dev` or `localify init-project --yes` reserve an available port and wire the Localify
+runtime config.
 
 ## Mental model
 
@@ -46,6 +47,12 @@ Create a project from the current folder:
 
 ```bash
 localify init-project --yes
+```
+
+Start the current project through Localify:
+
+```bash
+localify dev
 ```
 
 Create an explicit route only when the user gives you the target:
@@ -76,37 +83,97 @@ When entering an existing repo or after creating a new app:
    localify status
    ```
 
-2. Bootstrap the repo once if it is not already a Localify project:
+2. Start the repo through Localify:
+
+   ```bash
+   localify dev
+   ```
+
+   This auto-bootstraps a missing Localify Project when the current folder exposes a runnable app,
+   creates Local Domains, patches supported framework allowlists, injects `PORT`, `HOST`,
+   `LOCALIFY_URL`, URL envs, and Node CA env, then launches the detected dev script.
+
+3. Bootstrap explicitly when you only want project metadata/routes without starting the app:
 
    ```bash
    localify init-project --yes
    ```
 
    This creates or links the Localify Project, creates the primary Local Domains, chooses available
-   local ports, and updates supported package scripts/framework config.
+   local ports, and patches supported framework config. It does not write `dev-localify` package
+   scripts unless the user explicitly opts into package script updates.
 
-3. List configured projects and domains:
+4. List configured projects and domains:
 
    ```bash
    localify list-projects
    localify list
+   localify services list
    ```
 
-4. Use the `.localify` URL shown by Localify instead of a guessed localhost URL.
+5. Resolve the service URL instead of guessing:
 
-5. If a relevant monorepo app was not selected by the bootstrap heuristic, add it explicitly:
+   ```bash
+   localify get web
+   ```
+
+   For monorepos, inspect service names first:
+
+   ```bash
+   localify services list
+   ```
+
+6. If a relevant monorepo app was not selected by the bootstrap heuristic, add it explicitly:
 
    ```bash
    localify project add-service --path apps/admin
    ```
 
-6. If scripts/config drift after setup, repair the existing Project instead of rerunning bootstrap:
+7. If a service domain should change, use the project-scoped domain command instead of editing
+   Localify config directly:
+
+   ```bash
+   localify project domain set web my-app.localify
+   ```
+
+   For branch/worktree environments, pass the environment when it is not already implied by the
+   current worktree:
+
+   ```bash
+   localify project domain set web feat-auth.my-app.localify --env feat-auth
+   ```
+
+8. If framework config drift after setup, repair the existing Project instead of rerunning bootstrap:
 
    ```bash
    localify project configure-dev
    ```
 
-7. If the target does not respond, check that the underlying dev server is running on the mapped port.
+9. Before running a service from a branch/worktree environment, ensure that environment explicitly:
+
+   ```bash
+   localify project env ensure --name feat-auth
+   localify project env list
+   ```
+
+10. Run a service through the Localify service metadata:
+
+   ```bash
+   localify dev web
+   localify dev web --env feat-auth
+   ```
+
+   `dev` starts the configured or detected dev command, injects `PORT`, `HOST=127.0.0.1`,
+   `LOCALIFY_URL`, URL envs, and framework runtime flags where needed. It does not write package
+   scripts.
+
+11. If the target does not respond, check that the underlying dev server is running on the mapped port.
+
+When a coding agent is launched from a recognized agent project cache, Localify resolves the cache
+path back to the linked real checkout when the project was already initialized. The first supported
+cache format is Claude's `~/.claude/projects/-Users-name-Developer-projects-my-app` layout. If
+Localify reports that the cache is not linked, run the command from the real project folder or
+initialize/link the real folder first; do not create a Localify project inside the agent cache.
 
 ## Project setup
 
@@ -139,9 +206,9 @@ port is intentional.
 use targeted commands like `project configure-dev`, `project add-service`, `route list`, `logs`, and
 `status` to investigate or repair specific issues.
 
-When Localify's "default dev script" setting is enabled, bootstrap may rewrite package `dev` scripts
-to the Localify-compatible command and preserve the original as `dev-localhost` when that script name
-is available. `dev-localify` is kept aligned either way.
+Package script rewrites are optional. Prefer `localify dev` for runtime port/env injection. Use
+`localify init-project --write-scripts`, `localify project configure-dev --write-scripts`, or the
+desktop checkbox only when the repository should contain a checked-in `dev-localify` script.
 
 For direct domain management without project metadata:
 
@@ -155,6 +222,16 @@ Use wildcard subdomains for tenant-style local testing:
 ```bash
 localify register myapp.localify --wildcard --route "/=3000"
 ```
+
+For project-owned service domains, prefer:
+
+```bash
+localify project domain set web myapp.localify
+localify project domain set web preview.myapp.localify --env preview
+```
+
+This updates the service or environment metadata, replaces the registered route, attempts to generate
+the certificate for the new domain, and reloads the daemon.
 
 ## Routes
 
@@ -256,12 +333,19 @@ Common failures:
 - Do not bypass certificate errors as a fix. Repair Localify trust instead.
 - Keep project routes explicit and small.
 - Use wildcard domains only when the app actually needs tenant or subdomain testing.
+- Use `localify project domain set` for project service domain changes. Do not hand-edit the
+  Localify TOML config for this.
+- If the current directory is under a recognized agent project cache such as `.claude/projects`,
+  rely on Localify's linked-project resolution or switch to the real checkout. Do not initialize
+  projects inside agent cache folders.
 - For app code changes, update local callback, OAuth, webhook, CORS, and cookie origins to the `.localify` URL when that is the route under test.
-- After creating a Next.js or Vite project, run `localify init-project --yes` before handing the URL to the user.
+- After creating a Next.js or Vite project, run `localify dev` before handing the URL to the user.
 - For Next.js, expect Localify to patch an existing `next.config.*` with `allowedDevOrigins` and Localify-compatible `images.remotePatterns`.
 - For Vite, expect Localify to patch an existing `vite.config.*` with an explicit `server.allowedHosts` entry. Do not set `allowedHosts: true`.
 
-## Current limitation
+## Run boundary
 
-Localify does not yet provide a `localify run` command equivalent to `portless run`.
-Until that exists, start the app's dev server normally, then register or use the matching Localify project/domain.
+`localify run` is a compatibility launch command. Prefer `localify dev` for dev servers. Use
+`localify init-project --yes`, `localify project add-service`, or `localify project env ensure` for
+explicit config mutations; use `localify dev --env <name>` when working inside a project worktree or
+branch environment.
