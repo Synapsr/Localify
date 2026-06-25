@@ -17,7 +17,6 @@ use tracing::{debug, info};
 use crate::branding::BRANDING;
 use crate::domain::{DomainRegistration, Route, RouteTarget};
 use crate::infrastructure::editor::open_in_editor;
-use crate::infrastructure::local_dev::open_local_dev_server;
 
 use super::embedded_assets;
 use super::proxy::{ClientAddr, Scheme, proxy_request};
@@ -380,40 +379,11 @@ fn handle_run_dev_server(
         );
     }
 
-    let registration = match state.get_domain(host) {
-        Some(registration) => registration,
-        None => {
-            return action_error_response(
-                StatusCode::NOT_FOUND,
-                "This Localify domain is not registered.",
-            );
-        }
-    };
-    let Some(root_path) = state.project_root_for_registration(registration) else {
-        return action_error_response(
-            StatusCode::NOT_FOUND,
-            "No project folder is linked to this domain yet.",
-        );
-    };
-    let Some(target) = query_param_value(target_query, "target").or_else(|| {
-        registration
-            .routes()
-            .iter()
-            .find_map(|route| match route.target() {
-                RouteTarget::Proxy(target) => Some(target.to_string()),
-                RouteTarget::StaticFiles(_) => None,
-            })
-    }) else {
-        return action_error_response(
-            StatusCode::BAD_REQUEST,
-            "This domain is not backed by a proxy target that Localify can launch.",
-        );
-    };
-
-    match open_local_dev_server(Path::new(root_path), &target) {
-        Ok(()) => redirect_back(headers, scheme, host),
-        Err(error) => action_error_response(StatusCode::BAD_REQUEST, &error.to_string()),
-    }
+    let _ = (state, target_query);
+    action_error_response(
+        StatusCode::BAD_REQUEST,
+        "Open Localify to launch this service from the integrated terminal.",
+    )
 }
 
 fn build_not_registered_response(domain: &str) -> Response {
@@ -492,42 +462,6 @@ fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String>
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
-}
-
-fn query_param_value(query: Option<&str>, key: &str) -> Option<String> {
-    query.and_then(|query| {
-        query.split('&').find_map(|pair| {
-            let (candidate, value) = pair.split_once('=')?;
-            (candidate == key).then(|| percent_decode(value)).flatten()
-        })
-    })
-}
-
-fn percent_decode(value: &str) -> Option<String> {
-    let mut out = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
-                let decoded = u8::from_str_radix(hex, 16).ok()?;
-                out.push(decoded as char);
-                index += 3;
-            }
-            b'+' => {
-                out.push(' ');
-                index += 1;
-            }
-            byte => {
-                out.push(byte as char);
-                index += 1;
-            }
-        }
-    }
-
-    Some(out)
 }
 
 fn same_origin_path(url: &str, scheme: &str, host: &str) -> Option<String> {

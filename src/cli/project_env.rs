@@ -8,7 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 use super::context::{AppContext, effective_current_dir};
-use crate::application::ports::DaemonConnection;
+use crate::application::StepOutcome;
+use crate::application::ports::{CertificateManager, DaemonConnection};
 use crate::application::register_domain::RegisterDomain;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
@@ -589,7 +590,7 @@ fn ensure_environment_domains(
     let mut missing = Vec::new();
     for service in domains {
         let pattern = DomainPattern::from_name(&service.domain, false)?;
-        if ctx.config_store.get_domain(&pattern)?.is_some() {
+        if let Some(registration) = ctx.config_store.get_domain(&pattern)? {
             let owner = ctx.config_store.domain_project_id(&pattern)?;
             if owner.as_deref() != Some(project_id) {
                 bail!(
@@ -598,6 +599,12 @@ fn ensure_environment_domains(
                     project_id
                 );
             }
+            ensure_existing_domain_https(
+                project_id,
+                registration,
+                &ctx.config_store,
+                &ctx.cert_service,
+            )?;
             continue;
         }
         missing.push((service.service_id.clone(), pattern));
@@ -611,6 +618,12 @@ fn ensure_environment_domains(
             .with_context(|| format!("Failed to create route for service '{service_id}'"))?;
         match use_case.execute(pattern.clone(), vec![route]) {
             Ok(result) => {
+                if let StepOutcome::Warning(message) = &result.cert_outcome {
+                    eprintln!(
+                        "  Certificate warning: failed to enable HTTPS for '{}': {message}",
+                        result.registration.display_pattern()
+                    );
+                }
                 if let Err(error) = ctx
                     .config_store
                     .update_domain_with_project(result.registration, Some(project_id.to_string()))
@@ -630,6 +643,32 @@ fn ensure_environment_domains(
     }
 
     Ok(created)
+}
+
+fn ensure_existing_domain_https(
+    project_id: &str,
+    mut registration: crate::domain::DomainRegistration,
+    config_store: &ConfigStore,
+    cert_service: &dyn CertificateManager,
+) -> Result<()> {
+    if registration.is_https_enabled() {
+        return Ok(());
+    }
+
+    match cert_service.create_and_install(registration.pattern()) {
+        Ok(()) => {
+            registration.enable_https();
+            config_store.update_domain_with_project(registration, Some(project_id.to_string()))?;
+        }
+        Err(error) => {
+            eprintln!(
+                "  Certificate warning: failed to enable HTTPS for '{}': {error}",
+                registration.display_pattern()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn domain_pattern_from_display(value: &str) -> Result<DomainPattern> {
@@ -793,6 +832,8 @@ fn slugify(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::testkit::InMemoryCertificateManager;
+    use crate::domain::DomainRegistration;
 
     fn service(id: &str, primary_domain: &str) -> ConfiguredService {
         ConfiguredService {
@@ -809,6 +850,13 @@ mod tests {
             primary_target: None,
             inferred: false,
         }
+    }
+
+    fn proxy_registration(domain: &str, port: u16) -> DomainRegistration {
+        DomainRegistration::new(
+            DomainPattern::from_name(domain, false).unwrap(),
+            vec![Route::parse(&format!("/={port}")).unwrap()],
+        )
     }
 
     #[test]
@@ -855,5 +903,57 @@ mod tests {
             environment_service_domains("demo", &[service("web", &primary)], "primary", true);
 
         assert_eq!(domains[0].domain, primary);
+    }
+
+    #[test]
+    fn ensure_existing_domain_https_upgrades_http_domain_when_cert_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.toml"));
+        let project = store.create_project("Demo").unwrap();
+        let domain = format!("feat-auth.demo{}", BRANDING.domain_suffix());
+        let pattern = DomainPattern::from_name(&domain, false).unwrap();
+        store
+            .add_domain_with_project(proxy_registration(&domain, 3000), Some(project.id.clone()))
+            .unwrap();
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+
+        ensure_existing_domain_https(
+            &project.id,
+            registration,
+            &store,
+            &InMemoryCertificateManager::new(),
+        )
+        .unwrap();
+
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+        assert!(registration.is_https_enabled());
+        assert_eq!(
+            store.domain_project_id(&pattern).unwrap().as_deref(),
+            Some(project.id.as_str())
+        );
+    }
+
+    #[test]
+    fn ensure_existing_domain_https_keeps_http_when_cert_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.toml"));
+        let project = store.create_project("Demo").unwrap();
+        let domain = format!("feat-auth.demo{}", BRANDING.domain_suffix());
+        let pattern = DomainPattern::from_name(&domain, false).unwrap();
+        store
+            .add_domain_with_project(proxy_registration(&domain, 3000), Some(project.id.clone()))
+            .unwrap();
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+
+        ensure_existing_domain_https(
+            &project.id,
+            registration,
+            &store,
+            &InMemoryCertificateManager::always_failing(),
+        )
+        .unwrap();
+
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+        assert!(!registration.is_https_enabled());
     }
 }

@@ -107,7 +107,7 @@ fn build_target_uri(target: &ProxyTarget, path: &str, query: Option<&str>) -> Re
 fn build_upgrade_request(
     request: &Request,
     host: &str,
-    scheme: &str,
+    forwarded_scheme: &str,
     client_ip: Option<IpAddr>,
 ) -> String {
     let path = request.uri().path();
@@ -123,9 +123,9 @@ fn build_upgrade_request(
     req.push_str(&format!("X-Forwarded-Host: {}\r\n", host));
     req.push_str(&format!(
         "X-Forwarded-Port: {}\r\n",
-        forwarded_port_for_scheme(scheme)
+        forwarded_port_for_scheme(forwarded_scheme)
     ));
-    req.push_str(&format!("X-Forwarded-Proto: {}\r\n", scheme));
+    req.push_str(&format!("X-Forwarded-Proto: {}\r\n", forwarded_scheme));
     if let Some(ip) = client_ip {
         let existing = request
             .headers()
@@ -180,7 +180,7 @@ async fn proxy_websocket(
     target: &ProxyTarget,
     request: Request,
     host: &str,
-    scheme: &str,
+    forwarded_scheme: &str,
     client_ip: Option<IpAddr>,
     project_root_path: Option<&str>,
 ) -> Response {
@@ -215,7 +215,7 @@ async fn proxy_websocket(
     let start_time = Instant::now();
 
     // Build and send the upgrade request to backend
-    let upgrade_request = build_upgrade_request(&request, host, scheme, client_ip);
+    let upgrade_request = build_upgrade_request(&request, host, forwarded_scheme, client_ip);
 
     if let Err(e) = backend.write_all(upgrade_request.as_bytes()).await {
         return build_proxy_error_response(
@@ -356,14 +356,18 @@ async fn proxy_websocket(
     })
 }
 
-/// Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers.
+/// Set forwarding headers for the upstream request.
+///
+/// `X-Forwarded-Host` keeps the public Localify host, while
+/// `X-Forwarded-Proto` follows the upstream target protocol. Framework dev
+/// servers like Next consume that header for internal self-rewrites.
 fn set_forwarding_headers(
     headers: &mut HeaderMap,
     host: &str,
-    scheme: &str,
+    forwarded_scheme: &str,
     client_ip: Option<IpAddr>,
 ) {
-    let forwarded_port = forwarded_port_for_scheme(scheme);
+    let forwarded_port = forwarded_port_for_scheme(forwarded_scheme);
 
     if let Ok(value) = HeaderValue::from_str(host) {
         headers.insert(X_FORWARDED_HOST, value);
@@ -373,7 +377,7 @@ fn set_forwarding_headers(
         headers.insert(X_FORWARDED_PORT, value);
     }
 
-    if let Ok(value) = HeaderValue::from_str(scheme) {
+    if let Ok(value) = HeaderValue::from_str(forwarded_scheme) {
         headers.insert(X_FORWARDED_PROTO, value);
     }
 
@@ -388,7 +392,7 @@ fn set_forwarding_headers(
     debug!(
         x_forwarded_host = %host,
         x_forwarded_port = %forwarded_port,
-        x_forwarded_proto = %scheme,
+        x_forwarded_proto = %forwarded_scheme,
         x_forwarded_for = %client_ip.map(|ip| ip.to_string()).unwrap_or_default(),
         "Forwarding headers set"
     );
@@ -399,6 +403,10 @@ fn forwarded_port_for_scheme(scheme: &str) -> &'static str {
         "https" => "443",
         _ => "80",
     }
+}
+
+fn forwarded_scheme_for_target(target: &ProxyTarget) -> &'static str {
+    target.uri_scheme()
 }
 
 /// Remove hop-by-hop headers that must not be forwarded (RFC 7230 §6.1).
@@ -434,14 +442,24 @@ pub async fn proxy_request(
     target: &ProxyTarget,
     request: Request,
     host: &str,
-    scheme: &str,
+    _client_scheme: &str,
     client_ip: Option<IpAddr>,
     project_root_path: Option<&str>,
 ) -> Response {
+    let forwarded_scheme = forwarded_scheme_for_target(target);
+
     // Check for WebSocket upgrade
     if is_websocket_upgrade(&request) {
         debug!(target = %target, "Proxying WebSocket request");
-        return proxy_websocket(target, request, host, scheme, client_ip, project_root_path).await;
+        return proxy_websocket(
+            target,
+            request,
+            host,
+            forwarded_scheme,
+            client_ip,
+            project_root_path,
+        )
+        .await;
     }
 
     debug!(target = %target, "Proxying HTTP request");
@@ -476,7 +494,7 @@ pub async fn proxy_request(
     }
 
     // Set forwarding headers before stripping hop-by-hop headers.
-    set_forwarding_headers(request.headers_mut(), host, scheme, client_ip);
+    set_forwarding_headers(request.headers_mut(), host, forwarded_scheme, client_ip);
 
     // Strip hop-by-hop headers
     strip_hop_by_hop_headers(request.headers_mut());
@@ -668,20 +686,15 @@ fn render_project_action_section(
     let (extra_actions, footnote) = match project_root_path {
         Some(project_root_path) => (
             format!(
-                "<a href=\"localify://action/run-local-dev-server?domain={}&target={}\" class=\"px-button px-button--secondary\">\
-{RUN_ICON}<span>Run local dev server</span>\
-</a>\
-<a href=\"localify://action/open-in-editor?domain={}\" class=\"px-button px-button--secondary\">\
+                "<a href=\"localify://action/open-in-editor?domain={}\" class=\"px-button px-button--secondary\">\
 {EDITOR_ICON}<span>Open in editor</span>\
 </a>\
 <code class=\"px-path\">{}</code>",
                 theme::encode_path_segment(domain),
-                theme::encode_path_segment(target),
-                theme::encode_path_segment(domain),
                 theme::html_escape(project_root_path),
             ),
             format!(
-                "Localify will reopen the workspace package linked to <code>{}</code>, and you can still inspect the linked folder in Cursor or VS Code.",
+                "Use the integrated terminal in Localify to launch the service linked to <code>{}</code>.",
                 theme::html_escape(target),
             ),
         ),
@@ -695,7 +708,7 @@ fn render_project_action_section(
         "<section class=\"px-panel px-panel--accent\">\
 <div class=\"px-panel__head\">\
 <h2 class=\"px-panel__title\">Fix it from the app</h2>\
-<p class=\"px-panel__hint\">Open {app_name} to inspect the route, or relaunch the linked workspace server from here.</p>\
+<p class=\"px-panel__hint\">Open {app_name} to inspect the route and launch the linked service from the integrated terminal.</p>\
 </div>\
 <div class=\"px-action\">\
 <a href=\"{open_app_url}\" class=\"px-button px-button--primary\">Open in app</a>\
@@ -741,13 +754,6 @@ const EDITOR_ICON: &str = concat!(
     "stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">",
     "<path d=\"M15 3h6v6\"/><path d=\"M10 14 21 3\"/>",
     "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/>",
-    "</svg>",
-);
-
-const RUN_ICON: &str = concat!(
-    "<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" ",
-    "stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">",
-    "<path d=\"m5 3 14 9-14 9V3Z\"/>",
     "</svg>",
 );
 
@@ -861,6 +867,15 @@ mod tests {
         assert_eq!(headers.get(X_FORWARDED_PORT).unwrap(), "80");
         assert_eq!(headers.get(X_FORWARDED_PROTO).unwrap(), "http");
         assert!(headers.get(X_FORWARDED_FOR).is_none());
+    }
+
+    #[test]
+    fn forwarded_scheme_follows_target_protocol() {
+        let http_target = ProxyTarget::parse("127.0.0.1:3000").unwrap();
+        let https_target = ProxyTarget::parse("https://127.0.0.1:3000").unwrap();
+
+        assert_eq!(forwarded_scheme_for_target(&http_target), "http");
+        assert_eq!(forwarded_scheme_for_target(&https_target), "https");
     }
 
     #[test]
@@ -1157,8 +1172,8 @@ mod tests {
         );
 
         assert!(html.contains("Open in editor"));
-        assert!(html.contains("Run local dev server"));
-        assert!(html.contains("localify://action/run-local-dev-server?domain=demo.localify"));
+        assert!(html.contains("integrated terminal"));
+        assert!(!html.contains("localify://action/run-local-dev-server?domain=demo.localify"));
         assert!(html.contains("localify://action/open-in-editor?domain=demo.localify"));
         assert!(html.contains("Open in app"));
         assert!(html.contains("/tmp/demo"));

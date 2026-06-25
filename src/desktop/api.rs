@@ -31,10 +31,11 @@ use crate::desktop::dto::{
     EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
-    LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenInEditorRequest,
-    OpenProjectUrlRequest, PortConflictDto, ProjectEnvironmentInfoDto,
+    LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest,
+    OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto, ProjectEnvironmentInfoDto,
     ProjectEnvironmentServiceInfoDto, ProjectInfoDto, ProjectServiceInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
     SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
     SettingsImportPreviewProjectDto, SettingsImportPreviewRequest, SettingsImportRequest,
@@ -48,7 +49,7 @@ use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
-use crate::desktop::{LauncherPreferencesStore, ProjectRootStore, RunActionPreference};
+use crate::desktop::{LauncherPreferencesStore, ProjectRootStore};
 use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{
@@ -80,6 +81,12 @@ const SETTINGS_TRANSFER_SCOPE_ALL: &str = "all";
 const SETTINGS_TRANSFER_SCOPE_PROJECTS: &str = "projects";
 const SETTINGS_IMPORT_MODE_REPLACE_ALL: &str = "replaceAll";
 const SETTINGS_IMPORT_MODE_PROJECTS: &str = "projects";
+const ENV_FILE_CANDIDATES: [&str; 4] = [
+    ".env.local",
+    ".env.development.local",
+    ".env.development",
+    ".env",
+];
 
 #[derive(Debug, Clone)]
 pub struct DesktopApi {
@@ -631,18 +638,27 @@ impl DesktopApi {
     }
 
     pub fn list_project_services(&self) -> Result<Vec<ProjectServiceInfoDto>> {
-        Ok(self
-            .config_store()
+        let config_store = self.config_store();
+        let config = config_store.load()?;
+        config_store
             .list_services()?
             .into_iter()
-            .map(map_project_service_info)
-            .collect())
+            .map(|service| {
+                map_project_service_info(
+                    service,
+                    &config_store,
+                    config.daemon.http_port,
+                    config.daemon.https_port,
+                )
+            })
+            .collect()
     }
 
     pub fn list_project_environments(&self) -> Result<Vec<ProjectEnvironmentInfoDto>> {
-        Ok(self
-            .config_store()
-            .list_project_environments(None)?
+        let environments = self.config_store().list_project_environments(None)?;
+        let environments = self.enrich_project_environments_with_local_paths(environments)?;
+
+        Ok(environments
             .into_iter()
             .map(map_project_environment_info)
             .collect())
@@ -960,6 +976,13 @@ impl DesktopApi {
         crate::desktop::editor::open_in_editor(Path::new(&request.path))
     }
 
+    /// Resolves the env file target and opens it without reading or creating it.
+    pub fn open_env_in_editor(&self, request: OpenEnvInEditorRequest) -> Result<()> {
+        let bootstrap = self.bootstrap()?;
+        let path = resolve_env_editor_target(&bootstrap, &request)?;
+        crate::desktop::editor::open_file_in_editor(&path)
+    }
+
     pub fn open_project_url(&self, request: OpenProjectUrlRequest) -> Result<()> {
         crate::desktop::browser::open_project_url(&request.url, request.browser)
     }
@@ -1058,23 +1081,8 @@ impl DesktopApi {
         }
     }
 
-    pub fn run_local_dev_server(&self, request: RunLocalDevServerRequest) -> Result<()> {
-        let preferences = self.effective_launcher_preferences()?;
-        let project_root = Path::new(&request.root_path);
-        crate::infrastructure::local_dev::open_local_dev_server_with_terminal(
-            project_root,
-            &request.target,
-            preferences.terminal,
-        )?;
-
-        if preferences.run_action == RunActionPreference::EditorAndTerminal {
-            crate::desktop::editor::open_in_editor_with_preference(
-                project_root,
-                preferences.editor,
-            )?;
-        }
-
-        Ok(())
+    pub fn run_local_dev_server(&self, _request: RunLocalDevServerRequest) -> Result<()> {
+        bail!("Service launch now uses the integrated Localify terminal.")
     }
 
     pub fn stop_local_dev_server(&self, request: StopLocalDevServerRequest) -> Result<()> {
@@ -1269,19 +1277,7 @@ impl DesktopApi {
         &self,
         projects: Vec<ProjectInfoDto>,
     ) -> Result<Vec<ProjectInfoDto>> {
-        if self.direct_mode {
-            return Ok(projects);
-        }
-
-        let local_projects = match self.project_root_store() {
-            Ok(store) => match store.load() {
-                Ok(local_projects) => local_projects,
-                Err(error) if is_missing_home_error(&error) => HashMap::new(),
-                Err(error) => return Err(error),
-            },
-            Err(error) if is_missing_home_error(&error) => HashMap::new(),
-            Err(error) => return Err(error),
-        };
+        let local_projects = self.local_project_root_paths()?;
 
         Ok(projects
             .into_iter()
@@ -1292,6 +1288,34 @@ impl DesktopApi {
                 project
             })
             .collect())
+    }
+
+    fn enrich_project_environments_with_local_paths(
+        &self,
+        environments: Vec<ConfiguredProjectEnvironment>,
+    ) -> Result<Vec<ConfiguredProjectEnvironment>> {
+        let local_projects = self.local_project_root_paths()?;
+
+        Ok(apply_local_project_root_paths_to_environments(
+            environments,
+            &local_projects,
+        ))
+    }
+
+    fn local_project_root_paths(&self) -> Result<HashMap<String, String>> {
+        if self.direct_mode {
+            return Ok(HashMap::new());
+        }
+
+        match self.project_root_store() {
+            Ok(store) => match store.load() {
+                Ok(local_projects) => Ok(local_projects),
+                Err(error) if is_missing_home_error(&error) => Ok(HashMap::new()),
+                Err(error) => Err(error),
+            },
+            Err(error) if is_missing_home_error(&error) => Ok(HashMap::new()),
+            Err(error) => Err(error),
+        }
     }
 
     fn apply_imported_keygen_settings(&self, request: KeygenSettingsUpdateRequest) -> Result<()> {
@@ -1355,6 +1379,73 @@ impl DesktopApi {
 
         Ok(RemoveProjectResultDto {
             project: map_project_info(project, domain_count, false, None),
+            removed_domains,
+            daemon_reloaded,
+        })
+    }
+
+    pub fn remove_project_environment(
+        &self,
+        request: RemoveProjectEnvironmentRequest,
+    ) -> Result<RemoveProjectEnvironmentResultDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .remove_project_environment(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+        let environment = self
+            .list_project_environments()?
+            .into_iter()
+            .find(|environment| {
+                environment.project_id == request.project_id
+                    && environment.slug == request.environment_slug
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "Project environment '{}' was not found for project '{}'.",
+                    request.environment_slug,
+                    request.project_id
+                )
+            })?;
+
+        if environment.primary {
+            bail!("The primary environment cannot be removed.");
+        }
+
+        let environment_domains = environment
+            .services
+            .iter()
+            .map(|service| service.domain.as_str())
+            .collect::<HashSet<_>>();
+        let attached_domains = config_store
+            .list_configured_domains()?
+            .into_iter()
+            .filter(|domain| {
+                environment_domains.contains(domain.registration.display_pattern().as_str())
+            })
+            .collect::<Vec<_>>();
+        let mut removed_domains = Vec::with_capacity(attached_domains.len());
+        let unregister_domain = UnregisterDomain::new(&config_store, &certs);
+        for domain in &attached_domains {
+            unregister_domain.execute(domain.registration.pattern())?;
+            removed_domains.push(domain.registration.display_pattern());
+        }
+
+        config_store.remove_project_environment(&request.project_id, &request.environment_slug)?;
+
+        let daemon_reloaded = match MgmtSocketClient::new(&paths.socket_path).reload() {
+            Ok(()) => true,
+            Err(crate::application::ports::DaemonConnectionError::NotRunning) => false,
+            Err(_) => false,
+        };
+
+        Ok(RemoveProjectEnvironmentResultDto {
+            environment,
             removed_domains,
             daemon_reloaded,
         })
@@ -2134,6 +2225,30 @@ impl DesktopApi {
 
     fn launcher_preferences_store(&self) -> Result<LauncherPreferencesStore> {
         LauncherPreferencesStore::new_default()
+    }
+
+    pub fn service_dev_command(
+        &self,
+        project_id: &str,
+        environment_slug: &str,
+        service_id: &str,
+    ) -> Vec<String> {
+        let mut command = Vec::new();
+        if let Some(profile) = BRANDING.active_profile() {
+            command.push(format!("{}={profile}", BRANDING.profile_env()));
+        }
+        command.extend([
+            self.binary_path.display().to_string(),
+            "--config".into(),
+            self.config_path.display().to_string(),
+            "dev".into(),
+            "--project".into(),
+            project_id.to_string(),
+            "--env".into(),
+            environment_slug.to_string(),
+            service_id.to_string(),
+        ]);
+        command
     }
 
     fn launcher_preferences(&self) -> Result<crate::desktop::LauncherPreferences> {
@@ -4166,27 +4281,46 @@ fn map_project_info(
     }
 }
 
-fn map_project_service_info(value: ConfiguredService) -> ProjectServiceInfoDto {
+fn map_project_service_info(
+    value: ConfiguredService,
+    config_store: &ConfigStore,
+    http_port: u16,
+    https_port: u16,
+) -> Result<ProjectServiceInfoDto> {
     let public_host = value
         .primary_domain
         .strip_prefix("*.")
         .unwrap_or(&value.primary_domain)
         .to_string();
+    let https_enabled = config_store
+        .find_registration_for_domain(&value.primary_domain)?
+        .map(|registration| registration.is_https_enabled())
+        .unwrap_or(false);
+    let (scheme, port, default_port) = if https_enabled {
+        ("https", https_port, 443)
+    } else {
+        ("http", http_port, 80)
+    };
+    let public_domain = if port == default_port {
+        public_host
+    } else {
+        format!("{public_host}:{port}")
+    };
 
-    ProjectServiceInfoDto {
+    Ok(ProjectServiceInfoDto {
         id: value.id,
         name: value.name,
         project_id: value.project_id,
         project_name: value.project_name,
         project_enabled: value.project_enabled,
         primary_domain: value.primary_domain,
-        url: format!("https://{public_host}"),
+        url: format!("{scheme}://{public_domain}"),
         domains: value.domains,
         path: value.path,
         command: value.command,
         target: value.primary_target.map(|target| target.to_string()),
         inferred: value.inferred,
-    }
+    })
 }
 
 fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {
@@ -4208,6 +4342,163 @@ fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectE
             })
             .collect(),
     }
+}
+
+fn resolve_env_editor_target(
+    bootstrap: &BootstrapDto,
+    request: &OpenEnvInEditorRequest,
+) -> Result<PathBuf> {
+    let project_id = request.project_id.trim();
+    let environment_slug = request.environment_slug.trim();
+
+    if project_id.is_empty() {
+        bail!("Project id is required to open an env file.");
+    }
+    if environment_slug.is_empty() {
+        bail!("Environment slug is required to open an env file.");
+    }
+
+    let environment = bootstrap
+        .project_environments
+        .iter()
+        .find(|environment| {
+            environment.project_id == project_id && environment.slug == environment_slug
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "Project environment '{}' was not found for project '{}'.",
+                environment_slug,
+                project_id
+            )
+        })?;
+    let environment_root = environment_root_path(environment)?;
+    let target_root = match request.service_id.as_deref().map(str::trim) {
+        Some(service_id) if !service_id.is_empty() => {
+            let service = resolve_environment_service(bootstrap, environment, service_id)?;
+            service_env_root(&environment_root, service)
+        }
+        _ => environment_root,
+    };
+
+    Ok(env_file_target(&target_root))
+}
+
+fn environment_root_path(environment: &ProjectEnvironmentInfoDto) -> Result<PathBuf> {
+    let root_path = environment
+        .root_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "Project environment '{}' has no local folder linked.",
+                environment.slug
+            )
+        })?;
+    let path = PathBuf::from(root_path);
+
+    if !path.is_absolute() {
+        bail!(
+            "Project environment '{}' path '{}' must be absolute.",
+            environment.slug,
+            path.display()
+        );
+    }
+    if !path.is_dir() {
+        bail!(
+            "Project environment '{}' folder '{}' does not exist.",
+            environment.slug,
+            path.display()
+        );
+    }
+
+    Ok(path)
+}
+
+fn resolve_environment_service<'a>(
+    bootstrap: &'a BootstrapDto,
+    environment: &ProjectEnvironmentInfoDto,
+    service_id: &str,
+) -> Result<&'a ProjectServiceInfoDto> {
+    if !environment
+        .services
+        .iter()
+        .any(|service| service.service_id == service_id)
+    {
+        bail!(
+            "Service '{}' is not attached to environment '{}'.",
+            service_id,
+            environment.slug
+        );
+    }
+
+    bootstrap
+        .services
+        .iter()
+        .find(|service| service.project_id == environment.project_id && service.id == service_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "Service '{}' was not found for project '{}'.",
+                service_id,
+                environment.project_id
+            )
+        })
+}
+
+fn service_env_root(environment_root: &Path, service: &ProjectServiceInfoDto) -> PathBuf {
+    let Some(service_path) = service.path.as_deref().map(str::trim) else {
+        return environment_root.to_path_buf();
+    };
+
+    if service_path.is_empty() {
+        return environment_root.to_path_buf();
+    }
+
+    let service_path = Path::new(service_path);
+    if service_path.is_absolute() {
+        return environment_root.to_path_buf();
+    }
+
+    let candidate = environment_root.join(service_path);
+    if candidate.is_dir() && path_stays_inside_root(environment_root, &candidate) {
+        return candidate;
+    }
+
+    environment_root.to_path_buf()
+}
+
+fn path_stays_inside_root(root: &Path, candidate: &Path) -> bool {
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    let Ok(candidate) = candidate.canonicalize() else {
+        return false;
+    };
+
+    candidate.starts_with(root)
+}
+
+fn env_file_target(root: &Path) -> PathBuf {
+    ENV_FILE_CANDIDATES
+        .iter()
+        .map(|file_name| root.join(file_name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| root.join(".env.local"))
+}
+
+fn apply_local_project_root_paths_to_environments(
+    environments: Vec<ConfiguredProjectEnvironment>,
+    local_projects: &HashMap<String, String>,
+) -> Vec<ConfiguredProjectEnvironment> {
+    environments
+        .into_iter()
+        .map(|mut environment| {
+            if environment.root_path.is_none() {
+                environment.root_path = local_projects.get(&environment.project_id).cloned();
+            }
+            environment
+        })
+        .collect()
 }
 
 fn daemon_domain_accesses(socket_path: &Path) -> HashMap<String, u64> {
@@ -4382,21 +4673,26 @@ fn tail_lines(path: &Path, line_count: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliRemovalOutcome, DesktopApi, cli_command_points_to_binary, cli_shell_command,
-        cli_shell_commands, ensure_cli_command_link, export_route_string, normalize_desktop_route,
+        CliRemovalOutcome, DesktopApi, apply_local_project_root_paths_to_environments,
+        cli_command_points_to_binary, cli_shell_command, cli_shell_commands,
+        ensure_cli_command_link, env_file_target, export_route_string, normalize_desktop_route,
         normalize_project_snapshot_id, parse_desktop_route, remove_cli_command_link,
-        restart_daemon_after_certificate_refresh_step_with, shell_escape,
+        restart_daemon_after_certificate_refresh_step_with, service_env_root, shell_escape,
         validate_settings_snapshot,
     };
     use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
         CreateProjectDomainRequest, CreateProjectWithDomainsRequest, InitProjectRequest,
-        InitProjectServiceRequest, KeygenSettingsUpdateRequest, LogsRequest, RemoveProjectRequest,
-        RouteDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
-        SettingsTransferSnapshotDto,
+        InitProjectServiceRequest, KeygenSettingsUpdateRequest, LogsRequest, ProjectServiceInfoDto,
+        RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto, SettingsTransferDomainDto,
+        SettingsTransferProjectDto, SettingsTransferSnapshotDto,
     };
-    use crate::domain::RouteTarget;
-    use crate::infrastructure::config::{Config, ConfigStore};
+    use crate::domain::{DomainPattern, DomainRegistration, Route, RouteTarget};
+    use crate::infrastructure::config::{
+        Config, ConfigStore, ConfiguredProjectEnvironment, ProjectEnvironmentConfig,
+        ProjectEnvironmentServiceConfig,
+    };
+    use std::collections::HashMap;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::Path;
@@ -4408,6 +4704,97 @@ mod tests {
 
         assert_eq!(route.path().as_str(), "/");
         assert!(matches!(route.target(), RouteTarget::Proxy(_)));
+    }
+
+    #[test]
+    fn local_project_roots_fill_missing_environment_root_paths() {
+        let mut local_projects = HashMap::new();
+        local_projects.insert(
+            "project-1".to_string(),
+            "/Users/dev/Developer/acme".to_string(),
+        );
+
+        let environments = apply_local_project_root_paths_to_environments(
+            vec![
+                ConfiguredProjectEnvironment {
+                    project_id: "project-1".to_string(),
+                    project_name: "ACME".to_string(),
+                    name: "Primary".to_string(),
+                    slug: "primary".to_string(),
+                    primary: true,
+                    root_path: None,
+                    git_common_dir: None,
+                    git_branch: None,
+                    services: Vec::new(),
+                },
+                ConfiguredProjectEnvironment {
+                    project_id: "project-1".to_string(),
+                    project_name: "ACME".to_string(),
+                    name: "Worktree".to_string(),
+                    slug: "worktree".to_string(),
+                    primary: false,
+                    root_path: Some("/Users/dev/Developer/acme-worktree".to_string()),
+                    git_common_dir: None,
+                    git_branch: Some("feature".to_string()),
+                    services: Vec::new(),
+                },
+            ],
+            &local_projects,
+        );
+
+        assert_eq!(
+            environments[0].root_path.as_deref(),
+            Some("/Users/dev/Developer/acme")
+        );
+        assert_eq!(
+            environments[1].root_path.as_deref(),
+            Some("/Users/dev/Developer/acme-worktree")
+        );
+    }
+
+    #[test]
+    fn env_file_target_uses_first_existing_candidate() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::write(temp_dir.path().join(".env"), "ignored").unwrap();
+        fs::write(temp_dir.path().join(".env.development.local"), "selected").unwrap();
+
+        assert_eq!(
+            env_file_target(temp_dir.path()),
+            temp_dir.path().join(".env.development.local")
+        );
+    }
+
+    #[test]
+    fn env_file_target_falls_back_to_missing_env_local() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            env_file_target(temp_dir.path()),
+            temp_dir.path().join(".env.local")
+        );
+        assert!(!temp_dir.path().join(".env.local").exists());
+    }
+
+    #[test]
+    fn service_env_root_uses_existing_relative_service_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service_root = temp_dir.path().join("apps/web");
+        fs::create_dir_all(&service_root).unwrap();
+        let service = test_project_service(Some("apps/web"));
+
+        assert_eq!(service_env_root(temp_dir.path(), &service), service_root);
+    }
+
+    #[test]
+    fn service_env_root_falls_back_when_service_path_is_unreliable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join("repo");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let service = test_project_service(Some("../outside"));
+
+        assert_eq!(service_env_root(&root, &service), root);
     }
 
     #[test]
@@ -4863,6 +5250,79 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
     }
 
     #[test]
+    fn remove_project_environment_deletes_environment_domains() {
+        let (_temp_dir, api, store) = temp_api();
+
+        let project = api
+            .create_project_with_domains(CreateProjectWithDomainsRequest {
+                name: "Client App".into(),
+                domains: vec![CreateProjectDomainRequest {
+                    domain: "client.localify".into(),
+                    wildcard: false,
+                    routes: vec!["3000".into()],
+                }],
+            })
+            .unwrap();
+        let service = store
+            .list_services()
+            .unwrap()
+            .into_iter()
+            .find(|service| service.project_id == project.id)
+            .unwrap();
+        let environment_domain = "feat-auth.client.localify";
+        store
+            .add_domain_with_project(
+                DomainRegistration::new(
+                    DomainPattern::from_name(environment_domain, false).unwrap(),
+                    vec![Route::parse("/=3001").unwrap()],
+                ),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .upsert_project_environment(
+                &project.id,
+                ProjectEnvironmentConfig {
+                    name: "feat/auth".into(),
+                    slug: "feat-auth".into(),
+                    primary: false,
+                    root_path: Some("/tmp/client-app-feat-auth".into()),
+                    git_common_dir: Some("/tmp/client-app/.git".into()),
+                    git_branch: Some("feat/auth".into()),
+                    services: vec![ProjectEnvironmentServiceConfig {
+                        service_id: service.id,
+                        domain: environment_domain.into(),
+                    }],
+                },
+            )
+            .unwrap();
+
+        let result = api
+            .remove_project_environment(RemoveProjectEnvironmentRequest {
+                project_id: project.id.clone(),
+                environment_slug: "feat-auth".into(),
+            })
+            .unwrap();
+        let domains = store
+            .list_configured_domains()
+            .unwrap()
+            .into_iter()
+            .map(|domain| domain.registration.display_pattern())
+            .collect::<Vec<_>>();
+        let environments = store.list_project_environments(Some(&project.id)).unwrap();
+
+        assert_eq!(result.environment.slug, "feat-auth");
+        assert_eq!(result.removed_domains, vec![environment_domain]);
+        assert!(!result.daemon_reloaded);
+        assert_eq!(domains, vec!["client.localify"]);
+        assert!(
+            environments
+                .iter()
+                .all(|environment| environment.slug != "feat-auth")
+        );
+    }
+
+    #[test]
     fn list_domains_and_projects_mark_reachable_targets_as_active() {
         let (_temp_dir, api, _store) = temp_api();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -4992,5 +5452,22 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
         let api = DesktopApi::new_direct(config_path, temp_dir.path().join("roxy"));
 
         (temp_dir, api, store)
+    }
+
+    fn test_project_service(path: Option<&str>) -> ProjectServiceInfoDto {
+        ProjectServiceInfoDto {
+            id: "web".into(),
+            name: "web".into(),
+            project_id: "project-1".into(),
+            project_name: "Client App".into(),
+            project_enabled: true,
+            primary_domain: "client.localify".into(),
+            url: "https://client.localify".into(),
+            domains: Vec::new(),
+            path: path.map(Into::into),
+            command: None,
+            target: None,
+            inferred: false,
+        }
     }
 }

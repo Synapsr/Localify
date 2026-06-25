@@ -2155,7 +2155,10 @@ fn reserve_auto_targets(count: usize) -> Result<Vec<String>> {
 
 fn normalize_domain(value: String) -> String {
     let trimmed = value.trim();
-    if trimmed.ends_with(BRANDING.domain_suffix()) {
+    if trimmed.ends_with(BRANDING.domain_suffix())
+        || trimmed.ends_with(BRANDING.domain_suffix)
+        || trimmed.ends_with(BRANDING.dev_domain_suffix)
+    {
         return trimmed.to_string();
     }
 
@@ -2318,6 +2321,11 @@ mod tests {
         assert_eq!(
             normalize_domain(format!("demo{}", BRANDING.domain_suffix())),
             format!("demo{}", BRANDING.domain_suffix())
+        );
+        assert_eq!(normalize_domain("demo.localify".into()), "demo.localify");
+        assert_eq!(
+            normalize_domain("demo.localify.test".into()),
+            "demo.localify.test"
         );
     }
 

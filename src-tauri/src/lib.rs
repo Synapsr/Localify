@@ -1,4 +1,5 @@
 mod commands;
+mod terminal;
 
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
@@ -11,10 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use commands::{AppState, DeepLinkPayloadDto, DeepLinkRouteDto};
 use roxy::branding::BRANDING;
 use roxy::desktop::DesktopApi;
-use roxy::desktop::dto::{
-    DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, RunLocalDevServerRequest,
-    StartDaemonRequest, StopLocalDevServerRequest,
-};
+use roxy::desktop::dto::{DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -26,6 +24,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
 #[cfg(target_os = "macos")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use terminal::TerminalManager;
 
 #[cfg(desktop)]
 const AUTOSTART_ARG: &str = "--autostart";
@@ -35,8 +34,6 @@ const TRAY_START: &str = "tray-start";
 const TRAY_STOP: &str = "tray-stop";
 const TRAY_RESTART: &str = "tray-restart";
 const TRAY_QUIT: &str = "tray-quit";
-const TRAY_DOMAIN_START_PREFIX: &str = "tray-domain-start:";
-const TRAY_DOMAIN_STOP_PREFIX: &str = "tray-domain-stop:";
 const TRAY_DOMAIN_COPY_PREFIX: &str = "tray-domain-copy:";
 const TRAY_DOMAIN_OPEN_PREFIX: &str = "tray-domain-open:";
 const TRAY_PROJECT_LIMIT: usize = 10;
@@ -216,16 +213,9 @@ pub(crate) fn disable_autostart<R: Runtime>(_app: &AppHandle<R>) -> Result<(), S
 enum DeepLinkAction {
     Projects,
     SettingsLicensing,
-    Logs {
-        domain: String,
-    },
-    InEditor {
-        domain: String,
-    },
-    RunLocalDevServer {
-        domain: String,
-        target: Option<String>,
-    },
+    Logs { domain: String },
+    InEditor { domain: String },
+    RunLocalDevServer { domain: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -238,7 +228,6 @@ enum DeepLinkDelivery {
 struct ResolvedDomainProject {
     project_id: Option<String>,
     root_path: Option<String>,
-    target: Option<String>,
 }
 
 fn handle_startup_deep_links<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -296,7 +285,6 @@ fn parse_deep_link_action(url: &tauri::Url) -> Result<DeepLinkAction, String> {
         }),
         ("action", "/run-local-dev-server") => Ok(DeepLinkAction::RunLocalDevServer {
             domain: query_param(url, "domain")?,
-            target: optional_query_param(url, "target"),
         }),
         _ => Err(format!(
             "Unsupported deep-link target '{}{}'.",
@@ -311,12 +299,6 @@ fn query_param(url: &tauri::Url, key: &str) -> Result<String, String> {
         .find_map(|(candidate, value)| (candidate == key).then_some(value.into_owned()))
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("Deep link is missing query parameter '{}'.", key))
-}
-
-fn optional_query_param(url: &tauri::Url, key: &str) -> Option<String> {
-    url.query_pairs()
-        .find_map(|(candidate, value)| (candidate == key).then_some(value.into_owned()))
-        .filter(|value| !value.trim().is_empty())
 }
 
 fn execute_deep_link_action<R: Runtime>(
@@ -399,7 +381,7 @@ fn execute_deep_link_action<R: Runtime>(
                 .open_in_editor(OpenInEditorRequest { path: root_path })
                 .map_err(|error| error.to_string())
         }
-        DeepLinkAction::RunLocalDevServer { domain, target } => {
+        DeepLinkAction::RunLocalDevServer { domain } => {
             let resolved = resolve_domain_project(&state.api, &domain)?;
             let payload = resolved
                 .as_ref()
@@ -417,31 +399,14 @@ fn execute_deep_link_action<R: Runtime>(
 
             deliver_deep_link_payload(app, payload, delivery)?;
 
-            let Some(resolved) = resolved else {
+            if resolved.is_none() {
                 return Err(format!(
                     "No Localify project is linked to domain '{}'.",
                     normalize_domain(&domain)
                 ));
-            };
+            }
 
-            let Some(root_path) = resolved.root_path else {
-                return Err(format!(
-                    "No local project folder is linked to domain '{}'.",
-                    normalize_domain(&domain)
-                ));
-            };
-
-            let Some(target) = target.or(resolved.target) else {
-                return Err(format!(
-                    "Localify could not find a proxy target to launch for '{}'.",
-                    normalize_domain(&domain)
-                ));
-            };
-
-            state
-                .api
-                .run_local_dev_server(RunLocalDevServerRequest { root_path, target })
-                .map_err(|error| error.to_string())
+            Ok(())
         }
     }
 }
@@ -487,24 +452,9 @@ fn resolve_domain_project(
     let root_path = project_id
         .as_deref()
         .and_then(|project_id| project_root_path(&bootstrap.projects, project_id));
-    let target = matched_domain
-        .registration
-        .routes
-        .iter()
-        .find(|route| route.path == "/" && route.target_kind == "proxy")
-        .or_else(|| {
-            matched_domain
-                .registration
-                .routes
-                .iter()
-                .find(|route| route.target_kind == "proxy")
-        })
-        .map(|route| route.target.clone());
-
     Ok(Some(ResolvedDomainProject {
         project_id,
         root_path,
-        target,
     }))
 }
 
@@ -625,7 +575,7 @@ fn build_tray_project_menu<R: Runtime>(
     }
 
     for domain in domains {
-        let domain_menu = build_tray_domain_menu(app, domain, project.root_path.as_deref())?;
+        let domain_menu = build_tray_domain_menu(app, domain)?;
         project_menu.append(&domain_menu)?;
     }
 
@@ -635,29 +585,9 @@ fn build_tray_project_menu<R: Runtime>(
 fn build_tray_domain_menu<R: Runtime>(
     app: &AppHandle<R>,
     domain: &DomainInfoDto,
-    root_path: Option<&str>,
 ) -> tauri::Result<Submenu<R>> {
     let domain_name = &domain.registration.domain;
-    let launch_target = primary_launch_target(domain);
-    let can_toggle = launch_target.is_some() && (domain.target_reachable || root_path.is_some());
-    let toggle_id = if domain.target_reachable {
-        format!("{TRAY_DOMAIN_STOP_PREFIX}{domain_name}")
-    } else {
-        format!("{TRAY_DOMAIN_START_PREFIX}{domain_name}")
-    };
-    let toggle_label = if domain.target_reachable {
-        "Stop"
-    } else {
-        "Start"
-    };
     let domain_menu = Submenu::new(app, domain_name, domain.project_enabled)?;
-    domain_menu.append(&MenuItem::with_id(
-        app,
-        toggle_id,
-        toggle_label,
-        can_toggle,
-        None::<&str>,
-    )?)?;
     domain_menu.append(&MenuItem::with_id(
         app,
         format!("{TRAY_DOMAIN_COPY_PREFIX}{domain_name}"),
@@ -714,14 +644,6 @@ pub(crate) fn sync_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()
 }
 
 fn run_tray_action<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
-    if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_START_PREFIX) {
-        return start_tray_domain(app, domain);
-    }
-
-    if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_STOP_PREFIX) {
-        return stop_tray_domain(app, domain);
-    }
-
     if let Some(domain) = id.strip_prefix(TRAY_DOMAIN_COPY_PREFIX) {
         return copy_tray_domain_url(app, domain);
     }
@@ -837,63 +759,6 @@ fn start_daemon_after_login<R: Runtime + 'static>(app: &AppHandle<R>) {
     });
 }
 
-fn start_tray_domain<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let domain = find_tray_domain(&state.api, domain)?
-        .ok_or_else(|| format!("No Localify domain named '{domain}' was found."))?;
-    let project_id = domain.project_id.as_deref().ok_or_else(|| {
-        format!(
-            "No Localify project is linked to '{}'.",
-            domain.registration.domain
-        )
-    })?;
-    let root_path = project_root_path(
-        &state
-            .api
-            .list_projects()
-            .map_err(|error| error.to_string())?,
-        project_id,
-    )
-    .ok_or_else(|| {
-        format!(
-            "No local project folder is linked to '{}'.",
-            domain.registration.domain
-        )
-    })?;
-    let target = primary_launch_target(&domain).ok_or_else(|| {
-        format!(
-            "Localify could not find a proxy target to launch for '{}'.",
-            domain.registration.domain
-        )
-    })?;
-
-    let result = state
-        .api
-        .run_local_dev_server(RunLocalDevServerRequest { root_path, target })
-        .map_err(|error| error.to_string());
-    sync_tray_menu(app).map_err(|error| error.to_string())?;
-    result
-}
-
-fn stop_tray_domain<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let domain = find_tray_domain(&state.api, domain)?
-        .ok_or_else(|| format!("No Localify domain named '{domain}' was found."))?;
-    let target = primary_launch_target(&domain).ok_or_else(|| {
-        format!(
-            "Localify could not find a proxy target to stop for '{}'.",
-            domain.registration.domain
-        )
-    })?;
-
-    let result = state
-        .api
-        .stop_local_dev_server(StopLocalDevServerRequest { target })
-        .map_err(|error| error.to_string());
-    sync_tray_menu(app).map_err(|error| error.to_string())?;
-    result
-}
-
 fn copy_tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
     let url = tray_domain_url(app, domain)?;
     copy_text_to_clipboard(&url)
@@ -956,16 +821,6 @@ fn port_segment(scheme: &str, port: u16) -> String {
     } else {
         format!(":{port}")
     }
-}
-
-fn primary_launch_target(domain: &DomainInfoDto) -> Option<String> {
-    let route = domain
-        .registration
-        .routes
-        .iter()
-        .find(|route| route.path == "/")
-        .or_else(|| domain.registration.routes.first())?;
-    Some(route.target.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -1273,6 +1128,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::with_api(api))
+        .manage(TerminalManager::new())
         .manage(TrayState::default());
 
     #[cfg(target_os = "macos")]
@@ -1360,6 +1216,7 @@ pub fn run() {
             commands::init_project_from_folder,
             commands::update_project,
             commands::remove_project,
+            commands::remove_project_environment,
             commands::assign_domain_project,
             commands::register_domain,
             commands::update_domain,
@@ -1373,10 +1230,18 @@ pub fn run() {
             commands::reload_daemon,
             commands::read_logs,
             commands::open_in_editor,
+            commands::open_env_in_editor,
             commands::open_project_url,
             commands::run_local_dev_server,
             commands::stop_local_dev_server,
             commands::update_launcher_preferences,
+            commands::terminal_list_sessions,
+            commands::terminal_create_session,
+            commands::terminal_launch_service,
+            commands::terminal_write,
+            commands::terminal_resize,
+            commands::terminal_interrupt,
+            commands::terminal_close,
             commands::consume_pending_deep_link
         ])
         .run(tauri::generate_context!())

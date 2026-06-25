@@ -33,6 +33,7 @@ import type {
   LogsDto,
   LogsRequest,
   NodeTrustDto,
+  OpenEnvInEditorRequest,
   OpenInEditorRequest,
   OpenProjectUrlRequest,
   PortConflictDto,
@@ -42,6 +43,8 @@ import type {
   RegistrationDto,
   RegistrationMutationDto,
   RemoveProjectRequest,
+  RemoveProjectEnvironmentRequest,
+  RemoveProjectEnvironmentResultDto,
   RemoveProjectResultDto,
   RemoveRouteRequest,
   RunLocalDevServerRequest,
@@ -55,6 +58,13 @@ import type {
   StartDaemonRequest,
   UninstallPreviewDto,
   UninstallResultDto,
+  TerminalCreateSessionRequest,
+  TerminalLaunchServiceRequest,
+  TerminalLaunchServiceResultDto,
+  TerminalResizeRequest,
+  TerminalSessionDto,
+  TerminalSessionRequest,
+  TerminalWriteRequest,
   UpdateAutostartRequest,
   UnregisterDomainResultDto,
   UpdateDomainRequest,
@@ -78,9 +88,11 @@ import {
   importOfflineLicenseRequestSchema,
   keygenSettingsUpdateRequestSchema,
 } from "./validators/validator.license";
+import { openEnvInEditorRequestSchema } from "./validators/validator.open-env-in-editor";
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { openProjectUrlRequestSchema } from "./validators/validator.open-project-url";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
+import { removeProjectEnvironmentRequestSchema } from "./validators/validator.remove-project-environment";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
 import {
@@ -89,6 +101,13 @@ import {
   settingsImportRequestSchema,
 } from "./validators/validator.settings-transfer";
 import { stopLocalDevServerRequestSchema } from "./validators/validator.stop-local-dev-server";
+import {
+  terminalCreateSessionRequestSchema,
+  terminalLaunchServiceRequestSchema,
+  terminalResizeRequestSchema,
+  terminalSessionRequestSchema,
+  terminalWriteRequestSchema,
+} from "./validators/validator.terminal";
 
 async function tauriInvoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   try {
@@ -170,6 +189,9 @@ export interface DesktopClient {
   ): Promise<InitProjectFromFolderResultDto>;
   updateProject(request: UpdateProjectRequest): Promise<ProjectInfoDto>;
   removeProject(request: RemoveProjectRequest): Promise<RemoveProjectResultDto>;
+  removeProjectEnvironment(
+    request: RemoveProjectEnvironmentRequest,
+  ): Promise<RemoveProjectEnvironmentResultDto>;
   assignDomainProject(request: AssignDomainProjectRequest): Promise<DomainInfoDto>;
   registerDomain(request: RegisterDomainRequest): Promise<RegisterDomainResultDto>;
   updateDomain(request: UpdateDomainRequest): Promise<RegisterDomainResultDto>;
@@ -183,12 +205,22 @@ export interface DesktopClient {
   reloadDaemon(request: StartDaemonRequest): Promise<DaemonLaunchDto>;
   readLogs(request: LogsRequest): Promise<LogsDto>;
   openInEditor(request: OpenInEditorRequest): Promise<void>;
+  openEnvInEditor(request: OpenEnvInEditorRequest): Promise<void>;
   openProjectUrl(request: OpenProjectUrlRequest): Promise<void>;
   runLocalDevServer(request: RunLocalDevServerRequest): Promise<void>;
   stopLocalDevServer(request: StopLocalDevServerRequest): Promise<void>;
   updateLauncherPreferences(
     request: UpdateLauncherPreferencesRequest,
   ): Promise<LauncherPreferencesDto>;
+  terminalListSessions(): Promise<TerminalSessionDto[]>;
+  terminalCreateSession(request: TerminalCreateSessionRequest): Promise<TerminalSessionDto>;
+  terminalLaunchService(
+    request: TerminalLaunchServiceRequest,
+  ): Promise<TerminalLaunchServiceResultDto>;
+  terminalWrite(request: TerminalWriteRequest): Promise<void>;
+  terminalResize(request: TerminalResizeRequest): Promise<void>;
+  terminalInterrupt(request: TerminalSessionRequest): Promise<void>;
+  terminalClose(request: TerminalSessionRequest): Promise<void>;
 }
 
 export function createDesktopClient(): DesktopClient {
@@ -267,6 +299,10 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("remove_project", {
         request: removeProjectRequestSchema.parse(request),
       }),
+    removeProjectEnvironment: (request) =>
+      tauriInvoke("remove_project_environment", {
+        request: removeProjectEnvironmentRequestSchema.parse(request),
+      }),
     assignDomainProject: (request) => tauriInvoke("assign_domain_project", { request }),
     registerDomain: (request) =>
       tauriInvoke("register_domain", {
@@ -289,6 +325,10 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("open_in_editor", {
         request: openInEditorRequestSchema.parse(request),
       }),
+    openEnvInEditor: (request) =>
+      tauriInvoke("open_env_in_editor", {
+        request: openEnvInEditorRequestSchema.parse(request),
+      }),
     openProjectUrl: (request) =>
       tauriInvoke("open_project_url", {
         request: openProjectUrlRequestSchema.parse(request),
@@ -304,6 +344,31 @@ export function createDesktopClient(): DesktopClient {
     updateLauncherPreferences: (request) =>
       tauriInvoke("update_launcher_preferences", {
         request: launcherPreferencesSchema.parse(request),
+      }),
+    terminalListSessions: () => tauriInvoke("terminal_list_sessions"),
+    terminalCreateSession: (request) =>
+      tauriInvoke("terminal_create_session", {
+        request: terminalCreateSessionRequestSchema.parse(request),
+      }),
+    terminalLaunchService: (request) =>
+      tauriInvoke("terminal_launch_service", {
+        request: terminalLaunchServiceRequestSchema.parse(request),
+      }),
+    terminalWrite: (request) =>
+      tauriInvoke("terminal_write", {
+        request: terminalWriteRequestSchema.parse(request),
+      }),
+    terminalResize: (request) =>
+      tauriInvoke("terminal_resize", {
+        request: terminalResizeRequestSchema.parse(request),
+      }),
+    terminalInterrupt: (request) =>
+      tauriInvoke("terminal_interrupt", {
+        request: terminalSessionRequestSchema.parse(request),
+      }),
+    terminalClose: (request) =>
+      tauriInvoke("terminal_close", {
+        request: terminalSessionRequestSchema.parse(request),
       }),
   };
 }

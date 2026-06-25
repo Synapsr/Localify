@@ -4,16 +4,18 @@ import { RiDraggable, RiMoreLine } from "@remixicon/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Reorder, useDragControls } from "motion/react";
-import { useState, type PointerEvent } from "react";
+import { useState, type MouseEvent, type PointerEvent } from "react";
+import { toast } from "sonner";
 
 import type {
   DomainInfoDto,
   ProjectEnvironmentInfoDto,
   ProjectInfoDto,
   ProjectServiceInfoDto,
+  TerminalTargetRequest,
 } from "@/types/roxy";
 
-import { PinIcon, PinSolidIcon } from "@/components/icons";
+import { PinIcon, PinSolidIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,9 +35,10 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { projectMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { terminalTargetRequestMatches, useTerminal } from "@/providers/terminal-provider";
 
-import { ProjectDomainList } from "./projects-list-item-domains";
 import { ProjectsListItemDevDx } from "./projects-list-item-dev-dx";
+import { ProjectDomainList } from "./projects-list-item-domains";
 
 interface ProjectsListItemProps {
   project: ProjectInfoDto;
@@ -58,6 +61,7 @@ export const ProjectsListItem = ({
 }: ProjectsListItemProps) => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { openTerminal, selectedTarget, setSelectedTarget } = useTerminal();
   const dragControls = useDragControls();
   const updateProject = useMutation(projectMutations.update(queryClient));
   const removeProject = useMutation(projectMutations.remove(queryClient));
@@ -68,20 +72,44 @@ export const ProjectsListItem = ({
   const environmentDomainPatterns = new Set(
     environments
       .filter((environment) => !environment.primary)
-      .flatMap((environment) =>
-        environment.services.map((service) => service.domain),
-      ),
+      .flatMap((environment) => environment.services.map((service) => service.domain)),
   );
   const primaryDomains = domains.filter(
     (domain) => !environmentDomainPatterns.has(domain.registration.pattern),
   );
+  const primaryEnvironment =
+    environments.find((environment) => environment.primary) ?? environments[0] ?? null;
+  const projectTerminalTarget = project.rootPath && primaryEnvironment
+    ? ({
+        kind: "project",
+        projectId: project.id,
+        environmentSlug: primaryEnvironment.slug,
+      } satisfies TerminalTargetRequest)
+    : null;
+  const selected = terminalTargetRequestMatches(selectedTarget, projectTerminalTarget);
 
   const containerClassName = cn(
     "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
     "hover:border-border",
+    selected && "border-foreground/20 bg-muted/60 ring-1 ring-foreground/10",
     isPinned && "bg-primary/[0.04] dark:bg-primary/[0.08]",
     !project.enabled && "opacity-60",
   );
+
+  const selectProjectTerminalTarget = () => {
+    if (projectTerminalTarget) {
+      setSelectedTarget(projectTerminalTarget);
+    }
+  };
+
+  const handleCardClick = (event: MouseEvent<HTMLElement>) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest("a,button,input,select,textarea,[role='button'],[role='menuitem']")) {
+      return;
+    }
+
+    selectProjectTerminalTarget();
+  };
 
   const handleHandlePointerDown = (event: PointerEvent) => {
     if (!reorderEnabled) {
@@ -131,6 +159,22 @@ export const ProjectsListItem = ({
     }
   };
 
+  const handleOpenTerminal = async () => {
+    if (!projectTerminalTarget) {
+      return;
+    }
+
+    setSelectedTarget(projectTerminalTarget);
+
+    try {
+      await openTerminal(projectTerminalTarget);
+    } catch (error) {
+      toast.error("Open terminal failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   const body = (
     <>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -146,6 +190,8 @@ export const ProjectsListItem = ({
         <ProjectDomainList
           project={project}
           domains={primaryDomains}
+          environments={environments}
+          services={services}
           totalDomainCount={domains.length}
         />
         <ProjectsListItemDevDx
@@ -154,9 +200,7 @@ export const ProjectsListItem = ({
           environments={environments}
           projectRootPath={project.rootPath}
         />
-        {editorError ? (
-          <p className="text-xs text-destructive">{editorError}</p>
-        ) : null}
+        {editorError ? <p className="text-xs text-destructive">{editorError}</p> : null}
       </div>
 
       <DropdownMenu>
@@ -175,28 +219,24 @@ export const ProjectsListItem = ({
               disabled={removeProject.isPending}
               className="text-nowrap"
             >
-              {isPinned ? (
-                <PinSolidIcon className="size-4" />
-              ) : (
-                <PinIcon className="size-4" />
-              )}
+              {isPinned ? <PinSolidIcon className="size-4" /> : <PinIcon className="size-4" />}
               {isPinned ? "Unpin project" : "Pin project"}
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
             onClick={() => void handleOpenInEditor()}
-            disabled={
-              !project.rootPath ||
-              openInEditor.isPending ||
-              removeProject.isPending
-            }
+            disabled={!project.rootPath || openInEditor.isPending || removeProject.isPending}
           >
             Open in editor
           </DropdownMenuItem>
           <DropdownMenuItem
-            onClick={handleViewLogs}
-            disabled={removeProject.isPending}
+            onClick={() => void handleOpenTerminal()}
+            disabled={!projectTerminalTarget || removeProject.isPending}
           >
+            <TerminalIcon className="size-4" />
+            Open terminal
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={handleViewLogs} disabled={removeProject.isPending}>
             View logs
           </DropdownMenuItem>
           <DropdownMenuItem
@@ -228,6 +268,7 @@ export const ProjectsListItem = ({
           dragListener={false}
           dragControls={dragControls}
           className={containerClassName}
+          onClick={handleCardClick}
         >
           <Button
             aria-label="Drag to reorder"
@@ -241,7 +282,7 @@ export const ProjectsListItem = ({
           {body}
         </Reorder.Item>
       ) : (
-        <div className={containerClassName}>
+        <div className={containerClassName} onClick={handleCardClick}>
           <div className="size-9 shrink-0" />
           {body}
         </div>
@@ -260,8 +301,7 @@ export const ProjectsListItem = ({
           <DialogHeader>
             <DialogTitle>Delete {project.name}?</DialogTitle>
             <DialogDescription>
-              This permanently removes the project and unregisters every
-              attached domain.
+              This permanently removes the project and unregisters every attached domain.
             </DialogDescription>
           </DialogHeader>
 
@@ -288,9 +328,7 @@ export const ProjectsListItem = ({
               ) : null}
             </div>
 
-            {deleteError ? (
-              <p className="text-sm text-destructive">{deleteError}</p>
-            ) : null}
+            {deleteError ? <p className="text-sm text-destructive">{deleteError}</p> : null}
           </DialogBody>
 
           <DialogFooter>

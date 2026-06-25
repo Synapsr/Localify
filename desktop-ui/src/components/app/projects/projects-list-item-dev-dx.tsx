@@ -7,12 +7,15 @@ import type {
   DomainInfoDto,
   ProjectEnvironmentInfoDto,
   ProjectServiceInfoDto,
+  TerminalTargetRequest,
 } from "@/types/roxy";
 
 import { ChevronDownIcon } from "@/components/icons";
 import { cn } from "@/lib/utils";
+import { terminalTargetRequestMatches, useTerminal } from "@/providers/terminal-provider";
 
 import { ProjectDomainChip } from "./projects-list-item-domain-chip";
+import { ProjectsListItemEnvironmentActions } from "./projects-list-item-environment-actions";
 
 interface ProjectsListItemDevDxProps {
   domains: DomainInfoDto[];
@@ -32,15 +35,10 @@ export const ProjectsListItemDevDx = ({
   environments,
   projectRootPath,
 }: ProjectsListItemDevDxProps) => {
-  const [openEnvironmentSlugs, setOpenEnvironmentSlugs] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const visibleEnvironments = environments.filter(
-    (environment) => !environment.primary,
-  );
-  const domainByPattern = new Map(
-    domains.map((domain) => [domain.registration.pattern, domain]),
-  );
+  const { selectedTarget, setSelectedTarget } = useTerminal();
+  const [openEnvironmentSlugs, setOpenEnvironmentSlugs] = useState<Set<string>>(() => new Set());
+  const visibleEnvironments = environments.filter((environment) => !environment.primary);
+  const domainByPattern = new Map(domains.map((domain) => [domain.registration.pattern, domain]));
   const serviceById = new Map(services.map((service) => [service.id, service]));
 
   if (visibleEnvironments.length === 0) {
@@ -69,56 +67,69 @@ export const ProjectsListItemDevDx = ({
           const domain = domainByPattern.get(service.domain);
           return domain?.targetReachable;
         }).length;
-        const allReachable =
-          serviceCount > 0 && reachableCount === serviceCount;
+        const allReachable = serviceCount > 0 && reachableCount === serviceCount;
         const someReachable = reachableCount > 0;
         const worktree = isWorktreeEnvironment(environment, projectRootPath);
         const branchLabel = visibleBranchLabel(environment);
         const showServiceLabels = serviceCount > 1;
+        const target = environmentTarget(environment);
+        const selected = terminalTargetRequestMatches(selectedTarget, target);
 
         return (
           <div key={environment.slug}>
-            <button
-              type="button"
-              className="group/env flex w-full items-center gap-2 rounded-md py-1 text-left outline-none transition-transform duration-150 active:translate-y-px focus-visible:ring-2 focus-visible:ring-ring/50"
-              aria-expanded={open}
-              aria-controls={routesId}
-              onClick={() => toggleEnvironment(environment.slug)}
+            <div
+              className={cn(
+                "group/env flex w-full items-center gap-1 rounded-md py-1",
+                selected && "bg-muted/60",
+              )}
             >
-              <ChevronDownIcon
-                className={cn(
-                  "size-3.5 shrink-0 text-muted-foreground/60 transition-[transform,color] duration-200 ease-out group-hover/env:text-foreground",
-                  !open && "-rotate-90",
-                )}
-              />
-              <span
-                className={cn(
-                  "size-1.5 shrink-0 rounded-full transition-colors",
-                  allReachable
-                    ? "bg-success"
-                    : someReachable
-                      ? "bg-amber-500"
-                      : "bg-neutral-400",
-                )}
-                aria-hidden
-              />
-              {worktree ? (
-                <span className="shrink-0 rounded-full border border-border/60 bg-muted/60 px-1.5 py-px text-[10px] font-medium text-muted-foreground">
-                  worktree
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left transition-transform duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px"
+                aria-expanded={open}
+                aria-controls={routesId}
+                onClick={() => {
+                  if (target) {
+                    setSelectedTarget(target);
+                  }
+                  toggleEnvironment(environment.slug);
+                }}
+              >
+                <ChevronDownIcon
+                  className={cn(
+                    "size-3.5 shrink-0 text-muted-foreground/60 transition-[transform,color] duration-200 ease-out group-hover/env:text-foreground",
+                    !open && "-rotate-90",
+                  )}
+                />
+                <span
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full transition-colors",
+                    allReachable ? "bg-success" : someReachable ? "bg-amber-500" : "bg-neutral-400",
+                  )}
+                  aria-hidden
+                />
+                {worktree ? (
+                  <span className="shrink-0 rounded-full border border-border/60 bg-muted/60 px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+                    worktree
+                  </span>
+                ) : null}
+                <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                  {environment.slug}
                 </span>
-              ) : null}
-              <span className="min-w-0 truncate text-sm font-medium text-foreground">
-                {environment.slug}
-              </span>
-              {branchLabel ? (
-                <span className="hidden min-w-0 truncate text-xs text-muted-foreground sm:inline">
-                  {branchLabel}
+                {branchLabel ? (
+                  <span className="hidden min-w-0 truncate text-xs text-muted-foreground sm:inline">
+                    {branchLabel}
+                  </span>
+                ) : null}
+                <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+                  {reachableCount}/{serviceCount}
                 </span>
-              ) : null}
-              <span className="ml-auto shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
-                {reachableCount}/{serviceCount}
-              </span>
-            </button>
+              </button>
+              <ProjectsListItemEnvironmentActions
+                environment={environment}
+                terminalTarget={target}
+              />
+            </div>
 
             <AnimatePresence initial={false}>
               {open ? (
@@ -135,12 +146,9 @@ export const ProjectsListItemDevDx = ({
                     {environment.services.map((service, index) => {
                       const domain = domainByPattern.get(service.domain);
                       const serviceLabel =
-                        serviceById.get(service.serviceId)?.name ??
-                        service.serviceId;
+                        serviceById.get(service.serviceId)?.name ?? service.serviceId;
                       const extraRoutes =
-                        domain?.registration.routes.filter(
-                          (route) => route.path !== "/",
-                        ) ?? [];
+                        domain?.registration.routes.filter((route) => route.path !== "/") ?? [];
 
                       return (
                         <motion.div
@@ -158,7 +166,7 @@ export const ProjectsListItemDevDx = ({
                           className="relative flex min-w-0 flex-col gap-1 pl-3"
                         >
                           <span
-                            className="absolute left-0 top-4 h-px w-2.5 -translate-y-1/2 bg-border/60"
+                            className="absolute top-4 left-0 h-px w-2.5 -translate-y-1/2 bg-border/60"
                             aria-hidden
                           />
                           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -170,7 +178,17 @@ export const ProjectsListItemDevDx = ({
                             {domain ? (
                               <ProjectDomainChip
                                 domain={domain}
-                                projectRootPath={projectRootPath}
+                                service={serviceById.get(service.serviceId) ?? null}
+                                terminalTarget={
+                                  environment.rootPath
+                                    ? {
+                                        kind: "service",
+                                        projectId: environment.projectId,
+                                        environmentSlug: environment.slug,
+                                        serviceId: service.serviceId,
+                                      }
+                                    : null
+                                }
                               />
                             ) : (
                               <span className="min-w-0 truncate font-mono text-xs">
@@ -186,12 +204,8 @@ export const ProjectsListItemDevDx = ({
                                   className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-1"
                                   title={`${route.path} -> ${route.target}`}
                                 >
-                                  <span className="text-muted-foreground/70">
-                                    {route.path}
-                                  </span>
-                                  <span className="min-w-0 truncate">
-                                    -&gt; {route.target}
-                                  </span>
+                                  <span className="text-muted-foreground/70">{route.path}</span>
+                                  <span className="min-w-0 truncate">-&gt; {route.target}</span>
                                 </span>
                               ))}
                             </div>
@@ -212,6 +226,20 @@ export const ProjectsListItemDevDx = ({
 
 const normalizePath = (path: string | null) => {
   return path?.replace(/\/+$/, "") ?? null;
+};
+
+const environmentTarget = (
+  environment: ProjectEnvironmentInfoDto,
+): TerminalTargetRequest | null => {
+  if (!environment.rootPath) {
+    return null;
+  }
+
+  return {
+    kind: "projectEnvironment",
+    projectId: environment.projectId,
+    environmentSlug: environment.slug,
+  };
 };
 
 const isWorktreeEnvironment = (
@@ -248,7 +276,5 @@ const visibleBranchLabel = (environment: ProjectEnvironmentInfoDto) => {
     return null;
   }
 
-  return normalizeLabel(branch) === normalizeLabel(environment.slug)
-    ? null
-    : branch;
+  return normalizeLabel(branch) === normalizeLabel(environment.slug) ? null : branch;
 };

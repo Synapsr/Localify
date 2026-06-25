@@ -141,6 +141,37 @@ pub fn open_in_editor_with_preference(path: &Path, preference: EditorPreference)
         bail!("Project folder '{}' does not exist.", path.display());
     }
 
+    open_editor_target(path, preference)
+}
+
+/// Opens a file target without requiring the file to exist yet.
+///
+/// The parent directory must exist so Localify never creates or writes the
+/// target file before handing it to the configured editor.
+#[allow(dead_code)]
+pub fn open_file_in_editor(path: &Path) -> Result<()> {
+    if path.exists() && path.is_dir() {
+        bail!("Editor target '{}' is a directory.", path.display());
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        anyhow!(
+            "Editor target '{}' must include a parent directory.",
+            path.display()
+        )
+    })?;
+
+    if !parent.is_dir() {
+        bail!(
+            "Editor target folder '{}' does not exist.",
+            parent.display()
+        );
+    }
+
+    open_editor_target(path, EditorPreference::Auto)
+}
+
+fn open_editor_target(path: &Path, preference: EditorPreference) -> Result<()> {
     let launch = detect_editor(preference).ok_or_else(|| {
         anyhow!(
             "Install a supported editor like Cursor, VS Code, Windsurf, Zed, Nova, or Sublime Text to open this project from Localify."

@@ -4,10 +4,17 @@ import { RiAddLine } from "@remixicon/react";
 import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
 
+import type {
+  DomainInfoDto,
+  ProjectEnvironmentInfoDto,
+  ProjectInfoDto,
+  ProjectServiceInfoDto,
+  TerminalTargetRequest,
+} from "@/types/roxy";
+
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { bootstrapQueries } from "@/lib/queries";
-import type { DomainInfoDto, ProjectInfoDto } from "@/types/roxy";
 
 import { ProjectAddDomainDialog } from "./projects-list-item-add-domain-dialog";
 import { ProjectDomainChip } from "./projects-list-item-domain-chip";
@@ -15,6 +22,8 @@ import { ProjectDomainChip } from "./projects-list-item-domain-chip";
 interface ProjectDomainListProps {
   project: ProjectInfoDto;
   domains: DomainInfoDto[];
+  environments: ProjectEnvironmentInfoDto[];
+  services: ProjectServiceInfoDto[];
   totalDomainCount?: number;
 }
 
@@ -29,12 +38,13 @@ const chipVariants = {
 export const ProjectDomainList = ({
   project,
   domains,
+  environments,
+  services,
   totalDomainCount = domains.length,
 }: ProjectDomainListProps) => {
   const { data } = useQuery(bootstrapQueries.read());
   const maxDomainsPerProject = data?.licensing.limits.maxDomainsPerProject ?? null;
-  const addDisabled =
-    maxDomainsPerProject !== null && totalDomainCount >= maxDomainsPerProject;
+  const addDisabled = maxDomainsPerProject !== null && totalDomainCount >= maxDomainsPerProject;
 
   return (
     <motion.div layout className="flex flex-wrap items-center gap-1.5">
@@ -64,7 +74,15 @@ export const ProjectDomainList = ({
               transition={chipTransition}
               className="inline-flex"
             >
-              <ProjectDomainChip domain={domain} projectRootPath={project.rootPath} />
+              <ProjectDomainChip
+                domain={domain}
+                service={findServiceForDomain(services, domain.registration.pattern)}
+                terminalTarget={buildPrimaryDomainTerminalTarget(
+                  environments,
+                  services,
+                  domain.registration.pattern,
+                )}
+              />
             </motion.span>
           ))
         )}
@@ -94,3 +112,54 @@ export const ProjectDomainList = ({
     </motion.div>
   );
 };
+
+function findServiceForDomain(
+  services: ProjectServiceInfoDto[],
+  pattern: string,
+): ProjectServiceInfoDto | null {
+  return (
+    services.find(
+      (service) => service.primaryDomain === pattern || service.domains.includes(pattern),
+    ) ?? null
+  );
+}
+
+function buildPrimaryDomainTerminalTarget(
+  environments: ProjectEnvironmentInfoDto[],
+  services: ProjectServiceInfoDto[],
+  pattern: string,
+): TerminalTargetRequest | null {
+  const linkedEnvironments = environments.filter((environment) => environment.rootPath);
+  const fallbackEnvironment =
+    linkedEnvironments.find((environment) => environment.primary) ?? linkedEnvironments[0];
+  if (!fallbackEnvironment) {
+    return null;
+  }
+
+  const service = findServiceForDomain(services, pattern);
+  if (service) {
+    const serviceEnvironment =
+      linkedEnvironments.find(
+        (environment) =>
+          environment.primary &&
+          environment.services.some((entry) => entry.serviceId === service.id),
+      ) ??
+      linkedEnvironments.find((environment) =>
+        environment.services.some((entry) => entry.serviceId === service.id),
+      ) ??
+      fallbackEnvironment;
+
+    return {
+      kind: "service",
+      projectId: serviceEnvironment.projectId,
+      environmentSlug: serviceEnvironment.slug,
+      serviceId: service.id,
+    };
+  }
+
+  return {
+    kind: "projectEnvironment",
+    projectId: fallbackEnvironment.projectId,
+    environmentSlug: fallbackEnvironment.slug,
+  };
+}

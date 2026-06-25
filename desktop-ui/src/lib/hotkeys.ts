@@ -4,6 +4,7 @@ export const appHotkeyCategories = [
   { id: "navigation", label: "Navigation" },
   { id: "appearance", label: "Appearance" },
   { id: "projects", label: "Projects" },
+  { id: "terminal", label: "Terminal" },
 ] as const;
 
 export type AppHotkeyCategory = (typeof appHotkeyCategories)[number]["id"];
@@ -50,6 +51,41 @@ export const appHotkeyDefinitions = [
     label: "Create project",
     description: "Open the new project dialog.",
     defaultHotkey: "Mod+N",
+  },
+  {
+    id: "toggleTerminal",
+    category: "terminal",
+    label: "Toggle terminal",
+    description: "Show or hide the integrated terminal.",
+    defaultHotkey: "Mod+J",
+  },
+  {
+    id: "newTerminalTab",
+    category: "terminal",
+    label: "New terminal tab",
+    description: "Open another terminal tab for the current terminal target.",
+    defaultHotkey: "Mod+T",
+  },
+  {
+    id: "closeTerminalTab",
+    category: "terminal",
+    label: "Close terminal tab",
+    description: "Close the active terminal tab.",
+    defaultHotkey: "Mod+W",
+  },
+  {
+    id: "previousTerminalTab",
+    category: "terminal",
+    label: "Previous terminal tab",
+    description: "Select the previous terminal tab.",
+    defaultHotkey: "Mod+Shift+[",
+  },
+  {
+    id: "nextTerminalTab",
+    category: "terminal",
+    label: "Next terminal tab",
+    description: "Select the next terminal tab.",
+    defaultHotkey: "Mod+Shift+]",
   },
 ] as const satisfies readonly {
   id: string;

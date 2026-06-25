@@ -3,19 +3,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import type { BrowserPreference, RunActionPreference } from "@/types/roxy";
+import type { BrowserPreference } from "@/types/roxy";
 
-import { ChevronDownIcon, CodeIcon, ExternalLinkIcon, PlayIcon, TerminalIcon } from "@/components/icons";
+import { ChevronDownIcon, CodeIcon, ExternalLinkIcon, PlayIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { bootstrapQueries, systemMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 import { SettingsCard } from "./settings-card";
-
-const runActionOptions = [
-  { value: "terminalOnly", label: "Terminal only" },
-  { value: "editorAndTerminal", label: "Editor + terminal" },
-] satisfies Array<{ value: RunActionPreference; label: string }>;
 
 const browserOptions = [
   { value: "default", label: "Default" },
@@ -43,22 +38,13 @@ export const SettingsLaunchers = () => {
       label: option.label,
     })),
   ];
-  const terminalOptions = data.launcherAvailability.availableTerminals.map((option) => ({
-    value: option.id,
-    label: option.label,
-  }));
   const error = updatePreferences.error instanceof Error ? updatePreferences.error.message : null;
 
   const editorLabel =
     editorOptions.find((option) => option.value === preferences.editor)?.label ?? "Auto";
-  const terminalLabel =
-    terminalOptions.find((option) => option.value === preferences.terminal)?.label ?? "None";
   const browserLabel =
     browserOptions.find((option) => option.value === preferences.browser)?.label ?? "Default";
-  const runActionLabel =
-    runActionOptions.find((option) => option.value === preferences.runAction)?.label ??
-    "Terminal only";
-  const summary = [editorLabel, terminalLabel, browserLabel, runActionLabel].join(" · ");
+  const summary = [editorLabel, browserLabel].join(" · ");
 
   return (
     <SettingsCard
@@ -94,37 +80,14 @@ export const SettingsLaunchers = () => {
             <LauncherRow
               icon={<CodeIcon />}
               title="Editor"
-              description="Used when launch mode reopens the project folder."
+              description="Used by Open in editor actions."
             >
               <PreferenceSelect
                 value={preferences.editor}
                 disabled={updatePreferences.isPending}
                 options={editorOptions}
-                onChange={(value) =>
-                  updatePreferences.mutate({ ...preferences, editor: value })
-                }
+                onChange={(value) => updatePreferences.mutate({ ...preferences, editor: value })}
               />
-            </LauncherRow>
-
-            <LauncherRow
-              icon={<TerminalIcon />}
-              title="Terminal"
-              description="Used for dev server commands launched from project chips."
-            >
-              {terminalOptions.length > 0 ? (
-                <PreferenceSelect
-                  value={preferences.terminal}
-                  disabled={updatePreferences.isPending}
-                  options={terminalOptions}
-                  onChange={(value) =>
-                    updatePreferences.mutate({ ...preferences, terminal: value })
-                  }
-                />
-              ) : (
-                <span className="text-xs text-muted-foreground">
-                  No supported terminal detected
-                </span>
-              )}
             </LauncherRow>
 
             <LauncherRow
@@ -140,24 +103,6 @@ export const SettingsLaunchers = () => {
                   updatePreferences.mutate({
                     ...preferences,
                     browser: value as BrowserPreference,
-                  })
-                }
-              />
-            </LauncherRow>
-
-            <LauncherRow
-              icon={<PlayIcon />}
-              title="When running a linked app"
-              description="Open only the terminal, or also reopen the project folder."
-            >
-              <PreferenceSelect
-                value={preferences.runAction}
-                disabled={updatePreferences.isPending}
-                options={runActionOptions}
-                onChange={(value) =>
-                  updatePreferences.mutate({
-                    ...preferences,
-                    runAction: value as RunActionPreference,
                   })
                 }
               />

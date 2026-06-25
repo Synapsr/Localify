@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import type { AppHotkeyCategory } from "@/lib/hotkeys";
+
 import { KeyboardIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,22 +15,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  appHotkeyDefinitions,
-  defaultAppHotkeys,
-  type AppHotkeys,
-} from "@/lib/hotkeys";
+import { appHotkeyDefinitions, defaultAppHotkeys, type AppHotkeys } from "@/lib/hotkeys";
 import { hotkeysSchema } from "@/lib/validators/validator.hotkeys";
 import { useAppHotkeys } from "@/providers/hotkeys-provider";
 
 import { SettingsCard } from "./settings-card";
 import { SettingsHotkeysRow } from "./settings-hotkeys-row";
 
-import type { AppHotkeyCategory } from "@/lib/hotkeys";
-
 const hotkeyColumns: AppHotkeyCategory[][] = [
-  ["navigation"],
-  ["appearance", "projects"],
+  ["navigation", "appearance"],
+  ["projects", "terminal"],
 ];
 
 export const SettingsHotkeys = () => {
@@ -92,7 +88,7 @@ export const SettingsHotkeys = () => {
       <SettingsCard
         icon={<KeyboardIcon />}
         title="Keyboard shortcuts"
-        description="Rebind shortcuts for navigation, appearance, and project actions."
+        description="Rebind shortcuts for navigation, appearance, projects, and terminal sessions."
         action={
           <Button size="lg" variant="outline" onClick={() => setOpen(true)}>
             Customize

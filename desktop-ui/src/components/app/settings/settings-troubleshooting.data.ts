@@ -2,11 +2,7 @@ import type { BootstrapDto } from "@/types/roxy";
 
 export type TroubleshootingIssueTone = "success" | "warning" | "info";
 
-export type TroubleshootingAction =
-  | "install"
-  | "setupCliAccess"
-  | "setupNodeTrust"
-  | "startDaemon";
+export type TroubleshootingAction = "install" | "setupCliAccess" | "setupNodeTrust" | "startDaemon";
 
 export interface TroubleshootingIssue {
   id: string;
@@ -16,26 +12,50 @@ export interface TroubleshootingIssue {
   symptoms: string[];
   solutions: string[];
   commands?: string[];
+  agentPrompt?: {
+    label: string;
+    body: string;
+  };
   action?: {
     id: TroubleshootingAction;
     label: string;
   };
 }
 
-export const buildTroubleshootingIssues = (
-  data: BootstrapDto,
-): TroubleshootingIssue[] => {
+const NEXT_INTL_DEFAULT_LOCALE_PROMPT = `You are fixing a Next.js app that works on an explicit locale path like /en, but the default locale path / redirects too many times when the app is opened through Localify.
+
+Goal:
+- Keep Localify unchanged.
+- Make /, /<defaultLocale>, and a non-default locale path such as /en work.
+- Keep the fix minimal and scoped to the app's Next middleware/proxy/i18n routing.
+
+What to inspect:
+1. Find the Next middleware/proxy file, usually middleware.ts or proxy.ts.
+2. Find the next-intl routing config, especially defaultLocale and localePrefix.
+3. Look for custom canonical, legacy, or default-locale redirects that run before or around createMiddleware(routing).
+4. Check whether default-locale public paths such as /fr are redirected back to / while next-intl internally rewrites / to /fr.
+
+Minimal fix pattern:
+- Preserve next-intl's internal default-locale rewrite before custom canonical redirects.
+- If the request has x-next-intl-locale equal to routing.defaultLocale and the pathname is /<defaultLocale> or starts with /<defaultLocale>/, return NextResponse.next({request: {headers: new Headers(request.headers)}}) before redirect rules that canonicalize the default locale.
+- Keep normal public /<defaultLocale> redirects working when that header is not present.
+
+Verify:
+- Start with Localify.
+- Test /, /<defaultLocale>, and a non-default locale path such as /en.
+- Confirm there is no ERR_TOO_MANY_REDIRECTS and no unrelated i18n behavior changed.`;
+
+export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingIssue[] => {
   const appName = data.environment.appName;
   const cliCommand = appName.toLowerCase();
   const nodeTrust = data.environment.nodeTrust;
   const dnsResolution = data.daemon.dnsResolution;
-  const dnsProbeHostname = dnsResolution.hostname || `localify-healthcheck${data.environment.fixedDomainSuffix}`;
+  const dnsProbeHostname =
+    dnsResolution.hostname || `localify-healthcheck${data.environment.fixedDomainSuffix}`;
   const dnsResolvedIps = dnsResolution.resolvedIps.join(", ");
   const caCertPath = nodeTrust.caCertPath || `${data.config.paths.dataDir}/ca.crt`;
   const setupComplete =
-    data.environment.cliHelperReady &&
-    data.environment.cliAccessReady &&
-    data.daemon.caInstalled;
+    data.environment.cliHelperReady && data.environment.cliAccessReady && data.daemon.caInstalled;
 
   return [
     {
@@ -101,9 +121,7 @@ export const buildTroubleshootingIssues = (
             "Editor tasks cannot find the Localify CLI.",
           ],
       solutions: data.environment.cliAccessReady
-        ? [
-            "If one terminal still cannot find the command, restart that shell or reopen your IDE.",
-          ]
+        ? ["If one terminal still cannot find the command, restart that shell or reopen your IDE."]
         : [
             "Install the CLI command from Settings so shells and IDE tasks can find it.",
             "Restart open terminals after installation if the command still is not picked up.",
@@ -139,9 +157,7 @@ export const buildTroubleshootingIssues = (
               "Start the background service again from Settings.",
               "If startup fails with a port conflict, use the blocking-process controls in the System section.",
             ]
-          : [
-              "Finish the initial Localify setup first, then start the background service.",
-            ],
+          : ["Finish the initial Localify setup first, then start the background service."],
       action: data.daemon.running
         ? undefined
         : {
@@ -152,11 +168,12 @@ export const buildTroubleshootingIssues = (
     {
       id: "dns-resolution",
       title: `${data.environment.fixedDomainSuffix} DNS resolves through macOS`,
-      tone: !data.daemon.running || !dnsResolution.checked
-        ? "info"
-        : dnsResolution.healthy
-          ? "success"
-          : "warning",
+      tone:
+        !data.daemon.running || !dnsResolution.checked
+          ? "info"
+          : dnsResolution.healthy
+            ? "success"
+            : "warning",
       summary: !data.daemon.running
         ? "DNS resolution is checked after the background service starts."
         : dnsResolution.healthy
@@ -225,6 +242,28 @@ export const buildTroubleshootingIssues = (
             id: "setupNodeTrust",
             label: "Repair Node trust",
           },
+    },
+    {
+      id: "next-intl-default-locale-loop",
+      title: "Next.js next-intl loops on `/`, but `/en` works",
+      tone: "info",
+      summary:
+        "Some Next.js apps with next-intl hide the default locale in public URLs. If the app also has custom canonical or legacy redirects, Localify can make the redirect loop obvious even though the real fix belongs in the app middleware.",
+      symptoms: [
+        "Chrome shows `ERR_TOO_MANY_REDIRECTS` on a Localify URL ending at `/`.",
+        "An explicit locale path such as `/en` loads normally.",
+        "The app has a Next `middleware.ts` or `proxy.ts` using `next-intl/middleware` plus custom redirects.",
+      ],
+      solutions: [
+        "First verify the URL printed by `localify get <service>` matches the browser origin, so this is not an HTTP/HTTPS mismatch.",
+        "Inspect the app middleware/proxy for custom redirects that turn `/<defaultLocale>` back into `/`.",
+        "Add a small guard so next-intl's internal default-locale rewrite can pass before those canonical redirect rules.",
+        "Restart the dev server and test `/`, `/<defaultLocale>`, and a non-default locale path such as `/en`.",
+      ],
+      agentPrompt: {
+        label: "Copy agent prompt",
+        body: NEXT_INTL_DEFAULT_LOCALE_PROMPT,
+      },
     },
     {
       id: "browser-cache",

@@ -20,7 +20,8 @@ use crate::desktop::dto::{
     DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LicensingDto, LogsDto, LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RemoveProjectRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto,
     SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
     SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
@@ -85,6 +86,9 @@ pub enum HelperCommand {
     },
     RemoveProject {
         request: RemoveProjectRequest,
+    },
+    RemoveProjectEnvironment {
+        request: RemoveProjectEnvironmentRequest,
     },
     SetupCliAccess,
     ListPortConflicts,
@@ -160,6 +164,7 @@ impl HelperCommand {
             | Self::InitProject { .. }
             | Self::UpdateProject { .. }
             | Self::RemoveProject { .. }
+            | Self::RemoveProjectEnvironment { .. }
             | Self::SetupCliAccess
             | Self::KillPortConflict { .. }
             | Self::AssignDomainProject { .. }
@@ -212,6 +217,7 @@ impl HelperCommand {
                 | Self::InitProject { .. }
                 | Self::UpdateProject { .. }
                 | Self::RemoveProject { .. }
+                | Self::RemoveProjectEnvironment { .. }
                 | Self::AssignDomainProject { .. }
                 | Self::RegisterDomain { .. }
                 | Self::UpdateDomain { .. }
@@ -357,6 +363,13 @@ impl SystemHelperClient {
 
     pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
         self.send(HelperCommand::RemoveProject { request })
+    }
+
+    pub fn remove_project_environment(
+        &self,
+        request: RemoveProjectEnvironmentRequest,
+    ) -> Result<RemoveProjectEnvironmentResultDto> {
+        self.send(HelperCommand::RemoveProjectEnvironment { request })
     }
 
     pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
@@ -804,6 +817,9 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::RemoveProject { request } => {
             serde_json::to_value(api.remove_project(request)?).map_err(Into::into)
+        }
+        HelperCommand::RemoveProjectEnvironment { request } => {
+            serde_json::to_value(api.remove_project_environment(request)?).map_err(Into::into)
         }
         HelperCommand::SetupCliAccess => {
             serde_json::to_value(api.setup_cli_access()?).map_err(Into::into)

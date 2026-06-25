@@ -12,8 +12,11 @@ import type {
   DetectProjectInitPlanRequest,
   InitProjectFromFolderRequest,
   InitProjectFromFolderResultDto,
+  OpenEnvInEditorRequest,
   OpenInEditorRequest,
   ProjectInfoDto,
+  RemoveProjectEnvironmentRequest,
+  RemoveProjectEnvironmentResultDto,
   RemoveProjectRequest,
   RunLocalDevServerRequest,
   StopLocalDevServerRequest,
@@ -78,9 +81,22 @@ export const projectMutations = {
           domainQueries.all(),
         ]),
     }),
+  removeEnvironment: (queryClient: QueryClient) =>
+    mutationOptions<RemoveProjectEnvironmentResultDto, Error, RemoveProjectEnvironmentRequest>({
+      mutationFn: (request) => tauriClient.removeProjectEnvironment(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [
+          projectQueryKeys.all(),
+          domainQueries.all(),
+        ]),
+    }),
   openInEditor: () =>
     mutationOptions<void, Error, OpenInEditorRequest>({
       mutationFn: (request) => tauriClient.openInEditor(request),
+    }),
+  openEnvInEditor: () =>
+    mutationOptions<void, Error, OpenEnvInEditorRequest>({
+      mutationFn: (request) => tauriClient.openEnvInEditor(request),
     }),
   runLocalDevServer: (queryClient: QueryClient) =>
     mutationOptions<void, Error, RunLocalDevServerRequest>({

@@ -19,7 +19,8 @@ use crate::domain::DomainRegistration;
 use crate::domain::value_objects::{ProxyTarget, RouteTarget};
 use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
 use crate::infrastructure::local_dev::{
-    LocalDevLaunchPlan, resolve_local_dev_launch, resolve_portable_local_dev_launch,
+    LocalDevLaunchPlan, resolve_local_dev_launch, resolve_localify_dev_launch,
+    resolve_portable_local_dev_launch,
 };
 use crate::infrastructure::paths::RoxyPaths;
 use roxy::project_init::{
@@ -81,14 +82,17 @@ pub struct RunArgs {
 }
 
 pub fn list(ctx: &AppContext, json: bool) -> Result<()> {
-    let https_port = daemon_https_port(ctx)?;
+    let ports = daemon_ports(ctx)?;
     let services = ctx.config_store.list_services()?;
 
     if json {
         let output = services
             .iter()
-            .map(|service| ServiceOutput::from_service(service, https_port))
-            .collect::<Vec<_>>();
+            .map(|service| {
+                let endpoint = service_endpoint(service, ports, ctx)?;
+                Ok(ServiceOutput::from_service(service, endpoint))
+            })
+            .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -102,11 +106,12 @@ pub fn list(ctx: &AppContext, json: bool) -> Result<()> {
 
     println!("Services:\n");
     for service in services {
+        let endpoint = service_endpoint(&service, ports, ctx)?;
         println!(
             "  {} [{}] -> {}",
             service.name,
             service.id,
-            service_url(&service, https_port)
+            service_url(&service, endpoint)
         );
         println!(
             "    project: {} [{}]{}",
@@ -166,19 +171,20 @@ pub fn get(
     json: bool,
     ctx: &AppContext,
 ) -> Result<()> {
-    let https_port = daemon_https_port(ctx)?;
+    let ports = daemon_ports(ctx)?;
     let service = resolve_service(&service_name, project.as_deref(), ctx)?;
     let service = resolve_environment_service(service, environment.as_deref(), ctx)?;
+    let endpoint = service_endpoint(&service, ports, ctx)?;
 
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&ServiceOutput::from_service(&service, https_port))?
+            serde_json::to_string_pretty(&ServiceOutput::from_service(&service, endpoint))?
         );
         return Ok(());
     }
 
-    println!("{}", service_url(&service, https_port));
+    println!("{}", service_url(&service, endpoint));
     Ok(())
 }
 
@@ -197,7 +203,7 @@ pub fn run(
         override_command,
     } = args;
     let has_override_command = !override_command.is_empty();
-    let https_port = daemon_https_port(ctx)?;
+    let ports = daemon_ports(ctx)?;
     let implicit_environment = if environment.is_none() {
         ensure_implicit_worktree_environment(project.as_deref(), ctx)?
     } else {
@@ -283,9 +289,10 @@ pub fn run(
     };
     warn_if_daemon_is_stopped(ctx);
 
-    let url = service_url(&service, https_port);
+    let endpoint = service_endpoint(&service, ports, ctx)?;
+    let url = service_url(&service, endpoint);
     let app_host = service_public_host(&service);
-    let app_domain = service_public_domain(&service, https_port);
+    let app_domain = service_public_domain(&service, endpoint);
     ensure_next_allowed_dev_origin(&workdir, &app_host)?;
     ensure_vite_allowed_host(&workdir, &app_host)?;
     let url_envs = url_environment_overrides(&workdir, &url, &app_domain)?;
@@ -347,7 +354,7 @@ struct ServiceOutput {
 }
 
 impl ServiceOutput {
-    fn from_service(service: &ConfiguredService, https_port: u16) -> Self {
+    fn from_service(service: &ConfiguredService, endpoint: ServiceEndpoint) -> Self {
         Self {
             id: service.id.clone(),
             name: service.name.clone(),
@@ -355,7 +362,7 @@ impl ServiceOutput {
             project_name: service.project_name.clone(),
             project_enabled: service.project_enabled,
             primary_domain: service.primary_domain.clone(),
-            url: service_url(service, https_port),
+            url: service_url(service, endpoint),
             domains: service.domains.clone(),
             path: service.path.clone(),
             command: service.command.clone(),
@@ -828,20 +835,74 @@ fn service_with_launch_for_mode(service: ConfiguredService, mode: RunMode) -> Co
 }
 
 fn service_with_dev_launch(service: ConfiguredService) -> ConfiguredService {
-    if service.command.is_some() {
-        return service_with_local_dev_launch(service);
-    }
-
     let Some(root_path) = service.project_root_path.as_ref().map(PathBuf::from) else {
         return service;
     };
-    let launch = portable_local_dev_launch_for_service(&service, &root_path)
-        .or_else(|| local_dev_launch_for_service(&service, &root_path));
+    let launch = localify_dev_launch_for_service(&service, &root_path);
     let Some(launch) = launch else {
         return service;
     };
 
     apply_local_dev_launch(service, &root_path, &launch)
+}
+
+fn localify_dev_launch_for_service(
+    service: &ConfiguredService,
+    root_path: &Path,
+) -> Option<LocalDevLaunchPlan> {
+    if let Some(package_scope) = service_cwd_match_path(service, root_path) {
+        return resolve_localify_dev_launch(root_path, Some(&package_scope)).ok();
+    }
+
+    if let Some(legacy_launch) = local_dev_launch_for_service(service, root_path)
+        && let Ok(launch) = resolve_localify_dev_launch(root_path, Some(&legacy_launch.package_dir))
+    {
+        return Some(launch);
+    }
+
+    if let Some(package_scope) = package_scope_for_service_name(service, root_path)
+        && let Ok(launch) = resolve_localify_dev_launch(root_path, Some(&package_scope))
+    {
+        return Some(launch);
+    }
+
+    resolve_localify_dev_launch(root_path, None).ok()
+}
+
+fn package_scope_for_service_name(
+    service: &ConfiguredService,
+    root_path: &Path,
+) -> Option<PathBuf> {
+    let labels = [
+        service.id.trim().to_ascii_lowercase(),
+        service.name.trim().to_ascii_lowercase(),
+    ];
+
+    for directory in ["apps", "packages", "services"] {
+        let parent = root_path.join(directory);
+        let Ok(entries) = fs::read_dir(parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.join("package.json").is_file() {
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let name = name.trim().to_ascii_lowercase();
+            if labels
+                .iter()
+                .any(|label| !label.is_empty() && label == &name)
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    None
 }
 
 fn local_dev_launch_for_service(
@@ -862,6 +923,20 @@ fn local_dev_launch_for_service(
         RouteTarget::StaticFiles(_) => return None,
     };
     resolve_local_dev_launch(root_path, &target).ok()
+}
+
+fn inferred_path_from_configured_route_launch(service: &ConfiguredService) -> Option<String> {
+    let root_path = service.project_root_path.as_ref().map(PathBuf::from)?;
+    let launch = local_dev_launch_for_service(service, &root_path)?;
+    let relative_path = launch
+        .package_dir
+        .strip_prefix(&root_path)
+        .unwrap_or(&launch.package_dir);
+    if relative_path.as_os_str().is_empty() {
+        return None;
+    }
+
+    Some(relative_path.display().to_string())
 }
 
 fn portable_local_dev_launch_for_service(
@@ -961,31 +1036,72 @@ fn read_package_script(workdir: &Path, script_name: &str) -> Result<Option<Strin
 fn localify_dev_args_for_script(script: &str, port: u16) -> Vec<String> {
     let trimmed = script.trim();
     if trimmed.contains("next dev") {
-        return vec![
-            "--hostname".into(),
-            "127.0.0.1".into(),
-            "--port".into(),
-            port.to_string(),
-        ];
+        return host_and_port_args(
+            trimmed,
+            "--hostname",
+            &["--hostname", "-H"],
+            "127.0.0.1",
+            port,
+        );
     }
     if is_vite_dev_script(trimmed) || contains_dev_command(trimmed, "astro dev") {
-        return vec![
-            "--host".into(),
-            "127.0.0.1".into(),
-            "--port".into(),
-            port.to_string(),
-        ];
+        return host_and_port_args(trimmed, "--host", &["--host"], "127.0.0.1", port);
     }
     if contains_dev_command(trimmed, "nuxt dev") {
-        return vec![
-            "--host".into(),
-            "127.0.0.1".into(),
-            "--port".into(),
-            port.to_string(),
-        ];
+        return host_and_port_args(trimmed, "--host", &["--host"], "127.0.0.1", port);
+    }
+    if contains_dev_command(trimmed, "email dev") {
+        return arg_if_needed(trimmed, "--port", &["--port", "-p"], &port.to_string());
     }
 
     Vec::new()
+}
+
+fn host_and_port_args(
+    script: &str,
+    host_flag: &str,
+    host_flags: &[&str],
+    host: &str,
+    port: u16,
+) -> Vec<String> {
+    let mut args = arg_if_needed(script, host_flag, host_flags, host);
+    args.extend(arg_if_needed(
+        script,
+        "--port",
+        &["--port", "-p"],
+        &port.to_string(),
+    ));
+    args
+}
+
+fn arg_if_needed(script: &str, flag: &str, aliases: &[&str], desired: &str) -> Vec<String> {
+    if script_has_flag_value(script, aliases, desired) {
+        Vec::new()
+    } else {
+        vec![flag.into(), desired.into()]
+    }
+}
+
+fn script_has_flag_value(script: &str, flags: &[&str], desired: &str) -> bool {
+    let parts = script.split_whitespace().collect::<Vec<_>>();
+
+    for (index, part) in parts.iter().enumerate() {
+        for flag in flags {
+            if part == flag && parts.get(index + 1).is_some_and(|value| *value == desired) {
+                return true;
+            }
+
+            let prefix = format!("{flag}=");
+            if part
+                .strip_prefix(&prefix)
+                .is_some_and(|value| value == desired)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn is_vite_dev_script(script: &str) -> bool {
@@ -993,7 +1109,9 @@ fn is_vite_dev_script(script: &str) -> bool {
 }
 
 fn contains_dev_command(script: &str, command: &str) -> bool {
-    script == command || script.contains(&format!(" {command}"))
+    script == command
+        || script.starts_with(&format!("{command} "))
+        || script.contains(&format!(" {command}"))
 }
 
 fn append_package_script_args(
@@ -1145,12 +1263,23 @@ fn service_for_environment(
             )
         })?;
 
+    let inferred_service_path = service
+        .path
+        .clone()
+        .or_else(|| inferred_path_from_configured_route_launch(&service));
     service.primary_domain = mapping.domain.clone();
     service.domains = vec![mapping.domain.clone()];
     service.project_root_path = environment
         .root_path
         .clone()
         .or_else(|| service.project_root_path.clone());
+    if service
+        .path
+        .as_deref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        service.path = inferred_service_path;
+    }
     service.primary_target = domain_root_target(&mapping.domain, ctx)?;
     Ok(service)
 }
@@ -1235,8 +1364,63 @@ fn service_with_project_root(
     service
 }
 
-fn daemon_https_port(ctx: &AppContext) -> Result<u16> {
-    Ok(ctx.config_store.load()?.daemon.https_port)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DaemonPorts {
+    http: u16,
+    https: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServiceEndpoint {
+    scheme: &'static str,
+    port: u16,
+}
+
+impl ServiceEndpoint {
+    const fn http(port: u16) -> Self {
+        Self {
+            scheme: "http",
+            port,
+        }
+    }
+
+    const fn https(port: u16) -> Self {
+        Self {
+            scheme: "https",
+            port,
+        }
+    }
+
+    fn is_default_port(self) -> bool {
+        matches!((self.scheme, self.port), ("http", 80) | ("https", 443))
+    }
+}
+
+fn daemon_ports(ctx: &AppContext) -> Result<DaemonPorts> {
+    let config = ctx.config_store.load()?.daemon;
+
+    Ok(DaemonPorts {
+        http: config.http_port,
+        https: config.https_port,
+    })
+}
+
+fn service_endpoint(
+    service: &ConfiguredService,
+    ports: DaemonPorts,
+    ctx: &AppContext,
+) -> Result<ServiceEndpoint> {
+    let https_enabled = ctx
+        .config_store
+        .find_registration_for_domain(&service.primary_domain)?
+        .map(|registration| registration.is_https_enabled())
+        .unwrap_or(false);
+
+    if https_enabled {
+        Ok(ServiceEndpoint::https(ports.https))
+    } else {
+        Ok(ServiceEndpoint::http(ports.http))
+    }
 }
 
 fn service_public_host(service: &ConfiguredService) -> String {
@@ -1249,17 +1433,21 @@ fn service_public_host(service: &ConfiguredService) -> String {
     public_host
 }
 
-fn service_public_domain(service: &ConfiguredService, https_port: u16) -> String {
+fn service_public_domain(service: &ConfiguredService, endpoint: ServiceEndpoint) -> String {
     let public_host = service_public_host(service);
-    if https_port == 443 {
+    if endpoint.is_default_port() {
         public_host
     } else {
-        format!("{public_host}:{https_port}")
+        format!("{public_host}:{}", endpoint.port)
     }
 }
 
-fn service_url(service: &ConfiguredService, https_port: u16) -> String {
-    format!("https://{}", service_public_domain(service, https_port))
+fn service_url(service: &ConfiguredService, endpoint: ServiceEndpoint) -> String {
+    format!(
+        "{}://{}",
+        endpoint.scheme,
+        service_public_domain(service, endpoint)
+    )
 }
 
 fn service_proxy_target(service: &ConfiguredService) -> Result<&ProxyTarget> {
@@ -1624,11 +1812,14 @@ mod tests {
             inferred: true,
         };
 
-        assert_eq!(service_url(&service, 443), "https://demo.localify");
+        assert_eq!(
+            service_url(&service, ServiceEndpoint::https(443)),
+            "https://demo.localify"
+        );
     }
 
     #[test]
-    fn service_url_includes_non_default_https_port() {
+    fn service_url_includes_non_default_endpoint_port() {
         let service = ConfiguredService {
             id: "web".into(),
             name: "web".into(),
@@ -1645,8 +1836,12 @@ mod tests {
         };
 
         assert_eq!(
-            service_url(&service, 8443),
+            service_url(&service, ServiceEndpoint::https(8443)),
             "https://feat-auth.demo.localify.test:8443"
+        );
+        assert_eq!(
+            service_url(&service, ServiceEndpoint::http(8080)),
+            "http://feat-auth.demo.localify.test:8080"
         );
     }
 
@@ -1709,6 +1904,74 @@ mod tests {
                 "4010"
             ]
         );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_skips_matching_next_runtime_flags() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"scripts":{"dev":"next dev --hostname 127.0.0.1 --port 4010"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(command, vec!["pnpm", "run", "dev"]);
+    }
+
+    #[test]
+    fn prepare_local_dev_command_overrides_stale_next_runtime_flags() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"scripts":{"dev":"next dev --hostname 0.0.0.0 --port=3000"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_adds_email_runtime_port() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"scripts":{"dev":"email dev --port 3003"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
+            52168,
+        )
+        .unwrap();
+
+        assert_eq!(command, vec!["pnpm", "run", "dev", "--port", "52168"]);
     }
 
     #[test]
@@ -2026,6 +2289,108 @@ INVALID-NAME=https://old.example
         let service = service_with_local_dev_launch(service);
 
         assert_eq!(service.path.as_deref(), Some("apps/web"));
+        assert_eq!(
+            service.command,
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
+        );
+    }
+
+    #[test]
+    fn service_with_dev_launch_uses_dev_script_from_legacy_localify_port() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let app_dir = root.join("apps/web");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"name":"web","scripts":{"dev-localify":"next dev --hostname 127.0.0.1 --port 52165","dev":"next dev"}}"#,
+        )
+        .unwrap();
+        let mut service = test_service("acme", &root.display().to_string(), None);
+        service.command = None;
+        service.primary_target = Some(RouteTarget::Proxy(ProxyTarget::parse("52165").unwrap()));
+
+        let service = service_with_dev_launch(service);
+
+        assert_eq!(service.path.as_deref(), Some("apps/web"));
+        assert_eq!(
+            service.command,
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
+        );
+    }
+
+    #[test]
+    fn worktree_dev_launch_reuses_inferred_package_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let primary_root = temp_dir.path().join("primary");
+        let worktree_root = temp_dir.path().join("worktree");
+        let primary_app_dir = primary_root.join("apps/org-space");
+        let worktree_app_dir = worktree_root.join("apps/org-space");
+        std::fs::create_dir_all(&primary_app_dir).unwrap();
+        std::fs::create_dir_all(&worktree_app_dir).unwrap();
+        for root in [&primary_root, &worktree_root] {
+            std::fs::write(
+                root.join("package.json"),
+                r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            primary_app_dir.join("package.json"),
+            r#"{"name":"org-space","scripts":{"dev-localify":"next dev --hostname 127.0.0.1 --port 52164","dev":"next dev"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            worktree_app_dir.join("package.json"),
+            r#"{"name":"org-space","scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let mut service = test_service("acteur", &primary_root.display().to_string(), None);
+        service.command = None;
+        service.primary_target = Some(RouteTarget::Proxy(ProxyTarget::parse("52164").unwrap()));
+        let inferred_path = inferred_path_from_configured_route_launch(&service);
+        service.project_root_path = Some(worktree_root.display().to_string());
+        service.path = inferred_path;
+        service.primary_target = Some(RouteTarget::Proxy(ProxyTarget::parse("54481").unwrap()));
+
+        let service = service_with_dev_launch(service);
+
+        assert_eq!(service.path.as_deref(), Some("apps/org-space"));
+        assert_eq!(
+            service.command,
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
+        );
+    }
+
+    #[test]
+    fn service_with_dev_launch_uses_matching_service_folder_without_legacy_port() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let app_dir = root.join("apps/email");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"name":"email","scripts":{"dev":"email dev --port 3003"}}"#,
+        )
+        .unwrap();
+        let mut service = test_service("email", &root.display().to_string(), None);
+        service.command = None;
+        service.primary_target = Some(RouteTarget::Proxy(ProxyTarget::parse("52168").unwrap()));
+
+        let service = service_with_dev_launch(service);
+
+        assert_eq!(service.path.as_deref(), Some("apps/email"));
         assert_eq!(
             service.command,
             Some(vec!["pnpm".into(), "run".into(), "dev".into()])

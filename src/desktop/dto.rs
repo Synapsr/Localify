@@ -850,6 +850,15 @@ pub struct OpenInEditorRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OpenEnvInEditorRequest {
+    pub project_id: String,
+    pub environment_slug: String,
+    #[serde(default)]
+    pub service_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenProjectUrlRequest {
     pub url: String,
     #[serde(default)]
@@ -919,6 +928,22 @@ pub struct RemoveProjectRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RemoveProjectResultDto {
     pub project: ProjectInfoDto,
+    #[serde(default)]
+    pub removed_domains: Vec<String>,
+    pub daemon_reloaded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProjectEnvironmentRequest {
+    pub project_id: String,
+    pub environment_slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProjectEnvironmentResultDto {
+    pub environment: ProjectEnvironmentInfoDto,
     #[serde(default)]
     pub removed_domains: Vec<String>,
     pub daemon_reloaded: bool,

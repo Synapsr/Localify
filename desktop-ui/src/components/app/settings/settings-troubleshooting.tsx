@@ -15,6 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
 import { getInstallWarningMessage } from "@/lib/util.install-result";
 import { cn } from "@/lib/utils";
@@ -172,7 +173,9 @@ const FaqRow = ({
 }: FaqRowProps) => {
   const panelId = `troubleshoot-${issue.id}`;
   const action = issue.action;
+  const agentPrompt = issue.agentPrompt;
   const actionPending = action ? pendingAction === action.id : false;
+  const { copy: copyAgentPrompt, copied: agentPromptCopied } = useCopyToClipboard();
 
   return (
     <li className={cn(open && "bg-[--color-border]/10")}>
@@ -251,6 +254,23 @@ const FaqRow = ({
                       {command}
                     </span>
                   ))}
+                </div>
+              </Section>
+            ) : null}
+
+            {agentPrompt ? (
+              <Section label="Agent prompt">
+                <div className="space-y-2 rounded-md border border-[--color-border]/40 bg-[--color-border]/15 p-3">
+                  <pre className="max-h-48 overflow-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-[--color-ink]/85">
+                    {agentPrompt.body}
+                  </pre>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void copyAgentPrompt(agentPrompt.body)}
+                  >
+                    {agentPromptCopied ? "Copied" : agentPrompt.label}
+                  </Button>
                 </div>
               </Section>
             ) : null}

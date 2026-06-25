@@ -54,7 +54,7 @@ pub struct LocalDevLaunchPlan {
 }
 
 impl LocalDevLaunchPlan {
-    pub(crate) fn command_parts(&self) -> Vec<String> {
+    pub fn command_parts(&self) -> Vec<String> {
         self.package_manager.command_parts(&self.script_name)
     }
 }
@@ -110,36 +110,13 @@ struct PackageJsonManifest {
     package_manager: Option<String>,
 }
 
-pub fn open_local_dev_server(project_root: &Path, target: &str) -> Result<()> {
-    open_local_dev_server_with_terminal(project_root, target, TerminalPreference::Terminal)
-}
-
 #[allow(dead_code)]
 pub fn stop_local_dev_server(target: &str) -> Result<()> {
     let target_port = extract_target_port(target)?;
     stop_listening_process_on_port(target_port)
 }
 
-pub fn open_local_dev_server_with_terminal(
-    project_root: &Path,
-    target: &str,
-    terminal: TerminalPreference,
-) -> Result<()> {
-    if !project_root.is_dir() {
-        bail!(
-            "Project folder '{}' does not exist.",
-            project_root.display()
-        );
-    }
-
-    let launch = resolve_local_dev_launch(project_root, target)?;
-    launch_in_terminal(&launch, terminal)
-}
-
-pub(crate) fn resolve_local_dev_launch(
-    project_root: &Path,
-    target: &str,
-) -> Result<LocalDevLaunchPlan> {
+pub fn resolve_local_dev_launch(project_root: &Path, target: &str) -> Result<LocalDevLaunchPlan> {
     let target_port = extract_target_port(target)?;
     let mut candidates = detect_local_dev_candidates(project_root)?;
 
@@ -245,6 +222,45 @@ pub fn resolve_portable_local_dev_launch(
         }),
         _ => bail!(
             "Multiple workspace scripts can be launched with an injected PORT.\n{}",
+            format_candidates(&candidates)
+        ),
+    }
+}
+
+pub fn resolve_localify_dev_launch(
+    project_root: &Path,
+    package_scope: Option<&Path>,
+) -> Result<LocalDevLaunchPlan> {
+    let mut candidates = detect_local_dev_candidates(project_root)?;
+
+    if let Some(package_scope) = package_scope {
+        candidates.retain(|candidate| candidate.package_dir.starts_with(package_scope));
+    }
+    candidates.retain(|candidate| candidate.script_name != "dev-localify");
+
+    if candidates.is_empty() {
+        bail!(
+            "No workspace package in '{}' exposes a launchable local dev script yet.",
+            project_root.display()
+        );
+    }
+
+    let best_priority = candidates
+        .iter()
+        .map(|candidate| candidate.script_priority)
+        .min()
+        .unwrap_or(usize::MAX);
+    candidates.retain(|candidate| candidate.script_priority == best_priority);
+
+    match candidates.as_slice() {
+        [selected] => Ok(LocalDevLaunchPlan {
+            display_path: selected.display_path.clone(),
+            package_dir: selected.package_dir.clone(),
+            package_manager: selected.package_manager,
+            script_name: selected.script_name.clone(),
+        }),
+        _ => bail!(
+            "Multiple workspace scripts can be launched through Localify dev.\n{}",
             format_candidates(&candidates)
         ),
     }
@@ -649,54 +665,6 @@ fn format_candidates(candidates: &[LocalDevCandidate]) -> String {
     lines
 }
 
-fn launch_command(launch: &LocalDevLaunchPlan) -> String {
-    let mut parts = vec![
-        "cd".into(),
-        shell_escape(&launch.package_dir.to_string_lossy()),
-        "&&".into(),
-    ];
-    parts.extend(
-        launch
-            .command_parts()
-            .into_iter()
-            .map(|part| shell_escape(&part)),
-    );
-    parts.join(" ")
-}
-
-fn run_script_command(launch: &LocalDevLaunchPlan) -> String {
-    launch
-        .command_parts()
-        .into_iter()
-        .map(|part| shell_escape(&part))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(target_os = "macos")]
-fn launch_in_terminal(launch: &LocalDevLaunchPlan, terminal: TerminalPreference) -> Result<()> {
-    match terminal {
-        TerminalPreference::Terminal => launch_with_terminal_app(launch),
-        TerminalPreference::Ghostty => launch_with_ghostty(launch),
-        TerminalPreference::ITerm => launch_with_iterm(launch),
-        TerminalPreference::WezTerm => launch_with_wezterm(launch),
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn launch_in_terminal(_launch: &LocalDevLaunchPlan, _terminal: TerminalPreference) -> Result<()> {
-    bail!("Launching a local dev server from Localify currently supports macOS only.");
-}
-
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'"'"'"#))
-}
-
-#[cfg(target_os = "macos")]
-fn escape_applescript_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 #[cfg(target_os = "macos")]
 fn find_app_bundle(app_name: &str) -> Option<PathBuf> {
     MACOS_APP_DIRS
@@ -733,116 +701,6 @@ fn terminal_available(preference: TerminalPreference) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_with_terminal_app(launch: &LocalDevLaunchPlan) -> Result<()> {
-    let command = launch_command(launch);
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-        escape_applescript_string(&command)
-    );
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .with_context(|| format!("Failed to launch Terminal for '{}'.", launch.display_path))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        bail!("Terminal could not start the linked dev server.");
-    }
-
-    bail!("{stderr}")
-}
-
-#[cfg(target_os = "macos")]
-fn launch_with_ghostty(launch: &LocalDevLaunchPlan) -> Result<()> {
-    let command = run_script_command(launch);
-    let script = format!(
-        "tell application \"Ghostty\"\nset cfg to new surface configuration\nset initial working directory of cfg to \"{}\"\nset win to new window with configuration cfg\nset term to focused terminal of selected tab of win\ninput text \"{}\" to term\nsend key \"enter\" to term\nend tell",
-        escape_applescript_string(&launch.package_dir.to_string_lossy()),
-        escape_applescript_string(&command)
-    );
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .with_context(|| format!("Failed to launch Ghostty for '{}'.", launch.display_path))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        bail!("Ghostty could not start the linked dev server.");
-    }
-
-    bail!("{stderr}")
-}
-
-#[cfg(target_os = "macos")]
-fn launch_with_iterm(launch: &LocalDevLaunchPlan) -> Result<()> {
-    let command = launch_command(launch);
-    let script = format!(
-        "tell application \"iTerm2\"\nactivate\ncreate window with default profile command \"{}\"\nend tell",
-        escape_applescript_string(&command)
-    );
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .with_context(|| format!("Failed to launch iTerm for '{}'.", launch.display_path))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        bail!("iTerm could not start the linked dev server.");
-    }
-
-    bail!("{stderr}")
-}
-
-#[cfg(target_os = "macos")]
-fn launch_with_wezterm(launch: &LocalDevLaunchPlan) -> Result<()> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let command = run_script_command(launch);
-    let wezterm = wezterm_binary().ok_or_else(|| anyhow!("WezTerm is not installed."))?;
-    let output = Command::new(wezterm)
-        .arg("start")
-        .arg("--cwd")
-        .arg(&launch.package_dir)
-        .arg("--")
-        .arg(shell)
-        .arg("-l")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .with_context(|| format!("Failed to launch WezTerm for '{}'.", launch.display_path))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        bail!("WezTerm could not start the linked dev server.");
-    }
-
-    bail!("{stderr}")
-}
-
-#[cfg(target_os = "macos")]
-fn wezterm_binary() -> Option<PathBuf> {
-    find_command("wezterm").or_else(wezterm_bundle_binary)
-}
-
-#[cfg(target_os = "macos")]
 fn wezterm_bundle_binary() -> Option<PathBuf> {
     find_app_bundle("WezTerm").map(|bundle| bundle.join("Contents/MacOS/wezterm"))
 }
@@ -860,7 +718,8 @@ mod tests {
 
     use super::{
         PackageManager, detect_local_dev_candidates, extract_script_port,
-        parse_lsof_machine_output, resolve_local_dev_launch, resolve_portable_local_dev_launch,
+        parse_lsof_machine_output, resolve_local_dev_launch, resolve_localify_dev_launch,
+        resolve_portable_local_dev_launch,
     };
 
     #[test]
@@ -971,6 +830,39 @@ mod tests {
         .unwrap();
 
         let launch = resolve_portable_local_dev_launch(root, None).unwrap();
+
+        assert_eq!(launch.display_path, "apps/web");
+        assert_eq!(launch.script_name, "dev");
+        assert_eq!(launch.package_manager, PackageManager::Pnpm);
+    }
+
+    #[test]
+    fn resolve_localify_dev_launch_ignores_dev_localify_script() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "workspaces": ["apps/*"]
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/web/package.json"),
+            r#"{
+  "name": "web",
+  "scripts": {
+    "dev-localify": "next dev --hostname 127.0.0.1 --port 61092",
+    "dev": "next dev"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let launch = resolve_localify_dev_launch(root, Some(&root.join("apps/web"))).unwrap();
 
         assert_eq!(launch.display_path, "apps/web");
         assert_eq!(launch.script_name, "dev");

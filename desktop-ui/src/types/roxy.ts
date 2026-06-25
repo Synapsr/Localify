@@ -151,6 +151,79 @@ export interface ProjectEnvironmentInfoDto {
   services: ProjectEnvironmentServiceInfoDto[];
 }
 
+export type TerminalTargetKind = "project" | "projectEnvironment" | "service";
+
+export interface TerminalTargetRequest {
+  kind: TerminalTargetKind;
+  projectId: string;
+  environmentSlug: string;
+  serviceId?: string | null;
+}
+
+export interface TerminalSessionTargetDto {
+  kind: TerminalTargetKind;
+  projectId: string;
+  projectName: string;
+  environmentSlug: string;
+  environmentName: string;
+  serviceId?: string | null;
+  serviceName?: string | null;
+}
+
+export interface TerminalCreateSessionRequest {
+  target: TerminalTargetRequest;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalLaunchServiceRequest {
+  target: TerminalTargetRequest;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalWriteRequest {
+  sessionId: string;
+  data: string;
+}
+
+export interface TerminalResizeRequest {
+  sessionId: string;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalSessionRequest {
+  sessionId: string;
+}
+
+export type TerminalSessionStatus = "running" | "exited";
+
+export interface TerminalSessionDto {
+  id: string;
+  title: string;
+  workingDirectory: string;
+  target: TerminalSessionTargetDto;
+  status: TerminalSessionStatus;
+}
+
+export interface TerminalLaunchServiceResultDto {
+  session: TerminalSessionDto;
+  created: boolean;
+  command: string[];
+}
+
+export interface TerminalOutputPayload {
+  sessionId: string;
+  bytes: number[];
+}
+
+export interface TerminalExitPayload {
+  sessionId: string;
+  exitCode: number;
+  signal: string | null;
+}
+
 export interface DnsResolutionDto {
   checked: boolean;
   healthy: boolean;
@@ -498,6 +571,17 @@ export interface RemoveProjectResultDto {
   daemonReloaded: boolean;
 }
 
+export interface RemoveProjectEnvironmentRequest {
+  projectId: string;
+  environmentSlug: string;
+}
+
+export interface RemoveProjectEnvironmentResultDto {
+  environment: ProjectEnvironmentInfoDto;
+  removedDomains: string[];
+  daemonReloaded: boolean;
+}
+
 export interface AvailablePortDto {
   port: number;
 }
@@ -553,6 +637,12 @@ export interface InitProjectServiceRequest {
 
 export interface OpenInEditorRequest {
   path: string;
+}
+
+export interface OpenEnvInEditorRequest {
+  projectId: string;
+  environmentSlug: string;
+  serviceId?: string | null;
 }
 
 export interface OpenProjectUrlRequest {

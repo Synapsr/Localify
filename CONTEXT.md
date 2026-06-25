@@ -36,6 +36,10 @@ _Avoid_: Project, branch project, clone
 The canonical project environment that owns the project's existing local domains unless another project environment is selected explicitly.
 _Avoid_: Main branch, default branch
 
+**Terminal Session**:
+An interactive shell opened from Localify for a project environment or one service inside a project environment.
+_Avoid_: Terminal tab, dev server, launcher
+
 **Local Domain**:
 A stable `.localify` hostname for one local entrypoint in a project.
 _Avoid_: Public URL, tunnel

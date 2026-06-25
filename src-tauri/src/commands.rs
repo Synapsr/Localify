@@ -7,14 +7,15 @@ use roxy::desktop::dto::{
     DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
     InitProjectFromFolderResultDto, InstallResultDto, KeygenSettingsUpdateRequest,
     KillPortConflictRequest, LauncherPreferencesDto, LicensingDto, LogsDto, LogsRequest,
-    NodeTrustDto, OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
-    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
-    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
+    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectEnvironmentRequest,
+    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, RunLocalDevServerRequest, SettingsExportRequest,
+    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewRequest,
+    SettingsImportRequest, SettingsImportResultDto, StartDaemonRequest, StepDto,
+    StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -24,6 +25,12 @@ use std::sync::{Mutex, MutexGuard};
 use tauri::async_runtime;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_updater::UpdaterExt;
+
+use crate::terminal::{
+    TerminalCreateSessionRequest, TerminalLaunchServiceRequest, TerminalLaunchServiceResultDto,
+    TerminalManager, TerminalResizeRequest, TerminalSessionDto, TerminalSessionRequest,
+    TerminalWriteRequest,
+};
 
 pub struct AppState {
     pub api: DesktopApi,
@@ -622,6 +629,20 @@ pub fn remove_project(
 }
 
 #[tauri::command]
+pub fn remove_project_environment(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: RemoveProjectEnvironmentRequest,
+) -> Result<RemoveProjectEnvironmentResultDto, String> {
+    let result = state
+        .api
+        .remove_project_environment(request)
+        .map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn assign_domain_project(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -755,6 +776,14 @@ pub fn open_in_editor(
 }
 
 #[tauri::command]
+pub fn open_env_in_editor(
+    state: tauri::State<'_, AppState>,
+    request: OpenEnvInEditorRequest,
+) -> Result<(), String> {
+    state.api.open_env_in_editor(request).map_err(map_error)
+}
+
+#[tauri::command]
 pub fn open_project_url(
     state: tauri::State<'_, AppState>,
     request: OpenProjectUrlRequest,
@@ -794,6 +823,69 @@ pub fn update_launcher_preferences(
         .api
         .update_launcher_preferences(request)
         .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn terminal_list_sessions(
+    terminal: tauri::State<'_, TerminalManager>,
+) -> Result<Vec<TerminalSessionDto>, String> {
+    Ok(terminal.list_sessions())
+}
+
+#[tauri::command]
+pub fn terminal_create_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalCreateSessionRequest,
+) -> Result<TerminalSessionDto, String> {
+    terminal
+        .create_session(app, &state.api, request)
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn terminal_launch_service(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalLaunchServiceRequest,
+) -> Result<TerminalLaunchServiceResultDto, String> {
+    terminal
+        .launch_service(app, &state.api, request)
+        .map_err(map_error)
+}
+
+#[tauri::command]
+pub fn terminal_write(
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalWriteRequest,
+) -> Result<(), String> {
+    terminal.write(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn terminal_resize(
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalResizeRequest,
+) -> Result<(), String> {
+    terminal.resize(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn terminal_interrupt(
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalSessionRequest,
+) -> Result<(), String> {
+    terminal.interrupt(request).map_err(map_error)
+}
+
+#[tauri::command]
+pub fn terminal_close(
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalSessionRequest,
+) -> Result<(), String> {
+    terminal.close(request).map_err(map_error)
 }
 
 #[tauri::command]

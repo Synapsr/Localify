@@ -11,12 +11,14 @@ use crate::cli::project_env;
 use crate::domain::{DomainPattern, DomainRegistration, Route};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{
-    ConfigStore, ConfiguredProject, ProjectServiceConfig, ProjectServiceDomainUpdate,
+    ConfigStore, ConfiguredProject, ConfiguredService, ProjectServiceConfig,
+    ProjectServiceDomainUpdate,
 };
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use roxy::project_init::{
-    FolderInitSelection, LocalAppUpdatePolicy, ServicePlan, apply_local_app_updates,
-    detect_folder_init_plan, resolve_folder_init_selection,
+    FolderInitSelection, FolderInitServicePlan, LocalAppUpdatePolicy, ServicePlan,
+    apply_local_app_updates, detect_current_dir_localify_target, detect_folder_init_plan,
+    resolve_folder_init_selection,
 };
 
 pub struct ConfigureDevArgs {
@@ -49,6 +51,7 @@ pub fn configure_dev(
     let project = resolve_project(&config_store, args.project.as_deref(), &current_dir)?;
     let policy = policy.with_package_scripts(args.write_scripts || policy.write_package_scripts);
     let detected = detect_folder_init_plan(&current_dir, Some(&project.name))?;
+    let detected_services = detected.services.clone();
     let selections = detected
         .services
         .into_iter()
@@ -64,12 +67,21 @@ pub fn configure_dev(
         })
         .collect::<Vec<_>>();
     let resolved = resolve_folder_init_selection(&current_dir, &project.name, &selections, policy)?;
+    let materialized_count = materialize_inferred_project_services(
+        &config_store,
+        &project.id,
+        &current_dir,
+        &detected_services,
+    )?;
     let update_results = apply_local_app_updates(
         &resolved.package_updates,
         &resolved.next_config_updates,
         &resolved.vite_config_updates,
     );
 
+    if materialized_count > 0 {
+        println!("  Materialized project services: {materialized_count}");
+    }
     print_update_results(&update_results.updated, &update_results.skipped);
     Ok(())
 }
@@ -273,6 +285,128 @@ fn normalize_display_path(path: &str) -> String {
     path.trim_matches('/').replace('\\', "/")
 }
 
+fn materialize_inferred_project_services(
+    config_store: &ConfigStore,
+    project_id: &str,
+    root: &Path,
+    detected_services: &[FolderInitServicePlan],
+) -> Result<usize> {
+    let services = config_store
+        .list_services()?
+        .into_iter()
+        .filter(|service| service.project_id == project_id)
+        .collect::<Vec<_>>();
+    if services.iter().all(|service| !service.inferred) {
+        return Ok(0);
+    }
+
+    let (project_services, materialized_count) =
+        materialized_project_services(&services, root, detected_services)?;
+    if materialized_count > 0 {
+        config_store.set_project_services(project_id, project_services)?;
+    }
+
+    Ok(materialized_count)
+}
+
+fn materialized_project_services(
+    services: &[ConfiguredService],
+    root: &Path,
+    detected_services: &[FolderInitServicePlan],
+) -> Result<(Vec<ProjectServiceConfig>, usize)> {
+    let detected = detected_service_matches(root, detected_services)?;
+    let mut materialized_count = 0;
+    let project_services = services
+        .iter()
+        .map(|service| {
+            let mut config = project_service_config_from_existing(service);
+            if service.inferred
+                && let Some(detected) = detected_service_for_existing(service, &detected)
+            {
+                let next_path = detected.service_path.clone();
+                let next_command = detected.command.clone();
+                if config.path != next_path || config.command != next_command {
+                    materialized_count += 1;
+                }
+                config.path = next_path;
+                config.command = next_command;
+            }
+            config
+        })
+        .collect();
+
+    Ok((project_services, materialized_count))
+}
+
+struct DetectedServiceMatch<'a> {
+    service: &'a FolderInitServicePlan,
+    legacy_target: Option<String>,
+}
+
+fn detected_service_matches<'a>(
+    root: &Path,
+    services: &'a [FolderInitServicePlan],
+) -> Result<Vec<DetectedServiceMatch<'a>>> {
+    services
+        .iter()
+        .map(|service| {
+            let package_dir = service
+                .service_path
+                .as_ref()
+                .map(|path| root.join(path))
+                .unwrap_or_else(|| root.to_path_buf());
+            Ok(DetectedServiceMatch {
+                service,
+                legacy_target: detect_current_dir_localify_target(&package_dir)?,
+            })
+        })
+        .collect()
+}
+
+fn detected_service_for_existing<'a>(
+    service: &ConfiguredService,
+    detected: &'a [DetectedServiceMatch<'a>],
+) -> Option<&'a FolderInitServicePlan> {
+    service_proxy_port(service)
+        .and_then(|port| {
+            detected
+                .iter()
+                .find(|candidate| candidate.legacy_target.as_deref() == Some(port.as_str()))
+        })
+        .or_else(|| {
+            let service_id = normalize_display_path(&service.id).to_ascii_lowercase();
+            let service_name = normalize_display_path(&service.name).to_ascii_lowercase();
+            detected.iter().find(|candidate| {
+                let detected_name =
+                    normalize_display_path(&candidate.service.service_name).to_ascii_lowercase();
+                detected_name == service_id || detected_name == service_name
+            })
+        })
+        .map(|candidate| candidate.service)
+}
+
+fn service_proxy_port(service: &ConfiguredService) -> Option<String> {
+    match service.primary_target.as_ref()? {
+        crate::domain::RouteTarget::Proxy(target) => Some(target.port().value().to_string()),
+        crate::domain::RouteTarget::StaticFiles(_) => None,
+    }
+}
+
+fn project_service_config_from_existing(service: &ConfiguredService) -> ProjectServiceConfig {
+    ProjectServiceConfig {
+        name: service.name.clone(),
+        primary_domain: service.primary_domain.clone(),
+        domains: service
+            .domains
+            .iter()
+            .filter(|domain| domain.as_str() != service.primary_domain)
+            .cloned()
+            .collect(),
+        path: service.path.clone(),
+        command: service.command.clone(),
+    }
+}
+
 fn register_project_service(
     config_store: &ConfigStore,
     project_id: &str,
@@ -396,5 +530,72 @@ mod tests {
             Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()])
         );
         assert!(!services[0].inferred);
+    }
+
+    #[test]
+    fn materialize_inferred_services_reuses_legacy_target_mapping() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        let config_store = ConfigStore::new(config_path);
+        let mut config = Config::default();
+        config.paths = RoxyPaths {
+            data_dir: temp_dir.path().join("data"),
+            pid_file: temp_dir.path().join("localify.pid"),
+            log_file: temp_dir.path().join("localify.log"),
+            certs_dir: temp_dir.path().join("certs"),
+            socket_path: temp_dir.path().join("localify.sock"),
+        };
+        config_store.save(&config).unwrap();
+
+        let root = temp_dir.path().join("ACME");
+        let app_dir = root.join("apps/org-space");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"name":"org-space","scripts":{"dev-localify":"next dev --hostname 127.0.0.1 --port 52164","dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let project = config_store
+            .create_project_with_root("ACME", Some(root.display().to_string()))
+            .unwrap();
+        config_store
+            .add_domain_with_project(
+                test_proxy_registration(&format!("acteur.acme{}", BRANDING.domain_suffix()), 52164),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        let detected = detect_folder_init_plan(&root, Some(&project.name)).unwrap();
+
+        let materialized_count = materialize_inferred_project_services(
+            &config_store,
+            &project.id,
+            &root,
+            &detected.services,
+        )
+        .unwrap();
+        let services = config_store.list_services().unwrap();
+
+        assert_eq!(materialized_count, 1);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].id, "acteur");
+        assert_eq!(services[0].path.as_deref(), Some("apps/org-space"));
+        assert_eq!(
+            services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
+        );
+        assert!(!services[0].inferred);
+    }
+
+    fn test_proxy_registration(domain: &str, target: u16) -> DomainRegistration {
+        DomainRegistration::new(
+            DomainPattern::from_name(domain, false).unwrap(),
+            vec![Route::parse(&format!("/={target}")).unwrap()],
+        )
     }
 }

@@ -360,10 +360,20 @@ impl Config {
         project_id: &str,
         project: &ProjectDto,
     ) -> Vec<ConfiguredService> {
+        let environment_domains = project
+            .environments
+            .iter()
+            .filter(|environment| !environment.primary)
+            .flat_map(|environment| environment.services.iter())
+            .map(|service| owned_domain_key(&service.domain))
+            .collect::<HashSet<_>>();
         let mut domains = self
             .domains
             .values()
             .filter(|domain| domain.project.as_deref() == Some(project_id))
+            .filter(|domain| {
+                !environment_domains.contains(&owned_domain_key(&domain.pattern.display_pattern()))
+            })
             .collect::<Vec<_>>();
         domains.sort_by_key(|domain| domain.pattern.display_pattern());
 
@@ -1092,6 +1102,17 @@ impl ConfigStore {
             .map(DomainRegistration::from))
     }
 
+    pub fn find_registration_for_domain(
+        &self,
+        domain: &str,
+    ) -> Result<Option<DomainRegistration>, ConfigError> {
+        let config = self.load()?;
+        Ok(config
+            .registration_for_domain(domain)
+            .cloned()
+            .map(DomainRegistration::from))
+    }
+
     #[allow(dead_code)]
     pub fn domain_project_id(
         &self,
@@ -1246,6 +1267,45 @@ impl ConfigStore {
                     format!("Environment '{slug}' was not persisted"),
                 )
             })
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_project_environment(
+        &self,
+        project_id: &str,
+        environment_slug: &str,
+    ) -> Result<ConfiguredProjectEnvironment, ConfigError> {
+        let mut config = self.load()?;
+        let result = {
+            let project = config
+                .projects
+                .get_mut(project_id)
+                .ok_or_else(|| ConfigError::ProjectNotFound(project_id.to_string()))?;
+            let environment_index = project
+                .environments
+                .iter()
+                .position(|environment| environment.slug == environment_slug)
+                .ok_or_else(|| {
+                    ConfigError::InvalidProject(
+                        project_id.to_string(),
+                        format!("Environment '{environment_slug}' was not found"),
+                    )
+                })?;
+
+            if project.environments[environment_index].primary {
+                return Err(ConfigError::InvalidProject(
+                    project_id.to_string(),
+                    "The primary environment cannot be removed".into(),
+                ));
+            }
+
+            let removed = project.environments.remove(environment_index);
+            configured_environment(project_id, project, &removed)
+        };
+
+        config.validate()?;
+        self.save(&config)?;
+        Ok(result)
     }
 
     #[allow(dead_code)]
@@ -2084,6 +2144,74 @@ mod tests {
     }
 
     #[test]
+    fn inferred_services_ignore_non_primary_environment_domains() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("ACME").unwrap();
+        let primary_domain = format!("acme{}", BRANDING.domain_suffix());
+        let admin_domain = format!("admin.acme{}", BRANDING.domain_suffix());
+        let env_domain = format!("test-visible-modif.acme{}", BRANDING.domain_suffix());
+        let env_admin_domain =
+            format!("admin--test-visible-modif.acme{}", BRANDING.domain_suffix());
+
+        store
+            .add_domain_with_project(
+                proxy_registration(&primary_domain, 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration(&admin_domain, 3001),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .upsert_project_environment(
+                &project.id,
+                ProjectEnvironmentConfig {
+                    name: "test/visible-modif".into(),
+                    slug: "test-visible-modif".into(),
+                    primary: false,
+                    root_path: Some("/tmp/acme-test-visible-modif".into()),
+                    git_common_dir: None,
+                    git_branch: Some("test/visible-modif".into()),
+                    services: vec![
+                        ProjectEnvironmentServiceConfig {
+                            service_id: "web".into(),
+                            domain: env_domain.clone(),
+                        },
+                        ProjectEnvironmentServiceConfig {
+                            service_id: "admin".into(),
+                            domain: env_admin_domain.clone(),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration(&env_domain, 4000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration(&env_admin_domain, 4001),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let ids = store
+            .list_services()
+            .unwrap()
+            .into_iter()
+            .map(|service| service.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["admin", "web"]);
+    }
+
+    #[test]
     fn explicit_project_services_take_precedence_over_inference() {
         let (_dir, store) = temp_store();
         let project = store.create_project("Client App").unwrap();
@@ -2238,6 +2366,77 @@ mod tests {
         assert_eq!(
             environment.services[0].domain,
             format!("feat-auth.client-app{}", BRANDING.domain_suffix())
+        );
+    }
+
+    #[test]
+    fn remove_project_environment_deletes_non_primary_environment() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Client App").unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration("client-app.roxy", 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        store
+            .upsert_project_environment(
+                &project.id,
+                ProjectEnvironmentConfig {
+                    name: "feat/auth".into(),
+                    slug: "feat-auth".into(),
+                    primary: false,
+                    root_path: Some("/tmp/client-app-feat-auth".into()),
+                    git_common_dir: Some("/tmp/client-app/.git".into()),
+                    git_branch: Some("feat/auth".into()),
+                    services: vec![ProjectEnvironmentServiceConfig {
+                        service_id: "web".into(),
+                        domain: format!("feat-auth.client-app{}", BRANDING.domain_suffix()),
+                    }],
+                },
+            )
+            .unwrap();
+
+        let removed = store
+            .remove_project_environment(&project.id, "feat-auth")
+            .unwrap();
+        let environments = store.list_project_environments(Some(&project.id)).unwrap();
+
+        assert_eq!(removed.slug, "feat-auth");
+        assert!(
+            environments
+                .iter()
+                .all(|environment| environment.slug != "feat-auth")
+        );
+    }
+
+    #[test]
+    fn remove_project_environment_rejects_primary_environment() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Client App").unwrap();
+        store
+            .upsert_project_environment(
+                &project.id,
+                ProjectEnvironmentConfig {
+                    name: "Primary".into(),
+                    slug: "primary".into(),
+                    primary: true,
+                    root_path: Some("/tmp/client-app".into()),
+                    git_common_dir: None,
+                    git_branch: None,
+                    services: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let error = store
+            .remove_project_environment(&project.id, "primary")
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("primary environment cannot be removed")
         );
     }
 

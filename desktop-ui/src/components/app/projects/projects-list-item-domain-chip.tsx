@@ -5,6 +5,7 @@ import { useState, type MouseEvent, type PointerEvent } from "react";
 import { toast } from "sonner";
 
 import type { DomainInfoDto } from "@/types/roxy";
+import type { ProjectServiceInfoDto, TerminalTargetRequest } from "@/types/roxy";
 
 import {
   CheckIcon,
@@ -12,8 +13,10 @@ import {
   DotsIcon,
   EditIcon,
   ExternalLinkIcon,
+  FileTextIcon,
   PlayIcon,
   SpinnerIcon,
+  TerminalIcon,
   TrashIcon,
   XIcon,
 } from "@/components/icons";
@@ -25,28 +28,23 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { bootstrapQueries, projectMutations } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 import { cn } from "@/lib/utils";
+import { useTerminal } from "@/providers/terminal-provider";
 
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
 import { ProjectEditDomainDialog } from "./projects-list-item-edit-domain-dialog";
 
 interface ProjectDomainChipProps {
   domain: DomainInfoDto;
-  projectRootPath: string | null;
+  service?: ProjectServiceInfoDto | null;
+  terminalTarget?: TerminalTargetRequest | null;
 }
 
-function portSegment(
-  scheme: "http" | "https",
-  port: number | undefined,
-): string {
+function portSegment(scheme: "http" | "https", port: number | undefined): string {
   if (!port) return "";
   if (scheme === "http" && port === 80) return "";
   if (scheme === "https" && port === 443) return "";
@@ -58,9 +56,7 @@ function buildUrl(
   ports: { httpPort: number; httpsPort: number } | undefined,
 ): string {
   const scheme = domain.registration.httpsEnabled ? "https" : "http";
-  const port = domain.registration.httpsEnabled
-    ? ports?.httpsPort
-    : ports?.httpPort;
+  const port = domain.registration.httpsEnabled ? ports?.httpsPort : ports?.httpPort;
   return `${scheme}://${domain.registration.domain}${portSegment(scheme, port)}`;
 }
 
@@ -79,60 +75,58 @@ function extractPort(target: string | undefined): string | null {
 }
 
 function getPrimaryLaunchTarget(domain: DomainInfoDto): string | null {
-  const rootRoute = domain.registration.routes.find(
-    (route) => route.path === "/",
-  );
+  const rootRoute = domain.registration.routes.find((route) => route.path === "/");
   const candidate = rootRoute ?? domain.registration.routes[0];
   return candidate?.target ?? null;
 }
 
 export const ProjectDomainChip = ({
   domain,
-  projectRootPath,
+  service = null,
+  terminalTarget = null,
 }: ProjectDomainChipProps) => {
   const { data } = useQuery(bootstrapQueries.read());
   const queryClient = useQueryClient();
+  const {
+    findSessionForTarget,
+    hasOwnedServiceSession,
+    interruptSession,
+    launchService,
+    openTerminal,
+  } = useTerminal();
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [serviceActionInFlight, setServiceActionInFlight] = useState(false);
   const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
   const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
-  const runLocalDevServer = useMutation(
-    projectMutations.runLocalDevServer(queryClient),
-  );
-  const stopLocalDevServer = useMutation(
-    projectMutations.stopLocalDevServer(queryClient),
-  );
+  const openEnvInEditor = useMutation(projectMutations.openEnvInEditor());
+  const stopLocalDevServer = useMutation(projectMutations.stopLocalDevServer(queryClient));
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
   const port = extractPort(routes[0]?.target);
   const launchTarget = getPrimaryLaunchTarget(domain);
-  const launchPort = extractPort(launchTarget ?? undefined);
-  const canRunLocalDevServer = Boolean(
-    projectRootPath && launchTarget && launchPort,
-  );
-  const canStopLocalDevServer = Boolean(
-    launchTarget && launchPort && reachable,
-  );
-  const localDevServerPending =
-    runLocalDevServer.isPending || stopLocalDevServer.isPending;
-  const localDevServerUnavailable = reachable
-    ? !canStopLocalDevServer
-    : !canRunLocalDevServer;
-  const localDevServerDisabled =
-    localDevServerPending || localDevServerUnavailable;
-  const localDevServerLabel = reachable
-    ? "Stop local dev server"
-    : "Run local dev server";
-  const localDevServerMenuLabel = localDevServerPending
+  const hasTerminalTarget = Boolean(terminalTarget);
+  const serviceTerminalTarget = terminalTarget?.kind === "service" ? terminalTarget : null;
+  const ownedServiceSession = serviceTerminalTarget
+    ? hasOwnedServiceSession(serviceTerminalTarget)
+    : false;
+  const serviceTarget = service?.target ?? launchTarget;
+  const serviceActionPending = stopLocalDevServer.isPending || serviceActionInFlight;
+  const serviceActionUnavailable = reachable
+    ? !serviceTarget && !ownedServiceSession
+    : !serviceTerminalTarget;
+  const serviceActionDisabled = serviceActionPending || serviceActionUnavailable;
+  const serviceActionLabel = reachable ? "Stop service" : "Launch service";
+  const serviceActionMenuLabel = serviceActionPending
     ? reachable
-      ? "Stopping local dev server"
-      : "Starting local dev server"
-    : localDevServerUnavailable
+      ? "Stopping service"
+      : "Launching service"
+    : serviceActionUnavailable
       ? reachable
-        ? "No running local dev server"
-        : "No linked local app"
-      : localDevServerLabel;
+        ? "No linked service target"
+        : "No terminal target"
+      : serviceActionLabel;
 
   const stopPointerPropagation = (event: PointerEvent) => {
     event.stopPropagation();
@@ -156,8 +150,7 @@ export const ProjectDomainChip = ({
         browser: data?.launcherPreferences.browser ?? "default",
       });
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : "Unable to open this URL.";
+      const description = error instanceof Error ? error.message : "Unable to open this URL.";
       toast.error("Open in browser failed", { description });
     }
   };
@@ -168,33 +161,72 @@ export const ProjectDomainChip = ({
     void handleOpen();
   };
 
-  const handleToggleLocalDevServer = async () => {
+  const handleOpenTerminal = async () => {
+    if (!terminalTarget) {
+      return;
+    }
+
+    try {
+      await openTerminal(terminalTarget);
+    } catch (error) {
+      toast.error("Open terminal failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const handleOpenServiceEnv = async () => {
+    if (!serviceTerminalTarget?.serviceId) {
+      return;
+    }
+
+    try {
+      await openEnvInEditor.mutateAsync({
+        projectId: serviceTerminalTarget.projectId,
+        environmentSlug: serviceTerminalTarget.environmentSlug,
+        serviceId: serviceTerminalTarget.serviceId,
+      });
+    } catch (error) {
+      toast.error("Open service .env failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const handleToggleService = async () => {
+    if (!serviceTerminalTarget) {
+      return;
+    }
+
+    setServiceActionInFlight(true);
     try {
       if (reachable) {
-        if (!launchTarget) {
+        const ownedSession = findSessionForTarget(serviceTerminalTarget);
+        if (ownedSession) {
+          await interruptSession(ownedSession.id);
+          return;
+        }
+
+        if (!serviceTarget) {
+          return;
+        }
+
+        if (!window.confirm("Stop the process currently listening on this service port?")) {
           return;
         }
 
         await stopLocalDevServer.mutateAsync({
-          target: launchTarget,
+          target: serviceTarget,
         });
         return;
       }
 
-      if (!projectRootPath || !launchTarget) {
-        return;
-      }
-
-      await runLocalDevServer.mutateAsync({
-        rootPath: projectRootPath,
-        target: launchTarget,
-      });
+      await launchService(serviceTerminalTarget);
     } catch (error) {
-      const description =
-        error instanceof Error
-          ? error.message
-          : "Unable to update the local dev server.";
-      toast.error(`${localDevServerLabel} failed`, { description });
+      const description = error instanceof Error ? error.message : "Unable to update this service.";
+      toast.error(`${serviceActionLabel} failed`, { description });
+    } finally {
+      setServiceActionInFlight(false);
     }
   };
 
@@ -219,9 +251,7 @@ export const ProjectDomainChip = ({
               />
             }
           />
-          <TooltipContent>
-            {reachable ? "Target reachable" : "Target offline"}
-          </TooltipContent>
+          <TooltipContent>{reachable ? "Target reachable" : "Target offline"}</TooltipContent>
         </Tooltip>
 
         <Tooltip>
@@ -259,9 +289,7 @@ export const ProjectDomainChip = ({
                 <span>:{port}</span>
               )}
             </TooltipTrigger>
-            <TooltipContent>
-              {portCopied ? "Port copied" : `Copy port ${port}`}
-            </TooltipContent>
+            <TooltipContent>{portCopied ? "Port copied" : `Copy port ${port}`}</TooltipContent>
           </Tooltip>
         )}
 
@@ -295,29 +323,47 @@ export const ProjectDomainChip = ({
                 void handleCopyUrl();
               }}
             >
-              {urlCopied ? (
-                <CheckIcon className="text-emerald-500" />
-              ) : (
-                <CopyIcon />
-              )}
+              {urlCopied ? <CheckIcon className="text-emerald-500" /> : <CopyIcon />}
               {urlCopied ? "URL copied" : "Copy URL"}
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={(event) => {
                 event.stopPropagation();
-                void handleToggleLocalDevServer();
+                void handleOpenTerminal();
               }}
-              disabled={localDevServerDisabled}
+              disabled={!hasTerminalTarget}
             >
-              {localDevServerPending ? (
-                <SpinnerIcon className="animate-spin" />
-              ) : reachable ? (
-                <XIcon />
-              ) : (
-                <PlayIcon className="translate-x-px" />
-              )}
-              {localDevServerMenuLabel}
+              <TerminalIcon />
+              Open terminal
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleOpenServiceEnv();
+              }}
+              disabled={!serviceTerminalTarget?.serviceId || openEnvInEditor.isPending}
+            >
+              <FileTextIcon />
+              Open service .env
+            </DropdownMenuItem>
+            {serviceTerminalTarget ? (
+              <DropdownMenuItem
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void handleToggleService();
+                }}
+                disabled={serviceActionDisabled}
+              >
+                {serviceActionPending ? (
+                  <SpinnerIcon className="animate-spin" />
+                ) : reachable ? (
+                  <XIcon />
+                ) : (
+                  <PlayIcon className="translate-x-px" />
+                )}
+                {serviceActionMenuLabel}
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               onClick={(event) => {
                 event.stopPropagation();
