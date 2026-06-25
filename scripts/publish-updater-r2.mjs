@@ -180,7 +180,11 @@ function detectContentType(filePath) {
 }
 
 function detectCacheControl(objectKey) {
-  if (objectKey === "latest.json" || objectKey.startsWith("latest/")) {
+  if (objectKey === "latest.json") {
+    return "no-store, no-cache, must-revalidate, no-transform";
+  }
+
+  if (objectKey.startsWith("latest/")) {
     return "no-store, no-cache, must-revalidate";
   }
 
