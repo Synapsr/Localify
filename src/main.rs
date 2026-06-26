@@ -193,6 +193,10 @@ enum Commands {
         /// Service name or ID. If omitted, Localify infers it from the current directory or prompts.
         service: Option<String>,
 
+        /// Primary domain to pre-fill/use if dev initializes the project first
+        #[arg(long)]
+        domain: Option<String>,
+
         /// Project ID/name when service resolution is ambiguous
         #[arg(long)]
         project: Option<String>,
@@ -564,6 +568,7 @@ fn main() -> Result<()> {
                 project_only,
                 yes,
                 write_scripts,
+                detected_primary_domain: None,
             },
             config_path,
             roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
@@ -687,6 +692,7 @@ fn main() -> Result<()> {
                 service_name: service,
                 project,
                 environment: env,
+                init_domain: None,
                 override_command: command,
             },
             config_path,
@@ -698,6 +704,7 @@ fn main() -> Result<()> {
         ),
         Commands::Dev {
             service,
+            domain,
             project,
             env,
             command,
@@ -707,6 +714,7 @@ fn main() -> Result<()> {
                 service_name: service,
                 project,
                 environment: env,
+                init_domain: domain,
                 override_command: command,
             },
             config_path,

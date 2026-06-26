@@ -24,6 +24,7 @@ pub struct InitProjectArgs {
     pub project_only: bool,
     pub yes: bool,
     pub write_scripts: bool,
+    pub detected_primary_domain: Option<String>,
 }
 
 struct ResolvedInitProjectArgs {
@@ -136,6 +137,7 @@ fn resolve_args(
     if args.project_only && (args.api_domain.is_some() || args.api_target.is_some()) {
         bail!("--project-only cannot be combined with API initialization options");
     }
+    let policy = policy.with_package_scripts(args.write_scripts || policy.write_package_scripts);
 
     if args.yes || !is_interactive_terminal() {
         return resolve_non_interactive_args(default_name, args, policy);
@@ -157,7 +159,10 @@ fn resolve_args(
     }
 
     let detected = detect_folder_init_plan(&current_dir, Some(&name))?;
-    let services = detected.services;
+    let services = detected_services_with_primary_domain(
+        detected.services,
+        args.detected_primary_domain.as_deref(),
+    );
 
     if services.len() == 1 && services[0].id == "__primary__" {
         return resolve_single_service_interactive(name, &current_dir, &services[0], policy);
@@ -172,9 +177,17 @@ fn resolve_non_interactive_args(
     policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
     let current_dir = effective_current_dir()?;
-    let policy = policy.with_package_scripts(args.write_scripts || policy.write_package_scripts);
     if !args.project_only && !has_explicit_service_args(&args) {
-        return resolve_detected_defaults(name, &current_dir, policy);
+        return resolve_detected_defaults(
+            name,
+            &current_dir,
+            args.detected_primary_domain.as_deref(),
+            policy,
+        );
+    }
+
+    if args.detected_primary_domain.is_some() {
+        bail!("detected primary domain can only be used with detected init-project defaults");
     }
 
     let init_plan = build_init_plan(
@@ -201,11 +214,11 @@ fn resolve_non_interactive_args(
 fn resolve_detected_defaults(
     name: String,
     current_dir: &Path,
+    primary_domain: Option<&str>,
     policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
     let detected = detect_folder_init_plan(current_dir, Some(&name))?;
-    let selections = detected
-        .services
+    let selections = detected_services_with_primary_domain(detected.services, primary_domain)
         .into_iter()
         .map(|service| FolderInitSelection {
             id: service.id,
@@ -229,6 +242,21 @@ fn resolve_detected_defaults(
     })
 }
 
+fn detected_services_with_primary_domain(
+    mut services: Vec<FolderInitServicePlan>,
+    primary_domain: Option<&str>,
+) -> Vec<FolderInitServicePlan> {
+    let Some(primary_domain) = primary_domain else {
+        return services;
+    };
+
+    if let Some(service) = services.iter_mut().find(|service| service.enabled) {
+        service.domain = primary_domain.to_string();
+    }
+
+    services
+}
+
 fn has_explicit_service_args(args: &InitProjectArgs) -> bool {
     args.domain.is_some()
         || args.target.is_some()
@@ -244,7 +272,7 @@ fn resolve_single_service_interactive(
     policy: LocalAppUpdatePolicy,
 ) -> Result<ResolvedInitProjectArgs> {
     let domain = prompt_string("Primary domain", &service.domain)?;
-    let target = prompt_string("Primary target", &service.target)?;
+    let target = prompt_target("Primary target", service, policy)?;
     let resolved = resolve_folder_init_selection(
         current_dir,
         &name,
@@ -298,11 +326,16 @@ fn resolve_workspace_services_interactive(
             &format!("Domain for {}", service.display_path),
             &service.domain,
         )?;
-        let target = prompt_string(
+        let target = prompt_target(
             &format!("Target for {}", service.display_path),
-            &service.target,
+            service,
+            policy,
         )?;
-        let update_dev_script = prompt_update_dev_script(service, &target)?;
+        let update_dev_script = if policy.write_package_scripts {
+            prompt_update_dev_script(service, &target)?
+        } else {
+            false
+        };
 
         selections.push(FolderInitSelection {
             id: service.id.clone(),
@@ -332,6 +365,18 @@ fn resolve_workspace_services_interactive(
         next_config_updates: resolved.next_config_updates,
         vite_config_updates: resolved.vite_config_updates,
     })
+}
+
+fn prompt_target(
+    label: &str,
+    service: &FolderInitServicePlan,
+    policy: LocalAppUpdatePolicy,
+) -> Result<String> {
+    if policy.write_package_scripts {
+        return prompt_string(label, &service.target);
+    }
+
+    Ok(service.target.clone())
 }
 
 fn prompt_update_dev_script(service: &FolderInitServicePlan, target: &str) -> Result<bool> {
@@ -395,5 +440,76 @@ fn prompt_bool(label: &str, default: bool) -> Result<bool> {
         "y" | "yes" => Ok(true),
         "n" | "no" => Ok(false),
         _ => bail!("Please answer yes or no"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detected_primary_domain_override_keeps_workspace_service_detection() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::create_dir_all(root.join("packages/infra")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+  "name": "dev-playground-2",
+  "workspaces": ["apps/*", "packages/*"],
+  "packageManager": "pnpm@11.4.0",
+  "scripts": {
+    "dev": "turbo dev"
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("apps/web/package.json"),
+            r#"{
+  "name": "web",
+  "scripts": {
+    "dev:bare": "ALCHEMY=false vite dev"
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/infra/package.json"),
+            r#"{
+  "name": "@demo/infra",
+  "scripts": {
+    "dev": "alchemy dev"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_detected_defaults(
+            "dev-playground-2".into(),
+            root,
+            Some("playground"),
+            LocalAppUpdatePolicy::runtime_only(),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.services.len(), 1);
+        assert_eq!(resolved.services[0].service_name.as_deref(), Some("web"));
+        assert_eq!(
+            resolved.services[0].service_path.as_deref(),
+            Some("apps/web")
+        );
+        assert_eq!(
+            resolved.services[0].domain,
+            format!("playground{}", BRANDING.domain_suffix())
+        );
+        assert_eq!(
+            resolved.services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev:bare".into()])
+        );
     }
 }

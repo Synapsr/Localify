@@ -55,6 +55,12 @@ Start the current project through Localify:
 localify dev
 ```
 
+Pre-fill the primary domain during first-run auto-bootstrap:
+
+```bash
+localify dev --domain playground
+```
+
 Create an explicit route only when the user gives you the target:
 
 ```bash
@@ -92,6 +98,10 @@ When entering an existing repo or after creating a new app:
    This auto-bootstraps a missing Localify Project when the current folder exposes a runnable app,
    creates Local Domains, patches supported framework allowlists, injects `PORT`, `HOST`,
    `LOCALIFY_URL`, URL envs, and Node CA env, then launches the detected dev script.
+   In an interactive terminal, first-run auto-bootstrap prompts for project/service domains with
+   defaults that can be accepted by pressing Enter. Pass `--domain <name>` to pre-fill the primary
+   domain or to choose it in non-interactive runs. It does not prompt for the reserved port or
+   package script rewrites.
 
 3. Bootstrap explicitly when you only want project metadata/routes without starting the app:
 

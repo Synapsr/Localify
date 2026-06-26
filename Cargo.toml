@@ -63,6 +63,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities
 humantime = "2.1"
+dialoguer = { version = "0.12", default-features = false }
 
 # Tracing
 tracing = "0.1"

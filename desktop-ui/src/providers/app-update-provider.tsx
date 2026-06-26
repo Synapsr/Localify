@@ -45,7 +45,29 @@ const defaultState: AppUpdateState = {
   errorMessage: null,
 };
 
+const UPDATE_CHECK_TIMEOUT_MS = 30_000;
+const UPDATE_INSTALL_TIMEOUT_MS = 5 * 60_000;
+
 export const AppUpdateContext = createContext<AppUpdateContextValue | null>(null);
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
 
 function resolveErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) {
@@ -94,7 +116,11 @@ export const AppUpdateProvider = ({
       });
 
       try {
-        await tauriClient.installAppUpdate();
+        await withTimeout(
+          tauriClient.installAppUpdate(),
+          UPDATE_INSTALL_TIMEOUT_MS,
+          "Update download timed out. Check your connection and try again.",
+        );
         setState({
           status: "upToDate",
           availableUpdate: null,
@@ -132,7 +158,11 @@ export const AppUpdateProvider = ({
     }));
 
     try {
-      const updateCheck = await tauriClient.checkAppUpdate();
+      const updateCheck = await withTimeout(
+        tauriClient.checkAppUpdate(),
+        UPDATE_CHECK_TIMEOUT_MS,
+        "Update check timed out. Try again in a moment.",
+      );
 
       if (!updateCheck.configured) {
         setState({

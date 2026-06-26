@@ -137,6 +137,13 @@ pub(crate) fn updater_public_key() -> &'static str {
     UPDATER_PUBLIC_KEY.trim()
 }
 
+pub(crate) fn configure_updater_builder(
+    builder: tauri_plugin_updater::UpdaterBuilder,
+) -> tauri_plugin_updater::UpdaterBuilder {
+    // Updater archives must be read byte-for-byte; let the signed .tar.gz stay opaque.
+    builder.configure_client(|client| client.no_gzip().no_brotli().no_zstd().no_deflate())
+}
+
 fn runtime_desktop_name() -> String {
     BRANDING.runtime_desktop_name()
 }

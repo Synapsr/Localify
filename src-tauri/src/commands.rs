@@ -18,10 +18,13 @@ use roxy::desktop::dto::{
     UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_updater::UpdaterExt;
@@ -106,9 +109,18 @@ pub struct UpdateAutostartRequest {
 
 const INSTALL_ATTRIBUTION_PREFIX: &str = "localify:install-attribution:v1:";
 const POST_UPDATE_DAEMON_RESTART_MARKER: &str = "post-update-daemon-restart";
+const UPDATE_DOWNLOAD_ATTEMPTS: usize = 3;
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn map_error<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+fn map_updater_error<E: std::fmt::Display>(stage: &str, error: E) -> String {
+    let message = format!("{stage}: {error}");
+    append_updater_log(&format!("error {message}"));
+    message
 }
 
 fn install_completed(result: &InstallResultDto) -> bool {
@@ -166,6 +178,26 @@ fn desktop_state_dir() -> Result<PathBuf, String> {
     Ok(home
         .join("Library/Application Support")
         .join(roxy::branding::BRANDING.desktop_state_dir_name()))
+}
+
+fn append_updater_log(message: &str) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    let Ok(directory) = desktop_state_dir() else {
+        return;
+    };
+
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+
+    let path = directory.join("updater.log");
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{timestamp} {message}");
 }
 
 fn post_update_daemon_restart_marker_path() -> Result<PathBuf, String> {
@@ -256,16 +288,20 @@ fn build_updater<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Option<tauri_plugin_updater::Updater>, String> {
     let Some(endpoint) = super::updater_endpoint() else {
+        append_updater_log("build skipped updater_endpoint=none");
         return Ok(None);
     };
 
-    let updater = app
+    append_updater_log(&format!("build endpoint={endpoint}"));
+    let builder = app
         .updater_builder()
         .pubkey(super::updater_public_key())
+        .timeout(UPDATE_CHECK_TIMEOUT)
         .endpoints(vec![tauri::Url::parse(endpoint).map_err(map_error)?])
-        .map_err(map_error)?
+        .map_err(|error| map_updater_error("configure updater endpoint", error))?;
+    let updater = super::configure_updater_builder(builder)
         .build()
-        .map_err(map_error)?;
+        .map_err(|error| map_updater_error("build updater", error))?;
 
     Ok(Some(updater))
 }
@@ -273,6 +309,8 @@ fn build_updater<R: Runtime>(
 pub(crate) async fn check_app_update_with_handle<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<AppUpdateCheckDto, String> {
+    let current_version = app.package_info().version.to_string();
+    append_updater_log(&format!("check start current_version={current_version}"));
     let Some(updater) = build_updater(&app)? else {
         return Ok(AppUpdateCheckDto {
             configured: false,
@@ -283,12 +321,16 @@ pub(crate) async fn check_app_update_with_handle<R: Runtime>(
     let update = updater
         .check()
         .await
-        .map_err(map_error)?
+        .map_err(|error| map_updater_error("check update manifest", error))?
         .map(|update| AppUpdateInfoDto {
             version: update.version.to_string(),
             notes: update.body,
             pub_date: update.date.map(|value| value.to_string()),
         });
+    match &update {
+        Some(update) => append_updater_log(&format!("check available version={}", update.version)),
+        None => append_updater_log("check no_update"),
+    }
 
     Ok(AppUpdateCheckDto {
         configured: true,
@@ -299,26 +341,90 @@ pub(crate) async fn check_app_update_with_handle<R: Runtime>(
 pub(crate) async fn install_app_update_with_handle<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<(), String> {
+    append_updater_log("install start");
     let Some(updater) = build_updater(&app)? else {
         return Err("Desktop updater is not configured for this build.".into());
     };
 
-    let Some(update) = updater.check().await.map_err(map_error)? else {
+    let Some(mut update) = updater
+        .check()
+        .await
+        .map_err(|error| map_updater_error("install check update manifest", error))?
+    else {
+        append_updater_log("install no_update");
         return Ok(());
     };
 
+    append_updater_log(&format!(
+        "install candidate version={} url={}",
+        update.version, update.download_url
+    ));
+    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
     mark_daemon_restart_after_update_if_running(&app)?;
 
+    let mut downloaded_update = None;
+    let mut last_download_error = None;
+    for attempt in 1..=UPDATE_DOWNLOAD_ATTEMPTS {
+        append_updater_log(&format!(
+            "download start attempt={attempt}/{UPDATE_DOWNLOAD_ATTEMPTS}"
+        ));
+        let mut downloaded_bytes = 0usize;
+        let mut expected_bytes = None;
+        let mut next_progress_log = 5 * 1024 * 1024;
+        let download_result = update
+            .download(
+                |chunk_size, content_length| {
+                    downloaded_bytes += chunk_size;
+                    expected_bytes = content_length;
+                    if downloaded_bytes >= next_progress_log {
+                        append_updater_log(&format!(
+                            "download progress attempt={attempt} bytes={downloaded_bytes} expected={expected_bytes:?}"
+                        ));
+                        next_progress_log += 5 * 1024 * 1024;
+                    }
+                },
+                || {
+                    append_updater_log(&format!("download finished attempt={attempt}"));
+                },
+            )
+            .await;
+
+        match download_result {
+            Ok(bytes) => {
+                append_updater_log(&format!(
+                    "download verified attempt={attempt} bytes={}",
+                    bytes.len()
+                ));
+                downloaded_update = Some(bytes);
+                last_download_error = None;
+                break;
+            }
+            Err(error) => {
+                let message = format!(
+                    "{error}; attempt={attempt}; downloaded_bytes={downloaded_bytes}; expected_bytes={expected_bytes:?}"
+                );
+                append_updater_log(&format!("download error {message}"));
+                last_download_error = Some(message);
+            }
+        }
+    }
+
+    let Some(downloaded_update) = downloaded_update else {
+        let message = last_download_error.unwrap_or_else(|| "unknown download error".into());
+        let _ = remove_post_update_daemon_restart_marker();
+        return Err(map_updater_error("download update", message));
+    };
+
     let install_result = update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(map_error);
+        .install(&downloaded_update)
+        .map_err(|error| map_updater_error("install downloaded update", error));
 
     if let Err(error) = install_result {
         let _ = remove_post_update_daemon_restart_marker();
         return Err(error);
     }
 
+    append_updater_log("install finished restarting");
     app.restart()
 }
 

@@ -1,12 +1,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use dialoguer::{Select, theme::ColorfulTheme};
 use roxy::desktop::ProjectRootStore;
 use roxy::project_init::{LocalAppUpdatePolicy, detect_folder_init_plan};
 use serde::Serialize;
@@ -78,6 +79,7 @@ pub struct RunArgs {
     pub service_name: Option<String>,
     pub project: Option<String>,
     pub environment: Option<String>,
+    pub init_domain: Option<String>,
     pub override_command: Vec<String>,
 }
 
@@ -200,8 +202,19 @@ pub fn run(
         service_name,
         project,
         environment,
+        init_domain,
         override_command,
     } = args;
+    if init_domain.is_some()
+        && (service_name.is_some() || project.is_some() || environment.is_some())
+    {
+        bail!(
+            "--domain only applies when '{} dev' initializes a project from the current folder. For an existing service, use '{} project domain set <service> <domain>'.",
+            BRANDING.cli_command(),
+            BRANDING.cli_command()
+        );
+    }
+
     let has_override_command = !override_command.is_empty();
     let ports = daemon_ports(ctx)?;
     let implicit_environment = if environment.is_none() {
@@ -231,6 +244,7 @@ pub fn run(
         service_name.as_deref(),
         effective_project,
         effective_environment,
+        init_domain.as_deref(),
         config_path,
         policy,
         ctx,
@@ -564,6 +578,7 @@ fn ensure_run_context_is_initialized(
     service_name: Option<&str>,
     project: Option<&str>,
     environment: Option<&str>,
+    init_domain: Option<&str>,
     config_path: &Path,
     policy: LocalAppUpdatePolicy,
     ctx: &AppContext,
@@ -575,6 +590,13 @@ fn ensure_run_context_is_initialized(
     let cwd = effective_current_dir()?;
     let services = services_with_project_roots(ctx)?;
     if run_context_has_configured_project_or_service(&services, &cwd) {
+        if let Some(domain) = init_domain {
+            bail!(
+                "Cannot use --domain '{domain}' because a Localify project is already configured for '{}'. Update the existing service domain with:\n  {} project domain set <service> {domain}",
+                cwd.display(),
+                BRANDING.cli_command()
+            );
+        }
         return Ok(());
     }
 
@@ -601,8 +623,9 @@ fn ensure_run_context_is_initialized(
                 api_domain: None,
                 api_target: None,
                 project_only: false,
-                yes: true,
+                yes: !is_interactive_terminal(),
                 write_scripts: false,
+                detected_primary_domain: init_domain.map(ToOwned::to_owned),
             },
             config_path,
             policy,
@@ -1135,42 +1158,39 @@ fn prompt_service_selection(
     services: &[ConfiguredService],
     environment: Option<&str>,
 ) -> Result<ConfiguredService> {
-    println!("Select a service to run:");
-    for (index, service) in services.iter().enumerate() {
-        let path = service.path.as_deref().unwrap_or(".");
-        let command = service
-            .command
-            .as_ref()
-            .map(|command| command.join(" "))
-            .unwrap_or_else(|| "no command configured".into());
-        println!("  {}. {} ({}) - {}", index + 1, service.id, path, command);
+    let labels = services
+        .iter()
+        .map(service_selection_label)
+        .collect::<Vec<_>>();
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a service to run")
+        .items(&labels)
+        .default(0)
+        .interact_opt()
+        .context("Failed to read service selection")?;
+
+    match selection {
+        Some(index) => services.get(index).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid service selection. Pass one explicitly:\n{}",
+                run_options(services, environment)
+            )
+        }),
+        None => bail!(
+            "Service selection cancelled. Pass one explicitly:\n{}",
+            run_options(services, environment)
+        ),
     }
+}
 
-    print!("Service [1-{}]: ", services.len());
-    io::stdout().flush()?;
-
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer)?;
-    let choice = buffer.trim();
-    let index = choice
-        .parse::<usize>()
-        .with_context(|| format!("Invalid service selection '{choice}'"))?;
-
-    let Some(index) = index.checked_sub(1) else {
-        bail!(
-            "Invalid service selection '{}'. Pass one explicitly:\n{}",
-            choice,
-            run_options(services, environment)
-        );
-    };
-
-    services.get(index).cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Invalid service selection '{}'. Pass one explicitly:\n{}",
-            choice,
-            run_options(services, environment)
-        )
-    })
+fn service_selection_label(service: &ConfiguredService) -> String {
+    let path = service.path.as_deref().unwrap_or(".");
+    let command = service
+        .command
+        .as_ref()
+        .map(|command| command.join(" "))
+        .unwrap_or_else(|| "no command configured".into());
+    format!("{} ({path}) - {command}", service.id)
 }
 
 fn run_options(services: &[ConfiguredService], environment: Option<&str>) -> String {
@@ -1842,6 +1862,27 @@ mod tests {
         assert_eq!(
             service_url(&service, ServiceEndpoint::http(8080)),
             "http://feat-auth.demo.localify.test:8080"
+        );
+    }
+
+    #[test]
+    fn service_selection_label_includes_path_and_command() {
+        let service = test_service("web", "/repo", Some("apps/app"));
+
+        assert_eq!(
+            service_selection_label(&service),
+            "web (apps/app) - pnpm dev"
+        );
+    }
+
+    #[test]
+    fn service_selection_label_handles_root_and_missing_command() {
+        let mut service = test_service("server", "/repo", None);
+        service.command = None;
+
+        assert_eq!(
+            service_selection_label(&service),
+            "server (.) - no command configured"
         );
     }
 
