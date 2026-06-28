@@ -855,6 +855,59 @@ pub struct OpenEnvInEditorRequest {
     pub environment_slug: String,
     #[serde(default)]
     pub service_id: Option<String>,
+    #[serde(default)]
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileRequest {
+    pub project_id: String,
+    pub environment_slug: String,
+    #[serde(default)]
+    pub service_id: Option<String>,
+    #[serde(default)]
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileCandidateDto {
+    pub file_name: String,
+    pub relative_path: String,
+    pub root_label: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileListDto {
+    pub files: Vec<EnvironmentFileCandidateDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileDto {
+    pub file_name: String,
+    pub relative_path: String,
+    pub exists: bool,
+    pub content: String,
+    #[serde(default)]
+    pub modified_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveEnvironmentFileRequest {
+    pub project_id: String,
+    pub environment_slug: String,
+    #[serde(default)]
+    pub service_id: Option<String>,
+    #[serde(default)]
+    pub relative_path: Option<String>,
+    pub content: String,
+    #[serde(default)]
+    pub expected_modified_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

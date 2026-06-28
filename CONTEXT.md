@@ -32,6 +32,10 @@ _Avoid_: Broken service, deleted service
 A local checkout variant of a project, usually tied to a git worktree or branch, that can run the same services with distinct local domains and ports.
 _Avoid_: Project, branch project, clone
 
+**Environment File**:
+A local environment configuration file attached to a project environment, optionally scoped to one service inside that environment.
+_Avoid_: Env, settings file, config file
+
 **Primary Environment**:
 The canonical project environment that owns the project's existing local domains unless another project environment is selected explicitly.
 _Avoid_: Main branch, default branch

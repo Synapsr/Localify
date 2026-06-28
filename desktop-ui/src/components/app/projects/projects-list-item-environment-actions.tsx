@@ -6,7 +6,11 @@ import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import type { ProjectEnvironmentInfoDto, TerminalTargetRequest } from "@/types/roxy";
+import type {
+  EnvironmentFileRequest,
+  ProjectEnvironmentInfoDto,
+  TerminalTargetRequest,
+} from "@/types/roxy";
 
 import { FileTextIcon, FolderIcon, TerminalIcon, TrashIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -28,6 +32,9 @@ import {
 import { projectMutations } from "@/lib/queries";
 import { useTerminal } from "@/providers/terminal-provider";
 
+import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog";
+import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
+
 interface ProjectsListItemEnvironmentActionsProps {
   environment: ProjectEnvironmentInfoDto;
   terminalTarget: TerminalTargetRequest | null;
@@ -41,9 +48,13 @@ export const ProjectsListItemEnvironmentActions = ({
   const queryClient = useQueryClient();
   const { openTerminal, setSelectedTarget } = useTerminal();
   const openInEditor = useMutation(projectMutations.openInEditor());
-  const openEnvInEditor = useMutation(projectMutations.openEnvInEditor());
   const removeEnvironment = useMutation(projectMutations.removeEnvironment(queryClient));
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] = useState(false);
+  const [environmentFileTarget, setEnvironmentFileTarget] = useState<EnvironmentFileRequest | null>(
+    null,
+  );
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const handleOpenInEditor = async () => {
@@ -55,23 +66,6 @@ export const ProjectsListItemEnvironmentActions = ({
       await openInEditor.mutateAsync({ path: environment.rootPath });
     } catch (error) {
       toast.error("Open in editor failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  const handleOpenEnvInEditor = async () => {
-    if (!environment.rootPath) {
-      return;
-    }
-
-    try {
-      await openEnvInEditor.mutateAsync({
-        projectId: environment.projectId,
-        environmentSlug: environment.slug,
-      });
-    } catch (error) {
-      toast.error("Open .env failed", {
         description: error instanceof Error ? error.message : String(error),
       });
     }
@@ -119,7 +113,7 @@ export const ProjectsListItemEnvironmentActions = ({
 
   return (
     <>
-      <DropdownMenu>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger
           aria-label={`Environment actions for ${environment.slug}`}
           render={
@@ -136,20 +130,27 @@ export const ProjectsListItemEnvironmentActions = ({
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuItem
             onClick={() => void handleOpenInEditor()}
-            disabled={!environment.rootPath || openInEditor.isPending || removeEnvironment.isPending}
+            disabled={
+              !environment.rootPath || openInEditor.isPending || removeEnvironment.isPending
+            }
           >
             <FolderIcon className="size-4" />
             Open in editor
           </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => void handleOpenEnvInEditor()}
-            disabled={
-              !environment.rootPath || openEnvInEditor.isPending || removeEnvironment.isPending
-            }
-          >
-            <FileTextIcon className="size-4" />
-            Open .env
-          </DropdownMenuItem>
+          <ProjectEnvironmentFileMenuItem
+            active={menuOpen}
+            label="Open .env"
+            target={{
+              projectId: environment.projectId,
+              environmentSlug: environment.slug,
+              serviceId: null,
+            }}
+            disabled={!environment.rootPath || removeEnvironment.isPending}
+            onOpenTarget={(nextTarget) => {
+              setEnvironmentFileTarget(nextTarget);
+              setEnvironmentFileDialogOpen(true);
+            }}
+          />
           <DropdownMenuItem
             onClick={() => void handleOpenTerminal()}
             disabled={!terminalTarget || removeEnvironment.isPending}
@@ -235,6 +236,12 @@ export const ProjectsListItemEnvironmentActions = ({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ProjectEnvironmentFileDialog
+        open={environmentFileDialogOpen}
+        target={environmentFileTarget}
+        onOpenChange={setEnvironmentFileDialogOpen}
+      />
     </>
   );
 };

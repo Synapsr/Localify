@@ -643,6 +643,42 @@ export interface OpenEnvInEditorRequest {
   projectId: string;
   environmentSlug: string;
   serviceId?: string | null;
+  relativePath?: string | null;
+}
+
+export interface EnvironmentFileRequest {
+  projectId: string;
+  environmentSlug: string;
+  serviceId?: string | null;
+  relativePath?: string | null;
+}
+
+export interface EnvironmentFileCandidateDto {
+  fileName: string;
+  relativePath: string;
+  rootLabel: string;
+  exists: boolean;
+}
+
+export interface EnvironmentFileListDto {
+  files: EnvironmentFileCandidateDto[];
+}
+
+export interface EnvironmentFileDto {
+  fileName: string;
+  relativePath: string;
+  exists: boolean;
+  content: string;
+  modifiedAt?: number | null;
+}
+
+export interface SaveEnvironmentFileRequest {
+  projectId: string;
+  environmentSlug: string;
+  serviceId?: string | null;
+  relativePath?: string | null;
+  content: string;
+  expectedModifiedAt?: number | null;
 }
 
 export interface OpenProjectUrlRequest {

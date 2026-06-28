@@ -1,15 +1,12 @@
-import {
-  mutationOptions,
-  queryOptions,
-  type QueryClient,
-} from "@tanstack/react-query";
-
-import { tauriClient } from "../tauri-client";
+import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import type {
   CreateProjectWithDomainsRequest,
   DetectProjectInitPlanDto,
   DetectProjectInitPlanRequest,
+  EnvironmentFileDto,
+  EnvironmentFileListDto,
+  EnvironmentFileRequest,
   InitProjectFromFolderRequest,
   InitProjectFromFolderResultDto,
   OpenEnvInEditorRequest,
@@ -19,16 +16,35 @@ import type {
   RemoveProjectEnvironmentResultDto,
   RemoveProjectRequest,
   RunLocalDevServerRequest,
+  SaveEnvironmentFileRequest,
   StopLocalDevServerRequest,
   UpdateProjectRequest,
 } from "../../types/roxy";
 
+import { tauriClient } from "../tauri-client";
 import { domainQueries } from "./domain.queries";
 import { invalidateBootstrapAnd } from "./shared";
 
 const projectQueryKeys = {
   all: () => ["projects"] as const,
   list: () => [...projectQueryKeys.all(), "list"] as const,
+  environmentFile: (request: EnvironmentFileRequest) =>
+    [
+      ...projectQueryKeys.all(),
+      "environmentFile",
+      request.projectId,
+      request.environmentSlug,
+      request.serviceId ?? null,
+      request.relativePath ?? null,
+    ] as const,
+  environmentFiles: (request: EnvironmentFileRequest) =>
+    [
+      ...projectQueryKeys.all(),
+      "environmentFiles",
+      request.projectId,
+      request.environmentSlug,
+      request.serviceId ?? null,
+    ] as const,
 } as const;
 
 export const projectQueries = {
@@ -37,6 +53,16 @@ export const projectQueries = {
     queryOptions<ProjectInfoDto[], Error>({
       queryKey: projectQueryKeys.list(),
       queryFn: () => tauriClient.listProjects(),
+    }),
+  environmentFile: (request: EnvironmentFileRequest) =>
+    queryOptions<EnvironmentFileDto, Error>({
+      queryKey: projectQueryKeys.environmentFile(request),
+      queryFn: () => tauriClient.readEnvironmentFile(request),
+    }),
+  environmentFiles: (request: EnvironmentFileRequest) =>
+    queryOptions<EnvironmentFileListDto, Error>({
+      queryKey: projectQueryKeys.environmentFiles(request),
+      queryFn: () => tauriClient.listEnvironmentFiles(request),
     }),
 } as const;
 
@@ -50,45 +76,30 @@ export const projectMutations = {
       mutationFn: (request: CreateProjectWithDomainsRequest) =>
         tauriClient.createProjectWithDomains(request),
       onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [
-          projectQueryKeys.all(),
-          domainQueries.all(),
-        ]),
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   initFromFolder: (queryClient: QueryClient) =>
     mutationOptions<InitProjectFromFolderResultDto, Error, InitProjectFromFolderRequest>({
       mutationFn: (request) => tauriClient.initProjectFromFolder(request),
       onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [
-          projectQueryKeys.all(),
-          domainQueries.all(),
-        ]),
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   update: (queryClient: QueryClient) =>
     mutationOptions({
-      mutationFn: (request: UpdateProjectRequest) =>
-        tauriClient.updateProject(request),
-      onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all()]),
+      mutationFn: (request: UpdateProjectRequest) => tauriClient.updateProject(request),
+      onSuccess: async () => invalidateBootstrapAnd(queryClient, [projectQueryKeys.all()]),
     }),
   remove: (queryClient: QueryClient) =>
     mutationOptions({
-      mutationFn: (request: RemoveProjectRequest) =>
-        tauriClient.removeProject(request),
+      mutationFn: (request: RemoveProjectRequest) => tauriClient.removeProject(request),
       onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [
-          projectQueryKeys.all(),
-          domainQueries.all(),
-        ]),
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   removeEnvironment: (queryClient: QueryClient) =>
     mutationOptions<RemoveProjectEnvironmentResultDto, Error, RemoveProjectEnvironmentRequest>({
       mutationFn: (request) => tauriClient.removeProjectEnvironment(request),
       onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [
-          projectQueryKeys.all(),
-          domainQueries.all(),
-        ]),
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   openInEditor: () =>
     mutationOptions<void, Error, OpenInEditorRequest>({
@@ -98,22 +109,20 @@ export const projectMutations = {
     mutationOptions<void, Error, OpenEnvInEditorRequest>({
       mutationFn: (request) => tauriClient.openEnvInEditor(request),
     }),
+  saveEnvironmentFile: () =>
+    mutationOptions<EnvironmentFileDto, Error, SaveEnvironmentFileRequest>({
+      mutationFn: (request) => tauriClient.saveEnvironmentFile(request),
+    }),
   runLocalDevServer: (queryClient: QueryClient) =>
     mutationOptions<void, Error, RunLocalDevServerRequest>({
       mutationFn: (request) => tauriClient.runLocalDevServer(request),
       onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [
-          projectQueryKeys.all(),
-          domainQueries.all(),
-        ]),
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   stopLocalDevServer: (queryClient: QueryClient) =>
     mutationOptions<void, Error, StopLocalDevServerRequest>({
       mutationFn: (request) => tauriClient.stopLocalDevServer(request),
       onSuccess: async () =>
-        invalidateBootstrapAnd(queryClient, [
-          projectQueryKeys.all(),
-          domainQueries.all(),
-        ]),
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
 } as const;

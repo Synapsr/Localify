@@ -4,8 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type MouseEvent, type PointerEvent } from "react";
 import { toast } from "sonner";
 
-import type { DomainInfoDto } from "@/types/roxy";
-import type { ProjectServiceInfoDto, TerminalTargetRequest } from "@/types/roxy";
+import type {
+  DomainInfoDto,
+  EnvironmentFileRequest,
+  ProjectServiceInfoDto,
+  TerminalTargetRequest,
+} from "@/types/roxy";
 
 import {
   CheckIcon,
@@ -13,7 +17,6 @@ import {
   DotsIcon,
   EditIcon,
   ExternalLinkIcon,
-  FileTextIcon,
   PlayIcon,
   SpinnerIcon,
   TerminalIcon,
@@ -28,13 +31,19 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { bootstrapQueries, projectMutations } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 import { cn } from "@/lib/utils";
 import { useTerminal } from "@/providers/terminal-provider";
 
+import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog";
+import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
 import { ProjectEditDomainDialog } from "./projects-list-item-edit-domain-dialog";
 
@@ -44,7 +53,10 @@ interface ProjectDomainChipProps {
   terminalTarget?: TerminalTargetRequest | null;
 }
 
-function portSegment(scheme: "http" | "https", port: number | undefined): string {
+function portSegment(
+  scheme: "http" | "https",
+  port: number | undefined,
+): string {
   if (!port) return "";
   if (scheme === "http" && port === 80) return "";
   if (scheme === "https" && port === 443) return "";
@@ -56,7 +68,9 @@ function buildUrl(
   ports: { httpPort: number; httpsPort: number } | undefined,
 ): string {
   const scheme = domain.registration.httpsEnabled ? "https" : "http";
-  const port = domain.registration.httpsEnabled ? ports?.httpsPort : ports?.httpPort;
+  const port = domain.registration.httpsEnabled
+    ? ports?.httpsPort
+    : ports?.httpPort;
   return `${scheme}://${domain.registration.domain}${portSegment(scheme, port)}`;
 }
 
@@ -75,7 +89,9 @@ function extractPort(target: string | undefined): string | null {
 }
 
 function getPrimaryLaunchTarget(domain: DomainInfoDto): string | null {
-  const rootRoute = domain.registration.routes.find((route) => route.path === "/");
+  const rootRoute = domain.registration.routes.find(
+    (route) => route.path === "/",
+  );
   const candidate = rootRoute ?? domain.registration.routes[0];
   return candidate?.target ?? null;
 }
@@ -96,27 +112,49 @@ export const ProjectDomainChip = ({
   } = useTerminal();
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] =
+    useState(false);
+  const [selectedEnvironmentFileTarget, setSelectedEnvironmentFileTarget] =
+    useState<EnvironmentFileRequest | null>(null);
   const [serviceActionInFlight, setServiceActionInFlight] = useState(false);
   const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
   const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
-  const openEnvInEditor = useMutation(projectMutations.openEnvInEditor());
-  const stopLocalDevServer = useMutation(projectMutations.stopLocalDevServer(queryClient));
+  const stopLocalDevServer = useMutation(
+    projectMutations.stopLocalDevServer(queryClient),
+  );
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
   const port = extractPort(routes[0]?.target);
   const launchTarget = getPrimaryLaunchTarget(domain);
   const hasTerminalTarget = Boolean(terminalTarget);
-  const serviceTerminalTarget = terminalTarget?.kind === "service" ? terminalTarget : null;
+  const serviceTerminalTarget =
+    terminalTarget?.kind === "service" ? terminalTarget : null;
+  const environmentFileTarget = serviceTerminalTarget?.serviceId
+    ? {
+        projectId: serviceTerminalTarget.projectId,
+        environmentSlug: serviceTerminalTarget.environmentSlug,
+        serviceId: serviceTerminalTarget.serviceId,
+      }
+    : terminalTarget
+      ? {
+          projectId: terminalTarget.projectId,
+          environmentSlug: terminalTarget.environmentSlug,
+          serviceId: null,
+        }
+      : null;
   const ownedServiceSession = serviceTerminalTarget
     ? hasOwnedServiceSession(serviceTerminalTarget)
     : false;
   const serviceTarget = service?.target ?? launchTarget;
-  const serviceActionPending = stopLocalDevServer.isPending || serviceActionInFlight;
+  const serviceActionPending =
+    stopLocalDevServer.isPending || serviceActionInFlight;
   const serviceActionUnavailable = reachable
     ? !serviceTarget && !ownedServiceSession
     : !serviceTerminalTarget;
-  const serviceActionDisabled = serviceActionPending || serviceActionUnavailable;
+  const serviceActionDisabled =
+    serviceActionPending || serviceActionUnavailable;
   const serviceActionLabel = reachable ? "Stop service" : "Launch service";
   const serviceActionMenuLabel = serviceActionPending
     ? reachable
@@ -150,7 +188,8 @@ export const ProjectDomainChip = ({
         browser: data?.launcherPreferences.browser ?? "default",
       });
     } catch (error) {
-      const description = error instanceof Error ? error.message : "Unable to open this URL.";
+      const description =
+        error instanceof Error ? error.message : "Unable to open this URL.";
       toast.error("Open in browser failed", { description });
     }
   };
@@ -175,24 +214,6 @@ export const ProjectDomainChip = ({
     }
   };
 
-  const handleOpenServiceEnv = async () => {
-    if (!serviceTerminalTarget?.serviceId) {
-      return;
-    }
-
-    try {
-      await openEnvInEditor.mutateAsync({
-        projectId: serviceTerminalTarget.projectId,
-        environmentSlug: serviceTerminalTarget.environmentSlug,
-        serviceId: serviceTerminalTarget.serviceId,
-      });
-    } catch (error) {
-      toast.error("Open service .env failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
   const handleToggleService = async () => {
     if (!serviceTerminalTarget) {
       return;
@@ -211,7 +232,11 @@ export const ProjectDomainChip = ({
           return;
         }
 
-        if (!window.confirm("Stop the process currently listening on this service port?")) {
+        if (
+          !window.confirm(
+            "Stop the process currently listening on this service port?",
+          )
+        ) {
           return;
         }
 
@@ -223,7 +248,10 @@ export const ProjectDomainChip = ({
 
       await launchService(serviceTerminalTarget);
     } catch (error) {
-      const description = error instanceof Error ? error.message : "Unable to update this service.";
+      const description =
+        error instanceof Error
+          ? error.message
+          : "Unable to update this service.";
       toast.error(`${serviceActionLabel} failed`, { description });
     } finally {
       setServiceActionInFlight(false);
@@ -251,7 +279,9 @@ export const ProjectDomainChip = ({
               />
             }
           />
-          <TooltipContent>{reachable ? "Target reachable" : "Target offline"}</TooltipContent>
+          <TooltipContent>
+            {reachable ? "Target reachable" : "Target offline"}
+          </TooltipContent>
         </Tooltip>
 
         <Tooltip>
@@ -289,11 +319,13 @@ export const ProjectDomainChip = ({
                 <span>:{port}</span>
               )}
             </TooltipTrigger>
-            <TooltipContent>{portCopied ? "Port copied" : `Copy port ${port}`}</TooltipContent>
+            <TooltipContent>
+              {portCopied ? "Port copied" : `Copy port ${port}`}
+            </TooltipContent>
           </Tooltip>
         )}
 
-        <DropdownMenu>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger
             render={
               <Button
@@ -323,7 +355,11 @@ export const ProjectDomainChip = ({
                 void handleCopyUrl();
               }}
             >
-              {urlCopied ? <CheckIcon className="text-emerald-500" /> : <CopyIcon />}
+              {urlCopied ? (
+                <CheckIcon className="text-emerald-500" />
+              ) : (
+                <CopyIcon />
+              )}
               {urlCopied ? "URL copied" : "Copy URL"}
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -336,16 +372,16 @@ export const ProjectDomainChip = ({
               <TerminalIcon />
               Open terminal
             </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={(event) => {
-                event.stopPropagation();
-                void handleOpenServiceEnv();
+            <ProjectEnvironmentFileMenuItem
+              active={menuOpen}
+              label={serviceTerminalTarget ? "Open .env" : "Open .env"}
+              target={environmentFileTarget}
+              disabled={!environmentFileTarget}
+              onOpenTarget={(nextTarget) => {
+                setSelectedEnvironmentFileTarget(nextTarget);
+                setEnvironmentFileDialogOpen(true);
               }}
-              disabled={!serviceTerminalTarget?.serviceId || openEnvInEditor.isPending}
-            >
-              <FileTextIcon />
-              Open service .env
-            </DropdownMenuItem>
+            />
             {serviceTerminalTarget ? (
               <DropdownMenuItem
                 onClick={(event) => {
@@ -397,6 +433,11 @@ export const ProjectDomainChip = ({
         domain={domain}
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}
+      />
+      <ProjectEnvironmentFileDialog
+        open={environmentFileDialogOpen}
+        target={selectedEnvironmentFileTarget}
+        onOpenChange={setEnvironmentFileDialogOpen}
       />
     </>
   );

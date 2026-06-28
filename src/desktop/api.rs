@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::TcpListener;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -28,7 +29,8 @@ use crate::desktop::dto::{
     CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
     CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
     DetectProjectInitPlanRequest, DnsResolutionDto, DomainInfoDto, DomainPatternRequest,
-    EnvironmentDto, FolderInitServiceDto, ImportOfflineLicenseRequest,
+    EnvironmentDto, EnvironmentFileCandidateDto, EnvironmentFileDto, EnvironmentFileListDto,
+    EnvironmentFileRequest, FolderInitServiceDto, ImportOfflineLicenseRequest,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
     InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest,
@@ -37,12 +39,13 @@ use crate::desktop::dto::{
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
     RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
-    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
-    SettingsImportPreviewProjectDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
-    SettingsTransferSettingsDto, SettingsTransferSnapshotDto, StartDaemonRequest, StepDto,
-    StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    SaveEnvironmentFileRequest, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
+    SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
+    SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
+    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::home_dir::user_home_dir;
 use crate::desktop::node_trust;
@@ -82,11 +85,14 @@ const SETTINGS_TRANSFER_SCOPE_PROJECTS: &str = "projects";
 const SETTINGS_IMPORT_MODE_REPLACE_ALL: &str = "replaceAll";
 const SETTINGS_IMPORT_MODE_PROJECTS: &str = "projects";
 const ENV_FILE_CANDIDATES: [&str; 4] = [
+    ".env",
     ".env.local",
     ".env.development.local",
     ".env.development",
-    ".env",
 ];
+const ROOT_ENV_FILE_FALLBACK: &str = ".env.local";
+const SERVICE_ENV_FILE_FALLBACK: &str = ".env";
+const MAX_ENV_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct DesktopApi {
@@ -979,8 +985,97 @@ impl DesktopApi {
     /// Resolves the env file target and opens it without reading or creating it.
     pub fn open_env_in_editor(&self, request: OpenEnvInEditorRequest) -> Result<()> {
         let bootstrap = self.bootstrap()?;
-        let path = resolve_env_editor_target(&bootstrap, &request)?;
-        crate::desktop::editor::open_file_in_editor(&path)
+        let target = resolve_environment_file_target(
+            &bootstrap,
+            &request.project_id,
+            &request.environment_slug,
+            request.service_id.as_deref(),
+            request.relative_path.as_deref(),
+        )?;
+        ensure_environment_file_target(&target)?;
+        crate::desktop::editor::open_file_in_editor(&target.path)
+    }
+
+    pub fn list_environment_files(
+        &self,
+        request: EnvironmentFileRequest,
+    ) -> Result<EnvironmentFileListDto> {
+        let bootstrap = self.bootstrap()?;
+        let files = environment_file_candidates(
+            &bootstrap,
+            &request.project_id,
+            &request.environment_slug,
+            request.service_id.as_deref(),
+        )?
+        .into_iter()
+        .map(EnvironmentFileCandidate::into_dto)
+        .collect();
+
+        Ok(EnvironmentFileListDto { files })
+    }
+
+    pub fn read_environment_file(
+        &self,
+        request: EnvironmentFileRequest,
+    ) -> Result<EnvironmentFileDto> {
+        let bootstrap = self.bootstrap()?;
+        let target = resolve_environment_file_target(
+            &bootstrap,
+            &request.project_id,
+            &request.environment_slug,
+            request.service_id.as_deref(),
+            request.relative_path.as_deref(),
+        )?;
+        read_environment_file_target(&target)
+    }
+
+    pub fn save_environment_file(
+        &self,
+        request: SaveEnvironmentFileRequest,
+    ) -> Result<EnvironmentFileDto> {
+        let bootstrap = self.bootstrap()?;
+        let target = resolve_environment_file_target(
+            &bootstrap,
+            &request.project_id,
+            &request.environment_slug,
+            request.service_id.as_deref(),
+            request.relative_path.as_deref(),
+        )?;
+        ensure_environment_file_target(&target)?;
+
+        let current_modified_at = environment_file_modified_at(&target.path)?;
+        if current_modified_at != request.expected_modified_at {
+            bail!("Environment file changed on disk after it was opened. Reopen it before saving.");
+        }
+
+        if current_modified_at.is_some() {
+            fs::write(&target.path, request.content).with_context(|| {
+                format!(
+                    "Failed to save environment file '{}'",
+                    target.relative_path.display()
+                )
+            })?;
+        } else {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target.path)
+                .with_context(|| {
+                    format!(
+                        "Failed to create environment file '{}'",
+                        target.relative_path.display()
+                    )
+                })?;
+            file.write_all(request.content.as_bytes())
+                .with_context(|| {
+                    format!(
+                        "Failed to save environment file '{}'",
+                        target.relative_path.display()
+                    )
+                })?;
+        }
+
+        read_environment_file_target(&target)
     }
 
     pub fn open_project_url(&self, request: OpenProjectUrlRequest) -> Result<()> {
@@ -4344,12 +4439,75 @@ fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectE
     }
 }
 
-fn resolve_env_editor_target(
+#[derive(Debug, Clone)]
+struct EnvironmentFileTarget {
+    root: PathBuf,
+    path: PathBuf,
+    relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct EnvironmentFileCandidate {
+    target: EnvironmentFileTarget,
+    root_label: String,
+    exists: bool,
+}
+
+impl EnvironmentFileCandidate {
+    fn into_dto(self) -> EnvironmentFileCandidateDto {
+        EnvironmentFileCandidateDto {
+            file_name: self
+                .target
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ROOT_ENV_FILE_FALLBACK.into()),
+            relative_path: self.target.relative_path.to_string_lossy().into_owned(),
+            root_label: self.root_label,
+            exists: self.exists,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EnvironmentFileRoot {
+    path: PathBuf,
+    fallback_file_name: &'static str,
+}
+
+fn resolve_environment_file_target(
     bootstrap: &BootstrapDto,
-    request: &OpenEnvInEditorRequest,
-) -> Result<PathBuf> {
-    let project_id = request.project_id.trim();
-    let environment_slug = request.environment_slug.trim();
+    project_id: &str,
+    environment_slug: &str,
+    service_id: Option<&str>,
+    relative_path: Option<&str>,
+) -> Result<EnvironmentFileTarget> {
+    if let Some(relative_path) = relative_path.and_then(normalize_optional_relative_path) {
+        let requested = normalize_environment_file_relative_path(relative_path)?;
+        let requested_display = requested.display().to_string();
+        return environment_file_candidates(bootstrap, project_id, environment_slug, service_id)?
+            .into_iter()
+            .find(|candidate| candidate.target.relative_path == requested)
+            .map(|candidate| candidate.target)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Environment file '{}' is not available for this project environment.",
+                    requested_display
+                )
+            });
+    }
+
+    resolve_default_environment_file_target(bootstrap, project_id, environment_slug, service_id)
+}
+
+fn resolve_default_environment_file_target(
+    bootstrap: &BootstrapDto,
+    project_id: &str,
+    environment_slug: &str,
+    service_id: Option<&str>,
+) -> Result<EnvironmentFileTarget> {
+    let project_id = project_id.trim();
+    let environment_slug = environment_slug.trim();
 
     if project_id.is_empty() {
         bail!("Project id is required to open an env file.");
@@ -4372,15 +4530,377 @@ fn resolve_env_editor_target(
             )
         })?;
     let environment_root = environment_root_path(environment)?;
-    let target_root = match request.service_id.as_deref().map(str::trim) {
+    let target_root = match service_id.map(str::trim) {
         Some(service_id) if !service_id.is_empty() => {
             let service = resolve_environment_service(bootstrap, environment, service_id)?;
-            service_env_root(&environment_root, service)
+            service_environment_file_root(&environment_root, service)
         }
-        _ => environment_root,
+        _ => default_environment_file_root(bootstrap, environment, &environment_root),
     };
 
-    Ok(env_file_target(&target_root))
+    let path = env_file_target(&target_root.path, target_root.fallback_file_name);
+    let relative_path = path
+        .strip_prefix(&environment_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| {
+            path.file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(target_root.fallback_file_name))
+        });
+
+    Ok(EnvironmentFileTarget {
+        root: target_root.path,
+        path,
+        relative_path,
+    })
+}
+
+fn environment_file_candidates(
+    bootstrap: &BootstrapDto,
+    project_id: &str,
+    environment_slug: &str,
+    service_id: Option<&str>,
+) -> Result<Vec<EnvironmentFileCandidate>> {
+    let project_id = project_id.trim();
+    let environment_slug = environment_slug.trim();
+
+    if project_id.is_empty() {
+        bail!("Project id is required to open an env file.");
+    }
+    if environment_slug.is_empty() {
+        bail!("Environment slug is required to open an env file.");
+    }
+
+    let environment = bootstrap
+        .project_environments
+        .iter()
+        .find(|environment| {
+            environment.project_id == project_id && environment.slug == environment_slug
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "Project environment '{}' was not found for project '{}'.",
+                environment_slug,
+                project_id
+            )
+        })?;
+    let environment_root = environment_root_path(environment)?;
+
+    match service_id.and_then(normalize_optional_relative_path) {
+        Some(service_id) => {
+            let service = resolve_environment_service(bootstrap, environment, service_id)?;
+            Ok(service_environment_file_candidates(
+                &environment_root,
+                service,
+            ))
+        }
+        None => Ok(environment_environment_file_candidates(
+            bootstrap,
+            environment,
+            &environment_root,
+        )),
+    }
+}
+
+fn normalize_optional_relative_path(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn environment_environment_file_candidates(
+    bootstrap: &BootstrapDto,
+    environment: &ProjectEnvironmentInfoDto,
+    environment_root: &Path,
+) -> Vec<EnvironmentFileCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    push_environment_file_candidates(
+        environment_root,
+        environment_root,
+        ROOT_ENV_FILE_FALLBACK,
+        "Project root".into(),
+        &mut candidates,
+        &mut seen,
+        true,
+    );
+
+    for environment_service in &environment.services {
+        let Some(service) = bootstrap.services.iter().find(|service| {
+            service.project_id == environment.project_id
+                && service.id == environment_service.service_id
+        }) else {
+            continue;
+        };
+
+        let service_root = service_env_root(environment_root, service);
+        if service_root == environment_root || env_file_target_if_exists(&service_root).is_none() {
+            continue;
+        }
+
+        push_environment_file_candidates(
+            environment_root,
+            &service_root,
+            SERVICE_ENV_FILE_FALLBACK,
+            service.name.clone(),
+            &mut candidates,
+            &mut seen,
+            false,
+        );
+    }
+
+    for discovered_root in discover_nested_environment_file_roots(environment_root) {
+        push_environment_file_candidates(
+            environment_root,
+            &discovered_root,
+            SERVICE_ENV_FILE_FALLBACK,
+            environment_file_root_label(environment_root, &discovered_root),
+            &mut candidates,
+            &mut seen,
+            false,
+        );
+    }
+
+    candidates
+}
+
+fn service_environment_file_candidates(
+    environment_root: &Path,
+    service: &ProjectServiceInfoDto,
+) -> Vec<EnvironmentFileCandidate> {
+    let service_root = service_env_root(environment_root, service);
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    if service_root != environment_root {
+        push_environment_file_candidates(
+            environment_root,
+            &service_root,
+            SERVICE_ENV_FILE_FALLBACK,
+            service.name.clone(),
+            &mut candidates,
+            &mut seen,
+            true,
+        );
+        return candidates;
+    }
+
+    if env_file_target_if_exists(environment_root).is_some() {
+        push_environment_file_candidates(
+            environment_root,
+            environment_root,
+            SERVICE_ENV_FILE_FALLBACK,
+            "Project root".into(),
+            &mut candidates,
+            &mut seen,
+            true,
+        );
+    }
+
+    for discovered_root in discover_nested_environment_file_roots(environment_root) {
+        push_environment_file_candidates(
+            environment_root,
+            &discovered_root,
+            SERVICE_ENV_FILE_FALLBACK,
+            environment_file_root_label(environment_root, &discovered_root),
+            &mut candidates,
+            &mut seen,
+            true,
+        );
+    }
+
+    if candidates.is_empty() {
+        push_environment_file_candidates(
+            environment_root,
+            environment_root,
+            SERVICE_ENV_FILE_FALLBACK,
+            "Project root".into(),
+            &mut candidates,
+            &mut seen,
+            true,
+        );
+    }
+
+    candidates
+}
+
+fn push_environment_file_candidates(
+    environment_root: &Path,
+    root: &Path,
+    fallback_file_name: &'static str,
+    root_label: String,
+    candidates: &mut Vec<EnvironmentFileCandidate>,
+    seen: &mut HashSet<PathBuf>,
+    include_missing_fallback: bool,
+) {
+    let existing_files = existing_env_files(root);
+    let files = if existing_files.is_empty() && include_missing_fallback {
+        vec![root.join(fallback_file_name)]
+    } else {
+        existing_files
+    };
+
+    for path in files {
+        let relative_path = environment_file_relative_path(environment_root, &path);
+        if !seen.insert(relative_path.clone()) {
+            continue;
+        }
+        let exists = path.is_file();
+
+        candidates.push(EnvironmentFileCandidate {
+            target: EnvironmentFileTarget {
+                root: root.to_path_buf(),
+                path,
+                relative_path,
+            },
+            root_label: root_label.clone(),
+            exists,
+        });
+    }
+}
+
+fn existing_env_files(root: &Path) -> Vec<PathBuf> {
+    ENV_FILE_CANDIDATES
+        .iter()
+        .map(|file_name| root.join(file_name))
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+fn environment_file_relative_path(environment_root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(environment_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| {
+            path.file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(ROOT_ENV_FILE_FALLBACK))
+        })
+}
+
+fn environment_file_root_relative_path(environment_root: &Path, root: &Path) -> String {
+    root.strip_prefix(environment_root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".into())
+}
+
+fn environment_file_root_label(environment_root: &Path, root: &Path) -> String {
+    environment_file_root_relative_path(environment_root, root)
+}
+
+fn normalize_environment_file_relative_path(value: &str) -> Result<PathBuf> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        bail!("Environment file path must be relative to the project environment.");
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {}
+            _ => bail!("Environment file path must stay inside the project environment."),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        bail!("Environment file path is required.");
+    }
+
+    Ok(normalized)
+}
+
+fn default_environment_file_root(
+    bootstrap: &BootstrapDto,
+    environment: &ProjectEnvironmentInfoDto,
+    environment_root: &Path,
+) -> EnvironmentFileRoot {
+    if env_file_target_if_exists(environment_root).is_some() {
+        return root_environment_file_root(environment_root);
+    }
+
+    let mut service_roots = Vec::new();
+    for environment_service in &environment.services {
+        let Some(service) = bootstrap.services.iter().find(|service| {
+            service.project_id == environment.project_id
+                && service.id == environment_service.service_id
+        }) else {
+            continue;
+        };
+
+        let service_root = service_env_root(environment_root, service);
+        if service_root == environment_root {
+            continue;
+        }
+        if env_file_target_if_exists(&service_root).is_some() {
+            return service_environment_file_root_value(service_root);
+        }
+        if !service_roots.contains(&service_root) {
+            service_roots.push(service_root);
+        }
+    }
+
+    if let Some(discovered_root) = discover_nested_environment_file_root(environment_root) {
+        return service_environment_file_root_value(discovered_root);
+    }
+
+    if service_roots.len() == 1 {
+        return service_environment_file_root_value(service_roots.remove(0));
+    }
+
+    root_environment_file_root(environment_root)
+}
+
+fn discover_nested_environment_file_root(environment_root: &Path) -> Option<PathBuf> {
+    discover_nested_environment_file_roots(environment_root)
+        .into_iter()
+        .next()
+}
+
+fn discover_nested_environment_file_roots(environment_root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    for relative_path in ["apps/web", "apps/app", "web", "app", "frontend", "client"] {
+        collect_environment_file_root(
+            environment_root,
+            &environment_root.join(relative_path),
+            &mut roots,
+        );
+    }
+
+    for workspace_dir in ["apps", "services", "packages"] {
+        let workspace_root = environment_root.join(workspace_dir);
+        let Ok(entries) = fs::read_dir(&workspace_root) else {
+            continue;
+        };
+        let mut children = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        children.sort();
+
+        for child in children {
+            collect_environment_file_root(environment_root, &child, &mut roots);
+        }
+    }
+
+    roots
+}
+
+fn collect_environment_file_root(
+    environment_root: &Path,
+    candidate: &Path,
+    roots: &mut Vec<PathBuf>,
+) {
+    if !candidate.is_dir() || !path_stays_inside_root(environment_root, candidate) {
+        return;
+    }
+    if env_file_target_if_exists(candidate).is_none() {
+        return;
+    }
+    if !roots.iter().any(|root| root == candidate) {
+        roots.push(candidate.to_path_buf());
+    }
 }
 
 fn environment_root_path(environment: &ProjectEnvironmentInfoDto) -> Result<PathBuf> {
@@ -4467,6 +4987,37 @@ fn service_env_root(environment_root: &Path, service: &ProjectServiceInfoDto) ->
     environment_root.to_path_buf()
 }
 
+fn service_environment_file_root(
+    environment_root: &Path,
+    service: &ProjectServiceInfoDto,
+) -> EnvironmentFileRoot {
+    let service_root = service_env_root(environment_root, service);
+    if service_root != environment_root {
+        return service_environment_file_root_value(service_root);
+    }
+    if env_file_target_if_exists(environment_root).is_some() {
+        return service_environment_file_root_value(service_root);
+    }
+
+    discover_nested_environment_file_root(environment_root)
+        .map(service_environment_file_root_value)
+        .unwrap_or_else(|| service_environment_file_root_value(service_root))
+}
+
+fn root_environment_file_root(root: &Path) -> EnvironmentFileRoot {
+    EnvironmentFileRoot {
+        path: root.to_path_buf(),
+        fallback_file_name: ROOT_ENV_FILE_FALLBACK,
+    }
+}
+
+fn service_environment_file_root_value(root: PathBuf) -> EnvironmentFileRoot {
+    EnvironmentFileRoot {
+        path: root,
+        fallback_file_name: SERVICE_ENV_FILE_FALLBACK,
+    }
+}
+
 fn path_stays_inside_root(root: &Path, candidate: &Path) -> bool {
     let Ok(root) = root.canonicalize() else {
         return false;
@@ -4478,12 +5029,143 @@ fn path_stays_inside_root(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-fn env_file_target(root: &Path) -> PathBuf {
+fn env_file_target(root: &Path, fallback_file_name: &str) -> PathBuf {
+    env_file_target_if_exists(root).unwrap_or_else(|| root.join(fallback_file_name))
+}
+
+fn env_file_target_if_exists(root: &Path) -> Option<PathBuf> {
     ENV_FILE_CANDIDATES
         .iter()
         .map(|file_name| root.join(file_name))
         .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| root.join(".env.local"))
+}
+
+fn read_environment_file_target(target: &EnvironmentFileTarget) -> Result<EnvironmentFileDto> {
+    ensure_environment_file_target(target)?;
+
+    let modified_at = environment_file_modified_at(&target.path)?;
+    let exists = modified_at.is_some();
+    let content = if exists {
+        let metadata = fs::metadata(&target.path).with_context(|| {
+            format!(
+                "Failed to read environment file metadata for '{}'",
+                target.relative_path.display()
+            )
+        })?;
+        if metadata.len() > MAX_ENV_FILE_BYTES {
+            bail!(
+                "Environment file '{}' is too large to edit in Localify.",
+                target.relative_path.display()
+            );
+        }
+        fs::read_to_string(&target.path).with_context(|| {
+            format!(
+                "Failed to read environment file '{}'. Make sure it is valid UTF-8 text.",
+                target.relative_path.display()
+            )
+        })?
+    } else {
+        String::new()
+    };
+
+    Ok(EnvironmentFileDto {
+        file_name: target
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ROOT_ENV_FILE_FALLBACK.into()),
+        relative_path: target.relative_path.to_string_lossy().into_owned(),
+        exists,
+        content,
+        modified_at,
+    })
+}
+
+fn ensure_environment_file_target(target: &EnvironmentFileTarget) -> Result<()> {
+    if target.path.exists() {
+        return ensure_existing_environment_file_target(target);
+    }
+
+    let root = target.root.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve environment folder '{}'",
+            target.root.display()
+        )
+    })?;
+    let parent = target
+        .path
+        .parent()
+        .ok_or_else(|| anyhow!("Environment file target has no parent folder."))?
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "Failed to resolve environment file folder '{}'",
+                target.relative_path.display()
+            )
+        })?;
+
+    if !parent.starts_with(&root) {
+        bail!(
+            "Environment file '{}' must stay inside the project environment.",
+            target.relative_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_existing_environment_file_target(target: &EnvironmentFileTarget) -> Result<()> {
+    let root = target.root.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve environment folder '{}'",
+            target.root.display()
+        )
+    })?;
+    let file = target.path.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve environment file '{}'",
+            target.relative_path.display()
+        )
+    })?;
+
+    if !file.starts_with(&root) {
+        bail!(
+            "Environment file '{}' must stay inside the project environment.",
+            target.relative_path.display()
+        );
+    }
+    if !file.is_file() {
+        bail!(
+            "Environment file '{}' is not a regular file.",
+            target.relative_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn environment_file_modified_at(path: &Path) -> Result<Option<u64>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to read environment file '{}'", path.display()));
+        }
+    };
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("Failed to read environment file '{}'", path.display()))?;
+
+    Ok(Some(system_time_millis(modified)?))
+}
+
+fn system_time_millis(value: SystemTime) -> Result<u64> {
+    let duration = value
+        .duration_since(UNIX_EPOCH)
+        .context("Environment file modified time is before the Unix epoch.")?;
+    u64::try_from(duration.as_millis())
+        .context("Environment file modified time is too large to represent.")
 }
 
 fn apply_local_project_root_paths_to_environments(
@@ -4673,19 +5355,22 @@ fn tail_lines(path: &Path, line_count: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliRemovalOutcome, DesktopApi, apply_local_project_root_paths_to_environments,
-        cli_command_points_to_binary, cli_shell_command, cli_shell_commands,
-        ensure_cli_command_link, env_file_target, export_route_string, normalize_desktop_route,
-        normalize_project_snapshot_id, parse_desktop_route, remove_cli_command_link,
+        CliRemovalOutcome, DesktopApi, EnvironmentFileTarget, ROOT_ENV_FILE_FALLBACK,
+        apply_local_project_root_paths_to_environments, cli_command_points_to_binary,
+        cli_shell_command, cli_shell_commands, ensure_cli_command_link,
+        ensure_environment_file_target, env_file_target, environment_file_modified_at,
+        export_route_string, normalize_desktop_route, normalize_project_snapshot_id,
+        parse_desktop_route, read_environment_file_target, remove_cli_command_link,
         restart_daemon_after_certificate_refresh_step_with, service_env_root, shell_escape,
         validate_settings_snapshot,
     };
     use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
-        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, InitProjectRequest,
-        InitProjectServiceRequest, KeygenSettingsUpdateRequest, LogsRequest, ProjectServiceInfoDto,
-        RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto, SettingsTransferDomainDto,
-        SettingsTransferProjectDto, SettingsTransferSnapshotDto,
+        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, EnvironmentFileRequest,
+        InitProjectRequest, InitProjectServiceRequest, KeygenSettingsUpdateRequest, LogsRequest,
+        ProjectServiceInfoDto, RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
+        SaveEnvironmentFileRequest, SettingsTransferDomainDto, SettingsTransferProjectDto,
+        SettingsTransferSnapshotDto,
     };
     use crate::domain::{DomainPattern, DomainRegistration, Route, RouteTarget};
     use crate::infrastructure::config::{
@@ -4696,6 +5381,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::Path;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -4753,14 +5439,14 @@ mod tests {
     }
 
     #[test]
-    fn env_file_target_uses_first_existing_candidate() {
+    fn env_file_target_prefers_dotenv_when_it_exists() {
         let temp_dir = tempfile::tempdir().unwrap();
-        fs::write(temp_dir.path().join(".env"), "ignored").unwrap();
-        fs::write(temp_dir.path().join(".env.development.local"), "selected").unwrap();
+        fs::write(temp_dir.path().join(".env"), "selected").unwrap();
+        fs::write(temp_dir.path().join(".env.local"), "ignored").unwrap();
 
         assert_eq!(
-            env_file_target(temp_dir.path()),
-            temp_dir.path().join(".env.development.local")
+            env_file_target(temp_dir.path(), ROOT_ENV_FILE_FALLBACK),
+            temp_dir.path().join(".env")
         );
     }
 
@@ -4769,10 +5455,427 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         assert_eq!(
-            env_file_target(temp_dir.path()),
+            env_file_target(temp_dir.path(), ROOT_ENV_FILE_FALLBACK),
             temp_dir.path().join(".env.local")
         );
         assert!(!temp_dir.path().join(".env.local").exists());
+    }
+
+    #[test]
+    fn read_environment_file_target_returns_empty_missing_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = EnvironmentFileTarget {
+            root: temp_dir.path().to_path_buf(),
+            path: temp_dir.path().join(".env.local"),
+            relative_path: Path::new(".env.local").to_path_buf(),
+        };
+
+        let result = read_environment_file_target(&target).unwrap();
+
+        assert!(!result.exists);
+        assert_eq!(result.file_name, ".env.local");
+        assert_eq!(result.relative_path, ".env.local");
+        assert_eq!(result.content, "");
+        assert_eq!(result.modified_at, None);
+        assert!(!temp_dir.path().join(".env.local").exists());
+    }
+
+    #[test]
+    fn save_environment_file_creates_missing_fallback_on_first_save() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        fs::create_dir(&root).unwrap();
+        let project = store
+            .create_project_with_root("Client App", Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: project.id.clone(),
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+        let saved = api
+            .save_environment_file(SaveEnvironmentFileRequest {
+                project_id: project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+                content: "LOCALIFY_DOMAIN=client.localify\n".into(),
+                expected_modified_at: loaded.modified_at,
+            })
+            .unwrap();
+
+        assert!(saved.exists);
+        assert_eq!(saved.relative_path, ".env.local");
+        assert_eq!(
+            fs::read_to_string(root.join(".env.local")).unwrap(),
+            "LOCALIFY_DOMAIN=client.localify\n"
+        );
+    }
+
+    #[test]
+    fn read_environment_file_without_service_uses_existing_service_env() {
+        let (temp_dir, api, _store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        let service_root = root.join("apps/web");
+        fs::create_dir_all(&service_root).unwrap();
+        fs::write(service_root.join(".env"), "APP_ENV=web\n").unwrap();
+
+        let result = api
+            .init_project(InitProjectRequest {
+                name: "Client App".into(),
+                root_path: Some(root.display().to_string()),
+                services: vec![InitProjectServiceRequest {
+                    domain: "client.localify".into(),
+                    target: "3000".into(),
+                    service_name: Some("web".into()),
+                    service_path: Some("apps/web".into()),
+                    command: None,
+                }],
+            })
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: result.project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+
+        assert!(loaded.exists);
+        assert_eq!(loaded.file_name, ".env");
+        assert_eq!(loaded.relative_path, "apps/web/.env");
+        assert_eq!(loaded.content, "APP_ENV=web\n");
+    }
+
+    #[test]
+    fn read_environment_file_without_service_keeps_root_env_priority() {
+        let (temp_dir, api, _store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        let service_root = root.join("apps/web");
+        fs::create_dir_all(&service_root).unwrap();
+        fs::write(root.join(".env"), "APP_ENV=root\n").unwrap();
+        fs::write(service_root.join(".env"), "APP_ENV=web\n").unwrap();
+
+        let result = api
+            .init_project(InitProjectRequest {
+                name: "Client App".into(),
+                root_path: Some(root.display().to_string()),
+                services: vec![InitProjectServiceRequest {
+                    domain: "client.localify".into(),
+                    target: "3000".into(),
+                    service_name: Some("web".into()),
+                    service_path: Some("apps/web".into()),
+                    command: None,
+                }],
+            })
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: result.project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+
+        assert_eq!(loaded.relative_path, ".env");
+        assert_eq!(loaded.content, "APP_ENV=root\n");
+    }
+
+    #[test]
+    fn list_environment_files_includes_root_and_monorepo_candidates() {
+        let (temp_dir, api, _store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        let web_root = root.join("apps/web");
+        let api_root = root.join("packages/api");
+        fs::create_dir_all(&web_root).unwrap();
+        fs::create_dir_all(&api_root).unwrap();
+        fs::write(root.join(".env"), "APP_ENV=root\n").unwrap();
+        fs::write(root.join(".env.local"), "APP_ENV=root-local\n").unwrap();
+        fs::write(web_root.join(".env"), "APP_ENV=web\n").unwrap();
+        fs::write(api_root.join(".env.local"), "APP_ENV=api-local\n").unwrap();
+
+        let result = api
+            .init_project(InitProjectRequest {
+                name: "Client App".into(),
+                root_path: Some(root.display().to_string()),
+                services: vec![InitProjectServiceRequest {
+                    domain: "client.localify".into(),
+                    target: "3000".into(),
+                    service_name: Some("web".into()),
+                    service_path: Some("apps/web".into()),
+                    command: None,
+                }],
+            })
+            .unwrap();
+
+        let files = api
+            .list_environment_files(EnvironmentFileRequest {
+                project_id: result.project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap()
+            .files
+            .into_iter()
+            .map(|file| file.relative_path)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            files,
+            vec![
+                ".env".to_string(),
+                ".env.local".to_string(),
+                "apps/web/.env".to_string(),
+                "packages/api/.env.local".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn read_environment_file_uses_selected_relative_path() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(".env"), "APP_ENV=root\n").unwrap();
+        fs::write(root.join(".env.local"), "APP_ENV=root-local\n").unwrap();
+        let project = store
+            .create_project_with_root("Client App", Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: Some(".env.local".into()),
+            })
+            .unwrap();
+
+        assert_eq!(loaded.relative_path, ".env.local");
+        assert_eq!(loaded.content, "APP_ENV=root-local\n");
+    }
+
+    #[test]
+    fn read_environment_file_without_service_discovers_legacy_nested_env() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        let service_root = root.join("apps/web");
+        fs::create_dir_all(&service_root).unwrap();
+        fs::write(service_root.join(".env"), "APP_ENV=legacy-web\n").unwrap();
+        let project = store
+            .create_project_with_root("Client App", Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+
+        assert!(loaded.exists);
+        assert_eq!(loaded.file_name, ".env");
+        assert_eq!(loaded.relative_path, "apps/web/.env");
+        assert_eq!(loaded.content, "APP_ENV=legacy-web\n");
+    }
+
+    #[test]
+    fn read_environment_file_without_service_prefers_apps_web_for_legacy_project() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        let web_root = root.join("apps/web");
+        let infra_root = root.join("packages/infra");
+        fs::create_dir_all(&web_root).unwrap();
+        fs::create_dir_all(&infra_root).unwrap();
+        fs::write(web_root.join(".env"), "APP_ENV=web\n").unwrap();
+        fs::write(infra_root.join(".env"), "APP_ENV=infra\n").unwrap();
+        let project = store
+            .create_project_with_root("Client App", Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+
+        assert_eq!(loaded.relative_path, "apps/web/.env");
+        assert_eq!(loaded.content, "APP_ENV=web\n");
+    }
+
+    #[test]
+    fn read_environment_file_with_legacy_inferred_service_discovers_nested_env() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("cedre");
+        let service_root = root.join("apps/web");
+        fs::create_dir_all(&service_root).unwrap();
+        fs::write(service_root.join(".env"), "APP_ENV=cedre-web\n").unwrap();
+        let project = store
+            .create_project_with_root("Cedre", Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+        store
+            .add_domain_with_project(
+                DomainRegistration::new(
+                    DomainPattern::from_name("cedre.localify", false).unwrap(),
+                    vec![Route::parse("/=127.0.0.1:52205").unwrap()],
+                ),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+        let service_id = api
+            .list_project_services()
+            .unwrap()
+            .into_iter()
+            .find(|service| service.project_id == project.id)
+            .unwrap()
+            .id;
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: project.id,
+                environment_slug: "primary".into(),
+                service_id: Some(service_id),
+                relative_path: None,
+            })
+            .unwrap();
+
+        assert!(loaded.exists);
+        assert_eq!(loaded.file_name, ".env");
+        assert_eq!(loaded.relative_path, "apps/web/.env");
+        assert_eq!(loaded.content, "APP_ENV=cedre-web\n");
+    }
+
+    #[test]
+    fn save_environment_file_without_service_uses_single_service_dotenv_fallback() {
+        let (temp_dir, api, _store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        let service_root = root.join("apps/web");
+        fs::create_dir_all(&service_root).unwrap();
+
+        let result = api
+            .init_project(InitProjectRequest {
+                name: "Client App".into(),
+                root_path: Some(root.display().to_string()),
+                services: vec![InitProjectServiceRequest {
+                    domain: "client.localify".into(),
+                    target: "3000".into(),
+                    service_name: Some("web".into()),
+                    service_path: Some("apps/web".into()),
+                    command: None,
+                }],
+            })
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: result.project.id.clone(),
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+        let saved = api
+            .save_environment_file(SaveEnvironmentFileRequest {
+                project_id: result.project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+                content: "APP_ENV=web\n".into(),
+                expected_modified_at: loaded.modified_at,
+            })
+            .unwrap();
+
+        assert_eq!(loaded.relative_path, "apps/web/.env");
+        assert_eq!(saved.relative_path, "apps/web/.env");
+        assert_eq!(
+            fs::read_to_string(service_root.join(".env")).unwrap(),
+            "APP_ENV=web\n"
+        );
+    }
+
+    #[test]
+    fn save_environment_file_rejects_disk_changes_after_open() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("client-app");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(".env.local"), "A=1\n").unwrap();
+        let project = store
+            .create_project_with_root("Client App", Some(root.to_string_lossy().into_owned()))
+            .unwrap();
+
+        let loaded = api
+            .read_environment_file(EnvironmentFileRequest {
+                project_id: project.id.clone(),
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+            })
+            .unwrap();
+        let original_modified_at = loaded.modified_at;
+        for index in 0..10 {
+            std::thread::sleep(Duration::from_millis(5));
+            fs::write(root.join(".env.local"), format!("A={index}\n")).unwrap();
+            if environment_file_modified_at(&root.join(".env.local")).unwrap()
+                != original_modified_at
+            {
+                break;
+            }
+        }
+        assert_ne!(
+            environment_file_modified_at(&root.join(".env.local")).unwrap(),
+            original_modified_at
+        );
+
+        let error = api
+            .save_environment_file(SaveEnvironmentFileRequest {
+                project_id: project.id,
+                environment_slug: "primary".into(),
+                service_id: None,
+                relative_path: None,
+                content: "A=2\n".into(),
+                expected_modified_at: original_modified_at,
+            })
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("changed on disk after it was opened")
+        );
+    }
+
+    #[test]
+    fn environment_file_target_rejects_symlink_outside_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().join("root");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.env"), "SECRET=1\n").unwrap();
+        symlink(outside.join("secret.env"), root.join(".env.local")).unwrap();
+        let target = EnvironmentFileTarget {
+            root: root.clone(),
+            path: root.join(".env.local"),
+            relative_path: Path::new(".env.local").to_path_buf(),
+        };
+
+        let error = ensure_environment_file_target(&target).unwrap_err();
+
+        assert!(error.to_string().contains("must stay inside"));
     }
 
     #[test]

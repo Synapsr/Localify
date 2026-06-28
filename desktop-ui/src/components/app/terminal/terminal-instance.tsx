@@ -118,7 +118,7 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
     <div
       ref={containerRef}
       className={cn(
-        "localify-terminal h-full min-h-0 w-full bg-[#101010] px-4 py-3",
+        "localify-terminal h-full min-h-0 w-full overflow-hidden bg-[#101010]",
         active ? "block" : "hidden",
       )}
     />

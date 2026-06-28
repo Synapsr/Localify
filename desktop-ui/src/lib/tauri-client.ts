@@ -22,6 +22,9 @@ import type {
   DetectProjectInitPlanRequest,
   DomainInfoDto,
   DomainPatternRequest,
+  EnvironmentFileDto,
+  EnvironmentFileListDto,
+  EnvironmentFileRequest,
   ImportOfflineLicenseRequest,
   InitProjectFromFolderRequest,
   InitProjectFromFolderResultDto,
@@ -48,6 +51,7 @@ import type {
   RemoveProjectResultDto,
   RemoveRouteRequest,
   RunLocalDevServerRequest,
+  SaveEnvironmentFileRequest,
   StopLocalDevServerRequest,
   SettingsExportRequest,
   SettingsExportResultDto,
@@ -79,6 +83,10 @@ import {
   updateDomainRequestSchema,
 } from "./validators/validator.create-project";
 import {
+  environmentFileRequestSchema,
+  saveEnvironmentFileRequestSchema,
+} from "./validators/validator.environment-file";
+import {
   detectProjectInitPlanRequestSchema,
   initProjectFromFolderRequestSchema,
 } from "./validators/validator.init-project-from-folder";
@@ -92,8 +100,8 @@ import { openEnvInEditorRequestSchema } from "./validators/validator.open-env-in
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { openProjectUrlRequestSchema } from "./validators/validator.open-project-url";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
-import { removeProjectEnvironmentRequestSchema } from "./validators/validator.remove-project-environment";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
+import { removeProjectEnvironmentRequestSchema } from "./validators/validator.remove-project-environment";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
 import {
   settingsExportRequestSchema,
@@ -206,6 +214,9 @@ export interface DesktopClient {
   readLogs(request: LogsRequest): Promise<LogsDto>;
   openInEditor(request: OpenInEditorRequest): Promise<void>;
   openEnvInEditor(request: OpenEnvInEditorRequest): Promise<void>;
+  listEnvironmentFiles(request: EnvironmentFileRequest): Promise<EnvironmentFileListDto>;
+  readEnvironmentFile(request: EnvironmentFileRequest): Promise<EnvironmentFileDto>;
+  saveEnvironmentFile(request: SaveEnvironmentFileRequest): Promise<EnvironmentFileDto>;
   openProjectUrl(request: OpenProjectUrlRequest): Promise<void>;
   runLocalDevServer(request: RunLocalDevServerRequest): Promise<void>;
   stopLocalDevServer(request: StopLocalDevServerRequest): Promise<void>;
@@ -328,6 +339,18 @@ export function createDesktopClient(): DesktopClient {
     openEnvInEditor: (request) =>
       tauriInvoke("open_env_in_editor", {
         request: openEnvInEditorRequestSchema.parse(request),
+      }),
+    listEnvironmentFiles: (request) =>
+      tauriInvoke("list_environment_files", {
+        request: environmentFileRequestSchema.parse(request),
+      }),
+    readEnvironmentFile: (request) =>
+      tauriInvoke("read_environment_file", {
+        request: environmentFileRequestSchema.parse(request),
+      }),
+    saveEnvironmentFile: (request) =>
+      tauriInvoke("save_environment_file", {
+        request: saveEnvironmentFileRequestSchema.parse(request),
       }),
     openProjectUrl: (request) =>
       tauriInvoke("open_project_url", {

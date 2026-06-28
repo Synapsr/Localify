@@ -4,14 +4,15 @@ use roxy::desktop::dto::{
     AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto, CliAccessDto,
     ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto,
     DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DomainInfoDto,
-    DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectFromFolderRequest,
-    InitProjectFromFolderResultDto, InstallResultDto, KeygenSettingsUpdateRequest,
-    KillPortConflictRequest, LauncherPreferencesDto, LicensingDto, LogsDto, LogsRequest,
-    NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
+    DomainPatternRequest, EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest,
+    ImportOfflineLicenseRequest, InitProjectFromFolderRequest, InitProjectFromFolderResultDto,
+    InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
+    LauncherPreferencesDto, LicensingDto, LogsDto, LogsRequest, NodeTrustDto,
+    OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
     PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
     RegistrationDto, RegistrationMutationDto, RemoveProjectEnvironmentRequest,
     RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, RunLocalDevServerRequest, SettingsExportRequest,
+    RemoveRouteRequest, RunLocalDevServerRequest, SaveEnvironmentFileRequest, SettingsExportRequest,
     SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewRequest,
     SettingsImportRequest, SettingsImportResultDto, StartDaemonRequest, StepDto,
     StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
@@ -882,11 +883,51 @@ pub fn open_in_editor(
 }
 
 #[tauri::command]
-pub fn open_env_in_editor(
+pub async fn open_env_in_editor(
     state: tauri::State<'_, AppState>,
     request: OpenEnvInEditorRequest,
 ) -> Result<(), String> {
-    state.api.open_env_in_editor(request).map_err(map_error)
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.open_env_in_editor(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn read_environment_file(
+    state: tauri::State<'_, AppState>,
+    request: EnvironmentFileRequest,
+) -> Result<EnvironmentFileDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.read_environment_file(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn list_environment_files(
+    state: tauri::State<'_, AppState>,
+    request: EnvironmentFileRequest,
+) -> Result<EnvironmentFileListDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.list_environment_files(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn save_environment_file(
+    state: tauri::State<'_, AppState>,
+    request: SaveEnvironmentFileRequest,
+) -> Result<EnvironmentFileDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.save_environment_file(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]
