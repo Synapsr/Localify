@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::fmt;
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
@@ -394,6 +395,10 @@ pub fn resolve_license_state(licensing: &LicensingConfig) -> ResolvedLicenseStat
 
     let offline_result = verify_offline_license_cache(licensing);
     let offline_license = offline_result.as_ref().ok().cloned();
+    let offline_cache_expired = offline_result
+        .as_ref()
+        .err()
+        .is_some_and(is_offline_license_file_expired);
     let offline_error = if licensing.offline_license.is_some() {
         offline_result.err().map(|error| error.to_string())
     } else {
@@ -425,7 +430,7 @@ pub fn resolve_license_state(licensing: &LicensingConfig) -> ResolvedLicenseStat
         };
     }
 
-    if uses_verified_offline_cache {
+    if uses_verified_offline_cache && !offline_cache_expired {
         return ResolvedLicenseState {
             status: if configured {
                 ResolvedLicenseStatus::Invalid
@@ -501,8 +506,7 @@ pub fn verify_offline_license_certificate(
         &dataset,
         &["/meta/expiry", "/expiry", "/data/attributes/expiry"],
     ) {
-        ensure_timestamp_not_expired(&file_expiry)
-            .with_context(|| "Offline license file has expired".to_string())?;
+        ensure_offline_license_file_not_expired(&file_expiry)?;
     }
 
     let metadata = first_value(
@@ -1043,15 +1047,32 @@ fn first_value<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a Value> {
     pointers.iter().find_map(|pointer| value.pointer(pointer))
 }
 
-fn ensure_timestamp_not_expired(value: &str) -> Result<()> {
+fn ensure_offline_license_file_not_expired(value: &str) -> Result<()> {
     let expiry = OffsetDateTime::parse(value, &Rfc3339)
         .with_context(|| format!("Failed to parse timestamp '{value}'"))?;
     if OffsetDateTime::now_utc() > expiry {
-        bail!("Timestamp is in the past.");
+        return Err(OfflineLicenseFileExpired.into());
     }
 
     Ok(())
 }
+
+fn is_offline_license_file_expired(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<OfflineLicenseFileExpired>())
+}
+
+#[derive(Debug)]
+struct OfflineLicenseFileExpired;
+
+impl fmt::Display for OfflineLicenseFileExpired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Offline license file has expired")
+    }
+}
+
+impl std::error::Error for OfflineLicenseFileExpired {}
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {
     let trimmed = value.trim();
@@ -1233,11 +1254,14 @@ struct KeygenErrorItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEYGEN_OFFLINE_ALGORITHM, KeygenHttpResponse, ResolvedLicenseStatus, decode_hex,
-        mask_fingerprint, parse_ioplatform_uuid, parse_signature_header, parse_validation_response,
-        resolve_license_state, should_activate_machine,
+        BASE64, KEYGEN_OFFLINE_ALGORITHM, KEYGEN_PLAINTEXT_OFFLINE_ALGORITHM, KeygenHttpResponse,
+        ResolvedLicenseStatus, decode_hex, mask_fingerprint, parse_ioplatform_uuid,
+        parse_signature_header, parse_validation_response, resolve_license_state,
+        should_activate_machine,
     };
-    use crate::config::{LicensingConfig, OfflineLicenseFile, StoredLicense};
+    use crate::config::{KeygenConfig, LicensingConfig, OfflineLicenseFile, StoredLicense};
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
     use reqwest::StatusCode;
 
     #[test]
@@ -1350,5 +1374,97 @@ mod tests {
 
         assert_eq!(resolved.status, ResolvedLicenseStatus::Invalid);
         assert!(resolved.last_error.is_some());
+    }
+
+    #[test]
+    fn expired_offline_cache_does_not_hide_stored_valid_license() {
+        let (keygen, certificate) = expired_plaintext_offline_certificate();
+        let licensing = LicensingConfig {
+            keygen,
+            license: Some(StoredLicense {
+                key: "localify-test-key".into(),
+                validation_code: Some("VALID".into()),
+                plan: Some("Pro".into()),
+                max_projects: None,
+                max_domains_per_project: None,
+                ..StoredLicense::default()
+            }),
+            offline_license: Some(OfflineLicenseFile {
+                certificate,
+                algorithm: KEYGEN_PLAINTEXT_OFFLINE_ALGORITHM.into(),
+                ..OfflineLicenseFile::default()
+            }),
+        };
+
+        let resolved = resolve_license_state(&licensing);
+
+        assert_eq!(resolved.status, ResolvedLicenseStatus::Licensed);
+        assert_eq!(resolved.limits.plan, "Pro");
+        assert_eq!(resolved.last_error, None);
+    }
+
+    #[test]
+    fn expired_offline_cache_stays_invalid_without_stored_valid_license() {
+        let (keygen, certificate) = expired_plaintext_offline_certificate();
+        let licensing = LicensingConfig {
+            keygen,
+            license: Some(StoredLicense {
+                key: "localify-test-key".into(),
+                validation_code: Some("VALID_OFFLINE".into()),
+                ..StoredLicense::default()
+            }),
+            offline_license: Some(OfflineLicenseFile {
+                certificate,
+                algorithm: KEYGEN_PLAINTEXT_OFFLINE_ALGORITHM.into(),
+                ..OfflineLicenseFile::default()
+            }),
+        };
+
+        let resolved = resolve_license_state(&licensing);
+
+        assert_eq!(resolved.status, ResolvedLicenseStatus::Invalid);
+        assert_eq!(
+            resolved.last_error.as_deref(),
+            Some("Offline license file has expired")
+        );
+    }
+
+    fn expired_plaintext_offline_certificate() -> (KeygenConfig, String) {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let public_key = hex_bytes(signing_key.verifying_key().as_bytes());
+        let dataset = serde_json::json!({
+            "meta": {
+                "expiry": "2000-01-01T00:00:00Z"
+            },
+            "data": {
+                "id": "lic_123",
+                "attributes": {
+                    "metadata": {
+                        "plan": "Pro",
+                        "maxProjects": null,
+                        "maxDomainsPerProject": null
+                    }
+                }
+            }
+        });
+        let enc = BASE64.encode(dataset.to_string());
+        let signature = signing_key.sign(format!("license/{enc}").as_bytes());
+        let payload = serde_json::json!({
+            "enc": enc,
+            "sig": BASE64.encode(signature.to_bytes()),
+            "alg": KEYGEN_PLAINTEXT_OFFLINE_ALGORITHM
+        });
+
+        (
+            KeygenConfig {
+                public_key: Some(public_key),
+                ..KeygenConfig::default()
+            },
+            BASE64.encode(payload.to_string()),
+        )
+    }
+
+    fn hex_bytes(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
