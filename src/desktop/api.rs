@@ -5333,11 +5333,43 @@ fn is_stale_system_helper_error(error: &anyhow::Error) -> bool {
         && message.contains("older build")
 }
 
+fn is_attach_project_not_git_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("is not inside a Git repository") && message.contains("attach worktrees")
+}
+
 fn should_restart_helper_after_attach_error(
     error: &anyhow::Error,
-    _request: &AttachProjectWorktreeRequest,
+    request: &AttachProjectWorktreeRequest,
 ) -> bool {
-    is_stale_system_helper_error(error)
+    if is_stale_system_helper_error(error) {
+        return true;
+    }
+
+    is_attach_project_not_git_error(error) && attach_request_points_to_valid_git_worktree(request)
+}
+
+fn attach_request_points_to_valid_git_worktree(request: &AttachProjectWorktreeRequest) -> bool {
+    let worktree_root = PathBuf::from(request.root_path.trim());
+    if worktree_root.as_os_str().is_empty() {
+        return false;
+    }
+    let worktree_root = fs::canonicalize(&worktree_root).unwrap_or(worktree_root);
+    let Some(worktree_common_dir) = git_common_dir(&worktree_root) else {
+        return false;
+    };
+
+    let primary_common_dir = request
+        .primary_root_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|root_path| !root_path.is_empty())
+        .and_then(|root_path| git_common_dir(Path::new(root_path)))
+        .or_else(|| {
+            infer_primary_worktree_root(&worktree_root).and_then(|root| git_common_dir(&root))
+        });
+
+    primary_common_dir.as_ref() == Some(&worktree_common_dir)
 }
 
 #[derive(Debug, Clone)]
@@ -6726,16 +6758,37 @@ mod tests {
 
     #[test]
     fn attach_not_git_project_error_does_not_restart_helper() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path().join("project");
+        let worktree_root = temp_dir.path().join("worktree");
+        fs::create_dir(&project_root).unwrap();
+        fs::create_dir(&worktree_root).unwrap();
         let error = anyhow::anyhow!(
             "Project 'acme' is not inside a Git repository, so Localify cannot attach worktrees."
         );
         let request = AttachProjectWorktreeRequest {
             project_id: "acme".into(),
-            root_path: "/Users/dev/.codex/worktrees/0815/ACME".into(),
-            primary_root_path: Some("/Users/dev/Developer/acme/ACME".into()),
+            root_path: worktree_root.display().to_string(),
+            primary_root_path: Some(project_root.display().to_string()),
         };
 
         assert!(!should_restart_helper_after_attach_error(&error, &request));
+    }
+
+    #[test]
+    fn attach_not_git_project_error_restarts_helper_for_valid_git_worktree() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (primary_root, worktree_root) = create_git_repo_with_worktree(temp_dir.path());
+        let error = anyhow::anyhow!(
+            "Project 'acme' is not inside a Git repository, so Localify cannot attach worktrees."
+        );
+        let request = AttachProjectWorktreeRequest {
+            project_id: "acme".into(),
+            root_path: worktree_root.display().to_string(),
+            primary_root_path: Some(primary_root.display().to_string()),
+        };
+
+        assert!(should_restart_helper_after_attach_error(&error, &request));
     }
 
     #[test]
