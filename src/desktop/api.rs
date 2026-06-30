@@ -4795,9 +4795,7 @@ struct WorktreeGitMetadata {
 }
 
 fn git_worktrees(root: &Path) -> Result<Vec<GitWorktreeInfo>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = git_command(root)
         .args(["worktree", "list", "--porcelain"])
         .output()
         .with_context(|| {
@@ -4899,12 +4897,7 @@ fn git_common_dir(root: &Path) -> Option<PathBuf> {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = git_command(root).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -4912,6 +4905,31 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     let value = String::from_utf8(output.stdout).ok()?;
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+fn git_command(root: &Path) -> Command {
+    let safe_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut command = Command::new(git_executable());
+    command
+        .arg("-c")
+        .arg(format!("safe.directory={}", safe_root.display()))
+        .arg("-C")
+        .arg(root);
+    command
+}
+
+fn git_executable() -> &'static Path {
+    for candidate in [
+        Path::new("/usr/bin/git"),
+        Path::new("/opt/homebrew/bin/git"),
+        Path::new("/usr/local/bin/git"),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    Path::new("git")
 }
 
 fn map_project_worktree(
@@ -6468,12 +6486,13 @@ mod tests {
         apply_local_project_root_paths_to_environments, cli_command_points_to_binary,
         cli_shell_command, cli_shell_commands, ensure_cli_command_link,
         ensure_environment_file_target, env_file_target, environment_file_modified_at,
-        export_route_string, infer_primary_worktree_root, is_stale_system_helper_error,
-        normalize_desktop_route, normalize_project_snapshot_id, parse_desktop_route,
-        parse_git_worktree_porcelain, read_environment_file_target, remove_cli_command_link,
-        resolve_attach_primary_git_root, restart_daemon_after_certificate_refresh_step_with,
-        service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
-        unique_environment_slug, validate_settings_snapshot,
+        export_route_string, git_command, infer_primary_worktree_root,
+        is_stale_system_helper_error, normalize_desktop_route, normalize_project_snapshot_id,
+        parse_desktop_route, parse_git_worktree_porcelain, read_environment_file_target,
+        remove_cli_command_link, resolve_attach_primary_git_root,
+        restart_daemon_after_certificate_refresh_step_with, service_env_root, shell_escape,
+        should_restart_helper_after_attach_error, slugify, unique_environment_slug,
+        validate_settings_snapshot,
     };
     use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
@@ -6564,6 +6583,20 @@ mod tests {
             configured.root_path.as_deref(),
             Some("/Users/dev/Developer/acme/ACME")
         );
+    }
+
+    #[test]
+    fn git_command_marks_checkout_safe_before_chdir() {
+        let root = Path::new("/tmp/localify-client-app");
+        let args = git_command(root)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "safe.directory=/tmp/localify-client-app");
+        assert_eq!(args[2], "-C");
+        assert_eq!(args[3], "/tmp/localify-client-app");
     }
 
     #[test]
