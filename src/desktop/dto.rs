@@ -328,6 +328,81 @@ pub struct ProjectEnvironmentInfoDto {
     pub services: Vec<ProjectEnvironmentServiceInfoDto>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverProjectWorktreesRequest {
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachProjectWorktreeRequest {
+    pub project_id: String,
+    pub root_path: String,
+    #[serde(default)]
+    pub primary_root_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachProjectWorktreeResultDto {
+    pub environment: ProjectEnvironmentInfoDto,
+    pub created: bool,
+    pub created_domains: Vec<String>,
+    pub daemon_reloaded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectWorktreeStatusDto {
+    Primary,
+    Attached,
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWorktreeServiceCandidateDto {
+    pub id: String,
+    pub label: String,
+    pub display_path: String,
+    #[serde(default)]
+    pub service_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWorktreeDto {
+    pub root_path: String,
+    pub name: String,
+    pub slug: String,
+    pub status: ProjectWorktreeStatusDto,
+    #[serde(default)]
+    pub attached_environment_slug: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub git_head: Option<String>,
+    #[serde(default)]
+    pub git_common_dir: Option<String>,
+    #[serde(default)]
+    pub existing_environment_file_count: usize,
+    #[serde(default)]
+    pub service_candidates: Vec<ProjectWorktreeServiceCandidateDto>,
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWorktreeDiscoveryDto {
+    pub project_id: String,
+    pub project_name: String,
+    pub primary_root_path: String,
+    pub worktrees: Vec<ProjectWorktreeDto>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DnsResolutionDto {
@@ -908,6 +983,51 @@ pub struct SaveEnvironmentFileRequest {
     pub content: String,
     #[serde(default)]
     pub expected_modified_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileCopyRequest {
+    pub project_id: String,
+    pub source_environment_slug: String,
+    pub target_environment_slug: String,
+    #[serde(default)]
+    pub relative_paths: Vec<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentFileCopyStatusDto {
+    Create,
+    Overwrite,
+    SkipExists,
+    Blocked,
+    Copied,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileCopyItemDto {
+    pub relative_path: String,
+    pub file_name: String,
+    pub status: EnvironmentFileCopyStatusDto,
+    pub source_exists: bool,
+    pub target_exists: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileCopyPreviewDto {
+    pub items: Vec<EnvironmentFileCopyItemDto>,
+    pub create_count: usize,
+    pub overwrite_count: usize,
+    pub skip_count: usize,
+    pub blocked_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

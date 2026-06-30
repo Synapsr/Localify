@@ -16,7 +16,7 @@ import type {
   TerminalTargetRequest,
 } from "@/types/roxy";
 
-import { PinIcon, PinSolidIcon, TerminalIcon } from "@/components/icons";
+import { CodeIcon, PinIcon, PinSolidIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -36,13 +36,11 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { projectMutations } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import {
-  terminalTargetRequestMatches,
-  useTerminal,
-} from "@/providers/terminal-provider";
+import { terminalTargetRequestMatches, useTerminal } from "@/providers/terminal-provider";
 
 import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog";
 import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
+import { ProjectWorktreesDialog } from "./project-worktrees-dialog";
 import { ProjectsListItemDevDx } from "./projects-list-item-dev-dx";
 import { ProjectDomainList } from "./projects-list-item-domains";
 
@@ -74,26 +72,23 @@ export const ProjectsListItem = ({
   const openInEditor = useMutation(projectMutations.openInEditor());
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] =
-    useState(false);
-  const [environmentFileTarget, setEnvironmentFileTarget] =
-    useState<EnvironmentFileRequest | null>(null);
+  const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] = useState(false);
+  const [environmentFileTarget, setEnvironmentFileTarget] = useState<EnvironmentFileRequest | null>(
+    null,
+  );
+  const [worktreesDialogOpen, setWorktreesDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const environmentDomainPatterns = new Set(
     environments
       .filter((environment) => !environment.primary)
-      .flatMap((environment) =>
-        environment.services.map((service) => service.domain),
-      ),
+      .flatMap((environment) => environment.services.map((service) => service.domain)),
   );
   const primaryDomains = domains.filter(
     (domain) => !environmentDomainPatterns.has(domain.registration.pattern),
   );
   const primaryEnvironment =
-    environments.find((environment) => environment.primary) ??
-    environments[0] ??
-    null;
+    environments.find((environment) => environment.primary) ?? environments[0] ?? null;
   const projectTerminalTarget =
     project.rootPath && primaryEnvironment
       ? ({
@@ -102,10 +97,7 @@ export const ProjectsListItem = ({
           environmentSlug: primaryEnvironment.slug,
         } satisfies TerminalTargetRequest)
       : null;
-  const selected = terminalTargetRequestMatches(
-    selectedTarget,
-    projectTerminalTarget,
-  );
+  const selected = terminalTargetRequestMatches(selectedTarget, projectTerminalTarget);
 
   const containerClassName = cn(
     "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
@@ -123,11 +115,7 @@ export const ProjectsListItem = ({
 
   const handleCardClick = (event: MouseEvent<HTMLElement>) => {
     const target = event.target instanceof HTMLElement ? event.target : null;
-    if (
-      target?.closest(
-        "a,button,input,select,textarea,[role='button'],[role='menuitem']",
-      )
-    ) {
+    if (target?.closest("a,button,input,select,textarea,[role='button'],[role='menuitem']")) {
       return;
     }
 
@@ -223,9 +211,7 @@ export const ProjectsListItem = ({
           environments={environments}
           projectRootPath={project.rootPath}
         />
-        {editorError ? (
-          <p className="text-xs text-destructive">{editorError}</p>
-        ) : null}
+        {editorError ? <p className="text-xs text-destructive">{editorError}</p> : null}
       </div>
 
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
@@ -244,21 +230,13 @@ export const ProjectsListItem = ({
               disabled={removeProject.isPending}
               className="text-nowrap"
             >
-              {isPinned ? (
-                <PinSolidIcon className="size-4" />
-              ) : (
-                <PinIcon className="size-4" />
-              )}
+              {isPinned ? <PinSolidIcon className="size-4" /> : <PinIcon className="size-4" />}
               {isPinned ? "Unpin project" : "Pin project"}
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
             onClick={() => void handleOpenInEditor()}
-            disabled={
-              !project.rootPath ||
-              openInEditor.isPending ||
-              removeProject.isPending
-            }
+            disabled={!project.rootPath || openInEditor.isPending || removeProject.isPending}
           >
             Open in editor
           </DropdownMenuItem>
@@ -281,16 +259,20 @@ export const ProjectsListItem = ({
             }}
           />
           <DropdownMenuItem
+            onClick={() => setWorktreesDialogOpen(true)}
+            disabled={!project.rootPath || removeProject.isPending}
+          >
+            <CodeIcon className="size-4" />
+            Manage worktrees
+          </DropdownMenuItem>
+          <DropdownMenuItem
             onClick={() => void handleOpenTerminal()}
             disabled={!projectTerminalTarget || removeProject.isPending}
           >
             <TerminalIcon className="size-4" />
             Open terminal
           </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={handleViewLogs}
-            disabled={removeProject.isPending}
-          >
+          <DropdownMenuItem onClick={handleViewLogs} disabled={removeProject.isPending}>
             View logs
           </DropdownMenuItem>
           <DropdownMenuItem
@@ -355,8 +337,7 @@ export const ProjectsListItem = ({
           <DialogHeader>
             <DialogTitle>Delete {project.name}?</DialogTitle>
             <DialogDescription>
-              This permanently removes the project and unregisters every
-              attached domain.
+              This permanently removes the project and unregisters every attached domain.
             </DialogDescription>
           </DialogHeader>
 
@@ -383,9 +364,7 @@ export const ProjectsListItem = ({
               ) : null}
             </div>
 
-            {deleteError ? (
-              <p className="text-sm text-destructive">{deleteError}</p>
-            ) : null}
+            {deleteError ? <p className="text-sm text-destructive">{deleteError}</p> : null}
           </DialogBody>
 
           <DialogFooter>
@@ -413,6 +392,11 @@ export const ProjectsListItem = ({
         open={environmentFileDialogOpen}
         target={environmentFileTarget}
         onOpenChange={setEnvironmentFileDialogOpen}
+      />
+      <ProjectWorktreesDialog
+        project={project}
+        open={worktreesDialogOpen}
+        onOpenChange={setWorktreesDialogOpen}
       />
     </>
   );

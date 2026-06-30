@@ -15,17 +15,18 @@ use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
-    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
-    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
-    DomainInfoDto, DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest,
-    InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
-    LicensingDto, LogsDto, LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
-    RemoveProjectResultDto, RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto,
-    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
-    UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
+    AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
+    CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
+    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
+    DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest, InitProjectResultDto,
+    InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto,
+    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    RegistrationDto, RegistrationMutationDto, RemoveProjectEnvironmentRequest,
+    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateDomainRequest, UpdateProjectRequest,
 };
 
 const HELPER_PING_TIMEOUT: Duration = Duration::from_secs(1);
@@ -89,6 +90,9 @@ pub enum HelperCommand {
     },
     RemoveProjectEnvironment {
         request: RemoveProjectEnvironmentRequest,
+    },
+    AttachProjectWorktree {
+        request: AttachProjectWorktreeRequest,
     },
     SetupCliAccess,
     ListPortConflicts,
@@ -165,6 +169,7 @@ impl HelperCommand {
             | Self::UpdateProject { .. }
             | Self::RemoveProject { .. }
             | Self::RemoveProjectEnvironment { .. }
+            | Self::AttachProjectWorktree { .. }
             | Self::SetupCliAccess
             | Self::KillPortConflict { .. }
             | Self::AssignDomainProject { .. }
@@ -218,6 +223,7 @@ impl HelperCommand {
                 | Self::UpdateProject { .. }
                 | Self::RemoveProject { .. }
                 | Self::RemoveProjectEnvironment { .. }
+                | Self::AttachProjectWorktree { .. }
                 | Self::AssignDomainProject { .. }
                 | Self::RegisterDomain { .. }
                 | Self::UpdateDomain { .. }
@@ -370,6 +376,13 @@ impl SystemHelperClient {
         request: RemoveProjectEnvironmentRequest,
     ) -> Result<RemoveProjectEnvironmentResultDto> {
         self.send(HelperCommand::RemoveProjectEnvironment { request })
+    }
+
+    pub fn attach_project_worktree(
+        &self,
+        request: AttachProjectWorktreeRequest,
+    ) -> Result<AttachProjectWorktreeResultDto> {
+        self.send(HelperCommand::AttachProjectWorktree { request })
     }
 
     pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
@@ -820,6 +833,9 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::RemoveProjectEnvironment { request } => {
             serde_json::to_value(api.remove_project_environment(request)?).map_err(Into::into)
+        }
+        HelperCommand::AttachProjectWorktree { request } => {
+            serde_json::to_value(api.attach_project_worktree_direct(request)?).map_err(Into::into)
         }
         HelperCommand::SetupCliAccess => {
             serde_json::to_value(api.setup_cli_access()?).map_err(Into::into)

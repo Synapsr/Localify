@@ -25,12 +25,16 @@ A runnable local entrypoint inside a project, such as a web app, API, docs app, 
 _Avoid_: App, package, script, route
 
 **Unavailable Service**:
-A project service that cannot be run in a specific project environment because its local checkout does not contain the service path or required launch metadata.
+A project service that cannot be run in a specific project environment because its local checkout does not contain the service path or required launch metadata. It is a configuration or diagnostic concept, not something every environment view must show by default.
 _Avoid_: Broken service, deleted service
 
 **Project Environment**:
 A local checkout variant of a project, usually tied to a git worktree or branch, that can run the same services with distinct local domains and ports.
 _Avoid_: Project, branch project, clone
+
+**Git Worktree**:
+A repository checkout that Localify may treat as a project environment for the same project.
+_Avoid_: Project, clone
 
 **Environment File**:
 A local environment configuration file attached to a project environment, optionally scoped to one service inside that environment.

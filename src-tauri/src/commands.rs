@@ -1,15 +1,17 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AgentSkillInstallResultDto, AgentSkillStatusDto,
-    AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto, CliAccessDto,
+    AppConfigDto, AssignDomainProjectRequest, AttachProjectWorktreeRequest,
+    AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto, CliAccessDto,
     ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto,
-    DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DomainInfoDto,
-    DomainPatternRequest, EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest,
+    DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
+    DiscoverProjectWorktreesRequest, DomainInfoDto, DomainPatternRequest, EnvironmentFileCopyPreviewDto,
+    EnvironmentFileCopyRequest, EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest,
     ImportOfflineLicenseRequest, InitProjectFromFolderRequest, InitProjectFromFolderResultDto,
     InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
     LauncherPreferencesDto, LicensingDto, LogsDto, LogsRequest, NodeTrustDto,
     OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
-    PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
+    PortConflictDto, ProjectInfoDto, ProjectWorktreeDiscoveryDto, RegisterDomainRequest, RegisterDomainResultDto,
     RegistrationDto, RegistrationMutationDto, RemoveProjectEnvironmentRequest,
     RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
     RemoveRouteRequest, RunLocalDevServerRequest, SaveEnvironmentFileRequest, SettingsExportRequest,
@@ -750,6 +752,35 @@ pub fn remove_project_environment(
 }
 
 #[tauri::command]
+pub async fn discover_project_worktrees(
+    state: tauri::State<'_, AppState>,
+    request: DiscoverProjectWorktreesRequest,
+) -> Result<ProjectWorktreeDiscoveryDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.discover_project_worktrees(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn attach_project_worktree(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: AttachProjectWorktreeRequest,
+) -> Result<AttachProjectWorktreeResultDto, String> {
+    let api = state.api.clone();
+
+    let result = async_runtime::spawn_blocking(move || {
+        api.attach_project_worktree(request).map_err(map_error)
+    })
+    .await
+    .map_err(map_error)??;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn assign_domain_project(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -926,6 +957,32 @@ pub async fn save_environment_file(
     let api = state.api.clone();
 
     async_runtime::spawn_blocking(move || api.save_environment_file(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn preview_environment_file_copy(
+    state: tauri::State<'_, AppState>,
+    request: EnvironmentFileCopyRequest,
+) -> Result<EnvironmentFileCopyPreviewDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || {
+        api.preview_environment_file_copy(request).map_err(map_error)
+    })
+    .await
+    .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn copy_environment_files(
+    state: tauri::State<'_, AppState>,
+    request: EnvironmentFileCopyRequest,
+) -> Result<EnvironmentFileCopyPreviewDto, String> {
+    let api = state.api.clone();
+
+    async_runtime::spawn_blocking(move || api.copy_environment_files(request).map_err(map_error))
         .await
         .map_err(map_error)?
 }

@@ -4,6 +4,11 @@ import type {
   CreateProjectWithDomainsRequest,
   DetectProjectInitPlanDto,
   DetectProjectInitPlanRequest,
+  DiscoverProjectWorktreesRequest,
+  AttachProjectWorktreeRequest,
+  AttachProjectWorktreeResultDto,
+  EnvironmentFileCopyPreviewDto,
+  EnvironmentFileCopyRequest,
   EnvironmentFileDto,
   EnvironmentFileListDto,
   EnvironmentFileRequest,
@@ -12,6 +17,7 @@ import type {
   OpenEnvInEditorRequest,
   OpenInEditorRequest,
   ProjectInfoDto,
+  ProjectWorktreeDiscoveryDto,
   RemoveProjectEnvironmentRequest,
   RemoveProjectEnvironmentResultDto,
   RemoveProjectRequest,
@@ -45,6 +51,18 @@ const projectQueryKeys = {
       request.environmentSlug,
       request.serviceId ?? null,
     ] as const,
+  worktrees: (request: DiscoverProjectWorktreesRequest) =>
+    [...projectQueryKeys.all(), "worktrees", request.projectId] as const,
+  environmentFileCopyPreview: (request: EnvironmentFileCopyRequest) =>
+    [
+      ...projectQueryKeys.all(),
+      "environmentFileCopyPreview",
+      request.projectId,
+      request.sourceEnvironmentSlug,
+      request.targetEnvironmentSlug,
+      request.overwrite,
+      ...request.relativePaths,
+    ] as const,
 } as const;
 
 export const projectQueries = {
@@ -63,6 +81,17 @@ export const projectQueries = {
     queryOptions<EnvironmentFileListDto, Error>({
       queryKey: projectQueryKeys.environmentFiles(request),
       queryFn: () => tauriClient.listEnvironmentFiles(request),
+    }),
+  worktrees: (request: DiscoverProjectWorktreesRequest) =>
+    queryOptions<ProjectWorktreeDiscoveryDto, Error>({
+      queryKey: projectQueryKeys.worktrees(request),
+      queryFn: () => tauriClient.discoverProjectWorktrees(request),
+      retry: false,
+    }),
+  environmentFileCopyPreview: (request: EnvironmentFileCopyRequest) =>
+    queryOptions<EnvironmentFileCopyPreviewDto, Error>({
+      queryKey: projectQueryKeys.environmentFileCopyPreview(request),
+      queryFn: () => tauriClient.previewEnvironmentFileCopy(request),
     }),
 } as const;
 
@@ -101,6 +130,12 @@ export const projectMutations = {
       onSuccess: async () =>
         invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
+  attachWorktree: (queryClient: QueryClient) =>
+    mutationOptions<AttachProjectWorktreeResultDto, Error, AttachProjectWorktreeRequest>({
+      mutationFn: (request) => tauriClient.attachProjectWorktree(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
+    }),
   openInEditor: () =>
     mutationOptions<void, Error, OpenInEditorRequest>({
       mutationFn: (request) => tauriClient.openInEditor(request),
@@ -112,6 +147,12 @@ export const projectMutations = {
   saveEnvironmentFile: () =>
     mutationOptions<EnvironmentFileDto, Error, SaveEnvironmentFileRequest>({
       mutationFn: (request) => tauriClient.saveEnvironmentFile(request),
+    }),
+  copyEnvironmentFiles: (queryClient: QueryClient) =>
+    mutationOptions<EnvironmentFileCopyPreviewDto, Error, EnvironmentFileCopyRequest>({
+      mutationFn: (request) => tauriClient.copyEnvironmentFiles(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   runLocalDevServer: (queryClient: QueryClient) =>
     mutationOptions<void, Error, RunLocalDevServerRequest>({

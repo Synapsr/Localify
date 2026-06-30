@@ -418,6 +418,17 @@ enum ProjectEnvCommands {
         json: bool,
     },
 
+    /// Discover Git worktrees for a project
+    Discover {
+        /// Project ID/name to inspect
+        #[arg(long)]
+        project: String,
+
+        /// Print structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Ensure a project environment for the current root/worktree
     Ensure {
         /// Project ID/name when the current folder is ambiguous
@@ -435,6 +446,37 @@ enum ProjectEnvCommands {
         /// Mark/update the primary environment metadata instead of creating variant domains.
         #[arg(long)]
         primary: bool,
+    },
+
+    /// Copy environment files between project environments
+    CopyEnv {
+        /// Project ID/name
+        #[arg(long)]
+        project: String,
+
+        /// Target project environment slug
+        #[arg(long = "env")]
+        environment: String,
+
+        /// Source project environment slug
+        #[arg(long = "from", default_value = "primary")]
+        from: String,
+
+        /// Relative environment file path to copy. Omit with --all to copy every source env file.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+
+        /// Copy every existing env file from the source environment
+        #[arg(long)]
+        all: bool,
+
+        /// Overwrite existing files in the target environment
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Print structured JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -611,6 +653,11 @@ fn main() -> Result<()> {
                         cli::project_env::ListEnvArgs { project, json },
                         &ctx,
                     ),
+                    ProjectEnvCommands::Discover { project, json } => cli::project_env::discover(
+                        cli::project_env::DiscoverEnvArgs { project, json },
+                        config_path,
+                        &ctx,
+                    ),
                     ProjectEnvCommands::Ensure {
                         project,
                         name,
@@ -624,6 +671,26 @@ fn main() -> Result<()> {
                             primary,
                         },
                         &ctx,
+                    ),
+                    ProjectEnvCommands::CopyEnv {
+                        project,
+                        environment,
+                        from,
+                        paths,
+                        all,
+                        overwrite,
+                        json,
+                    } => cli::project_env::copy_env(
+                        cli::project_env::CopyEnvArgs {
+                            project,
+                            environment,
+                            from,
+                            paths,
+                            all,
+                            overwrite,
+                            json,
+                        },
+                        config_path,
                     ),
                 },
                 ProjectCommands::Domain { command } => match command {

@@ -20,8 +20,13 @@ import type {
   DaemonStatusDto,
   DetectProjectInitPlanDto,
   DetectProjectInitPlanRequest,
+  DiscoverProjectWorktreesRequest,
   DomainInfoDto,
   DomainPatternRequest,
+  AttachProjectWorktreeRequest,
+  AttachProjectWorktreeResultDto,
+  EnvironmentFileCopyPreviewDto,
+  EnvironmentFileCopyRequest,
   EnvironmentFileDto,
   EnvironmentFileListDto,
   EnvironmentFileRequest,
@@ -41,6 +46,7 @@ import type {
   OpenProjectUrlRequest,
   PortConflictDto,
   ProjectInfoDto,
+  ProjectWorktreeDiscoveryDto,
   RegisterDomainRequest,
   RegisterDomainResultDto,
   RegistrationDto,
@@ -100,6 +106,11 @@ import { openEnvInEditorRequestSchema } from "./validators/validator.open-env-in
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { openProjectUrlRequestSchema } from "./validators/validator.open-project-url";
 import { killPortConflictRequestSchema } from "./validators/validator.port-conflict";
+import {
+  attachProjectWorktreeRequestSchema,
+  discoverProjectWorktreesRequestSchema,
+  environmentFileCopyRequestSchema,
+} from "./validators/validator.project-worktree";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import { removeProjectEnvironmentRequestSchema } from "./validators/validator.remove-project-environment";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
@@ -200,6 +211,12 @@ export interface DesktopClient {
   removeProjectEnvironment(
     request: RemoveProjectEnvironmentRequest,
   ): Promise<RemoveProjectEnvironmentResultDto>;
+  discoverProjectWorktrees(
+    request: DiscoverProjectWorktreesRequest,
+  ): Promise<ProjectWorktreeDiscoveryDto>;
+  attachProjectWorktree(
+    request: AttachProjectWorktreeRequest,
+  ): Promise<AttachProjectWorktreeResultDto>;
   assignDomainProject(request: AssignDomainProjectRequest): Promise<DomainInfoDto>;
   registerDomain(request: RegisterDomainRequest): Promise<RegisterDomainResultDto>;
   updateDomain(request: UpdateDomainRequest): Promise<RegisterDomainResultDto>;
@@ -217,6 +234,10 @@ export interface DesktopClient {
   listEnvironmentFiles(request: EnvironmentFileRequest): Promise<EnvironmentFileListDto>;
   readEnvironmentFile(request: EnvironmentFileRequest): Promise<EnvironmentFileDto>;
   saveEnvironmentFile(request: SaveEnvironmentFileRequest): Promise<EnvironmentFileDto>;
+  previewEnvironmentFileCopy(
+    request: EnvironmentFileCopyRequest,
+  ): Promise<EnvironmentFileCopyPreviewDto>;
+  copyEnvironmentFiles(request: EnvironmentFileCopyRequest): Promise<EnvironmentFileCopyPreviewDto>;
   openProjectUrl(request: OpenProjectUrlRequest): Promise<void>;
   runLocalDevServer(request: RunLocalDevServerRequest): Promise<void>;
   stopLocalDevServer(request: StopLocalDevServerRequest): Promise<void>;
@@ -314,6 +335,14 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("remove_project_environment", {
         request: removeProjectEnvironmentRequestSchema.parse(request),
       }),
+    discoverProjectWorktrees: (request) =>
+      tauriInvoke("discover_project_worktrees", {
+        request: discoverProjectWorktreesRequestSchema.parse(request),
+      }),
+    attachProjectWorktree: (request) =>
+      tauriInvoke("attach_project_worktree", {
+        request: attachProjectWorktreeRequestSchema.parse(request),
+      }),
     assignDomainProject: (request) => tauriInvoke("assign_domain_project", { request }),
     registerDomain: (request) =>
       tauriInvoke("register_domain", {
@@ -351,6 +380,14 @@ export function createDesktopClient(): DesktopClient {
     saveEnvironmentFile: (request) =>
       tauriInvoke("save_environment_file", {
         request: saveEnvironmentFileRequestSchema.parse(request),
+      }),
+    previewEnvironmentFileCopy: (request) =>
+      tauriInvoke("preview_environment_file_copy", {
+        request: environmentFileCopyRequestSchema.parse(request),
+      }),
+    copyEnvironmentFiles: (request) =>
+      tauriInvoke("copy_environment_files", {
+        request: environmentFileCopyRequestSchema.parse(request),
       }),
     openProjectUrl: (request) =>
       tauriInvoke("open_project_url", {

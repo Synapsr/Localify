@@ -12,7 +12,7 @@ import type {
   TerminalTargetRequest,
 } from "@/types/roxy";
 
-import { FileTextIcon, FolderIcon, TerminalIcon, TrashIcon } from "@/components/icons";
+import { CopyIcon, FileTextIcon, FolderIcon, TerminalIcon, TrashIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,6 +32,7 @@ import {
 import { projectMutations } from "@/lib/queries";
 import { useTerminal } from "@/providers/terminal-provider";
 
+import { ProjectEnvironmentFileCopyDialog } from "./project-environment-file-copy-dialog";
 import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog";
 import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
 
@@ -55,6 +56,7 @@ export const ProjectsListItemEnvironmentActions = ({
   const [environmentFileTarget, setEnvironmentFileTarget] = useState<EnvironmentFileRequest | null>(
     null,
   );
+  const [copyEnvironmentFileDialogOpen, setCopyEnvironmentFileDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const handleOpenInEditor = async () => {
@@ -151,6 +153,15 @@ export const ProjectsListItemEnvironmentActions = ({
               setEnvironmentFileDialogOpen(true);
             }}
           />
+          {!environment.primary ? (
+            <DropdownMenuItem
+              onClick={() => setCopyEnvironmentFileDialogOpen(true)}
+              disabled={!environment.rootPath || removeEnvironment.isPending}
+            >
+              <CopyIcon className="size-4" />
+              Copy .env from primary
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem
             onClick={() => void handleOpenTerminal()}
             disabled={!terminalTarget || removeEnvironment.isPending}
@@ -241,6 +252,13 @@ export const ProjectsListItemEnvironmentActions = ({
         open={environmentFileDialogOpen}
         target={environmentFileTarget}
         onOpenChange={setEnvironmentFileDialogOpen}
+      />
+      <ProjectEnvironmentFileCopyDialog
+        open={copyEnvironmentFileDialogOpen}
+        projectId={environment.projectId}
+        targetEnvironmentSlug={environment.slug}
+        targetLabel={environment.slug}
+        onOpenChange={setCopyEnvironmentFileDialogOpen}
       />
     </>
   );

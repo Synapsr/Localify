@@ -151,6 +151,53 @@ export interface ProjectEnvironmentInfoDto {
   services: ProjectEnvironmentServiceInfoDto[];
 }
 
+export interface DiscoverProjectWorktreesRequest {
+  projectId: string;
+}
+
+export interface AttachProjectWorktreeRequest {
+  projectId: string;
+  rootPath: string;
+  primaryRootPath?: string | null;
+}
+
+export interface AttachProjectWorktreeResultDto {
+  environment: ProjectEnvironmentInfoDto;
+  created: boolean;
+  createdDomains: string[];
+  daemonReloaded: boolean;
+}
+
+export type ProjectWorktreeStatusDto = "primary" | "attached" | "available" | "unavailable";
+
+export interface ProjectWorktreeServiceCandidateDto {
+  id: string;
+  label: string;
+  displayPath: string;
+  servicePath: string | null;
+}
+
+export interface ProjectWorktreeDto {
+  rootPath: string;
+  name: string;
+  slug: string;
+  status: ProjectWorktreeStatusDto;
+  attachedEnvironmentSlug: string | null;
+  gitBranch: string | null;
+  gitHead: string | null;
+  gitCommonDir: string | null;
+  existingEnvironmentFileCount: number;
+  serviceCandidates: ProjectWorktreeServiceCandidateDto[];
+  unavailableReason: string | null;
+}
+
+export interface ProjectWorktreeDiscoveryDto {
+  projectId: string;
+  projectName: string;
+  primaryRootPath: string;
+  worktrees: ProjectWorktreeDto[];
+}
+
 export type TerminalTargetKind = "project" | "projectEnvironment" | "service";
 
 export interface TerminalTargetRequest {
@@ -679,6 +726,39 @@ export interface SaveEnvironmentFileRequest {
   relativePath?: string | null;
   content: string;
   expectedModifiedAt?: number | null;
+}
+
+export interface EnvironmentFileCopyRequest {
+  projectId: string;
+  sourceEnvironmentSlug: string;
+  targetEnvironmentSlug: string;
+  relativePaths: string[];
+  overwrite: boolean;
+}
+
+export type EnvironmentFileCopyStatusDto =
+  | "create"
+  | "overwrite"
+  | "skipExists"
+  | "blocked"
+  | "copied"
+  | "skipped";
+
+export interface EnvironmentFileCopyItemDto {
+  relativePath: string;
+  fileName: string;
+  status: EnvironmentFileCopyStatusDto;
+  sourceExists: boolean;
+  targetExists: boolean;
+  message: string | null;
+}
+
+export interface EnvironmentFileCopyPreviewDto {
+  items: EnvironmentFileCopyItemDto[];
+  createCount: number;
+  overwriteCount: number;
+  skipCount: number;
+  blockedCount: number;
 }
 
 export interface OpenProjectUrlRequest {

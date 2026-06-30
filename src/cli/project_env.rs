@@ -19,7 +19,11 @@ use crate::infrastructure::config::{
     ProjectEnvironmentConfig, ProjectEnvironmentServiceConfig,
     ProjectEnvironmentServiceDomainUpdate,
 };
+use roxy::desktop::DesktopApi;
 use roxy::desktop::ProjectRootStore;
+use roxy::desktop::dto::{
+    DiscoverProjectWorktreesRequest, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
+};
 
 pub struct ListEnvArgs {
     pub project: Option<String>,
@@ -31,6 +35,21 @@ pub struct EnsureEnvArgs {
     pub name: Option<String>,
     pub root: Option<PathBuf>,
     pub primary: bool,
+}
+
+pub struct DiscoverEnvArgs {
+    pub project: String,
+    pub json: bool,
+}
+
+pub struct CopyEnvArgs {
+    pub project: String,
+    pub environment: String,
+    pub from: String,
+    pub paths: Vec<String>,
+    pub all: bool,
+    pub overwrite: bool,
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +125,52 @@ pub fn list(args: ListEnvArgs, ctx: &AppContext) -> Result<()> {
     Ok(())
 }
 
+pub fn discover(args: DiscoverEnvArgs, config_path: &Path, _ctx: &AppContext) -> Result<()> {
+    let api = DesktopApi::new_direct(config_path.to_path_buf(), current_binary_path()?);
+    let discovery = api.discover_project_worktrees(DiscoverProjectWorktreesRequest {
+        project_id: args.project,
+    })?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&discovery)?);
+        return Ok(());
+    }
+
+    println!(
+        "Git worktrees for {} [{}]\n",
+        discovery.project_name, discovery.project_id
+    );
+    for worktree in discovery.worktrees {
+        println!("  {} [{}]", worktree.name, worktree.slug);
+        println!("    status: {:?}", worktree.status);
+        println!("    root: {}", worktree.root_path);
+        if let Some(branch) = worktree.git_branch {
+            println!("    branch: {branch}");
+        }
+        if let Some(environment) = worktree.attached_environment_slug {
+            println!("    environment: {environment}");
+        }
+        if worktree.existing_environment_file_count > 0 {
+            println!(
+                "    env files: {} existing",
+                worktree.existing_environment_file_count
+            );
+        }
+        if !worktree.service_candidates.is_empty() {
+            println!("    new service candidates:");
+            for service in worktree.service_candidates {
+                println!("      {} ({})", service.label, service.display_path);
+            }
+        }
+        if let Some(reason) = worktree.unavailable_reason {
+            println!("    unavailable: {reason}");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 pub fn ensure(args: EnsureEnvArgs, ctx: &AppContext) -> Result<()> {
     let persisted = ensure_project_environment(args, ctx, EnsureOutput::Cli)?;
 
@@ -126,6 +191,47 @@ pub fn ensure(args: EnsureEnvArgs, ctx: &AppContext) -> Result<()> {
         println!("  service domains:");
         for service in persisted.services {
             println!("    {} -> {}", service.service_id, service.domain);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn copy_env(args: CopyEnvArgs, config_path: &Path) -> Result<()> {
+    if args.all && !args.paths.is_empty() {
+        bail!("Pass --all or --path, not both.");
+    }
+    if !args.all && args.paths.is_empty() {
+        bail!("Pass one or more --path values, or use --all.");
+    }
+
+    let api = DesktopApi::new_direct(config_path.to_path_buf(), current_binary_path()?);
+    let result = api.copy_environment_files(EnvironmentFileCopyRequest {
+        project_id: args.project,
+        source_environment_slug: args.from,
+        target_environment_slug: args.environment,
+        relative_paths: if args.all { Vec::new() } else { args.paths },
+        overwrite: args.overwrite,
+    })?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    println!("Environment file copy result:\n");
+    for item in result.items {
+        let status = match item.status {
+            EnvironmentFileCopyStatusDto::Create => "create",
+            EnvironmentFileCopyStatusDto::Overwrite => "overwrite",
+            EnvironmentFileCopyStatusDto::SkipExists => "skip",
+            EnvironmentFileCopyStatusDto::Blocked => "blocked",
+            EnvironmentFileCopyStatusDto::Copied => "copied",
+            EnvironmentFileCopyStatusDto::Skipped => "skipped",
+        };
+        println!("  {status}: {}", item.relative_path);
+        if let Some(message) = item.message {
+            println!("    {message}");
         }
     }
 
@@ -460,6 +566,10 @@ fn load_project_roots() -> HashMap<String, PathBuf> {
         .into_iter()
         .map(|(project_id, root_path)| (project_id, PathBuf::from(root_path)))
         .collect()
+}
+
+fn current_binary_path() -> Result<PathBuf> {
+    std::env::current_exe().context("Failed to determine the Localify CLI path")
 }
 
 fn project_matches_root_or_git(

@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use sha2::{Digest, Sha256};
 
 use crate::application::StepOutcome;
 use crate::application::daemon_status::QueryDaemonStatus;
@@ -25,17 +26,21 @@ use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
     ActivateLicenseRequest, AddRouteRequest, AgentSkillAgentDto, AgentSkillInstallResultDto,
-    AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest, AvailablePortDto, BootstrapDto,
-    CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
-    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
-    DetectProjectInitPlanRequest, DnsResolutionDto, DomainInfoDto, DomainPatternRequest,
-    EnvironmentDto, EnvironmentFileCandidateDto, EnvironmentFileDto, EnvironmentFileListDto,
-    EnvironmentFileRequest, FolderInitServiceDto, ImportOfflineLicenseRequest,
-    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
-    InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
-    LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest,
-    OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto, ProjectEnvironmentInfoDto,
-    ProjectEnvironmentServiceInfoDto, ProjectInfoDto, ProjectServiceInfoDto, RegisterDomainRequest,
+    AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest, AttachProjectWorktreeRequest,
+    AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto, CertificateRefreshDto,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
+    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
+    DiscoverProjectWorktreesRequest, DnsResolutionDto, DomainInfoDto, DomainPatternRequest,
+    EnvironmentDto, EnvironmentFileCandidateDto, EnvironmentFileCopyItemDto,
+    EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
+    EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest, FolderInitServiceDto,
+    ImportOfflineLicenseRequest, InitProjectFromFolderRequest, InitProjectFromFolderResultDto,
+    InitProjectRequest, InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest,
+    KillPortConflictRequest, LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto,
+    OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto,
+    ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto, ProjectInfoDto,
+    ProjectServiceInfoDto, ProjectWorktreeDiscoveryDto, ProjectWorktreeDto,
+    ProjectWorktreeServiceCandidateDto, ProjectWorktreeStatusDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
     RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
@@ -57,7 +62,8 @@ use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteT
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredDomain, ConfiguredProject, ConfiguredProjectEnvironment,
-    ConfiguredService, ProjectServiceConfig,
+    ConfiguredService, ProjectEnvironmentConfig, ProjectEnvironmentServiceConfig,
+    ProjectServiceConfig,
 };
 use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution, get_dns_service};
 use crate::infrastructure::filesystem::FileSystemSetup;
@@ -670,6 +676,238 @@ impl DesktopApi {
             .collect())
     }
 
+    fn configured_project_with_local_root(
+        &self,
+        project_id: &str,
+        root_path: Option<&str>,
+    ) -> Result<ConfiguredProject> {
+        let mut project = self
+            .config_store()
+            .list_projects()?
+            .into_iter()
+            .find(|project| {
+                project.id == project_id || project.name.eq_ignore_ascii_case(project_id)
+            })
+            .ok_or_else(|| anyhow!("Project not found: {project_id}"))?;
+        if let Some(root_path) = root_path
+            .map(str::trim)
+            .filter(|root_path| !root_path.is_empty())
+        {
+            project.root_path = Some(root_path.to_string());
+            return Ok(project);
+        }
+        let should_use_local_root = project
+            .root_path
+            .as_deref()
+            .map(configured_project_root_is_unusable_for_worktrees)
+            .unwrap_or(true);
+        if should_use_local_root
+            && let Some(root_path) = self.local_project_root_paths()?.get(&project.id)
+        {
+            project.root_path = Some(root_path.clone());
+        }
+        Ok(project)
+    }
+
+    pub fn discover_project_worktrees(
+        &self,
+        request: DiscoverProjectWorktreesRequest,
+    ) -> Result<ProjectWorktreeDiscoveryDto> {
+        let project_id = request.project_id.trim();
+        if project_id.is_empty() {
+            bail!("Project id is required to discover worktrees.");
+        }
+
+        let project = self.configured_project_with_local_root(project_id, None)?;
+        let primary_root = project_root_path(&project)?;
+        let primary_root = fs::canonicalize(&primary_root).unwrap_or(primary_root);
+        let primary_common_dir = git_common_dir(&primary_root).ok_or_else(|| {
+            anyhow!(
+                "Project '{}' is not inside a Git repository, so Localify cannot discover worktrees.",
+                project.id
+            )
+        })?;
+        let configured_environments = self
+            .config_store()
+            .list_project_environments(Some(&project.id))?;
+        let configured_environments =
+            self.enrich_project_environments_with_local_paths(configured_environments)?;
+        let mut used_slugs = configured_environments
+            .iter()
+            .map(|environment| environment.slug.clone())
+            .collect::<HashSet<_>>();
+        let services = self
+            .config_store()
+            .list_services()?
+            .into_iter()
+            .filter(|service| service.project_id == project.id)
+            .collect::<Vec<_>>();
+        let worktrees = git_worktrees(&primary_root)?
+            .into_iter()
+            .map(|worktree| {
+                map_project_worktree(
+                    &project,
+                    &primary_root,
+                    &primary_common_dir,
+                    &configured_environments,
+                    &services,
+                    &mut used_slugs,
+                    worktree,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok(ProjectWorktreeDiscoveryDto {
+            project_id: project.id,
+            project_name: project.name,
+            primary_root_path: primary_root.display().to_string(),
+            worktrees,
+        })
+    }
+
+    pub fn attach_project_worktree(
+        &self,
+        request: AttachProjectWorktreeRequest,
+    ) -> Result<AttachProjectWorktreeResultDto> {
+        if self.should_use_system_helper_for_worktree_attach() {
+            let helper = self.ensure_helper_running()?;
+            match helper.attach_project_worktree(request.clone()) {
+                Ok(result) => return Ok(result),
+                Err(error) if should_restart_helper_after_attach_error(&error, &request) => {
+                    self.restart_system_helper().with_context(|| {
+                        "The system helper is running an older build for worktree attach, and Localify could not restart it automatically."
+                    })?;
+                    return self
+                        .ensure_helper_running()?
+                        .attach_project_worktree(request);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        self.attach_project_worktree_direct(request)
+    }
+
+    pub(crate) fn attach_project_worktree_direct(
+        &self,
+        request: AttachProjectWorktreeRequest,
+    ) -> Result<AttachProjectWorktreeResultDto> {
+        self.ensure_config_writable()?;
+        let project_id = request.project_id.trim();
+        if project_id.is_empty() {
+            bail!("Project id is required to attach a worktree.");
+        }
+        let root_path = PathBuf::from(request.root_path.trim());
+        if root_path.as_os_str().is_empty() {
+            bail!("Worktree root path is required.");
+        }
+        let root_path = fs::canonicalize(&root_path).with_context(|| {
+            format!("Failed to resolve worktree root '{}'.", root_path.display())
+        })?;
+
+        let project = self
+            .configured_project_with_local_root(project_id, request.primary_root_path.as_deref())?;
+        let (primary_root, primary_common_dir) =
+            resolve_attach_primary_git_root(&project, &root_path)?;
+        if root_path == primary_root {
+            bail!("The primary project checkout is already the primary environment.");
+        }
+
+        let git = detect_worktree_git_metadata(&root_path);
+        if git.common_dir.as_ref() != Some(&primary_common_dir) {
+            bail!(
+                "Worktree '{}' does not belong to the same Git repository as project '{}'.",
+                root_path.display(),
+                project.id
+            );
+        }
+
+        let existing = existing_environment_for_root(
+            &self.enrich_project_environments_with_local_paths(
+                self.config_store()
+                    .list_project_environments(Some(&project.id))?,
+            )?,
+            &root_path,
+        );
+        if let Some(environment) = existing {
+            return Ok(AttachProjectWorktreeResultDto {
+                environment: map_project_environment_info(environment.clone()),
+                created: false,
+                created_domains: Vec::new(),
+                daemon_reloaded: false,
+            });
+        }
+
+        let services = self
+            .config_store()
+            .list_services()?
+            .into_iter()
+            .filter(|service| service.project_id == project.id)
+            .collect::<Vec<_>>();
+        if services.is_empty() {
+            bail!(
+                "Project '{}' has no services. Add a service before attaching worktree environments.",
+                project.id
+            );
+        }
+
+        let configured_environments = self
+            .config_store()
+            .list_project_environments(Some(&project.id))?;
+        let mut used_slugs = configured_environments
+            .iter()
+            .map(|environment| environment.slug.clone())
+            .collect::<HashSet<_>>();
+        let name = worktree_environment_name(git.branch.as_deref(), &root_path);
+        let slug = unique_environment_slug(&name, &root_path, &mut used_slugs)?;
+        let domain_mappings = environment_service_domains(&project.id, &services, &slug, false);
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let created_domains = ensure_environment_domains(
+            &project.id,
+            &domain_mappings,
+            &self.config_store(),
+            &certs,
+        )?;
+
+        let environment = ProjectEnvironmentConfig {
+            name,
+            slug: slug.clone(),
+            primary: false,
+            root_path: Some(root_path.display().to_string()),
+            git_common_dir: Some(primary_common_dir.display().to_string()),
+            git_branch: git.branch,
+            services: domain_mappings,
+        };
+
+        let persisted = match self
+            .config_store()
+            .upsert_project_environment(&project.id, environment)
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                rollback_environment_domains(&created_domains, &self.config_store(), &certs);
+                return Err(error.into());
+            }
+        };
+
+        let daemon_reloaded = match MgmtSocketClient::new(&paths.socket_path).reload() {
+            Ok(()) => true,
+            Err(crate::application::ports::DaemonConnectionError::NotRunning) => false,
+            Err(_) => false,
+        };
+
+        Ok(AttachProjectWorktreeResultDto {
+            environment: map_project_environment_info(persisted),
+            created: true,
+            created_domains: created_domains
+                .iter()
+                .map(|domain| domain.to_string())
+                .collect(),
+            daemon_reloaded,
+        })
+    }
+
     pub fn create_project(&self, request: CreateProjectRequest) -> Result<ProjectInfoDto> {
         if self.should_use_system_helper() {
             return self.ensure_helper_running()?.create_project(request);
@@ -1078,6 +1316,108 @@ impl DesktopApi {
         read_environment_file_target(&target)
     }
 
+    pub fn preview_environment_file_copy(
+        &self,
+        request: EnvironmentFileCopyRequest,
+    ) -> Result<EnvironmentFileCopyPreviewDto> {
+        let bootstrap = self.bootstrap()?;
+        environment_file_copy_preview(&bootstrap, &request)
+    }
+
+    pub fn copy_environment_files(
+        &self,
+        request: EnvironmentFileCopyRequest,
+    ) -> Result<EnvironmentFileCopyPreviewDto> {
+        let bootstrap = self.bootstrap()?;
+        let preview = environment_file_copy_preview(&bootstrap, &request)?;
+        let mut items = Vec::with_capacity(preview.items.len());
+
+        for item in preview.items {
+            let should_copy = matches!(
+                item.status,
+                EnvironmentFileCopyStatusDto::Create | EnvironmentFileCopyStatusDto::Overwrite
+            );
+            if !should_copy {
+                items.push(EnvironmentFileCopyItemDto {
+                    status: match item.status {
+                        EnvironmentFileCopyStatusDto::SkipExists => {
+                            EnvironmentFileCopyStatusDto::Skipped
+                        }
+                        other => other,
+                    },
+                    ..item
+                });
+                continue;
+            }
+
+            let source = environment_file_target_for_relative_path(
+                &bootstrap,
+                &request.project_id,
+                &request.source_environment_slug,
+                &item.relative_path,
+            )?;
+            let target = environment_file_target_for_relative_path(
+                &bootstrap,
+                &request.project_id,
+                &request.target_environment_slug,
+                &item.relative_path,
+            )?;
+            let content = fs::read_to_string(&source.path).with_context(|| {
+                format!(
+                    "Failed to read environment file '{}'. Make sure it is valid UTF-8 text.",
+                    item.relative_path
+                )
+            })?;
+
+            if target.path.exists() && !request.overwrite {
+                items.push(EnvironmentFileCopyItemDto {
+                    status: EnvironmentFileCopyStatusDto::Skipped,
+                    target_exists: true,
+                    message: Some("Target file already exists.".into()),
+                    ..item
+                });
+                continue;
+            }
+
+            if let Some(parent) = target.path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create folder for environment file '{}'",
+                        item.relative_path
+                    )
+                })?;
+            }
+            if target.path.exists() {
+                fs::write(&target.path, content).with_context(|| {
+                    format!(
+                        "Failed to overwrite environment file '{}'",
+                        item.relative_path
+                    )
+                })?;
+            } else {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target.path)
+                    .with_context(|| {
+                        format!("Failed to create environment file '{}'", item.relative_path)
+                    })?;
+                file.write_all(content.as_bytes()).with_context(|| {
+                    format!("Failed to copy environment file '{}'", item.relative_path)
+                })?;
+            }
+
+            items.push(EnvironmentFileCopyItemDto {
+                status: EnvironmentFileCopyStatusDto::Copied,
+                target_exists: true,
+                message: None,
+                ..item
+            });
+        }
+
+        Ok(environment_file_copy_summary(items))
+    }
+
     pub fn open_project_url(&self, request: OpenProjectUrlRequest) -> Result<()> {
         crate::desktop::browser::open_project_url(&request.url, request.browser)
     }
@@ -1398,10 +1738,6 @@ impl DesktopApi {
     }
 
     fn local_project_root_paths(&self) -> Result<HashMap<String, String>> {
-        if self.direct_mode {
-            return Ok(HashMap::new());
-        }
-
         match self.project_root_store() {
             Ok(store) => match store.load() {
                 Ok(local_projects) => Ok(local_projects),
@@ -2433,6 +2769,10 @@ impl DesktopApi {
 
     fn should_use_system_helper(&self) -> bool {
         !self.direct_mode && (self.config_path.starts_with("/etc") || BRANDING.is_dev_profile())
+    }
+
+    fn should_use_system_helper_for_worktree_attach(&self) -> bool {
+        !self.direct_mode && self.config_path.starts_with("/etc")
     }
 
     fn cli_helper_ready(&self) -> bool {
@@ -4440,6 +4780,563 @@ fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectE
 }
 
 #[derive(Debug, Clone)]
+struct GitWorktreeInfo {
+    root_path: PathBuf,
+    head: Option<String>,
+    branch: Option<String>,
+    bare: bool,
+    detached: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WorktreeGitMetadata {
+    common_dir: Option<PathBuf>,
+    branch: Option<String>,
+}
+
+fn git_worktrees(root: &Path) -> Result<Vec<GitWorktreeInfo>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .with_context(|| {
+            format!(
+                "Failed to discover Git worktrees from '{}'. Make sure Git is installed.",
+                root.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "Failed to discover Git worktrees from '{}'.{}",
+            root.display(),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" Git said: {stderr}")
+            }
+        );
+    }
+
+    Ok(parse_git_worktree_porcelain(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_git_worktree_porcelain(value: &str) -> Vec<GitWorktreeInfo> {
+    let mut worktrees = Vec::new();
+    let mut current: Option<GitWorktreeInfo> = None;
+
+    for line in value.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            if let Some(worktree) = current.take() {
+                worktrees.push(worktree);
+            }
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(worktree) = current.replace(GitWorktreeInfo {
+                root_path: PathBuf::from(path),
+                head: None,
+                branch: None,
+                bare: false,
+                detached: false,
+            }) {
+                worktrees.push(worktree);
+            }
+            continue;
+        }
+
+        let Some(worktree) = current.as_mut() else {
+            continue;
+        };
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            worktree.head = Some(head.to_string());
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            worktree.branch = Some(normalize_git_branch(branch));
+        } else if line == "bare" {
+            worktree.bare = true;
+        } else if line == "detached" {
+            worktree.detached = true;
+        }
+    }
+
+    if let Some(worktree) = current {
+        worktrees.push(worktree);
+    }
+
+    worktrees
+}
+
+fn normalize_git_branch(value: &str) -> String {
+    value
+        .strip_prefix("refs/heads/")
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn detect_worktree_git_metadata(root: &Path) -> WorktreeGitMetadata {
+    WorktreeGitMetadata {
+        common_dir: git_common_dir(root),
+        branch: git_output(root, &["branch", "--show-current"]),
+    }
+}
+
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    git_output(root, &["rev-parse", "--git-common-dir"]).map(|value| {
+        let path = PathBuf::from(value);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        fs::canonicalize(&path).unwrap_or(path)
+    })
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn map_project_worktree(
+    project: &ConfiguredProject,
+    primary_root: &Path,
+    primary_common_dir: &Path,
+    environments: &[ConfiguredProjectEnvironment],
+    services: &[ConfiguredService],
+    used_slugs: &mut HashSet<String>,
+    worktree: GitWorktreeInfo,
+) -> ProjectWorktreeDto {
+    let root_path = fs::canonicalize(&worktree.root_path).unwrap_or(worktree.root_path);
+    let git = detect_worktree_git_metadata(&root_path);
+    let branch = worktree.branch.clone().or(git.branch.clone());
+    let name = worktree_environment_name(branch.as_deref(), &root_path);
+    let attached_environment = existing_environment_for_root(environments, &root_path);
+    let primary = root_path == primary_root;
+    let same_repo = git.common_dir.as_deref() == Some(primary_common_dir);
+    let status = if worktree.bare || !same_repo {
+        ProjectWorktreeStatusDto::Unavailable
+    } else if primary {
+        ProjectWorktreeStatusDto::Primary
+    } else if attached_environment.is_some() {
+        ProjectWorktreeStatusDto::Attached
+    } else {
+        ProjectWorktreeStatusDto::Available
+    };
+    let slug = attached_environment
+        .as_ref()
+        .map(|environment| environment.slug.clone())
+        .or_else(|| {
+            if matches!(status, ProjectWorktreeStatusDto::Available) {
+                unique_environment_slug(&name, &root_path, used_slugs).ok()
+            } else {
+                slugify(&name)
+            }
+        })
+        .unwrap_or_else(|| stable_agent_slug(&root_path));
+    let unavailable_reason = if worktree.bare {
+        Some("Bare worktrees cannot be attached.".into())
+    } else if !same_repo {
+        Some("This checkout belongs to another Git repository.".into())
+    } else {
+        None
+    };
+
+    ProjectWorktreeDto {
+        root_path: root_path.display().to_string(),
+        name,
+        slug,
+        status,
+        attached_environment_slug: attached_environment.map(|environment| environment.slug.clone()),
+        git_branch: branch,
+        git_head: worktree.head,
+        git_common_dir: git.common_dir.map(|path| path.display().to_string()),
+        existing_environment_file_count: existing_environment_file_count(&root_path),
+        service_candidates: worktree_service_candidates(project, services, &root_path),
+        unavailable_reason,
+    }
+}
+
+fn worktree_environment_name(branch: Option<&str>, root: &Path) -> String {
+    if let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) {
+        return branch.to_string();
+    }
+
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| stable_agent_slug(root))
+}
+
+fn unique_environment_slug(
+    name: &str,
+    root: &Path,
+    used_slugs: &mut HashSet<String>,
+) -> Result<String> {
+    let base = slugify(name).unwrap_or_else(|| stable_agent_slug(root));
+    if used_slugs.insert(base.clone()) {
+        return Ok(base);
+    }
+
+    let slug = format!("{}-{}", base, stable_path_suffix(root));
+    if used_slugs.insert(slug.clone()) {
+        return Ok(slug);
+    }
+
+    for index in 2..100 {
+        let candidate = format!("{slug}-{index}");
+        if used_slugs.insert(candidate.clone()) {
+            return Ok(candidate);
+        }
+    }
+
+    bail!("Could not derive a unique environment slug for '{}'.", name)
+}
+
+fn slugify(value: &str) -> Option<String> {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+
+    for ch in value.trim().chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_was_dash = false;
+            continue;
+        }
+
+        if slug.is_empty() || previous_was_dash {
+            continue;
+        }
+
+        slug.push('-');
+        previous_was_dash = true;
+    }
+
+    let slug = slug.trim_matches('-').to_string();
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn stable_agent_slug(root: &Path) -> String {
+    format!("worktree-{}", stable_path_suffix(root))
+}
+
+fn stable_path_suffix(root: &Path) -> String {
+    let digest = Sha256::digest(root.to_string_lossy().as_bytes());
+    hex_prefix(&digest, 4)
+}
+
+fn hex_prefix(bytes: &[u8], count: usize) -> String {
+    bytes
+        .iter()
+        .take(count)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn existing_environment_for_root(
+    environments: &[ConfiguredProjectEnvironment],
+    root: &Path,
+) -> Option<ConfiguredProjectEnvironment> {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    environments.iter().find_map(|environment| {
+        let environment_root = environment
+            .root_path
+            .as_ref()
+            .map(PathBuf::from)
+            .map(|path| fs::canonicalize(&path).unwrap_or(path))?;
+        (environment_root == root).then(|| environment.clone())
+    })
+}
+
+fn existing_environment_file_count(root: &Path) -> usize {
+    let mut count = existing_env_files(root).len();
+    for nested_root in discover_nested_environment_file_roots(root) {
+        count += existing_env_files(&nested_root).len();
+    }
+    count
+}
+
+fn worktree_service_candidates(
+    project: &ConfiguredProject,
+    services: &[ConfiguredService],
+    root: &Path,
+) -> Vec<ProjectWorktreeServiceCandidateDto> {
+    let Ok(plan) = detect_folder_init_plan(root, Some(&project.name)) else {
+        return Vec::new();
+    };
+    let existing_ids = services
+        .iter()
+        .map(|service| normalize_service_identity(&service.id))
+        .collect::<HashSet<_>>();
+    let existing_paths = services
+        .iter()
+        .filter_map(|service| service.path.as_deref())
+        .map(normalize_service_identity)
+        .collect::<HashSet<_>>();
+
+    plan.services
+        .into_iter()
+        .filter(|service| {
+            let id = normalize_service_identity(&service.id);
+            let path = service
+                .service_path
+                .as_deref()
+                .map(normalize_service_identity);
+            !existing_ids.contains(&id)
+                && path
+                    .as_ref()
+                    .map(|path| !existing_paths.contains(path))
+                    .unwrap_or(true)
+        })
+        .map(|service| ProjectWorktreeServiceCandidateDto {
+            id: service.id,
+            label: service.label,
+            display_path: service.display_path,
+            service_path: service.service_path,
+        })
+        .collect()
+}
+
+fn normalize_service_identity(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('/')
+        .to_ascii_lowercase()
+        .replace('\\', "/")
+}
+
+fn project_root_path(project: &ConfiguredProject) -> Result<PathBuf> {
+    project
+        .root_path
+        .as_ref()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("Project '{}' has no root path.", project.id))
+}
+
+fn configured_project_root_is_unusable_for_worktrees(root_path: &str) -> bool {
+    let root_path = Path::new(root_path);
+    !root_path.exists() || git_common_dir(root_path).is_none()
+}
+
+fn resolve_attach_primary_git_root(
+    project: &ConfiguredProject,
+    worktree_root: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    if let Ok(root) = project_root_path(project) {
+        let root = fs::canonicalize(&root).unwrap_or(root);
+        if let Some(common_dir) = git_common_dir(&root) {
+            return Ok((root, common_dir));
+        }
+    }
+
+    if let Some(root) = infer_primary_worktree_root(worktree_root)
+        && let Some(common_dir) = git_common_dir(&root)
+    {
+        return Ok((root, common_dir));
+    }
+
+    bail!(
+        "Project '{}' is not inside a Git repository, so Localify cannot attach worktrees. Set the project root to the primary checkout and try again.",
+        project.id
+    )
+}
+
+fn infer_primary_worktree_root(worktree_root: &Path) -> Option<PathBuf> {
+    git_worktrees(worktree_root)
+        .ok()?
+        .into_iter()
+        .filter(|worktree| !worktree.bare)
+        .map(|worktree| fs::canonicalize(&worktree.root_path).unwrap_or(worktree.root_path))
+        .find(|root| git_common_dir(root).is_some())
+}
+
+fn environment_service_domains(
+    project_id: &str,
+    services: &[ConfiguredService],
+    environment_slug: &str,
+    primary: bool,
+) -> Vec<ProjectEnvironmentServiceConfig> {
+    let multi_service = services.len() > 1;
+    services
+        .iter()
+        .map(|service| {
+            let domain = if primary {
+                service.primary_domain.clone()
+            } else if multi_service {
+                format!(
+                    "{}--{}.{}{}",
+                    service.id,
+                    environment_slug,
+                    project_id,
+                    BRANDING.domain_suffix()
+                )
+            } else {
+                format!(
+                    "{}.{}{}",
+                    environment_slug,
+                    project_id,
+                    BRANDING.domain_suffix()
+                )
+            };
+            ProjectEnvironmentServiceConfig {
+                service_id: service.id.clone(),
+                domain,
+            }
+        })
+        .collect()
+}
+
+fn ensure_environment_domains(
+    project_id: &str,
+    domains: &[ProjectEnvironmentServiceConfig],
+    config_store: &ConfigStore,
+    certs: &CertificateService,
+) -> Result<Vec<DomainPattern>> {
+    let mut missing = Vec::new();
+    for service in domains {
+        let pattern = DomainPattern::from_name(&service.domain, false)?;
+        if let Some(registration) = config_store.get_domain(&pattern)? {
+            let owner = config_store.domain_project_id(&pattern)?;
+            if owner.as_deref() != Some(project_id) {
+                bail!(
+                    "Domain '{}' already exists outside project '{}'. Choose another environment name.",
+                    service.domain,
+                    project_id
+                );
+            }
+            ensure_existing_domain_https(project_id, registration, config_store, certs)?;
+            continue;
+        }
+        missing.push((service.service_id.clone(), pattern));
+    }
+
+    let ports = reserve_ports(missing.len())?;
+    let register_domain = RegisterDomain::new(config_store, certs);
+    let mut created = Vec::new();
+    for ((service_id, pattern), port) in missing.into_iter().zip(ports.into_iter()) {
+        let route = Route::parse(&format!("/={port}"))
+            .with_context(|| format!("Failed to create route for service '{service_id}'"))?;
+        match register_domain.execute(pattern.clone(), vec![route]) {
+            Ok(result) => {
+                if let Err(error) = config_store
+                    .update_domain_with_project(result.registration, Some(project_id.into()))
+                {
+                    rollback_environment_domains(&created, config_store, certs);
+                    let _ = UnregisterDomain::new(config_store, certs).execute(&pattern);
+                    return Err(error.into());
+                }
+                created.push(pattern);
+            }
+            Err(error) => {
+                rollback_environment_domains(&created, config_store, certs);
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(created)
+}
+
+fn ensure_existing_domain_https(
+    project_id: &str,
+    mut registration: DomainRegistration,
+    config_store: &ConfigStore,
+    certs: &CertificateService,
+) -> Result<()> {
+    if registration.is_https_enabled() {
+        return Ok(());
+    }
+
+    match certs.create_and_install(registration.pattern()) {
+        Ok(()) => {
+            registration.enable_https();
+            config_store.update_domain_with_project(registration, Some(project_id.into()))?;
+        }
+        Err(error) => {
+            eprintln!(
+                "  Certificate warning: failed to enable HTTPS for '{}': {error}",
+                registration.display_pattern()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn reserve_ports(count: usize) -> Result<Vec<u16>> {
+    let mut listeners = Vec::with_capacity(count);
+    let mut ports = Vec::with_capacity(count);
+    for _ in 0..count {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("Failed to ask the OS for an available local port")?;
+        let port = listener
+            .local_addr()
+            .context("Failed to read the generated local port")?
+            .port();
+        listeners.push(listener);
+        ports.push(port);
+    }
+    drop(listeners);
+    Ok(ports)
+}
+
+fn rollback_environment_domains(
+    patterns: &[DomainPattern],
+    config_store: &ConfigStore,
+    certs: &CertificateService,
+) {
+    let unregister_domain = UnregisterDomain::new(config_store, certs);
+    for pattern in patterns {
+        let _ = unregister_domain.execute(pattern);
+    }
+}
+
+fn is_stale_system_helper_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("system helper closed the connection without replying")
+        && message.contains("older build")
+}
+
+fn should_restart_helper_after_attach_error(
+    error: &anyhow::Error,
+    _request: &AttachProjectWorktreeRequest,
+) -> bool {
+    if is_stale_system_helper_error(error) {
+        return true;
+    }
+
+    is_missing_project_root_path_error(error) || is_project_root_not_git_error(error)
+}
+
+fn is_missing_project_root_path_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("has no root path")
+}
+
+fn is_project_root_not_git_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("is not inside a Git repository")
+        && message.contains("Localify cannot attach worktrees")
+}
+
+#[derive(Debug, Clone)]
 struct EnvironmentFileTarget {
     root: PathBuf,
     path: PathBuf,
@@ -4808,6 +5705,232 @@ fn normalize_environment_file_relative_path(value: &str) -> Result<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+fn environment_file_copy_preview(
+    bootstrap: &BootstrapDto,
+    request: &EnvironmentFileCopyRequest,
+) -> Result<EnvironmentFileCopyPreviewDto> {
+    let relative_paths = environment_file_copy_relative_paths(bootstrap, request)?;
+    let mut items = Vec::with_capacity(relative_paths.len());
+
+    for relative_path in relative_paths {
+        let source = environment_file_target_for_relative_path(
+            bootstrap,
+            &request.project_id,
+            &request.source_environment_slug,
+            &relative_path,
+        )?;
+        let target = environment_file_target_for_relative_path(
+            bootstrap,
+            &request.project_id,
+            &request.target_environment_slug,
+            &relative_path,
+        )?;
+        let source_exists = source.path.is_file();
+        let target_exists = target.path.exists();
+        let (status, message) = if !source_exists {
+            (
+                EnvironmentFileCopyStatusDto::Blocked,
+                Some("Source file does not exist.".into()),
+            )
+        } else if let Err(error) = ensure_environment_file_copy_target(&target) {
+            (
+                EnvironmentFileCopyStatusDto::Blocked,
+                Some(error.to_string()),
+            )
+        } else if target_exists && request.overwrite {
+            (EnvironmentFileCopyStatusDto::Overwrite, None)
+        } else if target_exists {
+            (
+                EnvironmentFileCopyStatusDto::SkipExists,
+                Some("Target file already exists.".into()),
+            )
+        } else {
+            (EnvironmentFileCopyStatusDto::Create, None)
+        };
+
+        items.push(EnvironmentFileCopyItemDto {
+            file_name: source
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ROOT_ENV_FILE_FALLBACK.into()),
+            relative_path,
+            status,
+            source_exists,
+            target_exists,
+            message,
+        });
+    }
+
+    Ok(environment_file_copy_summary(items))
+}
+
+fn environment_file_copy_relative_paths(
+    bootstrap: &BootstrapDto,
+    request: &EnvironmentFileCopyRequest,
+) -> Result<Vec<String>> {
+    let mut seen = HashSet::new();
+    let requested = request
+        .relative_paths
+        .iter()
+        .filter_map(|path| normalize_optional_relative_path(path))
+        .map(normalize_environment_file_relative_path)
+        .collect::<Result<Vec<_>>>()?;
+    let paths = if requested.is_empty() {
+        environment_file_candidates(
+            bootstrap,
+            &request.project_id,
+            &request.source_environment_slug,
+            None,
+        )?
+        .into_iter()
+        .filter(|candidate| candidate.exists)
+        .map(|candidate| candidate.target.relative_path)
+        .collect::<Vec<_>>()
+    } else {
+        requested
+    };
+
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let value = path.to_string_lossy().into_owned();
+            seen.insert(value.clone()).then_some(value)
+        })
+        .collect())
+}
+
+fn environment_file_target_for_relative_path(
+    bootstrap: &BootstrapDto,
+    project_id: &str,
+    environment_slug: &str,
+    relative_path: &str,
+) -> Result<EnvironmentFileTarget> {
+    let environment = resolve_project_environment(bootstrap, project_id, environment_slug)?;
+    let environment_root = environment_root_path(environment)?;
+    let relative_path = normalize_environment_file_relative_path(relative_path)?;
+    if !is_supported_environment_file_name(&relative_path) {
+        bail!(
+            "Environment file '{}' is not one of Localify's supported env file names.",
+            relative_path.display()
+        );
+    }
+    let path = environment_root.join(&relative_path);
+
+    Ok(EnvironmentFileTarget {
+        root: environment_root,
+        path,
+        relative_path,
+    })
+}
+
+fn resolve_project_environment<'a>(
+    bootstrap: &'a BootstrapDto,
+    project_id: &str,
+    environment_slug: &str,
+) -> Result<&'a ProjectEnvironmentInfoDto> {
+    let project_id = project_id.trim();
+    let environment_slug = environment_slug.trim();
+    if project_id.is_empty() {
+        bail!("Project id is required.");
+    }
+    if environment_slug.is_empty() {
+        bail!("Environment slug is required.");
+    }
+
+    bootstrap
+        .project_environments
+        .iter()
+        .find(|environment| {
+            environment.project_id == project_id && environment.slug == environment_slug
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "Project environment '{}' was not found for project '{}'.",
+                environment_slug,
+                project_id
+            )
+        })
+}
+
+fn is_supported_environment_file_name(relative_path: &Path) -> bool {
+    relative_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|file_name| ENV_FILE_CANDIDATES.contains(&file_name))
+        .unwrap_or(false)
+}
+
+fn ensure_environment_file_copy_target(target: &EnvironmentFileTarget) -> Result<()> {
+    if target.path.exists() {
+        return ensure_existing_environment_file_target(target);
+    }
+
+    let root = target.root.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve environment folder '{}'",
+            target.root.display()
+        )
+    })?;
+    let parent = target
+        .path
+        .parent()
+        .ok_or_else(|| anyhow!("Environment file target has no parent folder."))?;
+
+    if !parent.exists() {
+        bail!(
+            "Target folder '{}' does not exist in this environment.",
+            parent
+                .strip_prefix(&target.root)
+                .unwrap_or(parent)
+                .display()
+        );
+    }
+    let parent = parent.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve environment file folder '{}'",
+            target.relative_path.display()
+        )
+    })?;
+    if !parent.starts_with(&root) {
+        bail!(
+            "Environment file '{}' must stay inside the project environment.",
+            target.relative_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn environment_file_copy_summary(
+    items: Vec<EnvironmentFileCopyItemDto>,
+) -> EnvironmentFileCopyPreviewDto {
+    let mut create_count = 0;
+    let mut overwrite_count = 0;
+    let mut skip_count = 0;
+    let mut blocked_count = 0;
+
+    for item in &items {
+        match item.status {
+            EnvironmentFileCopyStatusDto::Create => create_count += 1,
+            EnvironmentFileCopyStatusDto::Overwrite => overwrite_count += 1,
+            EnvironmentFileCopyStatusDto::SkipExists | EnvironmentFileCopyStatusDto::Skipped => {
+                skip_count += 1;
+            }
+            EnvironmentFileCopyStatusDto::Blocked => blocked_count += 1,
+            EnvironmentFileCopyStatusDto::Copied => {}
+        }
+    }
+
+    EnvironmentFileCopyPreviewDto {
+        items,
+        create_count,
+        overwrite_count,
+        skip_count,
+        blocked_count,
+    }
 }
 
 fn default_environment_file_root(
@@ -5359,28 +6482,32 @@ mod tests {
         apply_local_project_root_paths_to_environments, cli_command_points_to_binary,
         cli_shell_command, cli_shell_commands, ensure_cli_command_link,
         ensure_environment_file_target, env_file_target, environment_file_modified_at,
-        export_route_string, normalize_desktop_route, normalize_project_snapshot_id,
-        parse_desktop_route, read_environment_file_target, remove_cli_command_link,
-        restart_daemon_after_certificate_refresh_step_with, service_env_root, shell_escape,
-        validate_settings_snapshot,
+        export_route_string, infer_primary_worktree_root, is_stale_system_helper_error,
+        normalize_desktop_route, normalize_project_snapshot_id, parse_desktop_route,
+        parse_git_worktree_porcelain, read_environment_file_target, remove_cli_command_link,
+        resolve_attach_primary_git_root, restart_daemon_after_certificate_refresh_step_with,
+        service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
+        unique_environment_slug, validate_settings_snapshot,
     };
     use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
-        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, EnvironmentFileRequest,
-        InitProjectRequest, InitProjectServiceRequest, KeygenSettingsUpdateRequest, LogsRequest,
-        ProjectServiceInfoDto, RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
+        AttachProjectWorktreeRequest, CreateProjectDomainRequest, CreateProjectWithDomainsRequest,
+        EnvironmentFileRequest, InitProjectRequest, InitProjectServiceRequest,
+        KeygenSettingsUpdateRequest, LogsRequest, ProjectServiceInfoDto,
+        RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
         SaveEnvironmentFileRequest, SettingsTransferDomainDto, SettingsTransferProjectDto,
         SettingsTransferSnapshotDto,
     };
     use crate::domain::{DomainPattern, DomainRegistration, Route, RouteTarget};
     use crate::infrastructure::config::{
-        Config, ConfigStore, ConfiguredProjectEnvironment, ProjectEnvironmentConfig,
-        ProjectEnvironmentServiceConfig,
+        Config, ConfigStore, ConfiguredProject, ConfiguredProjectEnvironment,
+        ProjectEnvironmentConfig, ProjectEnvironmentServiceConfig,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::os::unix::fs::symlink;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -5436,6 +6563,176 @@ mod tests {
             environments[1].root_path.as_deref(),
             Some("/Users/dev/Developer/acme-worktree")
         );
+    }
+
+    #[test]
+    fn configured_project_with_local_root_prefers_explicit_root_hint() {
+        let (_temp_dir, api, store) = temp_api();
+        let project = store.create_project("ACME").unwrap();
+
+        let configured = api
+            .configured_project_with_local_root(&project.id, Some("/Users/dev/Developer/acme/ACME"))
+            .unwrap();
+
+        assert_eq!(
+            configured.root_path.as_deref(),
+            Some("/Users/dev/Developer/acme/ACME")
+        );
+    }
+
+    #[test]
+    fn attach_primary_git_root_falls_back_when_configured_root_is_not_git() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (primary_root, worktree_root) = create_git_repo_with_worktree(temp_dir.path());
+        let non_git_root = temp_dir.path().join("not-git");
+        fs::create_dir(&non_git_root).unwrap();
+        let project = ConfiguredProject {
+            id: "client-app".into(),
+            name: "Client App".into(),
+            enabled: true,
+            root_path: Some(non_git_root.display().to_string()),
+        };
+
+        let (resolved_root, common_dir) =
+            resolve_attach_primary_git_root(&project, &worktree_root).unwrap();
+
+        assert_eq!(resolved_root, primary_root);
+        assert_eq!(common_dir, primary_root.join(".git"));
+    }
+
+    #[test]
+    fn inferred_primary_worktree_root_keeps_primary_checkout_identifiable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (primary_root, _worktree_root) = create_git_repo_with_worktree(temp_dir.path());
+
+        let resolved_root = infer_primary_worktree_root(&primary_root).unwrap();
+
+        assert_eq!(resolved_root, primary_root);
+    }
+
+    #[test]
+    fn parse_git_worktree_porcelain_reads_standard_and_detached_entries() {
+        let worktrees = parse_git_worktree_porcelain(
+            "worktree /Users/dev/Developer/project\n\
+             HEAD 1111111111111111111111111111111111111111\n\
+             branch refs/heads/main\n\
+             \n\
+             worktree /Users/dev/.codex/worktrees/feature/project\n\
+             HEAD 2222222222222222222222222222222222222222\n\
+             detached\n",
+        );
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(
+            worktrees[0].root_path,
+            Path::new("/Users/dev/Developer/project")
+        );
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(
+            worktrees[0].head.as_deref(),
+            Some("1111111111111111111111111111111111111111")
+        );
+        assert!(!worktrees[0].detached);
+        assert_eq!(
+            worktrees[1].root_path,
+            Path::new("/Users/dev/.codex/worktrees/feature/project")
+        );
+        assert_eq!(worktrees[1].branch, None);
+        assert!(worktrees[1].detached);
+    }
+
+    #[test]
+    fn parse_git_worktree_porcelain_marks_bare_entries() {
+        let worktrees = parse_git_worktree_porcelain(
+            "worktree /Users/dev/Developer/project.git\n\
+             HEAD 3333333333333333333333333333333333333333\n\
+             bare\n",
+        );
+
+        assert_eq!(worktrees.len(), 1);
+        assert!(worktrees[0].bare);
+    }
+
+    #[test]
+    fn unique_environment_slug_uses_stable_suffix_for_collisions() {
+        let root = Path::new("/Users/dev/.codex/worktrees/clean-project/project");
+        let mut used_slugs = HashSet::from(["feature-auth".to_string()]);
+
+        let slug = unique_environment_slug("feature/auth", root, &mut used_slugs).unwrap();
+
+        assert!(slug.starts_with("feature-auth-"));
+        assert_eq!(slug.len(), "feature-auth-00000000".len());
+        assert!(used_slugs.contains("feature-auth"));
+        assert!(used_slugs.contains(&slug));
+
+        let repeated = unique_environment_slug(
+            "feature/auth",
+            root,
+            &mut HashSet::from(["feature-auth".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(slug, repeated);
+    }
+
+    #[test]
+    fn slugify_keeps_localify_environment_names_readable() {
+        assert_eq!(
+            slugify("feature/worktree env"),
+            Some("feature-worktree-env".into())
+        );
+        assert_eq!(slugify("  ---  "), None);
+    }
+
+    #[test]
+    fn stale_system_helper_error_matches_closed_older_helper_message() {
+        let error = anyhow::anyhow!(
+            "Localify system helper closed the connection without replying. \
+             It is likely running an older build."
+        );
+
+        assert!(is_stale_system_helper_error(&error));
+    }
+
+    #[test]
+    fn attach_missing_root_path_error_restarts_helper_once() {
+        let error = anyhow::anyhow!("Project 'acme' has no root path.");
+        let request = AttachProjectWorktreeRequest {
+            project_id: "acme".into(),
+            root_path: "/Users/dev/.codex/worktrees/0815/ACME".into(),
+            primary_root_path: None,
+        };
+
+        assert!(should_restart_helper_after_attach_error(&error, &request));
+    }
+
+    #[test]
+    fn attach_not_git_project_error_restarts_helper_once() {
+        let error = anyhow::anyhow!(
+            "Project 'acme' is not inside a Git repository, so Localify cannot attach worktrees."
+        );
+        let request = AttachProjectWorktreeRequest {
+            project_id: "acme".into(),
+            root_path: "/Users/dev/.codex/worktrees/0815/ACME".into(),
+            primary_root_path: Some("/Users/dev/Developer/acme/ACME".into()),
+        };
+
+        assert!(should_restart_helper_after_attach_error(&error, &request));
+    }
+
+    #[test]
+    fn worktree_attach_uses_helper_only_for_system_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let user_api = DesktopApi::new(
+            temp_dir.path().join("Localify Dev").join("config.toml"),
+            temp_dir.path().join("localify"),
+        );
+        let system_api = DesktopApi::new(
+            PathBuf::from("/etc/localify/config.toml"),
+            temp_dir.path().join("localify"),
+        );
+
+        assert!(!user_api.should_use_system_helper_for_worktree_attach());
+        assert!(system_api.should_use_system_helper_for_worktree_attach());
     }
 
     #[test]
@@ -6572,5 +7869,55 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
             target: None,
             inferred: false,
         }
+    }
+
+    fn create_git_repo_with_worktree(temp_dir: &Path) -> (PathBuf, PathBuf) {
+        let primary_root = temp_dir.join("client-app");
+        let worktree_root = temp_dir.join("client-app-worktree");
+        fs::create_dir(&primary_root).unwrap();
+        run_git(&primary_root, &["init"]);
+        run_git(&primary_root, &["checkout", "-b", "main"]);
+        fs::write(primary_root.join("README.md"), "test\n").unwrap();
+        run_git(&primary_root, &["add", "README.md"]);
+        run_git(
+            &primary_root,
+            &[
+                "-c",
+                "user.email=localify@example.test",
+                "-c",
+                "user.name=Localify Test",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree_arg = worktree_root.to_string_lossy().to_string();
+        run_git(
+            &primary_root,
+            &["worktree", "add", "-b", "feature/test", &worktree_arg],
+        );
+
+        (
+            fs::canonicalize(primary_root).unwrap(),
+            fs::canonicalize(worktree_root).unwrap(),
+        )
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "git -C {} {} failed\nstdout:\n{}\nstderr:\n{}",
+            root.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
