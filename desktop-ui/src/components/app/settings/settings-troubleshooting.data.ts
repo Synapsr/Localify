@@ -233,8 +233,7 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
             "Restart the terminal or IDE after changing Node environment variables.",
           ],
       commands: [
-        `NODE_USE_SYSTEM_CA=1 pnpm dev-localify`,
-        `NODE_EXTRA_CA_CERTS="${caCertPath}" pnpm dev-localify`,
+        `env -u NODE_USE_SYSTEM_CA NODE_EXTRA_CA_CERTS="${caCertPath}" pnpm dev-localify`,
       ],
       action: nodeTrust.ready
         ? undefined

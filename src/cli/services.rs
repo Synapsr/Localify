@@ -337,7 +337,9 @@ pub fn run(
 
     let ca_cert_path = paths.data_dir.join("ca.crt");
     if ca_cert_path.exists() {
-        child.env("NODE_EXTRA_CA_CERTS", ca_cert_path);
+        child
+            .env("NODE_EXTRA_CA_CERTS", ca_cert_path)
+            .env_remove("NODE_USE_SYSTEM_CA");
     }
 
     let status = child

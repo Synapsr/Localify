@@ -181,7 +181,7 @@ fn shell_cleanup_paths(home_dir: &Path) -> [PathBuf; 8] {
 
 fn shell_snippet_contents(ca_cert_path: &Path) -> String {
     format!(
-        "# Added by {app}. Enables Node.js trust for local HTTPS certificates.\nexport NODE_USE_SYSTEM_CA=1\nexport NODE_EXTRA_CA_CERTS={ca}\n",
+        "# Added by {app}. Enables Node.js trust for local HTTPS certificates.\nexport NODE_EXTRA_CA_CERTS={ca}\n",
         app = BRANDING.app_name,
         ca = shell_escape(&ca_cert_path.to_string_lossy()),
     )
@@ -437,11 +437,9 @@ fn prune_empty_dirs(path: Option<&Path>) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn launchctl_environment_ready(ca_cert_path: &Path) -> Result<bool> {
-    Ok(
-        launchctl_getenv("NODE_USE_SYSTEM_CA")?.as_deref() == Some("1")
-            && launchctl_getenv("NODE_EXTRA_CA_CERTS")?.as_deref()
-                == Some(ca_cert_path.to_string_lossy().as_ref()),
-    )
+    Ok(launchctl_getenv("NODE_USE_SYSTEM_CA")?.is_none()
+        && launchctl_getenv("NODE_EXTRA_CA_CERTS")?.as_deref()
+            == Some(ca_cert_path.to_string_lossy().as_ref()))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -451,7 +449,9 @@ fn launchctl_environment_ready(_ca_cert_path: &Path) -> Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn set_launchctl_environment(ca_cert_path: &Path) -> Result<()> {
-    run_launchctl(["setenv", "NODE_USE_SYSTEM_CA", "1"])?;
+    if launchctl_getenv("NODE_USE_SYSTEM_CA")?.is_some() {
+        run_launchctl(["unsetenv", "NODE_USE_SYSTEM_CA"])?;
+    }
     run_launchctl([
         "setenv",
         "NODE_EXTRA_CA_CERTS",
@@ -568,6 +568,14 @@ mod tests {
     #[test]
     fn shell_escape_quotes_single_quotes() {
         assert_eq!(shell_escape("my'app"), "'my'\"'\"'app'");
+    }
+
+    #[test]
+    fn shell_snippet_exports_only_localify_ca() {
+        let contents = super::shell_snippet_contents(Path::new("/etc/localify/ca.crt"));
+
+        assert!(contents.contains("export NODE_EXTRA_CA_CERTS='/etc/localify/ca.crt'"));
+        assert!(!contents.contains("NODE_USE_SYSTEM_CA"));
     }
 
     #[test]
