@@ -5319,21 +5319,7 @@ fn should_restart_helper_after_attach_error(
     error: &anyhow::Error,
     _request: &AttachProjectWorktreeRequest,
 ) -> bool {
-    if is_stale_system_helper_error(error) {
-        return true;
-    }
-
-    is_missing_project_root_path_error(error) || is_project_root_not_git_error(error)
-}
-
-fn is_missing_project_root_path_error(error: &anyhow::Error) -> bool {
-    error.to_string().contains("has no root path")
-}
-
-fn is_project_root_not_git_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("is not inside a Git repository")
-        && message.contains("Localify cannot attach worktrees")
+    is_stale_system_helper_error(error)
 }
 
 #[derive(Debug, Clone)]
@@ -6694,7 +6680,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_missing_root_path_error_restarts_helper_once() {
+    fn attach_missing_root_path_error_does_not_restart_helper() {
         let error = anyhow::anyhow!("Project 'acme' has no root path.");
         let request = AttachProjectWorktreeRequest {
             project_id: "acme".into(),
@@ -6702,13 +6688,28 @@ mod tests {
             primary_root_path: None,
         };
 
-        assert!(should_restart_helper_after_attach_error(&error, &request));
+        assert!(!should_restart_helper_after_attach_error(&error, &request));
     }
 
     #[test]
-    fn attach_not_git_project_error_restarts_helper_once() {
+    fn attach_not_git_project_error_does_not_restart_helper() {
         let error = anyhow::anyhow!(
             "Project 'acme' is not inside a Git repository, so Localify cannot attach worktrees."
+        );
+        let request = AttachProjectWorktreeRequest {
+            project_id: "acme".into(),
+            root_path: "/Users/dev/.codex/worktrees/0815/ACME".into(),
+            primary_root_path: Some("/Users/dev/Developer/acme/ACME".into()),
+        };
+
+        assert!(!should_restart_helper_after_attach_error(&error, &request));
+    }
+
+    #[test]
+    fn attach_stale_helper_error_restarts_helper_once() {
+        let error = anyhow::anyhow!(
+            "Localify system helper closed the connection without replying. \
+             It is likely running an older build."
         );
         let request = AttachProjectWorktreeRequest {
             project_id: "acme".into(),
