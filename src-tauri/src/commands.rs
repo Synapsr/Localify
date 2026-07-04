@@ -1,24 +1,25 @@
 use roxy::desktop::DesktopApi;
 use roxy::desktop::dto::{
-    ActivateLicenseRequest, AddRouteRequest, AgentSkillInstallResultDto, AgentSkillStatusDto,
-    AppConfigDto, AssignDomainProjectRequest, AttachProjectWorktreeRequest,
-    AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto, CliAccessDto,
-    ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto,
-    DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
-    DiscoverProjectWorktreesRequest, DomainInfoDto, DomainPatternRequest, EnvironmentFileCopyPreviewDto,
-    EnvironmentFileCopyRequest, EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest,
-    ImportOfflineLicenseRequest, InitProjectFromFolderRequest, InitProjectFromFolderResultDto,
-    InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
-    LauncherPreferencesDto, LicensingDto, LogsDto, LogsRequest, NodeTrustDto,
-    OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
-    PortConflictDto, ProjectInfoDto, ProjectWorktreeDiscoveryDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectEnvironmentRequest,
-    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, RunLocalDevServerRequest, SaveEnvironmentFileRequest, SettingsExportRequest,
-    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewRequest,
-    SettingsImportRequest, SettingsImportResultDto, StartDaemonRequest, StepDto,
-    StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
+    AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
+    AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
+    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
+    DiscoverProjectWorktreesRequest, DomainInfoDto, DomainPatternRequest,
+    EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest, EnvironmentFileDto,
+    EnvironmentFileListDto, EnvironmentFileRequest, ImportOfflineLicenseRequest,
+    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherPreferencesDto, LicensingDto,
+    LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest,
+    OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto, ProjectWorktreeDiscoveryDto,
+    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
+    SaveEnvironmentFileRequest, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
+    SettingsImportResultDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -716,6 +717,17 @@ pub fn init_project_from_folder(
 }
 
 #[tauri::command]
+pub fn add_project_service(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: AddProjectServiceRequest,
+) -> Result<AddProjectServiceResultDto, String> {
+    let result = state.api.add_project_service(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn update_project(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -758,9 +770,11 @@ pub async fn discover_project_worktrees(
 ) -> Result<ProjectWorktreeDiscoveryDto, String> {
     let api = state.api.clone();
 
-    async_runtime::spawn_blocking(move || api.discover_project_worktrees(request).map_err(map_error))
-        .await
-        .map_err(map_error)?
+    async_runtime::spawn_blocking(move || {
+        api.discover_project_worktrees(request).map_err(map_error)
+    })
+    .await
+    .map_err(map_error)?
 }
 
 #[tauri::command]
@@ -969,7 +983,8 @@ pub async fn preview_environment_file_copy(
     let api = state.api.clone();
 
     async_runtime::spawn_blocking(move || {
-        api.preview_environment_file_copy(request).map_err(map_error)
+        api.preview_environment_file_copy(request)
+            .map_err(map_error)
     })
     .await
     .map_err(map_error)?

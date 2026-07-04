@@ -41,6 +41,7 @@ import { terminalTargetRequestMatches, useTerminal } from "@/providers/terminal-
 import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog";
 import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
 import { ProjectWorktreesDialog } from "./project-worktrees-dialog";
+import { ProjectAddServiceDialog } from "./projects-list-item-add-service-dialog";
 import { ProjectsListItemDevDx } from "./projects-list-item-dev-dx";
 import { ProjectDomainList } from "./projects-list-item-domains";
 
@@ -77,6 +78,7 @@ export const ProjectsListItem = ({
     null,
   );
   const [worktreesDialogOpen, setWorktreesDialogOpen] = useState(false);
+  const [addServiceDialogOpen, setAddServiceDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const environmentDomainPatterns = new Set(
@@ -259,6 +261,12 @@ export const ProjectsListItem = ({
             }}
           />
           <DropdownMenuItem
+            onClick={() => setAddServiceDialogOpen(true)}
+            disabled={!project.rootPath || removeProject.isPending}
+          >
+            Add service
+          </DropdownMenuItem>
+          <DropdownMenuItem
             onClick={() => setWorktreesDialogOpen(true)}
             disabled={!project.rootPath || removeProject.isPending}
           >
@@ -397,6 +405,12 @@ export const ProjectsListItem = ({
         project={project}
         open={worktreesDialogOpen}
         onOpenChange={setWorktreesDialogOpen}
+      />
+      <ProjectAddServiceDialog
+        project={project}
+        services={services}
+        open={addServiceDialogOpen}
+        onOpenChange={setAddServiceDialogOpen}
       />
     </>
   );

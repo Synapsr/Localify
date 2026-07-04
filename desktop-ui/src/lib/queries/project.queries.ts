@@ -1,6 +1,8 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import type {
+  AddProjectServiceRequest,
+  AddProjectServiceResultDto,
   CreateProjectWithDomainsRequest,
   DetectProjectInitPlanDto,
   DetectProjectInitPlanRequest,
@@ -104,6 +106,12 @@ export const projectMutations = {
     mutationOptions({
       mutationFn: (request: CreateProjectWithDomainsRequest) =>
         tauriClient.createProjectWithDomains(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
+    }),
+  addService: (queryClient: QueryClient) =>
+    mutationOptions<AddProjectServiceResultDto, Error, AddProjectServiceRequest>({
+      mutationFn: (request) => tauriClient.addProjectService(request),
       onSuccess: async () =>
         invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),

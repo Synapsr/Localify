@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   ActivateLicenseRequest,
+  AddProjectServiceRequest,
+  AddProjectServiceResultDto,
   AddRouteRequest,
   AgentSkillInstallResultDto,
   AgentSkillStatusDto,
@@ -82,6 +84,7 @@ import type {
   UpdateProjectRequest,
 } from "../types/roxy";
 
+import { addProjectServiceRequestSchema } from "./validators/validator.add-project-service";
 import { updateAutostartRequestSchema } from "./validators/validator.autostart";
 import {
   createProjectWithDomainsRequestSchema,
@@ -206,6 +209,7 @@ export interface DesktopClient {
   initProjectFromFolder(
     request: InitProjectFromFolderRequest,
   ): Promise<InitProjectFromFolderResultDto>;
+  addProjectService(request: AddProjectServiceRequest): Promise<AddProjectServiceResultDto>;
   updateProject(request: UpdateProjectRequest): Promise<ProjectInfoDto>;
   removeProject(request: RemoveProjectRequest): Promise<RemoveProjectResultDto>;
   removeProjectEnvironment(
@@ -325,6 +329,10 @@ export function createDesktopClient(): DesktopClient {
     initProjectFromFolder: (request) =>
       tauriInvoke("init_project_from_folder", {
         request: initProjectFromFolderRequestSchema.parse(request),
+      }),
+    addProjectService: (request) =>
+      tauriInvoke("add_project_service", {
+        request: addProjectServiceRequestSchema.parse(request),
       }),
     updateProject: (request) => tauriInvoke("update_project", { request }),
     removeProject: (request) =>

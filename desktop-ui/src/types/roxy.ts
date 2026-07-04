@@ -682,6 +682,21 @@ export interface InitProjectServiceRequest {
   command?: string[] | null;
 }
 
+export interface AddProjectServiceRequest {
+  projectId: string;
+  domain: string;
+  target: string;
+  serviceName?: string | null;
+  servicePath?: string | null;
+  command?: string[] | null;
+}
+
+export interface AddProjectServiceResultDto {
+  domain: string;
+  target: string;
+  daemonReloaded: boolean;
+}
+
 export interface OpenInEditorRequest {
   path: string;
 }

@@ -1221,6 +1221,7 @@ pub fn run() {
             commands::create_project,
             commands::create_project_with_domains,
             commands::init_project_from_folder,
+            commands::add_project_service,
             commands::update_project,
             commands::remove_project,
             commands::remove_project_environment,
