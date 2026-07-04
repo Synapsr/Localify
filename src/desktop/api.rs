@@ -3254,6 +3254,8 @@ impl DesktopApi {
             return Ok(None);
         }
 
+        self.refresh_outdated_helper_once(&client);
+
         if self.helper_matches_binary_path()? && self.helper_matches_runtime_config(&client)? {
             return Ok(Some(client));
         }
@@ -3269,6 +3271,9 @@ impl DesktopApi {
     fn ensure_helper_running(&self) -> Result<SystemHelperClient> {
         let socket_path = self.helper_socket_path()?;
         let client = SystemHelperClient::new(socket_path.clone());
+        if client.ping().is_ok() {
+            self.refresh_outdated_helper_once(&client);
+        }
         if client.ping().is_ok()
             && self.helper_matches_binary_path()?
             && self.helper_matches_runtime_config(&client)?
@@ -3302,6 +3307,74 @@ impl DesktopApi {
             "{} system helper did not become ready in time.",
             BRANDING.app_name
         )
+    }
+
+    /// Detects, once per app process, a helper that kept running a previous
+    /// build after an in-place app update (its process predates the binary on
+    /// disk) and refreshes it: silently for helpers that support relaunching,
+    /// with a single automatic administrator prompt for legacy helpers that
+    /// predate the relaunch command. Without this, users would have to run
+    /// `launchctl kickstart` by hand after updating.
+    #[cfg(target_os = "macos")]
+    fn refresh_outdated_helper_once(&self, client: &SystemHelperClient) {
+        use std::sync::OnceLock;
+        static ATTEMPTED: OnceLock<()> = OnceLock::new();
+        if ATTEMPTED.set(()).is_err() {
+            return;
+        }
+
+        if let Err(error) = self.refresh_outdated_helper(client) {
+            eprintln!(
+                "{} could not refresh the outdated system helper: {error}",
+                BRANDING.app_name
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn refresh_outdated_helper_once(&self, _client: &SystemHelperClient) {}
+
+    #[cfg(target_os = "macos")]
+    fn refresh_outdated_helper(&self, client: &SystemHelperClient) -> Result<()> {
+        let socket_path = self.helper_socket_path()?;
+        let Some(started_at) = helper_process_started_at(&socket_path) else {
+            return Ok(());
+        };
+        let binary_path =
+            fs::canonicalize(&self.binary_path).unwrap_or_else(|_| self.binary_path.clone());
+        let Ok(modified) = fs::metadata(&binary_path).and_then(|metadata| metadata.modified())
+        else {
+            return Ok(());
+        };
+        if modified <= started_at {
+            return Ok(());
+        }
+        if !self.helper_matches_binary_path()? {
+            // The service points at another binary; the mutation paths own
+            // that case with a full reinstall.
+            return Ok(());
+        }
+
+        // Helpers that know the relaunch command recycle without credentials.
+        if client.relaunch_helper().is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            wait_for_helper_ping(client);
+            return Ok(());
+        }
+
+        // Legacy helper from before the relaunch command: refresh it with a
+        // single automatic administrator prompt.
+        let uid = current_uid()?;
+        self.run_cli_command_with_admin(&[
+            "helper".into(),
+            "ensure-running".into(),
+            "--socket".into(),
+            socket_path.display().to_string(),
+            "--uid".into(),
+            uid.to_string(),
+        ])?;
+        wait_for_helper_ping(client);
+        Ok(())
     }
 
     /// Recovers a stale or unreachable helper without an administrator prompt
@@ -4168,6 +4241,73 @@ fn normalize_desktop_route(route: &str) -> Result<String> {
     RouteTarget::parse(trimmed)
         .map_err(|error| anyhow::anyhow!("Invalid route target: {error}"))?;
     Ok(format!("/={trimmed}"))
+}
+
+/// Polls the helper socket until it answers, covering the launchd respawn
+/// throttle (~10s for services that restarted recently).
+#[cfg(target_os = "macos")]
+fn wait_for_helper_ping(client: &SystemHelperClient) -> bool {
+    for _ in 0..150 {
+        if client.ping().is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Returns when the helper process serving the given socket started, derived
+/// from `ps` elapsed time. `None` when the process cannot be identified.
+#[cfg(target_os = "macos")]
+fn helper_process_started_at(socket_path: &Path) -> Option<SystemTime> {
+    let pattern = format!("helper serve --socket {}", socket_path.display());
+    let output = Command::new("pgrep")
+        .arg("-f")
+        .arg(&pattern)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = stdout.lines().next()?.trim();
+    if pid.is_empty() {
+        return None;
+    }
+
+    let output = Command::new("ps")
+        .args(["-o", "etime=", "-p", pid])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let elapsed = parse_ps_etime(String::from_utf8_lossy(&output.stdout).trim())?;
+    SystemTime::now().checked_sub(elapsed)
+}
+
+/// Parses `ps -o etime=` values shaped as `[[dd-]hh:]mm:ss`.
+#[cfg(target_os = "macos")]
+fn parse_ps_etime(value: &str) -> Option<Duration> {
+    let (days, clock) = match value.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, value),
+    };
+
+    let parts = clock.split(':').collect::<Vec<_>>();
+    let (hours, minutes, seconds): (u64, u64, u64) = match parts.as_slice() {
+        [hours, minutes, seconds] => (
+            hours.parse().ok()?,
+            minutes.parse().ok()?,
+            seconds.parse().ok()?,
+        ),
+        [minutes, seconds] => (0, minutes.parse().ok()?, seconds.parse().ok()?),
+        _ => return None,
+    };
+
+    Some(Duration::from_secs(
+        ((days * 24 + hours) * 60 + minutes) * 60 + seconds,
+    ))
 }
 
 fn command_output(output: &std::process::Output) -> String {
@@ -8682,6 +8822,27 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
 
         let registration = store.get_domain(&pattern).unwrap().unwrap();
         assert!(!registration.is_https_enabled());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_ps_etime_handles_all_ps_formats() {
+        use super::parse_ps_etime;
+
+        assert_eq!(
+            parse_ps_etime("05:41"),
+            Some(Duration::from_secs(5 * 60 + 41))
+        );
+        assert_eq!(
+            parse_ps_etime("02:03:04"),
+            Some(Duration::from_secs((2 * 60 + 3) * 60 + 4))
+        );
+        assert_eq!(
+            parse_ps_etime("20638-15:19:49"),
+            Some(Duration::from_secs(((20638 * 24 + 15) * 60 + 19) * 60 + 49))
+        );
+        assert_eq!(parse_ps_etime(""), None);
+        assert_eq!(parse_ps_etime("garbage"), None);
     }
 
     #[test]
