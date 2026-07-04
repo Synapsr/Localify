@@ -243,6 +243,8 @@ fn launchd_plist_contents(
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>1</integer>
 </dict>
 </plist>
 "#,
@@ -337,6 +339,7 @@ mod tests {
         assert!(plist.contains("<string>/var/run/localify-helper-501.sock</string>"));
         assert!(plist.contains("<string>--uid</string>"));
         assert!(plist.contains("<string>501</string>"));
+        assert!(plist.contains("<key>ThrottleInterval</key>"));
     }
 
     #[test]

@@ -212,6 +212,11 @@ impl DesktopApi {
         }
 
         let socket_path = self.helper_socket_path()?;
+        let client = SystemHelperClient::new(socket_path.clone());
+        if self.recover_helper_without_admin(&client)? {
+            return Ok(());
+        }
+
         let uid = current_uid()?;
         let commands = [
             vec![
@@ -3252,6 +3257,10 @@ impl DesktopApi {
             return Ok(client);
         }
 
+        if self.recover_helper_without_admin(&client)? {
+            return Ok(client);
+        }
+
         let uid = current_uid()?;
         let args = vec![
             "helper".into(),
@@ -3274,6 +3283,45 @@ impl DesktopApi {
             "{} system helper did not become ready in time.",
             BRANDING.app_name
         )
+    }
+
+    /// Recovers a stale or unreachable helper without an administrator prompt
+    /// when the launchd service already points at the current binary: the
+    /// helper is asked to exit (or has already exited) and launchd's
+    /// `KeepAlive` respawns it from the same path, picking up in-place app
+    /// updates. Returns whether the helper became healthy.
+    #[cfg(target_os = "macos")]
+    fn recover_helper_without_admin(&self, client: &SystemHelperClient) -> Result<bool> {
+        if !self.helper_matches_binary_path()? {
+            return Ok(false);
+        }
+
+        if client.ping().is_ok() {
+            if client.relaunch_helper().is_err() {
+                // A helper too old to know the relaunch command cannot recycle
+                // itself; fall back to the administrator prompt.
+                return Ok(false);
+            }
+            // Give the acknowledged exit a moment so the poll below observes
+            // the respawned helper, not the one about to terminate.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
+        // launchd throttles service respawns (up to ~10s for services that
+        // just started); poll a little past that.
+        for _ in 0..150 {
+            if client.ping().is_ok() && self.helper_matches_runtime_config(client)? {
+                return Ok(true);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        Ok(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn recover_helper_without_admin(&self, _client: &SystemHelperClient) -> Result<bool> {
+        Ok(false)
     }
 
     fn run_privileged_desktop_install(&self) -> Result<()> {

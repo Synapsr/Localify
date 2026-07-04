@@ -43,6 +43,9 @@ const HELPER_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(tag = "cmd", rename_all = "camelCase")]
 pub enum HelperCommand {
     Ping,
+    /// Ask the helper to exit after replying so its supervisor (launchd
+    /// `KeepAlive`) respawns it from the binary currently at the service path.
+    RelaunchHelper,
     GetBootstrap,
     GetConfig,
     UpdateConfig {
@@ -154,7 +157,7 @@ pub enum HelperCommand {
 impl HelperCommand {
     fn response_timeout(&self) -> Duration {
         match self {
-            Self::Ping => HELPER_PING_TIMEOUT,
+            Self::Ping | Self::RelaunchHelper => HELPER_PING_TIMEOUT,
             Self::GetBootstrap
             | Self::GetConfig
             | Self::GetDaemonStatus
@@ -207,6 +210,7 @@ impl HelperCommand {
     fn label(&self) -> &'static str {
         match self {
             Self::Ping => "ping",
+            Self::RelaunchHelper => "relaunch the system helper",
             Self::GetBootstrap => "read desktop configuration",
             Self::GetConfig => "read config",
             Self::GetDaemonStatus => "read daemon status",
@@ -277,6 +281,13 @@ impl SystemHelperClient {
 
     pub fn ping(&self) -> Result<()> {
         let _: bool = self.send(HelperCommand::Ping)?;
+        Ok(())
+    }
+
+    /// Asks the running helper to exit so its supervisor respawns it from the
+    /// current service binary. The helper acknowledges before exiting.
+    pub fn relaunch_helper(&self) -> Result<()> {
+        let _: bool = self.send(HelperCommand::RelaunchHelper)?;
         Ok(())
     }
 
@@ -704,6 +715,22 @@ fn handle_connection(
         "Failed to parse {} helper command",
         BRANDING.app_name
     ))?;
+
+    if matches!(command, HelperCommand::RelaunchHelper) {
+        let response = HelperResponse {
+            ok: true,
+            error: None,
+            data: Some(serde_json::Value::Bool(true)),
+        };
+        let mut writer = stream;
+        writer.write_all(serde_json::to_string(&response)?.as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        // The supervisor (launchd KeepAlive) respawns the helper from the
+        // binary at the service path, picking up in-place updates.
+        std::process::exit(0);
+    }
+
     let may_write_config = command.may_write_config();
     let response = match dispatch_command(api, command) {
         Ok(data) => HelperResponse {
@@ -819,7 +846,10 @@ fn chown_path_to_uid(path: &Path, uid: u32) -> Result<()> {
 
 fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_json::Value> {
     match command {
-        HelperCommand::Ping => serde_json::to_value(true).map_err(Into::into),
+        // Handled in handle_connection so the reply is flushed before exiting.
+        HelperCommand::Ping | HelperCommand::RelaunchHelper => {
+            serde_json::to_value(true).map_err(Into::into)
+        }
         HelperCommand::GetBootstrap => serde_json::to_value(api.bootstrap()?).map_err(Into::into),
         HelperCommand::GetConfig => serde_json::to_value(api.read_config()?).map_err(Into::into),
         HelperCommand::UpdateConfig { request } => {
