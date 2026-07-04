@@ -4,6 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -671,18 +673,84 @@ pub fn serve(
     let _ = fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     set_socket_owner(socket_path, allowed_uid)?;
+    let startup_binary = startup_binary_identity();
+    let in_flight = Arc::new(AtomicUsize::new(0));
 
     loop {
         let (stream, _) = listener.accept()?;
         let api = api.clone();
         let config_path = config_path.to_path_buf();
+        let startup_binary = startup_binary.clone();
+        let in_flight = Arc::clone(&in_flight);
+        in_flight.fetch_add(1, Ordering::SeqCst);
         thread::spawn(move || {
             if let Err(error) = handle_connection(stream, &api, allowed_uid, &config_path) {
                 eprintln!("{} helper connection failed: {error}", BRANDING.app_name);
             }
+            let remaining = in_flight.fetch_sub(1, Ordering::SeqCst) - 1;
+            recycle_when_binary_updated(&startup_binary, remaining);
         });
     }
 }
+
+/// Identity of the helper executable captured at startup, used to notice
+/// in-place app updates while the helper keeps running the old code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinaryIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn startup_binary_identity() -> Option<BinaryIdentity> {
+    let path = std::env::current_exe().ok()?;
+    binary_identity(&path)
+}
+
+fn binary_identity(path: &Path) -> Option<BinaryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path).ok()?;
+    Some(BinaryIdentity {
+        path: path.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+/// Exits the helper once its on-disk binary was replaced (app update) and no
+/// request is in flight, so the launchd `KeepAlive` supervisor respawns it on
+/// the new build without any user action.
+#[cfg(target_os = "macos")]
+fn recycle_when_binary_updated(startup_binary: &Option<BinaryIdentity>, in_flight: usize) {
+    let Some(startup) = startup_binary else {
+        return;
+    };
+    if in_flight > 0 {
+        return;
+    }
+
+    // A missing or unreadable binary is not an update in progress we can
+    // recover from by exiting; stay alive and keep serving.
+    let Some(current) = binary_identity(&startup.path) else {
+        return;
+    };
+
+    if current != *startup {
+        eprintln!(
+            "{} helper binary was updated on disk; exiting so launchd restarts it on the new build.",
+            BRANDING.app_name
+        );
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn recycle_when_binary_updated(_startup_binary: &Option<BinaryIdentity>, _in_flight: usize) {}
 
 fn handle_connection(
     stream: UnixStream,
@@ -1020,6 +1088,29 @@ impl StringExt for String {
 mod tests {
     use super::*;
     use crate::desktop::dto::DomainPatternRequest;
+
+    #[test]
+    fn binary_identity_changes_when_file_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("localify");
+        fs::write(&path, b"build-1").unwrap();
+        let before = binary_identity(&path).unwrap();
+
+        assert_eq!(binary_identity(&path).unwrap(), before);
+
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"build-2-longer").unwrap();
+        let after = binary_identity(&path).unwrap();
+
+        assert_ne!(after, before);
+    }
+
+    #[test]
+    fn binary_identity_is_none_for_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(binary_identity(&dir.path().join("missing")).is_none());
+    }
 
     #[test]
     fn read_commands_do_not_restore_config_ownership() {
