@@ -1,6 +1,5 @@
 import "./styles.css";
 import { RouterProvider } from "@tanstack/react-router";
-import { Agentation } from "agentation";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -28,7 +27,6 @@ createRoot(container).render(
           <RouterProvider router={router} />
         </AppShell>
       </DesktopErrorBoundary>
-      {import.meta.env.DEV && <Agentation />}
     </SharedProvider>
   </StrictMode>,
 );
