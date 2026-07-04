@@ -110,34 +110,3 @@ export const defaultAppHotkeys = appHotkeyDefinitions.reduce<AppHotkeys>(
 export function toRegisterableHotkey(hotkey: string): RegisterableHotkey {
   return hotkey as RegisterableHotkey;
 }
-
-const globalShortcutModifierMap: Record<string, string> = {
-  alt: "Alt",
-  cmd: "Command",
-  command: "Command",
-  commandorcontrol: "CommandOrControl",
-  control: "Control",
-  ctrl: "Control",
-  meta: "Command",
-  mod: "CommandOrControl",
-  option: "Alt",
-  shift: "Shift",
-  super: "Command",
-};
-
-export function toGlobalShortcut(hotkey: string): string {
-  const parts = hotkey
-    .split("+")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-
-  return parts
-    .map((part, index) => {
-      if (index === parts.length - 1 && part.length === 1) {
-        return part.toUpperCase();
-      }
-
-      return globalShortcutModifierMap[part.toLowerCase()] ?? part;
-    })
-    .join("+");
-}
