@@ -1314,8 +1314,27 @@ impl DesktopApi {
                 .ok_or_else(|| anyhow!("Environment name must contain letters or numbers"))?
         };
 
-        let domain_mappings =
+        let mut domain_mappings =
             environment_service_domains(&project.id, &services, &slug, request.primary);
+        // Re-running ensure must not clobber customized environment domains
+        // (renamed or wildcard-toggled): keep the stored mapping for services
+        // that already have one and only generate domains for new services.
+        if !request.primary
+            && let Some(existing) = config_store
+                .list_project_environments(Some(&project.id))?
+                .into_iter()
+                .find(|environment| environment.slug == slug)
+        {
+            for mapping in &mut domain_mappings {
+                if let Some(previous) = existing
+                    .services
+                    .iter()
+                    .find(|service| service.service_id == mapping.service_id)
+                {
+                    mapping.domain = previous.domain.clone();
+                }
+            }
+        }
         let created_domains = if request.primary {
             Vec::new()
         } else {
@@ -5538,7 +5557,9 @@ fn ensure_environment_domains(
 ) -> Result<Vec<DomainPattern>> {
     let mut missing = Vec::new();
     for service in domains {
-        let pattern = DomainPattern::from_name(&service.domain, false)?;
+        // Mapping domains are display patterns: a customized environment
+        // domain may be a wildcard ("*.feat.demo.localify").
+        let pattern = domain_pattern_from_display(&service.domain)?;
         if let Some(registration) = config_store.get_domain(&pattern)? {
             let owner = config_store.domain_project_id(&pattern)?;
             if owner.as_deref() != Some(project_id) {
@@ -8661,6 +8682,75 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
 
         let registration = store.get_domain(&pattern).unwrap().unwrap();
         assert!(!registration.is_https_enabled());
+    }
+
+    #[test]
+    fn ensure_project_environment_preserves_customized_wildcard_domains() {
+        let (temp_dir, api, store) = temp_api();
+        let root = temp_dir.path().join("store");
+        fs::create_dir_all(&root).unwrap();
+        let project = store
+            .create_project_with_root("Store", Some(root.display().to_string()))
+            .unwrap();
+        let primary = proxy_registration(
+            &format!("store{}", crate::branding::BRANDING.domain_suffix()),
+            61092,
+        );
+        let primary_domain = primary.display_pattern();
+        store
+            .add_domain_with_project(primary, Some(project.id.clone()))
+            .unwrap();
+        store
+            .set_project_services(
+                &project.id,
+                vec![crate::infrastructure::config::ProjectServiceConfig {
+                    name: "web".into(),
+                    primary_domain,
+                    domains: Vec::new(),
+                    path: None,
+                    command: None,
+                }],
+            )
+            .unwrap();
+
+        let request = crate::desktop::dto::EnsureProjectEnvironmentRequest {
+            project_id: project.id.clone(),
+            name: Some("feat-inventory".into()),
+            root_path: root.display().to_string(),
+            primary: false,
+        };
+        let first = api.ensure_project_environment(request.clone()).unwrap();
+        let env_domain = first.environment.services[0].domain.clone();
+        let env_pattern = DomainPattern::from_name(&env_domain, false).unwrap();
+        let routes = store
+            .get_domain(&env_pattern)
+            .unwrap()
+            .unwrap()
+            .routes()
+            .to_vec();
+
+        // Simulate the "toggle wildcard" rename on the environment domain.
+        let wildcard_pattern = DomainPattern::from_name(&env_domain, true).unwrap();
+        store
+            .replace_project_environment_service_domain(
+                &project.id,
+                crate::infrastructure::config::ProjectEnvironmentServiceDomainUpdate {
+                    environment_slug: first.environment.slug.clone(),
+                    service_id: "web".into(),
+                    current_domain: env_domain.clone(),
+                    new_registration: DomainRegistration::new(wildcard_pattern, routes),
+                },
+            )
+            .unwrap();
+
+        let second = api.ensure_project_environment(request).unwrap();
+
+        assert_eq!(
+            second.environment.services[0].domain,
+            format!("*.{env_domain}")
+        );
+        assert!(second.created_domains.is_empty());
+        assert!(store.get_domain(&env_pattern).unwrap().is_none());
     }
 
     fn configured_test_service(id: &str, primary_domain: &str) -> super::ConfiguredService {
