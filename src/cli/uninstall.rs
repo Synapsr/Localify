@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use super::backend::WriteBackend;
 use super::context::AppContext;
 use crate::application::StepOutcome;
 use crate::application::uninstall::Uninstall;
@@ -29,6 +30,22 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &RoxyPaths) -> Result<()> {
         println!("  - All SSL certificates from system trust store");
         println!("  - All data in {}/", preview.data_dir);
         println!("\nRun with --force to confirm, or press Ctrl+C to cancel.");
+        return Ok(());
+    }
+
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        println!("Uninstalling Localify...\n");
+        let result = client.uninstall_roxy()?;
+        for step in &result.steps {
+            let label = step.label.as_deref().unwrap_or("");
+            if step.status == "warning" {
+                eprintln!("  {}: {}", label, step.message);
+            } else {
+                println!("  {}: {}", label, step.message);
+            }
+        }
+        println!("\nLocalify uninstallation complete!");
+        println!("All configuration and certificates have been removed.");
         return Ok(());
     }
 

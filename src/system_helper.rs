@@ -14,19 +14,22 @@ use serde::{Deserialize, Serialize};
 use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
-    ActivateLicenseRequest, AddRouteRequest, AppConfigDto, AssignDomainProjectRequest,
-    AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
-    CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
-    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DomainInfoDto,
-    DomainPatternRequest, ImportOfflineLicenseRequest, InitProjectRequest, InitProjectResultDto,
-    InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto,
-    LogsRequest, PortConflictDto, ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto,
-    RegistrationDto, RegistrationMutationDto, RemoveProjectEnvironmentRequest,
-    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    StartDaemonRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateDomainRequest, UpdateProjectRequest,
+    ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
+    AppConfigDto, AssignDomainProjectRequest, AttachProjectWorktreeRequest,
+    AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto, CertificateRefreshDto,
+    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
+    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest,
+    EnsureProjectEnvironmentRequest, EnsureProjectEnvironmentResultDto,
+    ImportOfflineLicenseRequest, InitProjectRequest, InitProjectResultDto, InstallResultDto,
+    KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto, LogsRequest,
+    MaterializeProjectServicesRequest, MaterializeProjectServicesResultDto, PortConflictDto,
+    ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
+    RegistrationMutationDto, RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest,
+    SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto, SettingsExportRequest,
+    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewRequest,
+    SettingsImportRequest, SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
 };
 
 const HELPER_PING_TIMEOUT: Duration = Duration::from_secs(1);
@@ -81,6 +84,18 @@ pub enum HelperCommand {
     RefreshLicense,
     InitProject {
         request: InitProjectRequest,
+    },
+    AddProjectService {
+        request: AddProjectServiceRequest,
+    },
+    SetProjectServiceDomain {
+        request: SetProjectServiceDomainRequest,
+    },
+    MaterializeProjectServices {
+        request: MaterializeProjectServicesRequest,
+    },
+    EnsureProjectEnvironment {
+        request: EnsureProjectEnvironmentRequest,
     },
     UpdateProject {
         request: UpdateProjectRequest,
@@ -166,6 +181,10 @@ impl HelperCommand {
             | Self::ClearLicense
             | Self::RefreshLicense
             | Self::InitProject { .. }
+            | Self::AddProjectService { .. }
+            | Self::SetProjectServiceDomain { .. }
+            | Self::MaterializeProjectServices { .. }
+            | Self::EnsureProjectEnvironment { .. }
             | Self::UpdateProject { .. }
             | Self::RemoveProject { .. }
             | Self::RemoveProjectEnvironment { .. }
@@ -220,6 +239,10 @@ impl HelperCommand {
                 | Self::ClearLicense
                 | Self::RefreshLicense
                 | Self::InitProject { .. }
+                | Self::AddProjectService { .. }
+                | Self::SetProjectServiceDomain { .. }
+                | Self::MaterializeProjectServices { .. }
+                | Self::EnsureProjectEnvironment { .. }
                 | Self::UpdateProject { .. }
                 | Self::RemoveProject { .. }
                 | Self::RemoveProjectEnvironment { .. }
@@ -361,6 +384,34 @@ impl SystemHelperClient {
 
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
         self.send(HelperCommand::InitProject { request })
+    }
+
+    pub fn add_project_service(
+        &self,
+        request: AddProjectServiceRequest,
+    ) -> Result<AddProjectServiceResultDto> {
+        self.send(HelperCommand::AddProjectService { request })
+    }
+
+    pub fn set_project_service_domain(
+        &self,
+        request: SetProjectServiceDomainRequest,
+    ) -> Result<SetProjectServiceDomainResultDto> {
+        self.send(HelperCommand::SetProjectServiceDomain { request })
+    }
+
+    pub fn materialize_project_services(
+        &self,
+        request: MaterializeProjectServicesRequest,
+    ) -> Result<MaterializeProjectServicesResultDto> {
+        self.send(HelperCommand::MaterializeProjectServices { request })
+    }
+
+    pub fn ensure_project_environment(
+        &self,
+        request: EnsureProjectEnvironmentRequest,
+    ) -> Result<EnsureProjectEnvironmentResultDto> {
+        self.send(HelperCommand::EnsureProjectEnvironment { request })
     }
 
     pub fn update_project(&self, request: UpdateProjectRequest) -> Result<ProjectInfoDto> {
@@ -824,6 +875,18 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::InitProject { request } => {
             serde_json::to_value(api.init_project(request)?).map_err(Into::into)
+        }
+        HelperCommand::AddProjectService { request } => {
+            serde_json::to_value(api.add_project_service(request)?).map_err(Into::into)
+        }
+        HelperCommand::SetProjectServiceDomain { request } => {
+            serde_json::to_value(api.set_project_service_domain(request)?).map_err(Into::into)
+        }
+        HelperCommand::MaterializeProjectServices { request } => {
+            serde_json::to_value(api.materialize_project_services(request)?).map_err(Into::into)
+        }
+        HelperCommand::EnsureProjectEnvironment { request } => {
+            serde_json::to_value(api.ensure_project_environment(request)?).map_err(Into::into)
         }
         HelperCommand::UpdateProject { request } => {
             serde_json::to_value(api.update_project(request)?).map_err(Into::into)

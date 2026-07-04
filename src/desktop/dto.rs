@@ -919,6 +919,79 @@ pub struct InitProjectRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AddProjectServiceRequest {
+    pub project_id: String,
+    pub domain: String,
+    pub target: String,
+    #[serde(default)]
+    pub service_name: Option<String>,
+    #[serde(default)]
+    pub service_path: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddProjectServiceResultDto {
+    pub domain: String,
+    pub target: String,
+    pub daemon_reloaded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectServiceDomainRequest {
+    pub project_id: String,
+    pub service_id: String,
+    pub domain: String,
+    #[serde(default)]
+    pub environment_slug: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProjectServiceDomainResultDto {
+    pub service_id: String,
+    pub previous_domain: String,
+    pub domain: String,
+    pub daemon_reloaded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeProjectServicesRequest {
+    pub project_id: String,
+    pub root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeProjectServicesResultDto {
+    pub materialized: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureProjectEnvironmentRequest {
+    pub project_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub root_path: String,
+    #[serde(default)]
+    pub primary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureProjectEnvironmentResultDto {
+    pub environment: ProjectEnvironmentInfoDto,
+    pub created_domains: Vec<String>,
+    pub daemon_reloaded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenInEditorRequest {
     pub path: String,
 }

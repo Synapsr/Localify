@@ -1,5 +1,7 @@
 use anyhow::Result;
+use roxy::desktop::dto::DomainPatternRequest;
 
+use super::backend::WriteBackend;
 use super::context::AppContext;
 use crate::application::StepOutcome;
 use crate::application::unregister_domain::UnregisterDomain;
@@ -22,6 +24,17 @@ pub fn execute(domain: String, wildcard: bool, force: bool, ctx: &AppContext) ->
             println!("  HTTPS certificate files will be removed");
         }
         println!("\nRun with --force to confirm.");
+        return Ok(());
+    }
+
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        let result = client.unregister_domain(DomainPatternRequest { domain, wildcard })?;
+        if result.cert_outcome.status == "warning" {
+            eprintln!("{}", result.cert_outcome.message);
+        } else if result.cert_outcome.status == "success" {
+            println!("{}", result.cert_outcome.message);
+        }
+        println!("Unregistered domain: {}", result.registration.pattern);
         return Ok(());
     }
 

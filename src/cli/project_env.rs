@@ -1,28 +1,21 @@
 use std::collections::HashMap;
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
+use super::backend::{WriteBackend, direct_api};
 use super::context::{AppContext, effective_current_dir};
-use crate::application::StepOutcome;
-use crate::application::ports::{CertificateManager, DaemonConnection};
-use crate::application::register_domain::RegisterDomain;
-use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
-use crate::domain::{DomainPattern, Route};
-use crate::infrastructure::config::{
-    ConfigStore, ConfiguredProject, ConfiguredProjectEnvironment, ConfiguredService,
-    ProjectEnvironmentConfig, ProjectEnvironmentServiceConfig,
-    ProjectEnvironmentServiceDomainUpdate,
-};
+use crate::infrastructure::config::{ConfigStore, ConfiguredProject, ConfiguredProjectEnvironment};
 use roxy::desktop::DesktopApi;
 use roxy::desktop::ProjectRootStore;
 use roxy::desktop::dto::{
-    DiscoverProjectWorktreesRequest, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
+    DiscoverProjectWorktreesRequest, EnsureProjectEnvironmentRequest,
+    EnsureProjectEnvironmentResultDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
+    ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto,
 };
 
 pub struct ListEnvArgs {
@@ -52,17 +45,10 @@ pub struct CopyEnvArgs {
     pub json: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnsureOutput {
-    Cli,
-    Quiet,
-}
-
 #[derive(Debug, Clone)]
 struct GitMetadata {
     worktree_root: Option<PathBuf>,
     common_dir: Option<PathBuf>,
-    branch: Option<String>,
 }
 
 pub fn list(args: ListEnvArgs, ctx: &AppContext) -> Result<()> {
@@ -172,7 +158,31 @@ pub fn discover(args: DiscoverEnvArgs, config_path: &Path, _ctx: &AppContext) ->
 }
 
 pub fn ensure(args: EnsureEnvArgs, ctx: &AppContext) -> Result<()> {
-    let persisted = ensure_project_environment(args, ctx, EnsureOutput::Cli)?;
+    let current_dir = effective_current_dir()?;
+    let requested_root = args.root.as_deref().unwrap_or(&current_dir);
+    let root_path = absolute_existing_path(requested_root, &current_dir);
+    let git = detect_git_metadata(&root_path);
+    let environment_root = git
+        .worktree_root
+        .clone()
+        .unwrap_or_else(|| root_path.clone());
+    let project = resolve_project(
+        &ctx.config_store,
+        args.project.as_deref(),
+        &environment_root,
+    )?;
+
+    let result = ensure_environment_backend(
+        ctx,
+        EnsureProjectEnvironmentRequest {
+            project_id: project.id,
+            name: args.name,
+            root_path: environment_root.display().to_string(),
+            primary: args.primary,
+        },
+    )?;
+    crate::cli::project::print_daemon_state(result.daemon_reloaded);
+    let persisted = result.environment;
 
     println!(
         "Ensured project environment: {} [{}]{}",
@@ -241,7 +251,7 @@ pub fn copy_env(args: CopyEnvArgs, config_path: &Path) -> Result<()> {
 pub(crate) fn ensure_implicit_worktree_environment(
     project: Option<&str>,
     ctx: &AppContext,
-) -> Result<Option<ConfiguredProjectEnvironment>> {
+) -> Result<Option<ProjectEnvironmentInfoDto>> {
     let current_dir = effective_current_dir()?;
     let root_path = absolute_existing_path(&current_dir, &current_dir);
     let git = detect_git_metadata(&root_path);
@@ -262,115 +272,28 @@ pub(crate) fn ensure_implicit_worktree_environment(
     if let Some(existing) =
         existing_environment_for_root(&ctx.config_store, &project.id, &environment_root)?
     {
-        return Ok(Some(existing));
+        return Ok(Some(environment_info(existing)));
     }
 
-    let environment = ensure_project_environment_for_root(
-        project,
-        None,
-        environment_root,
-        git,
-        false,
+    let result = ensure_environment_backend(
         ctx,
-        EnsureOutput::Quiet,
+        EnsureProjectEnvironmentRequest {
+            project_id: project.id,
+            name: None,
+            root_path: environment_root.display().to_string(),
+            primary: false,
+        },
     )?;
-    Ok(Some(environment))
+    Ok(Some(result.environment))
 }
 
-fn ensure_project_environment(
-    args: EnsureEnvArgs,
-    ctx: &AppContext,
-    output: EnsureOutput,
-) -> Result<ConfiguredProjectEnvironment> {
-    let current_dir = effective_current_dir()?;
-    let requested_root = args.root.as_deref().unwrap_or(&current_dir);
-    let root_path = absolute_existing_path(requested_root, &current_dir);
-    let git = detect_git_metadata(&root_path);
-    let environment_root = git
-        .worktree_root
-        .clone()
-        .unwrap_or_else(|| root_path.clone());
-    let project = resolve_project(
-        &ctx.config_store,
-        args.project.as_deref(),
-        &environment_root,
-    )?;
-
-    ensure_project_environment_for_root(
-        project,
-        args.name,
-        environment_root,
-        git,
-        args.primary,
-        ctx,
-        output,
-    )
-}
-
-fn ensure_project_environment_for_root(
-    project: ConfiguredProject,
-    name: Option<String>,
-    environment_root: PathBuf,
-    git: GitMetadata,
-    primary: bool,
-    ctx: &AppContext,
-    output: EnsureOutput,
-) -> Result<ConfiguredProjectEnvironment> {
-    let services = project_services(&ctx.config_store, &project.id)?;
-    if services.is_empty() {
-        bail!(
-            "Project '{}' has no services. Add one with '{} project add-service --path <app>'.",
-            project.id,
-            BRANDING.cli_command()
-        );
-    }
-
-    let name = environment_name(name, primary, &git, &environment_root)?;
-    let slug = if primary {
-        "primary".to_string()
-    } else {
-        slugify(&name).ok_or_else(|| anyhow!("Environment name must contain letters or numbers"))?
-    };
-
-    let domain_mappings = environment_service_domains(&project.id, &services, &slug, primary);
-    let created_domains = if primary {
-        Vec::new()
-    } else {
-        ensure_environment_domains(&project.id, &domain_mappings, ctx)?
-    };
-
-    let environment = ProjectEnvironmentConfig {
-        name,
-        slug: slug.clone(),
-        primary,
-        root_path: Some(environment_root.display().to_string()),
-        git_common_dir: git.common_dir.map(|path| path.display().to_string()),
-        git_branch: git.branch,
-        services: domain_mappings,
-    };
-
-    let persisted = match ctx
-        .config_store
-        .upsert_project_environment(&project.id, environment)
-    {
-        Ok(environment) => environment,
-        Err(error) => {
-            rollback_domains(&created_domains, ctx);
-            return Err(error.into());
-        }
-    };
-
-    reload_daemon(ctx, output)?;
-    Ok(persisted)
-}
-
-pub(crate) fn set_environment_service_domain(
+/// Resolves the project and the exact environment slug for a `--env` value,
+/// accepting either the slug or the display name.
+pub(crate) fn resolve_environment(
     project: Option<&str>,
     environment: &str,
-    service_id: &str,
-    domain: &str,
     ctx: &AppContext,
-) -> Result<()> {
+) -> Result<(ConfiguredProject, String)> {
     let current_dir = effective_current_dir()?;
     let root_path = absolute_existing_path(&current_dir, &current_dir);
     let git = detect_git_metadata(&root_path);
@@ -400,65 +323,39 @@ pub(crate) fn set_environment_service_domain(
             project.id
         ),
     };
-    let mapping = environment
-        .services
-        .iter()
-        .find(|mapping| {
-            mapping.service_id == service_id || mapping.service_id.eq_ignore_ascii_case(service_id)
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "Service '{}' is unavailable in environment '{}'. Re-run '{} project env ensure --project {} --name {}'.",
-                service_id,
-                environment.slug,
-                BRANDING.cli_command(),
-                project.id,
-                environment.slug
-            )
-        })?;
 
-    let current_pattern = domain_pattern_from_display(&mapping.domain)?;
-    let current_registration = ctx
-        .config_store
-        .get_domain(&current_pattern)?
-        .ok_or_else(|| anyhow!("Domain '{}' is not registered.", mapping.domain))?;
-    let new_pattern = domain_pattern_from_display(domain)?;
-    let cert_installed = match ctx.cert_service.create_and_install(&new_pattern) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!(
-                "  Certificate warning: failed to generate certificate for '{}': {error}",
-                new_pattern
-            );
-            false
-        }
-    };
-    let mut new_registration = crate::domain::DomainRegistration::with_source(
-        new_pattern,
-        current_registration.routes().to_vec(),
-        current_registration.source(),
-    );
-    if cert_installed {
-        new_registration.enable_https();
+    Ok((project, environment.slug))
+}
+
+fn ensure_environment_backend(
+    ctx: &AppContext,
+    request: EnsureProjectEnvironmentRequest,
+) -> Result<EnsureProjectEnvironmentResultDto> {
+    match WriteBackend::resolve(&ctx.config_path)? {
+        WriteBackend::Direct => direct_api(&ctx.config_path)?.ensure_project_environment(request),
+        WriteBackend::Helper(client) => client.ensure_project_environment(request),
     }
-    let new_domain = new_registration.display_pattern();
+}
 
-    ctx.config_store
-        .replace_project_environment_service_domain(
-            &project.id,
-            ProjectEnvironmentServiceDomainUpdate {
-                environment_slug: environment.slug.clone(),
-                service_id: mapping.service_id.clone(),
-                current_domain: mapping.domain.clone(),
-                new_registration,
-            },
-        )?;
-    reload_daemon(ctx, EnsureOutput::Cli)?;
-    println!(
-        "Updated environment '{}' service '{}' domain: {} -> {}",
-        environment.slug, mapping.service_id, mapping.domain, new_domain
-    );
-    Ok(())
+fn environment_info(environment: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {
+    ProjectEnvironmentInfoDto {
+        project_id: environment.project_id,
+        project_name: environment.project_name,
+        name: environment.name,
+        slug: environment.slug,
+        primary: environment.primary,
+        root_path: environment.root_path,
+        git_common_dir: environment.git_common_dir,
+        git_branch: environment.git_branch,
+        services: environment
+            .services
+            .into_iter()
+            .map(|service| ProjectEnvironmentServiceInfoDto {
+                service_id: service.service_id,
+                domain: service.domain,
+            })
+            .collect(),
+    }
 }
 
 #[derive(Serialize)]
@@ -645,228 +542,8 @@ fn existing_environment_for_root(
         }))
 }
 
-fn project_services(
-    config_store: &ConfigStore,
-    project_id: &str,
-) -> Result<Vec<ConfiguredService>> {
-    Ok(config_store
-        .list_services()?
-        .into_iter()
-        .filter(|service| service.project_id == project_id)
-        .collect())
-}
-
-fn environment_service_domains(
-    project_id: &str,
-    services: &[ConfiguredService],
-    environment_slug: &str,
-    primary: bool,
-) -> Vec<ProjectEnvironmentServiceConfig> {
-    let multi_service = services.len() > 1;
-    services
-        .iter()
-        .map(|service| {
-            let domain = if primary {
-                service.primary_domain.clone()
-            } else if multi_service {
-                format!(
-                    "{}--{}.{}{}",
-                    service.id,
-                    environment_slug,
-                    project_id,
-                    BRANDING.domain_suffix()
-                )
-            } else {
-                format!(
-                    "{}.{}{}",
-                    environment_slug,
-                    project_id,
-                    BRANDING.domain_suffix()
-                )
-            };
-            ProjectEnvironmentServiceConfig {
-                service_id: service.id.clone(),
-                domain,
-            }
-        })
-        .collect()
-}
-
-fn ensure_environment_domains(
-    project_id: &str,
-    domains: &[ProjectEnvironmentServiceConfig],
-    ctx: &AppContext,
-) -> Result<Vec<DomainPattern>> {
-    let mut missing = Vec::new();
-    for service in domains {
-        let pattern = DomainPattern::from_name(&service.domain, false)?;
-        if let Some(registration) = ctx.config_store.get_domain(&pattern)? {
-            let owner = ctx.config_store.domain_project_id(&pattern)?;
-            if owner.as_deref() != Some(project_id) {
-                bail!(
-                    "Domain '{}' already exists outside project '{}'. Choose another environment name.",
-                    service.domain,
-                    project_id
-                );
-            }
-            ensure_existing_domain_https(
-                project_id,
-                registration,
-                &ctx.config_store,
-                &ctx.cert_service,
-            )?;
-            continue;
-        }
-        missing.push((service.service_id.clone(), pattern));
-    }
-
-    let ports = reserve_ports(missing.len())?;
-    let use_case = RegisterDomain::new(&ctx.config_store, &ctx.cert_service);
-    let mut created = Vec::new();
-    for ((service_id, pattern), port) in missing.into_iter().zip(ports.into_iter()) {
-        let route = Route::parse(&format!("/={port}"))
-            .with_context(|| format!("Failed to create route for service '{service_id}'"))?;
-        match use_case.execute(pattern.clone(), vec![route]) {
-            Ok(result) => {
-                if let StepOutcome::Warning(message) = &result.cert_outcome {
-                    eprintln!(
-                        "  Certificate warning: failed to enable HTTPS for '{}': {message}",
-                        result.registration.display_pattern()
-                    );
-                }
-                if let Err(error) = ctx
-                    .config_store
-                    .update_domain_with_project(result.registration, Some(project_id.to_string()))
-                {
-                    rollback_domains(&created, ctx);
-                    let _ = UnregisterDomain::new(&ctx.config_store, &ctx.cert_service)
-                        .execute(&pattern);
-                    return Err(error.into());
-                }
-                created.push(pattern);
-            }
-            Err(error) => {
-                rollback_domains(&created, ctx);
-                return Err(error);
-            }
-        }
-    }
-
-    Ok(created)
-}
-
-fn ensure_existing_domain_https(
-    project_id: &str,
-    mut registration: crate::domain::DomainRegistration,
-    config_store: &ConfigStore,
-    cert_service: &dyn CertificateManager,
-) -> Result<()> {
-    if registration.is_https_enabled() {
-        return Ok(());
-    }
-
-    match cert_service.create_and_install(registration.pattern()) {
-        Ok(()) => {
-            registration.enable_https();
-            config_store.update_domain_with_project(registration, Some(project_id.to_string()))?;
-        }
-        Err(error) => {
-            eprintln!(
-                "  Certificate warning: failed to enable HTTPS for '{}': {error}",
-                registration.display_pattern()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn domain_pattern_from_display(value: &str) -> Result<DomainPattern> {
-    let value = value.trim();
-    let (domain, wildcard) = value
-        .strip_prefix("*.")
-        .map(|domain| (domain, true))
-        .unwrap_or((value, false));
-    Ok(DomainPattern::from_name(domain, wildcard)?)
-}
-
 fn environment_matches(environment: &ConfiguredProjectEnvironment, value: &str) -> bool {
     environment.slug == value || environment.name.eq_ignore_ascii_case(value)
-}
-
-fn reserve_ports(count: usize) -> Result<Vec<u16>> {
-    let mut listeners = Vec::with_capacity(count);
-    let mut ports = Vec::with_capacity(count);
-    for _ in 0..count {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .context("Failed to ask the OS for an available local port")?;
-        let port = listener
-            .local_addr()
-            .context("Failed to read the generated local port")?
-            .port();
-        listeners.push(listener);
-        ports.push(port);
-    }
-    drop(listeners);
-    Ok(ports)
-}
-
-fn rollback_domains(patterns: &[DomainPattern], ctx: &AppContext) {
-    let unregister = UnregisterDomain::new(&ctx.config_store, &ctx.cert_service);
-    for pattern in patterns {
-        let _ = unregister.execute(pattern);
-    }
-}
-
-fn reload_daemon(ctx: &AppContext, output: EnsureOutput) -> Result<()> {
-    match ctx.mgmt_client.reload() {
-        Ok(()) => {
-            if output == EnsureOutput::Cli {
-                println!("  Daemon: reloaded");
-            }
-        }
-        Err(crate::application::ports::DaemonConnectionError::NotRunning) => {
-            if output == EnsureOutput::Cli {
-                println!("  Daemon: not running");
-                println!("  Start it with: {} start", BRANDING.cli_command());
-            }
-        }
-        Err(error) => bail!("Failed to reload the running daemon: {error}"),
-    }
-    Ok(())
-}
-
-fn environment_name(
-    requested: Option<String>,
-    primary: bool,
-    git: &GitMetadata,
-    root: &Path,
-) -> Result<String> {
-    if let Some(name) = requested {
-        let name = name.trim();
-        if name.is_empty() {
-            bail!("Environment name cannot be empty");
-        }
-        return Ok(name.to_string());
-    }
-
-    if primary {
-        return Ok("Primary".to_string());
-    }
-
-    if let Some(branch) = git
-        .branch
-        .as_ref()
-        .filter(|branch| !branch.trim().is_empty())
-    {
-        return Ok(branch.clone());
-    }
-
-    let name = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("Could not infer an environment name. Pass --name <label>."))?;
-    Ok(name.to_string())
 }
 
 fn absolute_existing_path(path: &Path, current_dir: &Path) -> PathBuf {
@@ -890,12 +567,9 @@ fn detect_git_metadata(root: &Path) -> GitMetadata {
         };
         fs::canonicalize(&path).unwrap_or(path)
     });
-    let branch = git_output(root, &["branch", "--show-current"]);
-
     GitMetadata {
         worktree_root,
         common_dir,
-        branch,
     }
 }
 
@@ -913,157 +587,4 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     let value = String::from_utf8(output.stdout).ok()?;
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
-}
-
-fn slugify(value: &str) -> Option<String> {
-    let mut slug = String::new();
-    let mut previous_was_dash = false;
-
-    for ch in value.trim().chars() {
-        let ch = ch.to_ascii_lowercase();
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-            previous_was_dash = false;
-            continue;
-        }
-
-        if slug.is_empty() || previous_was_dash {
-            continue;
-        }
-
-        slug.push('-');
-        previous_was_dash = true;
-    }
-
-    let slug = slug.trim_matches('-').to_string();
-    (!slug.is_empty()).then_some(slug)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::application::testkit::InMemoryCertificateManager;
-    use crate::domain::DomainRegistration;
-
-    fn service(id: &str, primary_domain: &str) -> ConfiguredService {
-        ConfiguredService {
-            id: id.into(),
-            name: id.into(),
-            project_id: "demo".into(),
-            project_name: "Demo".into(),
-            project_enabled: true,
-            project_root_path: Some("/tmp/demo".into()),
-            primary_domain: primary_domain.into(),
-            domains: vec![primary_domain.into()],
-            path: None,
-            command: None,
-            primary_target: None,
-            inferred: false,
-        }
-    }
-
-    fn proxy_registration(domain: &str, port: u16) -> DomainRegistration {
-        DomainRegistration::new(
-            DomainPattern::from_name(domain, false).unwrap(),
-            vec![Route::parse(&format!("/={port}")).unwrap()],
-        )
-    }
-
-    #[test]
-    fn non_primary_single_service_domain_uses_environment_label() {
-        let domains = environment_service_domains(
-            "demo",
-            &[service("web", &format!("demo{}", BRANDING.domain_suffix()))],
-            "feat-auth",
-            false,
-        );
-
-        assert_eq!(
-            domains[0].domain,
-            format!("feat-auth.demo{}", BRANDING.domain_suffix())
-        );
-    }
-
-    #[test]
-    fn non_primary_multi_service_domain_uses_service_and_environment_label() {
-        let domains = environment_service_domains(
-            "demo",
-            &[
-                service("web", &format!("demo{}", BRANDING.domain_suffix())),
-                service("api", &format!("api.demo{}", BRANDING.domain_suffix())),
-            ],
-            "feat-auth",
-            false,
-        );
-
-        assert_eq!(
-            domains[0].domain,
-            format!("web--feat-auth.demo{}", BRANDING.domain_suffix())
-        );
-        assert_eq!(
-            domains[1].domain,
-            format!("api--feat-auth.demo{}", BRANDING.domain_suffix())
-        );
-    }
-
-    #[test]
-    fn primary_environment_keeps_service_domains() {
-        let primary = format!("demo{}", BRANDING.domain_suffix());
-        let domains =
-            environment_service_domains("demo", &[service("web", &primary)], "primary", true);
-
-        assert_eq!(domains[0].domain, primary);
-    }
-
-    #[test]
-    fn ensure_existing_domain_https_upgrades_http_domain_when_cert_is_ready() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConfigStore::new(dir.path().join("config.toml"));
-        let project = store.create_project("Demo").unwrap();
-        let domain = format!("feat-auth.demo{}", BRANDING.domain_suffix());
-        let pattern = DomainPattern::from_name(&domain, false).unwrap();
-        store
-            .add_domain_with_project(proxy_registration(&domain, 3000), Some(project.id.clone()))
-            .unwrap();
-        let registration = store.get_domain(&pattern).unwrap().unwrap();
-
-        ensure_existing_domain_https(
-            &project.id,
-            registration,
-            &store,
-            &InMemoryCertificateManager::new(),
-        )
-        .unwrap();
-
-        let registration = store.get_domain(&pattern).unwrap().unwrap();
-        assert!(registration.is_https_enabled());
-        assert_eq!(
-            store.domain_project_id(&pattern).unwrap().as_deref(),
-            Some(project.id.as_str())
-        );
-    }
-
-    #[test]
-    fn ensure_existing_domain_https_keeps_http_when_cert_still_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConfigStore::new(dir.path().join("config.toml"));
-        let project = store.create_project("Demo").unwrap();
-        let domain = format!("feat-auth.demo{}", BRANDING.domain_suffix());
-        let pattern = DomainPattern::from_name(&domain, false).unwrap();
-        store
-            .add_domain_with_project(proxy_registration(&domain, 3000), Some(project.id.clone()))
-            .unwrap();
-        let registration = store.get_domain(&pattern).unwrap().unwrap();
-
-        ensure_existing_domain_https(
-            &project.id,
-            registration,
-            &store,
-            &InMemoryCertificateManager::always_failing(),
-        )
-        .unwrap();
-
-        let registration = store.get_domain(&pattern).unwrap().unwrap();
-        assert!(!registration.is_https_enabled());
-    }
 }

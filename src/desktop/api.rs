@@ -25,26 +25,29 @@ use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
-    ActivateLicenseRequest, AddRouteRequest, AgentSkillAgentDto, AgentSkillInstallResultDto,
-    AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest, AttachProjectWorktreeRequest,
-    AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto, CertificateRefreshDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
-    DiscoverProjectWorktreesRequest, DnsResolutionDto, DomainInfoDto, DomainPatternRequest,
-    EnvironmentDto, EnvironmentFileCandidateDto, EnvironmentFileCopyItemDto,
-    EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
-    EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest, FolderInitServiceDto,
-    ImportOfflineLicenseRequest, InitProjectFromFolderRequest, InitProjectFromFolderResultDto,
-    InitProjectRequest, InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest,
-    KillPortConflictRequest, LauncherAvailabilityDto, LogsDto, LogsRequest, NodeTrustDto,
-    OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto,
-    ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto, ProjectInfoDto,
-    ProjectServiceInfoDto, ProjectWorktreeDiscoveryDto, ProjectWorktreeDto,
-    ProjectWorktreeServiceCandidateDto, ProjectWorktreeStatusDto, RegisterDomainRequest,
-    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
-    RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
-    SaveEnvironmentFileRequest, SettingsExportRequest, SettingsExportResultDto,
+    ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
+    AgentSkillAgentDto, AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto,
+    AssignDomainProjectRequest, AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto,
+    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
+    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
+    DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DiscoverProjectWorktreesRequest,
+    DnsResolutionDto, DomainInfoDto, DomainPatternRequest, EnsureProjectEnvironmentRequest,
+    EnsureProjectEnvironmentResultDto, EnvironmentDto, EnvironmentFileCandidateDto,
+    EnvironmentFileCopyItemDto, EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest,
+    EnvironmentFileCopyStatusDto, EnvironmentFileDto, EnvironmentFileListDto,
+    EnvironmentFileRequest, FolderInitServiceDto, ImportOfflineLicenseRequest,
+    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
+    InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
+    LauncherAvailabilityDto, LogsDto, LogsRequest, MaterializeProjectServicesRequest,
+    MaterializeProjectServicesResultDto, NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest,
+    OpenProjectUrlRequest, PortConflictDto, ProjectEnvironmentInfoDto,
+    ProjectEnvironmentServiceInfoDto, ProjectInfoDto, ProjectServiceInfoDto,
+    ProjectWorktreeDiscoveryDto, ProjectWorktreeDto, ProjectWorktreeServiceCandidateDto,
+    ProjectWorktreeStatusDto, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
+    RegistrationMutationDto, RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RouteDto,
+    RunLocalDevServerRequest, SaveEnvironmentFileRequest, SetProjectServiceDomainRequest,
+    SetProjectServiceDomainResultDto, SettingsExportRequest, SettingsExportResultDto,
     SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
     SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
     SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
@@ -1082,6 +1085,263 @@ impl DesktopApi {
             project: map_project_info(project, services.len(), has_reachable_domain, None),
             services,
             daemon_reloaded,
+        })
+    }
+
+    /// Registers a new domain for an existing project and records the service
+    /// metadata (path, command) used by `localify dev`/`run`.
+    ///
+    /// Returns an error if the project does not exist, the domain is already
+    /// registered, or the service metadata cannot be persisted (the domain
+    /// registration is rolled back in that case).
+    pub fn add_project_service(
+        &self,
+        request: AddProjectServiceRequest,
+    ) -> Result<AddProjectServiceResultDto> {
+        if self.should_use_system_helper() {
+            return self.ensure_helper_running()?.add_project_service(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+        let project = configured_project(&config_store, &request.project_id)?;
+        let pattern = DomainPattern::from_name(&request.domain, false)?;
+        let route = parse_desktop_route(&request.target)
+            .map_err(|error| anyhow!("Invalid target for '{}': {error}", request.domain))?;
+        let result = RegisterDomain::new(&config_store, &certs).execute(pattern, vec![route])?;
+        config_store
+            .update_domain_with_project(result.registration.clone(), Some(project.id.clone()))?;
+
+        let service = crate::desktop::dto::InitProjectServiceRequest {
+            domain: request.domain.clone(),
+            target: request.target.clone(),
+            service_name: request.service_name.clone(),
+            service_path: request.service_path.clone(),
+            command: request.command.clone(),
+        };
+        if let Some(project_service) = init_project_service_config(&service)
+            && let Err(error) = config_store.add_project_service(&project.id, project_service)
+        {
+            let _ =
+                UnregisterDomain::new(&config_store, &certs).execute(result.registration.pattern());
+            return Err(error.into());
+        }
+
+        Ok(AddProjectServiceResultDto {
+            domain: result.registration.display_pattern(),
+            target: request.target,
+            daemon_reloaded: reload_running_daemon(&paths)?,
+        })
+    }
+
+    /// Replaces the primary domain of a project service, or of a service inside
+    /// a specific project environment when `environment_slug` is set.
+    ///
+    /// The existing routes are kept; a certificate is generated for the new
+    /// domain (falling back to HTTP with a warning when generation fails).
+    pub fn set_project_service_domain(
+        &self,
+        request: SetProjectServiceDomainRequest,
+    ) -> Result<SetProjectServiceDomainResultDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .set_project_service_domain(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+        let project = configured_project(&config_store, &request.project_id)?;
+
+        let (service_id, current_domain) = match request.environment_slug.as_deref() {
+            Some(slug) => {
+                environment_service_mapping(&config_store, &project, slug, &request.service_id)?
+            }
+            None => {
+                let service = project_service(&config_store, &project, &request.service_id)?;
+                (service.id, service.primary_domain)
+            }
+        };
+
+        let current_pattern = domain_pattern_from_display(&current_domain)?;
+        let current_registration = config_store
+            .get_domain(&current_pattern)?
+            .ok_or_else(|| anyhow!("Domain '{}' is not registered.", current_domain))?;
+        let new_pattern = domain_pattern_from_display(&request.domain)?;
+        let cert_installed = match certs.create_and_install(&new_pattern) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "  Certificate warning: failed to generate certificate for '{new_pattern}': {error}"
+                );
+                false
+            }
+        };
+        let mut new_registration = DomainRegistration::with_source(
+            new_pattern,
+            current_registration.routes().to_vec(),
+            current_registration.source(),
+        );
+        if cert_installed {
+            new_registration.enable_https();
+        }
+        let new_domain = new_registration.display_pattern();
+
+        match request.environment_slug {
+            Some(slug) => config_store.replace_project_environment_service_domain(
+                &project.id,
+                crate::infrastructure::config::ProjectEnvironmentServiceDomainUpdate {
+                    environment_slug: slug,
+                    service_id: service_id.clone(),
+                    current_domain: current_domain.clone(),
+                    new_registration,
+                },
+            )?,
+            None => config_store.replace_project_service_domain(
+                &project.id,
+                &service_id,
+                crate::infrastructure::config::ProjectServiceDomainUpdate {
+                    current_domain: current_domain.clone(),
+                    new_registration,
+                },
+            )?,
+        }
+
+        Ok(SetProjectServiceDomainResultDto {
+            service_id,
+            previous_domain: current_domain,
+            domain: new_domain,
+            daemon_reloaded: reload_running_daemon(&paths)?,
+        })
+    }
+
+    /// Converts inferred (domain-derived) services of a project into explicit
+    /// service entries by re-detecting apps under the project root.
+    ///
+    /// Only rewrites the config when at least one service gained a detected
+    /// path or command; returns how many services were materialized.
+    pub fn materialize_project_services(
+        &self,
+        request: MaterializeProjectServicesRequest,
+    ) -> Result<MaterializeProjectServicesResultDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .materialize_project_services(request);
+        }
+
+        self.ensure_config_writable()?;
+        let config_store = self.config_store();
+        let project = configured_project(&config_store, &request.project_id)?;
+        let root = PathBuf::from(&request.root_path);
+        let services = config_store
+            .list_services()?
+            .into_iter()
+            .filter(|service| service.project_id == project.id)
+            .collect::<Vec<_>>();
+        if services.iter().all(|service| !service.inferred) {
+            return Ok(MaterializeProjectServicesResultDto { materialized: 0 });
+        }
+
+        let detected = detect_folder_init_plan(&root, Some(&project.name))?;
+        let (project_services, materialized) =
+            materialized_project_services(&services, &root, &detected.services)?;
+        if materialized > 0 {
+            config_store.set_project_services(&project.id, project_services)?;
+        }
+
+        Ok(MaterializeProjectServicesResultDto { materialized })
+    }
+
+    /// Creates or updates a project environment for the given root, registering
+    /// per-environment domains (with reserved local ports) for non-primary
+    /// environments.
+    ///
+    /// Created domains are rolled back when persisting the environment fails.
+    pub fn ensure_project_environment(
+        &self,
+        request: EnsureProjectEnvironmentRequest,
+    ) -> Result<EnsureProjectEnvironmentResultDto> {
+        if self.should_use_system_helper() {
+            return self
+                .ensure_helper_running()?
+                .ensure_project_environment(request);
+        }
+
+        self.ensure_config_writable()?;
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        let config_store = self.config_store();
+        let project = configured_project(&config_store, &request.project_id)?;
+        let environment_root = PathBuf::from(request.root_path.trim());
+        if environment_root.as_os_str().is_empty() {
+            bail!("Environment root path is required.");
+        }
+
+        let services = config_store
+            .list_services()?
+            .into_iter()
+            .filter(|service| service.project_id == project.id)
+            .collect::<Vec<_>>();
+        if services.is_empty() {
+            bail!(
+                "Project '{}' has no services. Add one with '{} project add-service --path <app>'.",
+                project.id,
+                BRANDING.cli_command()
+            );
+        }
+
+        let git = detect_worktree_git_metadata(&environment_root);
+        let name = environment_display_name(
+            request.name,
+            request.primary,
+            git.branch.as_deref(),
+            &environment_root,
+        )?;
+        let slug = if request.primary {
+            "primary".to_string()
+        } else {
+            slugify(&name)
+                .ok_or_else(|| anyhow!("Environment name must contain letters or numbers"))?
+        };
+
+        let domain_mappings =
+            environment_service_domains(&project.id, &services, &slug, request.primary);
+        let created_domains = if request.primary {
+            Vec::new()
+        } else {
+            ensure_environment_domains(&project.id, &domain_mappings, &config_store, &certs)?
+        };
+
+        let environment = ProjectEnvironmentConfig {
+            name,
+            slug,
+            primary: request.primary,
+            root_path: Some(environment_root.display().to_string()),
+            git_common_dir: git.common_dir.map(|path| path.display().to_string()),
+            git_branch: git.branch,
+            services: domain_mappings,
+        };
+
+        let persisted = match config_store.upsert_project_environment(&project.id, environment) {
+            Ok(environment) => environment,
+            Err(error) => {
+                rollback_environment_domains(&created_domains, &config_store, &certs);
+                return Err(error.into());
+            }
+        };
+
+        Ok(EnsureProjectEnvironmentResultDto {
+            environment: map_project_environment_info(persisted),
+            created_domains: created_domains
+                .iter()
+                .map(|pattern| pattern.display_pattern())
+                .collect(),
+            daemon_reloaded: reload_running_daemon(&paths)?,
         })
     }
 
@@ -5273,11 +5533,230 @@ fn ensure_environment_domains(
     Ok(created)
 }
 
+fn configured_project(config_store: &ConfigStore, project_id: &str) -> Result<ConfiguredProject> {
+    config_store
+        .list_projects()?
+        .into_iter()
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| anyhow!("Project not found: {project_id}"))
+}
+
+fn project_service(
+    config_store: &ConfigStore,
+    project: &ConfiguredProject,
+    service_id: &str,
+) -> Result<ConfiguredService> {
+    config_store
+        .list_services()?
+        .into_iter()
+        .filter(|service| service.project_id == project.id)
+        .find(|service| service.id == service_id || service.name.eq_ignore_ascii_case(service_id))
+        .ok_or_else(|| {
+            anyhow!(
+                "Service '{}' was not found in project '{}'. Run '{} services list' to inspect configured services.",
+                service_id,
+                project.id,
+                BRANDING.cli_command()
+            )
+        })
+}
+
+fn environment_service_mapping(
+    config_store: &ConfigStore,
+    project: &ConfiguredProject,
+    environment_slug: &str,
+    service_id: &str,
+) -> Result<(String, String)> {
+    let environment = config_store
+        .list_project_environments(Some(&project.id))?
+        .into_iter()
+        .find(|environment| environment.slug == environment_slug)
+        .ok_or_else(|| {
+            anyhow!(
+                "Project environment '{environment_slug}' was not found for project '{}'. Create it with: {} project env ensure --project {} --name {environment_slug}",
+                project.id,
+                BRANDING.cli_command(),
+                project.id
+            )
+        })?;
+
+    environment
+        .services
+        .iter()
+        .find(|mapping| {
+            mapping.service_id == service_id || mapping.service_id.eq_ignore_ascii_case(service_id)
+        })
+        .map(|mapping| (mapping.service_id.clone(), mapping.domain.clone()))
+        .ok_or_else(|| {
+            anyhow!(
+                "Service '{service_id}' is unavailable in environment '{}'. Re-run '{} project env ensure --project {} --name {}'.",
+                environment.slug,
+                BRANDING.cli_command(),
+                project.id,
+                environment.slug
+            )
+        })
+}
+
+fn domain_pattern_from_display(value: &str) -> Result<DomainPattern> {
+    let value = value.trim();
+    let (domain, wildcard) = value
+        .strip_prefix("*.")
+        .map(|domain| (domain, true))
+        .unwrap_or((value, false));
+    DomainPattern::from_name(domain, wildcard).map_err(Into::into)
+}
+
+/// Reloads the running daemon after a config mutation.
+///
+/// Returns whether the daemon was reloaded; a daemon that is not running is
+/// not an error, but a daemon that fails to reload is.
+fn reload_running_daemon(paths: &RoxyPaths) -> Result<bool> {
+    match MgmtSocketClient::new(&paths.socket_path).reload() {
+        Ok(()) => Ok(true),
+        Err(crate::application::ports::DaemonConnectionError::NotRunning) => Ok(false),
+        Err(error) => bail!("Failed to reload the running daemon: {error}"),
+    }
+}
+
+fn environment_display_name(
+    requested: Option<String>,
+    primary: bool,
+    git_branch: Option<&str>,
+    root: &Path,
+) -> Result<String> {
+    if let Some(name) = requested {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("Environment name cannot be empty");
+        }
+        return Ok(name.to_string());
+    }
+
+    if primary {
+        return Ok("Primary".to_string());
+    }
+
+    if let Some(branch) = git_branch.filter(|branch| !branch.trim().is_empty()) {
+        return Ok(branch.to_string());
+    }
+
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("Could not infer an environment name. Pass --name <label>."))?;
+    Ok(name.to_string())
+}
+
+fn materialized_project_services(
+    services: &[ConfiguredService],
+    root: &Path,
+    detected_services: &[crate::project_init::FolderInitServicePlan],
+) -> Result<(Vec<ProjectServiceConfig>, usize)> {
+    let detected = detected_service_matches(root, detected_services)?;
+    let mut materialized_count = 0;
+    let project_services = services
+        .iter()
+        .map(|service| {
+            let mut config = project_service_config_from_existing(service);
+            if service.inferred
+                && let Some(detected) = detected_service_for_existing(service, &detected)
+            {
+                let next_path = detected.service_path.clone();
+                let next_command = detected.command.clone();
+                if config.path != next_path || config.command != next_command {
+                    materialized_count += 1;
+                }
+                config.path = next_path;
+                config.command = next_command;
+            }
+            config
+        })
+        .collect();
+
+    Ok((project_services, materialized_count))
+}
+
+struct DetectedServiceMatch<'a> {
+    service: &'a crate::project_init::FolderInitServicePlan,
+    legacy_target: Option<String>,
+}
+
+fn detected_service_matches<'a>(
+    root: &Path,
+    services: &'a [crate::project_init::FolderInitServicePlan],
+) -> Result<Vec<DetectedServiceMatch<'a>>> {
+    services
+        .iter()
+        .map(|service| {
+            let package_dir = service
+                .service_path
+                .as_ref()
+                .map(|path| root.join(path))
+                .unwrap_or_else(|| root.to_path_buf());
+            Ok(DetectedServiceMatch {
+                service,
+                legacy_target: crate::project_init::detect_current_dir_localify_target(
+                    &package_dir,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn detected_service_for_existing<'a>(
+    service: &ConfiguredService,
+    detected: &'a [DetectedServiceMatch<'a>],
+) -> Option<&'a crate::project_init::FolderInitServicePlan> {
+    service_proxy_port(service)
+        .and_then(|port| {
+            detected
+                .iter()
+                .find(|candidate| candidate.legacy_target.as_deref() == Some(port.as_str()))
+        })
+        .or_else(|| {
+            let service_id = normalize_display_path(&service.id).to_ascii_lowercase();
+            let service_name = normalize_display_path(&service.name).to_ascii_lowercase();
+            detected.iter().find(|candidate| {
+                let detected_name =
+                    normalize_display_path(&candidate.service.service_name).to_ascii_lowercase();
+                detected_name == service_id || detected_name == service_name
+            })
+        })
+        .map(|candidate| candidate.service)
+}
+
+fn service_proxy_port(service: &ConfiguredService) -> Option<String> {
+    match service.primary_target.as_ref()? {
+        RouteTarget::Proxy(target) => Some(target.port().value().to_string()),
+        RouteTarget::StaticFiles(_) => None,
+    }
+}
+
+fn project_service_config_from_existing(service: &ConfiguredService) -> ProjectServiceConfig {
+    ProjectServiceConfig {
+        name: service.name.clone(),
+        primary_domain: service.primary_domain.clone(),
+        domains: service
+            .domains
+            .iter()
+            .filter(|domain| domain.as_str() != service.primary_domain)
+            .cloned()
+            .collect(),
+        path: service.path.clone(),
+        command: service.command.clone(),
+    }
+}
+
+fn normalize_display_path(path: &str) -> String {
+    path.trim_matches('/').replace('\\', "/")
+}
+
 fn ensure_existing_domain_https(
     project_id: &str,
     mut registration: DomainRegistration,
     config_store: &ConfigStore,
-    certs: &CertificateService,
+    certs: &dyn crate::application::ports::CertificateManager,
 ) -> Result<()> {
     if registration.is_https_enabled() {
         return Ok(());
@@ -6517,14 +6996,14 @@ mod tests {
         CliRemovalOutcome, DesktopApi, EnvironmentFileTarget, ROOT_ENV_FILE_FALLBACK,
         apply_local_project_root_paths_to_environments, cli_command_points_to_binary,
         cli_shell_command, cli_shell_commands, ensure_cli_command_link,
-        ensure_environment_file_target, env_file_target, environment_file_modified_at,
-        export_route_string, git_command, infer_primary_worktree_root,
-        is_stale_system_helper_error, normalize_desktop_route, normalize_project_snapshot_id,
-        parse_desktop_route, parse_git_worktree_porcelain, read_environment_file_target,
-        remove_cli_command_link, resolve_attach_primary_git_root,
-        restart_daemon_after_certificate_refresh_step_with, service_env_root, shell_escape,
-        should_restart_helper_after_attach_error, slugify, unique_environment_slug,
-        validate_settings_snapshot,
+        ensure_environment_file_target, ensure_existing_domain_https, env_file_target,
+        environment_file_modified_at, environment_service_domains, export_route_string,
+        git_command, infer_primary_worktree_root, is_stale_system_helper_error,
+        normalize_desktop_route, normalize_project_snapshot_id, parse_desktop_route,
+        parse_git_worktree_porcelain, read_environment_file_target, remove_cli_command_link,
+        resolve_attach_primary_git_root, restart_daemon_after_certificate_refresh_step_with,
+        service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
+        unique_environment_slug, validate_settings_snapshot,
     };
     use crate::config::{RoxyPaths, StoredLicense};
     use crate::desktop::dto::{
@@ -7918,6 +8397,246 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
         assert_eq!(result.content, "");
         assert!(log_path.exists());
         assert_eq!(std::fs::read_to_string(&log_path).unwrap(), "");
+    }
+
+    #[test]
+    fn add_project_service_persists_explicit_service_metadata() {
+        let (temp_dir, api, store) = temp_api();
+        let project = store
+            .create_project_with_root("Client App", Some(temp_dir.path().display().to_string()))
+            .unwrap();
+
+        let result = api
+            .add_project_service(crate::desktop::dto::AddProjectServiceRequest {
+                project_id: project.id.clone(),
+                domain: format!(
+                    "web.client-app{}",
+                    crate::branding::BRANDING.domain_suffix()
+                ),
+                target: "3000".into(),
+                service_name: Some("web".into()),
+                service_path: Some("apps/web".into()),
+                command: Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()]),
+            })
+            .unwrap();
+
+        assert!(!result.daemon_reloaded);
+        let services = store.list_services().unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].id, "web");
+        assert_eq!(
+            services[0].primary_domain,
+            format!(
+                "web.client-app{}",
+                crate::branding::BRANDING.domain_suffix()
+            )
+        );
+        assert_eq!(services[0].path.as_deref(), Some("apps/web"));
+        assert_eq!(
+            services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()])
+        );
+        assert!(!services[0].inferred);
+    }
+
+    #[test]
+    fn materialize_inferred_services_reuses_legacy_target_mapping() {
+        let (temp_dir, api, store) = temp_api();
+
+        let root = temp_dir.path().join("ACME");
+        let app_dir = root.join("apps/org-space");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            app_dir.join("package.json"),
+            r#"{"name":"org-space","scripts":{"dev-localify":"next dev --hostname 127.0.0.1 --port 52164","dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let project = store
+            .create_project_with_root("ACME", Some(root.display().to_string()))
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration(
+                    &format!("acteur.acme{}", crate::branding::BRANDING.domain_suffix()),
+                    52164,
+                ),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let result = api
+            .materialize_project_services(crate::desktop::dto::MaterializeProjectServicesRequest {
+                project_id: project.id.clone(),
+                root_path: root.display().to_string(),
+            })
+            .unwrap();
+        let services = store.list_services().unwrap();
+
+        assert_eq!(result.materialized, 1);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].id, "acteur");
+        assert_eq!(services[0].path.as_deref(), Some("apps/org-space"));
+        assert_eq!(
+            services[0].command,
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
+        );
+        assert!(!services[0].inferred);
+    }
+
+    #[test]
+    fn non_primary_single_service_domain_uses_environment_label() {
+        let domains = environment_service_domains(
+            "demo",
+            &[configured_test_service(
+                "web",
+                &format!("demo{}", crate::branding::BRANDING.domain_suffix()),
+            )],
+            "feat-auth",
+            false,
+        );
+
+        assert_eq!(
+            domains[0].domain,
+            format!(
+                "feat-auth.demo{}",
+                crate::branding::BRANDING.domain_suffix()
+            )
+        );
+    }
+
+    #[test]
+    fn non_primary_multi_service_domain_uses_service_and_environment_label() {
+        let domains = environment_service_domains(
+            "demo",
+            &[
+                configured_test_service(
+                    "web",
+                    &format!("demo{}", crate::branding::BRANDING.domain_suffix()),
+                ),
+                configured_test_service(
+                    "api",
+                    &format!("api.demo{}", crate::branding::BRANDING.domain_suffix()),
+                ),
+            ],
+            "feat-auth",
+            false,
+        );
+
+        assert_eq!(
+            domains[0].domain,
+            format!(
+                "web--feat-auth.demo{}",
+                crate::branding::BRANDING.domain_suffix()
+            )
+        );
+        assert_eq!(
+            domains[1].domain,
+            format!(
+                "api--feat-auth.demo{}",
+                crate::branding::BRANDING.domain_suffix()
+            )
+        );
+    }
+
+    #[test]
+    fn primary_environment_keeps_service_domains() {
+        let primary = format!("demo{}", crate::branding::BRANDING.domain_suffix());
+        let domains = environment_service_domains(
+            "demo",
+            &[configured_test_service("web", &primary)],
+            "primary",
+            true,
+        );
+
+        assert_eq!(domains[0].domain, primary);
+    }
+
+    #[test]
+    fn ensure_existing_domain_https_upgrades_http_domain_when_cert_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.toml"));
+        let project = store.create_project("Demo").unwrap();
+        let domain = format!(
+            "feat-auth.demo{}",
+            crate::branding::BRANDING.domain_suffix()
+        );
+        let pattern = DomainPattern::from_name(&domain, false).unwrap();
+        store
+            .add_domain_with_project(proxy_registration(&domain, 3000), Some(project.id.clone()))
+            .unwrap();
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+
+        ensure_existing_domain_https(
+            &project.id,
+            registration,
+            &store,
+            &crate::application::testkit::InMemoryCertificateManager::new(),
+        )
+        .unwrap();
+
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+        assert!(registration.is_https_enabled());
+        assert_eq!(
+            store.domain_project_id(&pattern).unwrap().as_deref(),
+            Some(project.id.as_str())
+        );
+    }
+
+    #[test]
+    fn ensure_existing_domain_https_keeps_http_when_cert_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.toml"));
+        let project = store.create_project("Demo").unwrap();
+        let domain = format!(
+            "feat-auth.demo{}",
+            crate::branding::BRANDING.domain_suffix()
+        );
+        let pattern = DomainPattern::from_name(&domain, false).unwrap();
+        store
+            .add_domain_with_project(proxy_registration(&domain, 3000), Some(project.id.clone()))
+            .unwrap();
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+
+        ensure_existing_domain_https(
+            &project.id,
+            registration,
+            &store,
+            &crate::application::testkit::InMemoryCertificateManager::always_failing(),
+        )
+        .unwrap();
+
+        let registration = store.get_domain(&pattern).unwrap().unwrap();
+        assert!(!registration.is_https_enabled());
+    }
+
+    fn configured_test_service(id: &str, primary_domain: &str) -> super::ConfiguredService {
+        super::ConfiguredService {
+            id: id.into(),
+            name: id.into(),
+            project_id: "demo".into(),
+            project_name: "Demo".into(),
+            project_enabled: true,
+            project_root_path: Some("/tmp/demo".into()),
+            primary_domain: primary_domain.into(),
+            domains: vec![primary_domain.into()],
+            path: None,
+            command: None,
+            primary_target: None,
+            inferred: false,
+        }
+    }
+
+    fn proxy_registration(domain: &str, port: u16) -> DomainRegistration {
+        DomainRegistration::new(
+            DomainPattern::from_name(domain, false).unwrap(),
+            vec![Route::parse(&format!("/={port}")).unwrap()],
+        )
     }
 
     fn temp_api() -> (TempDir, DesktopApi, ConfigStore) {

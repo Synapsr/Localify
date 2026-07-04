@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow, bail};
+use roxy::desktop::dto::RemoveProjectRequest;
 
+use super::backend::WriteBackend;
 use super::context::AppContext;
 use crate::application::ports::DaemonConnection;
 use crate::application::unregister_domain::UnregisterDomain;
@@ -62,6 +64,28 @@ pub fn execute(
             "Project '{}' still has domains. Use --delete-domains --force, or reassign them first.",
             project.id
         );
+    }
+
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        let result = client.remove_project(RemoveProjectRequest {
+            id: project.id.clone(),
+            delete_domains,
+        })?;
+        if result.daemon_reloaded {
+            println!("Reloaded the running daemon.");
+        }
+        println!("Removed project: {} [{}]", project.name, project.id);
+        if !result.removed_domains.is_empty() {
+            println!(
+                "Removed {} attached domain(s).",
+                result.removed_domains.len()
+            );
+        }
+        println!(
+            "Create a new one with: {} init-project my-app",
+            BRANDING.cli_command()
+        );
+        return Ok(());
     }
 
     if delete_domains {

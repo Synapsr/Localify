@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use super::backend::WriteBackend;
 use super::context::AppContext;
 use crate::application::StepOutcome;
 use crate::application::install::Install;
@@ -11,6 +12,23 @@ use crate::infrastructure::paths::RoxyPaths;
 
 pub fn execute(ctx: &AppContext, paths: &RoxyPaths, config: &Config) -> Result<()> {
     println!("Setting up Localify...\n");
+
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        let result = client.install_roxy()?;
+        println!("  Using IP address: {}", result.lan_ip);
+        for step in &result.steps {
+            let label = step.label.as_deref().unwrap_or("");
+            if step.status == "warning" {
+                eprintln!("  {} {}", label, step.message);
+            } else {
+                println!("  {} {}", label, step.message);
+            }
+        }
+        println!("\nLocalify installation complete!");
+        println!();
+        println!("Register domains with: localify register <domain> --route \"/=3000\"");
+        return Ok(());
+    }
 
     let dns_service = get_dns_service()?;
     let network_info = get_network_info();

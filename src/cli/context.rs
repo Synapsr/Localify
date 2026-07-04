@@ -13,6 +13,7 @@ use crate::infrastructure::{
 /// Composition root: wires infrastructure adapters once,
 /// shared by all CLI commands that need them.
 pub struct AppContext {
+    pub config_path: PathBuf,
     pub config_store: ConfigStore,
     pub cert_service: CertificateService,
     pub pid_file: PidFile,
@@ -22,6 +23,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn new(config_path: &Path, paths: &RoxyPaths) -> Self {
         Self {
+            config_path: config_path.to_path_buf(),
             config_store: ConfigStore::new(config_path.to_path_buf()),
             cert_service: CertificateService::new(paths),
             pid_file: PidFile::new(paths.pid_file.clone()),

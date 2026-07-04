@@ -3,11 +3,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use roxy::desktop::dto::{DaemonLaunchDto, StartDaemonRequest};
 use std::env;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
+use super::backend::WriteBackend;
 use crate::application::start_daemon::StartDaemon;
 use crate::branding::BRANDING;
 use crate::config::DaemonConfig;
@@ -24,6 +26,12 @@ pub fn execute(
     paths: &RoxyPaths,
     daemon_config: &DaemonConfig,
 ) -> Result<()> {
+    if !foreground && let WriteBackend::Helper(client) = WriteBackend::resolve(config_path)? {
+        let launch = client.start_daemon(StartDaemonRequest { verbose })?;
+        print_daemon_started(&launch);
+        return Ok(());
+    }
+
     let pid_file = PidFile::new(paths.pid_file.clone());
     let service = StartDaemon::new(&pid_file, daemon_config);
     let ready = service.preflight()?;
@@ -53,6 +61,20 @@ pub fn execute(
     println!("Use 'localify stop' to stop the daemon");
 
     Ok(())
+}
+
+/// Prints the same startup summary as a direct launch for a daemon started
+/// through the system helper.
+pub(crate) fn print_daemon_started(launch: &DaemonLaunchDto) {
+    println!("Localify daemon started (PID: {})", launch.pid);
+    println!(
+        "Listening on 0.0.0.0:{} (HTTP) and 0.0.0.0:{} (HTTPS)",
+        launch.http_port, launch.https_port
+    );
+    println!("LAN IP: {}", launch.lan_ip);
+    print_dns_resolution_warning();
+    println!("\nUse 'localify status' to check status");
+    println!("Use 'localify stop' to stop the daemon");
 }
 
 fn print_dns_resolution_warning() {

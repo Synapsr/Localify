@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use roxy::desktop::dto::{ActivateLicenseRequest, ImportOfflineLicenseRequest, LicensingDto};
 
+use super::backend::WriteBackend;
 use super::context::AppContext;
 use crate::infrastructure::licensing::{
     KeygenClient, ResolvedLicenseStatus, build_offline_imported_license,
@@ -111,6 +113,12 @@ pub fn status(ctx: &AppContext) -> Result<()> {
 }
 
 pub fn activate(key: String, ctx: &AppContext) -> Result<()> {
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        let licensing = client.activate_license(ActivateLicenseRequest { key })?;
+        print_licensing_summary("License activated", &licensing);
+        return Ok(());
+    }
+
     let machine =
         current_machine_fingerprint().context("Failed to identify this machine for activation")?;
     let config = ctx.config_store.load()?;
@@ -143,6 +151,12 @@ pub fn activate(key: String, ctx: &AppContext) -> Result<()> {
 }
 
 pub fn refresh(ctx: &AppContext) -> Result<()> {
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        let licensing = client.refresh_license()?;
+        print_licensing_summary("License refreshed", &licensing);
+        return Ok(());
+    }
+
     let machine =
         current_machine_fingerprint().context("Failed to identify this machine for refresh")?;
     let config = ctx.config_store.load()?;
@@ -187,6 +201,12 @@ pub fn refresh(ctx: &AppContext) -> Result<()> {
 }
 
 pub fn clear(ctx: &AppContext) -> Result<()> {
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        client.clear_license()?;
+        println!("Cleared the stored license from the local config.");
+        return Ok(());
+    }
+
     ctx.config_store.store_licensing(None, None)?;
     println!("Cleared the stored license from the local config.");
     Ok(())
@@ -199,6 +219,18 @@ pub fn import_offline(path: PathBuf, key: Option<String>, ctx: &AppContext) -> R
             path.display()
         )
     })?;
+
+    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+        let licensing = client.import_offline_license(ImportOfflineLicenseRequest {
+            certificate,
+            key: key
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        })?;
+        print_licensing_summary("Imported offline license", &licensing);
+        return Ok(());
+    }
+
     let config = ctx.config_store.load()?;
     let key = key
         .map(|value| value.trim().to_string())
@@ -260,4 +292,14 @@ fn format_limit(value: Option<usize>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unlimited".into())
+}
+
+fn print_licensing_summary(action: &str, licensing: &LicensingDto) {
+    println!("{action}: {}", licensing.status);
+    println!("Plan: {}", licensing.limits.plan);
+    if let Some(error) = licensing.last_error.as_deref()
+        && !error.trim().is_empty()
+    {
+        println!("Last error: {error}");
+    }
 }
