@@ -1189,7 +1189,10 @@ impl ConfigStore {
         let mut dto = RegistrationDto::from(registration);
         dto.project = project_id;
         config.domains.remove(&current_key);
-        config.domains.insert(new_key, dto);
+        config.domains.insert(new_key.clone(), dto);
+        if current_key != new_key {
+            rename_project_domain_references(&mut config, &current_key, &new_key);
+        }
         self.save(&config)
     }
 
@@ -1668,6 +1671,31 @@ fn enforce_project_limit(config: &Config) -> Result<(), ConfigError> {
     Err(ConfigError::LicenseLimitExceeded(format!(
         "Free plan limit reached: up to {max_projects} projects are included. Activate a Keygen license to add more."
     )))
+}
+
+/// Rewrites project references to a renamed domain key so services and
+/// environment mappings keep pointing at the registration after a rename
+/// (including wildcard toggles, which change the key).
+fn rename_project_domain_references(config: &mut Config, current_key: &str, new_key: &str) {
+    for project in config.projects.values_mut() {
+        for service in &mut project.services {
+            if service.primary_domain == current_key {
+                service.primary_domain = new_key.to_string();
+            }
+            for domain in &mut service.domains {
+                if domain == current_key {
+                    *domain = new_key.to_string();
+                }
+            }
+        }
+        for environment in &mut project.environments {
+            for service in &mut environment.services {
+                if service.domain == current_key {
+                    service.domain = new_key.to_string();
+                }
+            }
+        }
+    }
 }
 
 fn enforce_domain_limits(
@@ -2707,6 +2735,109 @@ mod tests {
             format!("new{}", BRANDING.domain_suffix())
         );
         assert_eq!(domains[0].project_id.as_deref(), Some(project.id.as_str()));
+    }
+
+    #[test]
+    fn replace_domain_renames_environment_service_references() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Store").unwrap();
+        let primary = proxy_registration("store.roxy", 61092);
+        let primary_domain = primary.display_pattern();
+        let current = proxy_registration("feat-inventory.store.roxy", 55931);
+        let current_pattern = current.pattern().clone();
+        let current_domain = current.display_pattern();
+
+        store
+            .add_domain_with_project(primary, Some(project.id.clone()))
+            .unwrap();
+        store
+            .add_domain_with_project(current, Some(project.id.clone()))
+            .unwrap();
+        store
+            .set_project_services(
+                &project.id,
+                vec![ProjectServiceConfig {
+                    name: "web".into(),
+                    primary_domain,
+                    domains: Vec::new(),
+                    path: None,
+                    command: None,
+                }],
+            )
+            .unwrap();
+        store
+            .upsert_project_environment(
+                &project.id,
+                ProjectEnvironmentConfig {
+                    name: "feat-inventory".into(),
+                    slug: "feat-inventory".into(),
+                    primary: false,
+                    root_path: Some("/tmp/store-feat-inventory".into()),
+                    git_common_dir: None,
+                    git_branch: Some("feat-inventory".into()),
+                    services: vec![ProjectEnvironmentServiceConfig {
+                        service_id: "web".into(),
+                        domain: current_domain,
+                    }],
+                },
+            )
+            .unwrap();
+
+        store
+            .replace_domain_with_project(
+                &current_pattern,
+                wildcard_proxy_registration("feat-inventory.store.roxy", 55931),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let environments = store.list_project_environments(Some(&project.id)).unwrap();
+        let environment = environments
+            .iter()
+            .find(|environment| environment.slug == "feat-inventory")
+            .unwrap();
+        assert_eq!(
+            environment.services[0].domain,
+            format!("*.feat-inventory.store{}", BRANDING.domain_suffix())
+        );
+    }
+
+    #[test]
+    fn replace_domain_renames_project_service_references() {
+        let (_dir, store) = temp_store();
+        let project = store.create_project("Store").unwrap();
+        let current = proxy_registration("web.store.roxy", 3000);
+        let current_pattern = current.pattern().clone();
+        let current_domain = current.display_pattern();
+
+        store
+            .add_domain_with_project(current, Some(project.id.clone()))
+            .unwrap();
+        store
+            .set_project_services(
+                &project.id,
+                vec![ProjectServiceConfig {
+                    name: "web".into(),
+                    primary_domain: current_domain.clone(),
+                    domains: vec![current_domain],
+                    path: Some("apps/web".into()),
+                    command: None,
+                }],
+            )
+            .unwrap();
+
+        store
+            .replace_domain_with_project(
+                &current_pattern,
+                wildcard_proxy_registration("web.store.roxy", 3000),
+                Some(project.id.clone()),
+            )
+            .unwrap();
+
+        let services = store.list_services().unwrap();
+        let renamed = format!("*.web.store{}", BRANDING.domain_suffix());
+        assert_eq!(services[0].primary_domain, renamed);
+        assert_eq!(services[0].domains, vec![renamed]);
     }
 
     #[test]
