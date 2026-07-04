@@ -6,6 +6,7 @@ import { basicSetup } from "codemirror";
 import { useEffect, useMemo, useRef } from "react";
 
 import {
+  environmentFileHighlighting,
   environmentFileLanguage,
   environmentFileTheme,
 } from "./environment-file-editor.extensions";
@@ -45,6 +46,7 @@ export const EnvironmentFileCodeEditor = ({
         extensions: [
           basicSetup,
           environmentFileLanguage,
+          environmentFileHighlighting,
           environmentFileTheme,
           editableCompartment.of(EditorView.editable.of(!disabledRef.current)),
           readOnlyCompartment.of(EditorState.readOnly.of(disabledRef.current)),

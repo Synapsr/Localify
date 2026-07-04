@@ -1,11 +1,53 @@
-import { StreamLanguage } from "@codemirror/language";
+import {
+  HighlightStyle,
+  StreamLanguage,
+  syntaxHighlighting,
+} from "@codemirror/language";
 import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { EditorView } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 
-export const environmentFileLanguage = StreamLanguage.define(properties);
+export const environmentFileLanguage = StreamLanguage.define({
+  ...properties,
+  tokenTable: {
+    quote: tags.string,
+  },
+});
+
+const environmentFileHighlightStyle = HighlightStyle.define([
+  {
+    tag: [tags.definition(tags.variableName), tags.propertyName],
+    color: "var(--env-editor-key-color)",
+    fontWeight: "500",
+  },
+  {
+    tag: tags.string,
+    color: "var(--env-editor-value-color)",
+  },
+  {
+    tag: tags.comment,
+    color: "var(--env-editor-comment-color)",
+  },
+  {
+    tag: tags.heading,
+    color: "var(--env-editor-section-color)",
+    fontWeight: "500",
+  },
+]);
+
+export const environmentFileHighlighting = syntaxHighlighting(
+  environmentFileHighlightStyle,
+);
 
 export const environmentFileTheme = EditorView.theme({
   "&": {
+    "--env-editor-comment-color":
+      "color-mix(in oklab, var(--chart-5) 62%, var(--muted-foreground))",
+    "--env-editor-key-color":
+      "color-mix(in oklab, var(--ring) 58%, var(--foreground))",
+    "--env-editor-section-color":
+      "color-mix(in oklab, var(--chart-5) 70%, var(--foreground))",
+    "--env-editor-value-color": "var(--foreground)",
     height: "100%",
     backgroundColor: "transparent",
     color: "var(--foreground)",
