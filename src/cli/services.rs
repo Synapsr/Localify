@@ -307,8 +307,8 @@ pub fn run(
     let url = service_url(&service, endpoint);
     let app_host = service_public_host(&service);
     let app_domain = service_public_domain(&service, endpoint);
-    ensure_next_allowed_dev_origin(&workdir, &app_host)?;
-    ensure_vite_allowed_host(&workdir, &app_host)?;
+    ensure_next_allowed_dev_origin(&workdir, &app_host);
+    ensure_vite_allowed_host(&workdir, &app_host);
     let url_envs = url_environment_overrides(&workdir, &url, &app_domain)?;
     eprintln!("Starting '{}' at {}", service.id, url);
     eprintln!("  route target: {proxy_target}");
@@ -1555,49 +1555,42 @@ fn warn_if_daemon_is_stopped(ctx: &AppContext) {
     }
 }
 
-fn ensure_next_allowed_dev_origin(workdir: &Path, app_host: &str) -> Result<()> {
+fn ensure_next_allowed_dev_origin(workdir: &Path, app_host: &str) {
     let Some(next_config_path) = find_existing_next_config_path(workdir) else {
-        return Ok(());
+        return;
     };
 
-    let updated =
-        apply_next_allowed_dev_origin(&next_config_path, app_host).with_context(|| {
-            format!(
-                "Failed to update Next.js allowedDevOrigins in '{}'",
-                next_config_path.display()
-            )
-        })?;
-
-    if updated {
-        eprintln!(
+    match apply_next_allowed_dev_origin(&next_config_path, app_host) {
+        Ok(true) => eprintln!(
             "  updated Next.js allowedDevOrigins: {}",
             next_config_path.display()
-        );
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!(
+            "  skipped Next.js allowedDevOrigins update: {} - {}",
+            next_config_path.display(),
+            error
+        ),
     }
-
-    Ok(())
 }
 
-fn ensure_vite_allowed_host(workdir: &Path, app_host: &str) -> Result<()> {
+fn ensure_vite_allowed_host(workdir: &Path, app_host: &str) {
     let Some(vite_config_path) = find_existing_vite_config_path(workdir) else {
-        return Ok(());
+        return;
     };
 
-    let updated = apply_vite_allowed_host(&vite_config_path, app_host).with_context(|| {
-        format!(
-            "Failed to update Vite server.allowedHosts in '{}'",
-            vite_config_path.display()
-        )
-    })?;
-
-    if updated {
-        eprintln!(
+    match apply_vite_allowed_host(&vite_config_path, app_host) {
+        Ok(true) => eprintln!(
             "  updated Vite server.allowedHosts: {}",
             vite_config_path.display()
-        );
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!(
+            "  skipped Vite server.allowedHosts update: {} - {}",
+            vite_config_path.display(),
+            error
+        ),
     }
-
-    Ok(())
 }
 
 fn url_environment_overrides(
@@ -2027,8 +2020,8 @@ mod tests {
         )
         .unwrap();
 
-        ensure_next_allowed_dev_origin(temp_dir.path(), "fix-branch.demo.localify").unwrap();
-        ensure_next_allowed_dev_origin(temp_dir.path(), "fix-branch.demo.localify").unwrap();
+        ensure_next_allowed_dev_origin(temp_dir.path(), "fix-branch.demo.localify");
+        ensure_next_allowed_dev_origin(temp_dir.path(), "fix-branch.demo.localify");
 
         let updated = std::fs::read_to_string(config_path).unwrap();
         assert!(updated.contains("allowedDevOrigins: ['fix-branch.demo.localify']"));
@@ -2045,12 +2038,25 @@ mod tests {
         )
         .unwrap();
 
-        ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify").unwrap();
-        ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify").unwrap();
+        ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify");
+        ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify");
 
         let updated = std::fs::read_to_string(config_path).unwrap();
         assert!(updated.contains("server: { allowedHosts: ['fix-branch.demo.localify'] }"));
         assert_eq!(updated.matches("fix-branch.demo.localify").count(), 1);
+    }
+
+    #[test]
+    fn ensure_vite_allowed_host_skips_unsupported_vite_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("vite.config.ts");
+        let original = "import { defineConfig } from 'vite';\nconst config = loadConfig();\nexport default defineConfig(config);\n";
+        std::fs::write(&config_path, original).unwrap();
+
+        ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify");
+
+        let updated = std::fs::read_to_string(config_path).unwrap();
+        assert_eq!(updated, original);
     }
 
     #[test]

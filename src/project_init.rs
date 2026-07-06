@@ -1467,10 +1467,8 @@ fn update_vite_config_content(content: &str, host: &str) -> Result<String> {
     let Some((object_open, object_close)) = find_vite_config_object_bounds(content) else {
         bail!("Could not find a supported Vite config object");
     };
-    let object_body = &content[object_open + 1..object_close];
-
-    if let Some(server_offset) = object_body.find("server") {
-        let property_start = object_open + 1 + server_offset;
+    if let Some(property_start) = find_object_property(content, object_open, object_close, "server")
+    {
         return update_existing_vite_server(content, object_close, property_start, host);
     }
 
@@ -1563,6 +1561,124 @@ fn find_keyword_in_range(content: &str, keyword: &str, start: usize, end: usize)
     None
 }
 
+fn find_object_property(
+    content: &str,
+    object_open: usize,
+    object_close: usize,
+    property: &str,
+) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut depth = 0usize;
+    let mut index = object_open + 1;
+
+    while index < object_close {
+        let byte = bytes[index];
+
+        if depth == 0 {
+            if quoted_property_key_end(content, index, object_close, property).is_some() {
+                return Some(index);
+            }
+            if matches_identifier_property(content, index, object_close, property) {
+                return Some(index);
+            }
+        }
+
+        if let Some(next_index) = skip_comment_or_string(content, index, object_close) {
+            index = next_index;
+        } else if matches!(byte, b'{' | b'[' | b'(') {
+            depth += 1;
+            index += 1;
+        } else if matches!(byte, b'}' | b']' | b')') {
+            depth = depth.checked_sub(1)?;
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    None
+}
+
+fn skip_comment_or_string(content: &str, start: usize, end: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let byte = *bytes.get(start)?;
+
+    if byte == b'/' && bytes.get(start + 1) == Some(&b'/') {
+        return Some(
+            content[start + 2..end]
+                .find('\n')
+                .map_or(end, |newline_offset| start + 2 + newline_offset + 1),
+        );
+    }
+
+    if byte == b'/' && bytes.get(start + 1) == Some(&b'*') {
+        let close_offset = content[start + 2..end].find("*/")?;
+        return Some(start + 2 + close_offset + 2);
+    }
+
+    if matches!(byte, b'\'' | b'"' | b'`') {
+        return Some(find_string_end(content, start)? + 1);
+    }
+
+    None
+}
+
+fn quoted_property_key_end(
+    content: &str,
+    start: usize,
+    end: usize,
+    property: &str,
+) -> Option<usize> {
+    if !matches!(content.as_bytes().get(start), Some(b'\'' | b'"' | b'`')) {
+        return None;
+    }
+
+    let string_end = find_string_end(content, start)?;
+    if content[start + 1..string_end] == *property
+        && next_non_whitespace_is(content, string_end + 1, end, b':')
+    {
+        Some(string_end)
+    } else {
+        None
+    }
+}
+
+fn find_string_end(content: &str, quote_start: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let quote = *bytes.get(quote_start)?;
+    let mut index = quote_start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+        } else if bytes[index] == quote {
+            return Some(index);
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn matches_identifier_property(content: &str, start: usize, end: usize, property: &str) -> bool {
+    if !content[start..end].starts_with(property) {
+        return false;
+    }
+
+    let before = content[..start].chars().next_back();
+    let after_index = start + property.len();
+    let after = content[after_index..].chars().next();
+    before.is_none_or(|ch| !is_identifier_char(ch))
+        && after.is_none_or(|ch| !is_identifier_char(ch))
+        && next_non_whitespace_is(content, after_index, end, b':')
+}
+
+fn next_non_whitespace_is(content: &str, start: usize, end: usize, expected: u8) -> bool {
+    content.as_bytes()[start..end]
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(&expected)
+}
+
 fn is_identifier_char(ch: char) -> bool {
     ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
@@ -1588,9 +1704,12 @@ fn update_existing_vite_server(
         bail!("Found server config outside the Vite config object");
     }
 
-    let server_body = &content[server_object_open + 1..server_object_close];
-    if let Some(allowed_hosts_offset) = server_body.find("allowedHosts") {
-        let property_start = server_object_open + 1 + allowed_hosts_offset;
+    if let Some(property_start) = find_object_property(
+        content,
+        server_object_open,
+        server_object_close,
+        "allowedHosts",
+    ) {
         return update_existing_allowed_hosts(content, server_object_close, property_start, host);
     }
 
@@ -2864,6 +2983,28 @@ mod tests {
         .unwrap();
 
         let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains(&format!("server: {{ allowedHosts: ['{host}'] }}")));
+    }
+
+    #[test]
+    fn apply_vite_config_update_ignores_server_inside_string_values() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("vite.config.ts");
+        let host = format!("cinav{}", BRANDING.domain_suffix());
+        write_next_config(
+            &config_path,
+            "import { tanstackStart } from '@tanstack/react-start/plugin/vite';\nimport { defineConfig } from 'vite';\n\nexport default defineConfig({\n  define: {\n    'process.env.DEBUG': JSON.stringify(''),\n  },\n  plugins: [\n    tanstackStart({ customViteReactPlugin: true, target: 'node-server' }),\n  ],\n});\n",
+        );
+
+        apply_vite_config_update(&ViteConfigUpdate {
+            vite_config_path: config_path.clone(),
+            display_path: "web".into(),
+            allowed_host: host.clone(),
+        })
+        .unwrap();
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains("target: 'node-server'"));
         assert!(updated.contains(&format!("server: {{ allowedHosts: ['{host}'] }}")));
     }
 
