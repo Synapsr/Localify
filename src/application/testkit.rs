@@ -16,7 +16,8 @@ use crate::domain::{
 use super::ports::{
     CertificateError, CertificateManager, ConfigLoadError, ConfigLoader, DaemonConnection,
     DaemonConnectionError, DaemonControl, DaemonRuntimeInfo, DnsConfigError, DnsManager,
-    DomainRepository, NetworkInfo, RegistrationProvider, RepositoryError, SystemSetup,
+    DomainRepository, IosSimulatorTrust, NetworkInfo, RegistrationProvider, RepositoryError,
+    SystemSetup,
 };
 
 // ---------------------------------------------------------------------------
@@ -378,6 +379,7 @@ impl NetworkInfo for InMemoryNetworkInfo {
 
 pub struct InMemorySystemSetup {
     directories_created: RefCell<bool>,
+    ios_simulator_trust: RefCell<IosSimulatorTrust>,
     data_exists: RefCell<bool>,
     pid_exists: RefCell<bool>,
     log_exists: RefCell<bool>,
@@ -387,6 +389,9 @@ impl InMemorySystemSetup {
     pub fn new() -> Self {
         Self {
             directories_created: RefCell::new(false),
+            ios_simulator_trust: RefCell::new(IosSimulatorTrust::Trusted {
+                device_names: vec!["iPhone Test".into()],
+            }),
             data_exists: RefCell::new(false),
             pid_exists: RefCell::new(false),
             log_exists: RefCell::new(false),
@@ -396,10 +401,18 @@ impl InMemorySystemSetup {
     pub fn with_existing_data() -> Self {
         Self {
             directories_created: RefCell::new(true),
+            ios_simulator_trust: RefCell::new(IosSimulatorTrust::Trusted {
+                device_names: vec!["iPhone Test".into()],
+            }),
             data_exists: RefCell::new(true),
             pid_exists: RefCell::new(true),
             log_exists: RefCell::new(true),
         }
+    }
+
+    pub fn with_ios_simulator_trust(self, trust: IosSimulatorTrust) -> Self {
+        *self.ios_simulator_trust.borrow_mut() = trust;
+        self
     }
 }
 
@@ -407,6 +420,10 @@ impl SystemSetup for InMemorySystemSetup {
     fn create_directories(&self) -> anyhow::Result<()> {
         *self.directories_created.borrow_mut() = true;
         Ok(())
+    }
+
+    fn trust_ios_simulators(&self) -> anyhow::Result<IosSimulatorTrust> {
+        Ok(self.ios_simulator_trust.borrow().clone())
     }
 
     fn remove_data_directory(&self) -> anyhow::Result<bool> {

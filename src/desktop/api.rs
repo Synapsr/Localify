@@ -17,6 +17,8 @@ use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::install::Install;
 use crate::application::manage_routes::ManageRoutes;
 use crate::application::ports::DaemonConnection;
+#[cfg(target_os = "macos")]
+use crate::application::ports::IosSimulatorTrust;
 use crate::application::register_domain::RegisterDomain;
 use crate::application::restart_daemon::RestartDaemon;
 use crate::application::start_daemon::StartDaemon;
@@ -70,6 +72,8 @@ use crate::infrastructure::config::{
 };
 use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution, get_dns_service};
 use crate::infrastructure::filesystem::FileSystemSetup;
+#[cfg(target_os = "macos")]
+use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::licensing::{
     FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus, build_offline_imported_license,
     current_machine_fingerprint, mask_license_key, resolve_license_state,
@@ -2410,6 +2414,9 @@ impl DesktopApi {
 
         let status = self.daemon_status()?;
         steps.push(root_ca_verification_step(status.ca_installed));
+        if let Some(step) = self.ios_simulator_trust_step() {
+            steps.push(step);
+        }
         steps.push(self.cli_access_step_with(|_| helper.setup_cli_access()));
         if let Some(step) = self.node_trust_step() {
             steps.push(step);
@@ -3339,6 +3346,56 @@ impl DesktopApi {
                 ),
             },
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ios_simulator_trust_step(&self) -> Option<StepDto> {
+        let label = Some("Trust CA in iOS Simulator".into());
+
+        match trust_booted_ios_simulators(&self.ca_cert_path()) {
+            Ok(IosSimulatorTrust::Trusted { device_names }) => Some(StepDto {
+                label,
+                status: "success".into(),
+                message: format!(
+                    "Root CA trusted in {}.",
+                    format_ios_simulator_names(&device_names)
+                ),
+            }),
+            Ok(IosSimulatorTrust::NoBootedDevices) => Some(StepDto {
+                label,
+                status: "skipped".into(),
+                message: "No booted iOS Simulator found. Boot one and run setup again before testing .localify HTTPS there.".into(),
+            }),
+            Ok(IosSimulatorTrust::CertificateMissing { path }) => Some(StepDto {
+                label,
+                status: "warning".into(),
+                message: format!(
+                    "Root CA file was not found at {}; iOS Simulator HTTPS trust was not configured.",
+                    path.display()
+                ),
+            }),
+            Ok(IosSimulatorTrust::ToolUnavailable { reason }) => Some(StepDto {
+                label,
+                status: "skipped".into(),
+                message: format!(
+                    "Xcode simctl is not available; iOS Simulator HTTPS trust was not configured. {}",
+                    reason
+                ),
+            }),
+            Ok(IosSimulatorTrust::CurrentUserUnavailable) => None,
+            Err(error) => Some(StepDto {
+                label,
+                status: "warning".into(),
+                message: format!(
+                    "Failed to trust the Root CA in booted iOS Simulators: {error}"
+                ),
+            }),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn ios_simulator_trust_step(&self) -> Option<StepDto> {
+        None
     }
 
     fn connected_helper_client(&self) -> Result<Option<SystemHelperClient>> {
@@ -4679,6 +4736,19 @@ fn root_ca_verification_step(ca_installed: bool) -> StepDto {
         label: Some("Root CA".into()),
         status: "warning".into(),
         message: "Root CA setup finished, but macOS still does not trust it. HTTPS certificates will not work until the CA is trusted.".into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn format_ios_simulator_names(device_names: &[String]) -> String {
+    match device_names {
+        [] => "booted iOS Simulator".into(),
+        [name] => format!("booted iOS Simulator '{name}'"),
+        names => format!(
+            "{} booted iOS Simulators ({})",
+            names.len(),
+            names.join(", ")
+        ),
     }
 }
 

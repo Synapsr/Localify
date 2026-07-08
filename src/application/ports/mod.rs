@@ -18,4 +18,4 @@ pub use dns_manager::{DnsConfigError, DnsManager};
 pub use domain_repository::{DomainRepository, RepositoryError};
 pub use network_info::NetworkInfo;
 pub use registration_provider::RegistrationProvider;
-pub use system_setup::SystemSetup;
+pub use system_setup::{IosSimulatorTrust, SystemSetup};

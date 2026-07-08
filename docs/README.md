@@ -13,7 +13,8 @@ directory, and open `https://myapp.roxy` in your browser.
 
 ```bash
 # Initial setup — installs Root CA, configures DNS,
-# trusts the certificate in the system trust store
+# trusts the certificate in the system trust store,
+# and trusts booted iOS Simulators when available
 sudo roxy install
 
 # Register a domain that proxies to localhost:3000
@@ -504,6 +505,11 @@ immediately pick up the newly trusted Root CA from the system trust store.
 
 **Solution:** Restart your browser completely after running `sudo roxy install`.
 Browsers cache the trusted certificate list at startup.
+
+**iOS Simulator:** On macOS, `roxy install` also adds the Root CA to any
+booted iOS Simulator via `xcrun simctl keychain`. If no iOS Simulator was
+booted during installation, boot the simulator and run `sudo roxy install`
+again before testing HTTPS there.
 
 **Linux with snap browsers:** Snap-packaged browsers (Firefox, Chromium)
 are sandboxed and cannot access the system trust store. See the

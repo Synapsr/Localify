@@ -3,7 +3,9 @@ use std::net::Ipv4Addr;
 use anyhow::Result;
 
 use super::StepOutcome;
-use super::ports::{CertificateManager, ConfigLoader, DnsManager, NetworkInfo, SystemSetup};
+use super::ports::{
+    CertificateManager, ConfigLoader, DnsManager, IosSimulatorTrust, NetworkInfo, SystemSetup,
+};
 use crate::branding::BRANDING;
 
 /// Result of the install operation.
@@ -49,6 +51,7 @@ impl<'a> Install<'a> {
         self.create_directories(&mut steps)?;
         self.ensure_config_file(&mut steps)?;
         self.init_root_ca(&mut steps);
+        self.trust_ios_simulators(&mut steps);
         self.configure_dns(dns_port, &mut steps)?;
 
         Ok(InstallResult { lan_ip, steps })
@@ -98,6 +101,36 @@ impl<'a> Install<'a> {
         steps.push(("Root CA".into(), ca_outcome));
     }
 
+    fn trust_ios_simulators(&self, steps: &mut Vec<(String, StepOutcome)>) {
+        let outcome = match self.system.trust_ios_simulators() {
+            Ok(IosSimulatorTrust::Trusted { device_names }) => StepOutcome::Success(format!(
+                "Root CA trusted in {}.",
+                format_ios_simulator_names(&device_names)
+            )),
+            Ok(IosSimulatorTrust::NoBootedDevices) => StepOutcome::Skipped(format!(
+                "No booted iOS Simulator found. Boot one and rerun '{} install' before testing .localify HTTPS there.",
+                BRANDING.cli_command()
+            )),
+            Ok(IosSimulatorTrust::CertificateMissing { path }) => StepOutcome::Warning(format!(
+                "Root CA file was not found at {}; iOS Simulator HTTPS trust was not configured.",
+                path.display()
+            )),
+            Ok(IosSimulatorTrust::ToolUnavailable { reason }) => StepOutcome::Skipped(format!(
+                "Xcode simctl is not available; iOS Simulator HTTPS trust was not configured. {}",
+                reason
+            )),
+            #[cfg(target_os = "macos")]
+            Ok(IosSimulatorTrust::CurrentUserUnavailable) => return,
+            #[cfg(not(target_os = "macos"))]
+            Ok(IosSimulatorTrust::UnsupportedPlatform) => return,
+            Err(error) => StepOutcome::Warning(format!(
+                "Failed to trust the Root CA in booted iOS Simulators: {error}"
+            )),
+        };
+
+        steps.push(("iOS Simulator trust".into(), outcome));
+    }
+
     fn configure_dns(&self, dns_port: u16, steps: &mut Vec<(String, StepOutcome)>) -> Result<()> {
         let dns_outcome = if self.dns.is_configured() {
             match self.dns.validate() {
@@ -119,6 +152,18 @@ impl<'a> Install<'a> {
             StepOutcome::Success("DNS validation passed.".into()),
         ));
         Ok(())
+    }
+}
+
+fn format_ios_simulator_names(device_names: &[String]) -> String {
+    match device_names {
+        [] => "booted iOS Simulator".into(),
+        [name] => format!("booted iOS Simulator '{name}'"),
+        names => format!(
+            "{} booted iOS Simulators ({})",
+            names.len(),
+            names.join(", ")
+        ),
     }
 }
 
@@ -239,6 +284,26 @@ mod tests {
             .find(|(label, _)| label == "Root CA")
             .unwrap();
         assert!(matches!(ca_step.1, StepOutcome::Skipped(_)));
+    }
+
+    #[test]
+    fn install_skips_ios_simulator_trust_when_none_are_booted() {
+        let certs = InMemoryCertificateManager::new();
+        let config = InMemoryConfigLoader::new();
+        let dns = InMemoryDnsManager::new();
+        let network = InMemoryNetworkInfo::with_ip(Ipv4Addr::LOCALHOST);
+        let system =
+            InMemorySystemSetup::new().with_ios_simulator_trust(IosSimulatorTrust::NoBootedDevices);
+        let svc = make_install(&certs, &config, &dns, &network, &system);
+
+        let result = svc.execute().unwrap();
+
+        let simulator_step = result
+            .steps
+            .iter()
+            .find(|(label, _)| label == "iOS Simulator trust")
+            .unwrap();
+        assert!(matches!(simulator_step.1, StepOutcome::Skipped(_)));
     }
 
     #[test]

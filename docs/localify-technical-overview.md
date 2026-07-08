@@ -63,7 +63,8 @@ Localify garde le frontend desktop mince. L'UI appelle Tauri, Tauri appelle `Des
 1. Crée les dossiers de configuration et de données.
 2. Crée un fichier `config.toml` si besoin.
 3. Génère une Root CA locale et l'installe dans le trust store système.
-4. Configure le DNS système pour envoyer le suffixe `.localify` vers le DNS Localify.
+4. Sur macOS, ajoute cette Root CA aux simulateurs iOS bootés via `xcrun simctl keychain`.
+5. Configure le DNS système pour envoyer le suffixe `.localify` vers le DNS Localify.
 
 Sur macOS, Localify écrit un résolveur dans `/etc/resolver/localify`. En mode production, les ports par défaut sont:
 

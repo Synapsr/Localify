@@ -5,6 +5,7 @@ pub mod docker;
 pub mod editor;
 pub mod file_security;
 pub mod filesystem;
+pub mod ios_simulator_trust;
 pub mod licensing;
 pub mod local_dev;
 pub mod mgmt_client;

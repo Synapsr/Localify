@@ -1,6 +1,7 @@
 use std::fs;
 
-use crate::application::ports::SystemSetup;
+use crate::application::ports::{IosSimulatorTrust, SystemSetup};
+use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::paths::RoxyPaths;
 
 /// Infrastructure service for filesystem operations required by Roxy.
@@ -43,6 +44,10 @@ impl SystemSetup for FileSystemSetup<'_> {
         }
 
         Ok(())
+    }
+
+    fn trust_ios_simulators(&self) -> anyhow::Result<IosSimulatorTrust> {
+        trust_booted_ios_simulators(&self.paths.data_dir.join("ca.crt"))
     }
 
     fn remove_data_directory(&self) -> anyhow::Result<bool> {
