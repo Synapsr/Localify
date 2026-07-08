@@ -1223,6 +1223,7 @@ pub fn run() {
             commands::init_project_from_folder,
             commands::add_project_service,
             commands::update_project,
+            commands::relink_project_root,
             commands::remove_project,
             commands::remove_project_environment,
             commands::discover_project_worktrees,

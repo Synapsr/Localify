@@ -8,6 +8,7 @@ use super::context::effective_current_dir;
 use crate::branding::BRANDING;
 use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
 use roxy::desktop::{DesktopApi, ProjectRootStore};
+use roxy::infrastructure::project_marker::write_project_marker;
 use roxy::project_init::{
     FolderInitSelection, FolderInitServicePlan, LocalAppUpdatePolicy, NextConfigUpdate,
     PackageScriptUpdate, ServicePlan, ViteConfigUpdate, apply_local_app_updates, build_init_plan,
@@ -63,6 +64,8 @@ pub fn execute(
             .collect(),
     })?;
     ProjectRootStore::new_default()?.set(&init_result.project.id, &current_dir)?;
+    // Best-effort: lets a moved folder be re-linked to this project later.
+    let _ = write_project_marker(&current_dir, &init_result.project.id);
 
     println!("Initialized project: {}", init_result.project.name);
     println!("  Project ID: {}", init_result.project.id);

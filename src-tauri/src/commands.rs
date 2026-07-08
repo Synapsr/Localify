@@ -13,6 +13,7 @@ use roxy::desktop::dto::{
     LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest,
     OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto, ProjectWorktreeDiscoveryDto,
     RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RelinkProjectRootRequest,
     RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
     SaveEnvironmentFileRequest, SettingsExportRequest, SettingsExportResultDto,
@@ -734,6 +735,17 @@ pub fn update_project(
     request: UpdateProjectRequest,
 ) -> Result<ProjectInfoDto, String> {
     let result = state.api.update_project(request).map_err(map_error)?;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn relink_project_root(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: RelinkProjectRootRequest,
+) -> Result<ProjectInfoDto, String> {
+    let result = state.api.relink_project_root(request).map_err(map_error)?;
     super::sync_tray_menu(&app).map_err(map_error)?;
     Ok(result)
 }

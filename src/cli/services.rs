@@ -24,6 +24,7 @@ use crate::infrastructure::local_dev::{
     resolve_portable_local_dev_launch,
 };
 use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
 use roxy::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
     find_existing_vite_config_path,
@@ -215,6 +216,19 @@ pub fn run(
         );
     }
 
+    // A moved project folder would otherwise resolve to nothing and trigger a
+    // duplicate auto-init below; the in-project marker re-links it first.
+    if let Ok(cwd) = effective_current_dir()
+        && let Some(healed) = super::project::heal_moved_project_root(&ctx.config_store, &cwd)
+    {
+        eprintln!(
+            "Re-linked project '{}' [{}] to '{}' (folder moved).",
+            healed.project_name,
+            healed.project_id,
+            healed.root_path.display()
+        );
+    }
+
     let has_override_command = !override_command.is_empty();
     let ports = daemon_ports(ctx)?;
     let implicit_environment = if environment.is_none() {
@@ -265,6 +279,15 @@ pub fn run(
             service.id,
             service.project_id
         );
+    }
+
+    // Backfill the marker for pre-marker projects so a future move can
+    // auto-heal. Never overwrites an existing marker.
+    if let Some(root) = service.project_root_path.as_deref() {
+        let root = Path::new(root);
+        if root.is_dir() && read_project_marker(root).is_none() {
+            let _ = write_project_marker(root, &service.project_id);
+        }
     }
 
     let command = if !has_override_command {

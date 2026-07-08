@@ -53,6 +53,7 @@ import type {
   RegisterDomainResultDto,
   RegistrationDto,
   RegistrationMutationDto,
+  RelinkProjectRootRequest,
   RemoveProjectRequest,
   RemoveProjectEnvironmentRequest,
   RemoveProjectEnvironmentResultDto,
@@ -114,6 +115,7 @@ import {
   discoverProjectWorktreesRequestSchema,
   environmentFileCopyRequestSchema,
 } from "./validators/validator.project-worktree";
+import { relinkProjectRootRequestSchema } from "./validators/validator.relink-project-root";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import { removeProjectEnvironmentRequestSchema } from "./validators/validator.remove-project-environment";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
@@ -211,6 +213,7 @@ export interface DesktopClient {
   ): Promise<InitProjectFromFolderResultDto>;
   addProjectService(request: AddProjectServiceRequest): Promise<AddProjectServiceResultDto>;
   updateProject(request: UpdateProjectRequest): Promise<ProjectInfoDto>;
+  relinkProjectRoot(request: RelinkProjectRootRequest): Promise<ProjectInfoDto>;
   removeProject(request: RemoveProjectRequest): Promise<RemoveProjectResultDto>;
   removeProjectEnvironment(
     request: RemoveProjectEnvironmentRequest,
@@ -335,6 +338,10 @@ export function createDesktopClient(): DesktopClient {
         request: addProjectServiceRequestSchema.parse(request),
       }),
     updateProject: (request) => tauriInvoke("update_project", { request }),
+    relinkProjectRoot: (request) =>
+      tauriInvoke("relink_project_root", {
+        request: relinkProjectRootRequestSchema.parse(request),
+      }),
     removeProject: (request) =>
       tauriInvoke("remove_project", {
         request: removeProjectRequestSchema.parse(request),

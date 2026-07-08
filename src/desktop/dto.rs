@@ -277,8 +277,19 @@ pub struct ProjectInfoDto {
     pub has_reachable_domain: bool,
     #[serde(default)]
     pub root_path: Option<String>,
+    /// True when the effective root path no longer exists on disk — the
+    /// folder was likely moved or deleted and needs re-linking.
+    #[serde(default)]
+    pub root_path_missing: bool,
     #[serde(default)]
     pub last_accessed_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelinkProjectRootRequest {
+    pub project_id: String,
+    pub root_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

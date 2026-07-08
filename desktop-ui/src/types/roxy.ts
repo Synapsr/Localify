@@ -116,6 +116,7 @@ export interface ProjectInfoDto {
   domainCount: number;
   hasReachableDomain: boolean;
   rootPath: string | null;
+  rootPathMissing: boolean;
   lastAccessedAt: number | null;
 }
 
@@ -605,6 +606,11 @@ export interface UpdateProjectRequest {
   name?: string;
   enabled?: boolean;
   rootPath?: string | null;
+}
+
+export interface RelinkProjectRootRequest {
+  projectId: string;
+  rootPath: string;
 }
 
 export interface RemoveProjectRequest {

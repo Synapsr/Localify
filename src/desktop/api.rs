@@ -44,15 +44,15 @@ use crate::desktop::dto::{
     ProjectEnvironmentServiceInfoDto, ProjectInfoDto, ProjectServiceInfoDto,
     ProjectWorktreeDiscoveryDto, ProjectWorktreeDto, ProjectWorktreeServiceCandidateDto,
     ProjectWorktreeStatusDto, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
-    RegistrationMutationDto, RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RouteDto,
-    RunLocalDevServerRequest, SaveEnvironmentFileRequest, SetProjectServiceDomainRequest,
-    SetProjectServiceDomainResultDto, SettingsExportRequest, SettingsExportResultDto,
-    SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
-    SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
-    SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
-    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    RegistrationMutationDto, RelinkProjectRootRequest, RemoveProjectEnvironmentRequest,
+    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, RouteDto, RunLocalDevServerRequest, SaveEnvironmentFileRequest,
+    SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto, SettingsExportRequest,
+    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewProjectDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSettingsDto,
+    SettingsTransferSnapshotDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::home_dir::user_home_dir;
@@ -79,6 +79,7 @@ use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::RoxyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
+use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
 use crate::project_init::{
@@ -163,10 +164,11 @@ impl DesktopApi {
             bootstrap.projects = self.enrich_projects_with_local_paths(bootstrap.projects)?;
             bootstrap.services = self.list_project_services()?;
             bootstrap.project_environments = self.list_project_environments()?;
+            self.backfill_project_markers(&bootstrap.projects);
             return Ok(bootstrap);
         }
 
-        Ok(BootstrapDto {
+        let bootstrap = BootstrapDto {
             environment: self.environment(),
             config: self.read_config()?,
             daemon: self.daemon_status()?,
@@ -177,7 +179,28 @@ impl DesktopApi {
             projects: self.list_projects()?,
             services: self.list_project_services()?,
             project_environments: self.list_project_environments()?,
-        })
+        };
+        self.backfill_project_markers(&bootstrap.projects);
+        Ok(bootstrap)
+    }
+
+    /// Writes the in-project marker for pre-marker projects whose root still
+    /// exists, so a future folder move can be re-linked. Never overwrites an
+    /// existing marker and never runs as the system helper (root would own
+    /// the files).
+    fn backfill_project_markers(&self, projects: &[ProjectInfoDto]) {
+        if self.direct_mode {
+            return;
+        }
+
+        for project in projects {
+            let Some(root) = project.root_path.as_deref().map(Path::new) else {
+                continue;
+            };
+            if root.is_dir() && read_project_marker(root).is_none() {
+                let _ = write_project_marker(root, &project.id);
+            }
+        }
     }
 
     pub fn environment(&self) -> EnvironmentDto {
@@ -1500,6 +1523,65 @@ impl DesktopApi {
         })
     }
 
+    /// Points a project at a new folder after it was moved on disk.
+    ///
+    /// The folder must exist. When it carries a marker naming a *different*
+    /// known project, the request is rejected so one project cannot silently
+    /// steal another's folder; a marker naming an unknown project (e.g.
+    /// committed and cloned from another machine) is overwritten.
+    pub fn relink_project_root(&self, request: RelinkProjectRootRequest) -> Result<ProjectInfoDto> {
+        let project_id = request.project_id.trim();
+        if project_id.is_empty() {
+            bail!("Project id is required to re-link a project folder.");
+        }
+
+        let root_path = PathBuf::from(request.root_path.trim());
+        if !root_path.is_absolute() || !root_path.is_dir() {
+            bail!(
+                "'{}' is not an existing folder. Pick the folder the project was moved to.",
+                root_path.display()
+            );
+        }
+        let root_path = fs::canonicalize(&root_path).unwrap_or(root_path);
+
+        let projects = self.list_projects()?;
+        let mut project = projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Project not found: {project_id}"))?;
+
+        if let Some(marker_project_id) = read_project_marker(&root_path)
+            && marker_project_id != project.id
+            && let Some(other) = projects
+                .iter()
+                .find(|project| project.id == marker_project_id)
+        {
+            bail!(
+                "'{}' already belongs to project '{}'. Pick the folder for '{}' instead.",
+                root_path.display(),
+                other.name,
+                project.name
+            );
+        }
+
+        self.store_project_root_path(&project.id, &root_path)?;
+        // Best-effort: in helper mode the config root stays as-is and the
+        // local metadata written above takes precedence over the stale path.
+        if !self.should_use_system_helper() {
+            let _ = self.config_store().update_project(
+                &project.id,
+                None,
+                None,
+                Some(root_path.display().to_string()),
+            );
+        }
+
+        project.root_path = Some(root_path.display().to_string());
+        project.root_path_missing = false;
+        Ok(project)
+    }
+
     pub fn open_in_editor(&self, request: OpenInEditorRequest) -> Result<()> {
         crate::desktop::editor::open_in_editor(Path::new(&request.path))
     }
@@ -2001,9 +2083,20 @@ impl DesktopApi {
         Ok(projects
             .into_iter()
             .map(|mut project| {
-                if project.root_path.is_none() {
-                    project.root_path = local_projects.get(&project.id).cloned();
+                // The local root also wins over a stale config root: it is
+                // where CLI auto-heal and folder re-linking record moves.
+                let config_root_is_stale = project
+                    .root_path
+                    .as_deref()
+                    .map(|root| !Path::new(root).is_dir())
+                    .unwrap_or(true);
+                if config_root_is_stale && let Some(local_root) = local_projects.get(&project.id) {
+                    project.root_path = Some(local_root.clone());
                 }
+                project.root_path_missing = project
+                    .root_path
+                    .as_deref()
+                    .is_some_and(|root| !Path::new(root).is_dir());
                 project
             })
             .collect())
@@ -3031,6 +3124,10 @@ impl DesktopApi {
         if self.direct_mode {
             return Ok(());
         }
+
+        // Best-effort: the marker lets a moved folder be re-linked to this
+        // project later, but a read-only folder must not fail the operation.
+        let _ = write_project_marker(root_path, project_id);
 
         match self.project_root_store()?.set(project_id, root_path) {
             Ok(()) => Ok(()),
@@ -5179,6 +5276,7 @@ fn map_project_info(
         domain_count,
         has_reachable_domain,
         root_path: value.root_path,
+        root_path_missing: false,
         last_accessed_at,
     }
 }
@@ -7022,8 +7120,16 @@ fn apply_local_project_root_paths_to_environments(
     environments
         .into_iter()
         .map(|mut environment| {
-            if environment.root_path.is_none() {
-                environment.root_path = local_projects.get(&environment.project_id).cloned();
+            // The primary environment follows the project root, so a stale
+            // root (moved folder) also defers to the local metadata.
+            let root_is_stale = environment.root_path.is_none()
+                || (environment.primary
+                    && environment
+                        .root_path
+                        .as_deref()
+                        .is_some_and(|root| !Path::new(root).is_dir()));
+            if root_is_stale && let Some(local_root) = local_projects.get(&environment.project_id) {
+                environment.root_path = Some(local_root.clone());
             }
             environment
         })
@@ -7218,8 +7324,8 @@ mod tests {
     use crate::desktop::dto::{
         AttachProjectWorktreeRequest, CreateProjectDomainRequest, CreateProjectWithDomainsRequest,
         EnvironmentFileRequest, InitProjectRequest, InitProjectServiceRequest,
-        KeygenSettingsUpdateRequest, LogsRequest, ProjectServiceInfoDto,
-        RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
+        KeygenSettingsUpdateRequest, LogsRequest, ProjectInfoDto, ProjectServiceInfoDto,
+        RelinkProjectRootRequest, RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
         SaveEnvironmentFileRequest, SettingsTransferDomainDto, SettingsTransferProjectDto,
         SettingsTransferSnapshotDto,
     };
@@ -7303,6 +7409,116 @@ mod tests {
             configured.root_path.as_deref(),
             Some("/Users/dev/Developer/acme/ACME")
         );
+    }
+
+    #[test]
+    fn relink_project_root_updates_stale_root_path() {
+        let (temp_dir, api, store) = temp_api();
+        let project = store
+            .create_project_with_root("ACME", Some("/does/not/exist".to_string()))
+            .unwrap();
+        let new_root = temp_dir.path().join("moved-here");
+        fs::create_dir_all(&new_root).unwrap();
+
+        let relinked = api
+            .relink_project_root(RelinkProjectRootRequest {
+                project_id: project.id.clone(),
+                root_path: new_root.display().to_string(),
+            })
+            .unwrap();
+
+        let canonical_root = fs::canonicalize(&new_root).unwrap();
+        assert_eq!(
+            relinked.root_path.as_deref(),
+            Some(canonical_root.display().to_string().as_str())
+        );
+        assert!(!relinked.root_path_missing);
+        let stored = store
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.id == project.id)
+            .unwrap();
+        assert_eq!(
+            stored.root_path.as_deref(),
+            Some(canonical_root.display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn relink_project_root_rejects_folder_of_another_project() {
+        let (temp_dir, api, store) = temp_api();
+        let project = store
+            .create_project_with_root("ACME", Some("/does/not/exist".to_string()))
+            .unwrap();
+        let other = store.create_project("Other").unwrap();
+        let other_root = temp_dir.path().join("other-root");
+        fs::create_dir_all(&other_root).unwrap();
+        crate::infrastructure::project_marker::write_project_marker(&other_root, &other.id)
+            .unwrap();
+
+        let error = api
+            .relink_project_root(RelinkProjectRootRequest {
+                project_id: project.id,
+                root_path: other_root.display().to_string(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already belongs to"));
+    }
+
+    #[test]
+    fn backfill_project_markers_writes_missing_markers_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let api = DesktopApi::new(
+            temp_dir.path().join("config.toml"),
+            temp_dir.path().join("roxy"),
+        );
+        let unmarked_root = temp_dir.path().join("unmarked");
+        let marked_root = temp_dir.path().join("marked");
+        fs::create_dir_all(&unmarked_root).unwrap();
+        fs::create_dir_all(&marked_root).unwrap();
+        crate::infrastructure::project_marker::write_project_marker(&marked_root, "original")
+            .unwrap();
+        let project = |id: &str, root: &Path| ProjectInfoDto {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            domain_count: 0,
+            has_reachable_domain: false,
+            root_path: Some(root.display().to_string()),
+            root_path_missing: false,
+            last_accessed_at: None,
+        };
+
+        api.backfill_project_markers(&[
+            project("fresh", &unmarked_root),
+            project("intruder", &marked_root),
+        ]);
+
+        assert_eq!(
+            crate::infrastructure::project_marker::read_project_marker(&unmarked_root),
+            Some("fresh".to_string())
+        );
+        assert_eq!(
+            crate::infrastructure::project_marker::read_project_marker(&marked_root),
+            Some("original".to_string())
+        );
+    }
+
+    #[test]
+    fn relink_project_root_rejects_missing_folder() {
+        let (_temp_dir, api, store) = temp_api();
+        let project = store.create_project("ACME").unwrap();
+
+        let error = api
+            .relink_project_root(RelinkProjectRootRequest {
+                project_id: project.id,
+                root_path: "/does/not/exist".to_string(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not an existing folder"));
     }
 
     #[test]

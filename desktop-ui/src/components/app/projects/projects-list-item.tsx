@@ -3,6 +3,7 @@
 import { RiDraggable, RiMoreLine } from "@remixicon/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { Reorder, useDragControls } from "motion/react";
 import { useState, type MouseEvent, type PointerEvent } from "react";
 import { toast } from "sonner";
@@ -70,6 +71,7 @@ export const ProjectsListItem = ({
   const dragControls = useDragControls();
   const updateProject = useMutation(projectMutations.update(queryClient));
   const removeProject = useMutation(projectMutations.remove(queryClient));
+  const relinkProjectRoot = useMutation(projectMutations.relinkRoot(queryClient));
   const openInEditor = useMutation(projectMutations.openInEditor());
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -81,6 +83,7 @@ export const ProjectsListItem = ({
   const [addServiceDialogOpen, setAddServiceDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [relinkError, setRelinkError] = useState<string | null>(null);
   const environmentDomainPatterns = new Set(
     environments
       .filter((environment) => !environment.primary)
@@ -172,6 +175,23 @@ export const ProjectsListItem = ({
     }
   };
 
+  const handleRelinkFolder = async () => {
+    setRelinkError(null);
+
+    const selected = await openDirectoryDialog({
+      directory: true,
+      multiple: false,
+      title: `Locate the folder for ${project.name}`,
+    });
+    if (typeof selected !== "string") return;
+
+    try {
+      await relinkProjectRoot.mutateAsync({ projectId: project.id, rootPath: selected });
+    } catch (error) {
+      setRelinkError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const handleOpenTerminal = async () => {
     if (!projectTerminalTarget) {
       return;
@@ -213,6 +233,25 @@ export const ProjectsListItem = ({
           environments={environments}
           projectRootPath={project.rootPath}
         />
+        {project.rootPathMissing ? (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-1.5">
+            <p className="min-w-0 flex-1 truncate text-xs text-amber-700 dark:text-amber-300">
+              Project folder not found{project.rootPath ? `: ${project.rootPath}` : ""}. Was it
+              moved?
+            </p>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => void handleRelinkFolder()}
+              loading={relinkProjectRoot.isPending}
+              disabled={removeProject.isPending}
+            >
+              Locate folder…
+            </Button>
+          </div>
+        ) : null}
+        {relinkError ? <p className="text-xs text-destructive">{relinkError}</p> : null}
         {editorError ? <p className="text-xs text-destructive">{editorError}</p> : null}
       </div>
 

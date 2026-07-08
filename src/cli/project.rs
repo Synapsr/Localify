@@ -7,6 +7,8 @@ use super::context::{AppContext, effective_current_dir};
 use crate::branding::BRANDING;
 use crate::cli::project_env;
 use crate::infrastructure::config::{ConfigStore, ConfiguredProject};
+use crate::infrastructure::project_marker::{find_project_marker, write_project_marker};
+use roxy::desktop::ProjectRootStore;
 use roxy::desktop::dto::{
     AddProjectServiceRequest, AddProjectServiceResultDto, MaterializeProjectServicesRequest,
     SetProjectServiceDomainRequest,
@@ -70,6 +72,8 @@ pub fn configure_dev(
         WriteBackend::Helper(client) => client.materialize_project_services(request)?,
     }
     .materialized;
+    // Best-effort: lets a moved folder be re-linked to this project later.
+    let _ = write_project_marker(&current_dir, &project.id);
     let update_results = apply_local_app_updates(
         &resolved.package_updates,
         &resolved.next_config_updates,
@@ -209,23 +213,109 @@ fn resolve_project(
     }
 
     let current = current_dir.display().to_string();
+    let local_roots = ProjectRootStore::new_default()
+        .and_then(|store| store.load())
+        .unwrap_or_default();
     let matches = projects
         .into_iter()
-        .filter(|project| project.root_path.as_deref() == Some(current.as_str()))
+        .filter(|project| {
+            project.root_path.as_deref() == Some(current.as_str())
+                || local_roots.get(&project.id).map(String::as_str) == Some(current.as_str())
+        })
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
         [project] => Ok(project.clone()),
-        [] => bail!(
-            "No Localify project is linked to '{}'. Run '{} init-project --yes' first.",
-            current_dir.display(),
-            BRANDING.cli_command()
-        ),
+        [] => {
+            let canonical_current =
+                std::fs::canonicalize(current_dir).unwrap_or_else(|_| current_dir.to_path_buf());
+            if let Some(healed) = heal_moved_project_root(config_store, current_dir)
+                && healed.root_path == canonical_current
+            {
+                eprintln!(
+                    "Re-linked project '{}' [{}] to '{}' (folder moved).",
+                    healed.project_name,
+                    healed.project_id,
+                    healed.root_path.display()
+                );
+                return Ok(healed.project);
+            }
+            bail!(
+                "No Localify project is linked to '{}'. Run '{} init-project --yes' first.",
+                current_dir.display(),
+                BRANDING.cli_command()
+            )
+        }
         _ => bail!(
             "Multiple Localify projects are linked to '{}'. Pass --project <project-id>.",
             current_dir.display()
         ),
     }
+}
+
+/// A moved project folder that was re-linked through its in-project marker.
+pub(crate) struct HealedProjectRoot {
+    pub project_id: String,
+    pub project_name: String,
+    pub root_path: PathBuf,
+    pub project: ConfiguredProject,
+}
+
+/// Re-links a project whose stored root path went stale because the folder
+/// was moved on disk.
+///
+/// Walks up from `current_dir` to the nearest project marker. When the marker
+/// names a known project and none of its stored roots still exists, the local
+/// project-roots metadata is pointed at the marker folder and the shared
+/// config root is updated best-effort (it may be helper-owned). A folder
+/// *copy* — the stored root still exists — is left untouched, and a marker
+/// naming an unknown project (e.g. committed and cloned from another machine)
+/// is ignored.
+pub(crate) fn heal_moved_project_root(
+    config_store: &ConfigStore,
+    current_dir: &Path,
+) -> Option<HealedProjectRoot> {
+    let (marker_root, project_id) = find_project_marker(current_dir)?;
+    let marker_root = std::fs::canonicalize(&marker_root).unwrap_or(marker_root);
+    let mut project = config_store
+        .list_projects()
+        .ok()?
+        .into_iter()
+        .find(|project| project.id == project_id)?;
+
+    let local_roots = ProjectRootStore::new_default()
+        .and_then(|store| store.load())
+        .unwrap_or_default();
+    let known_roots = [
+        project.root_path.as_deref(),
+        local_roots.get(&project.id).map(String::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    .collect::<Vec<_>>();
+
+    // A known root that still exists means either nothing moved or the folder
+    // was copied — never steal the root in those cases.
+    if known_roots.iter().any(|root| root.is_dir()) {
+        return None;
+    }
+
+    ProjectRootStore::new_default()
+        .ok()?
+        .set(&project.id, &marker_root)
+        .ok()?;
+    let root_path = marker_root.display().to_string();
+    // Best-effort: the shared config may only be writable through the helper.
+    let _ = config_store.update_project(&project.id, None, None, Some(root_path.clone()));
+    project.root_path = Some(root_path);
+
+    Some(HealedProjectRoot {
+        project_id: project.id.clone(),
+        project_name: project.name.clone(),
+        root_path: marker_root,
+        project,
+    })
 }
 
 fn normalize_service_path(root: &Path, path: &Path) -> Result<String> {

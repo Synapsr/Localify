@@ -20,6 +20,7 @@ import type {
   OpenInEditorRequest,
   ProjectInfoDto,
   ProjectWorktreeDiscoveryDto,
+  RelinkProjectRootRequest,
   RemoveProjectEnvironmentRequest,
   RemoveProjectEnvironmentResultDto,
   RemoveProjectRequest,
@@ -125,6 +126,12 @@ export const projectMutations = {
     mutationOptions({
       mutationFn: (request: UpdateProjectRequest) => tauriClient.updateProject(request),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, [projectQueryKeys.all()]),
+    }),
+  relinkRoot: (queryClient: QueryClient) =>
+    mutationOptions<ProjectInfoDto, Error, RelinkProjectRootRequest>({
+      mutationFn: (request) => tauriClient.relinkProjectRoot(request),
+      onSuccess: async () =>
+        invalidateBootstrapAnd(queryClient, [projectQueryKeys.all(), domainQueries.all()]),
     }),
   remove: (queryClient: QueryClient) =>
     mutationOptions({
