@@ -863,16 +863,25 @@ fn local_dev_service_cwd_match(
 }
 
 fn service_with_local_dev_launch(service: ConfiguredService) -> ConfiguredService {
+    let service = service_without_legacy_dev_localify_command(service);
     let Some(root_path) = service.project_root_path.as_ref().map(PathBuf::from) else {
         return service;
     };
-    let Some(launch) = local_dev_launch_for_service(&service, &root_path)
-        .or_else(|| portable_local_dev_launch_for_service(&service, &root_path))
-    else {
-        return service;
-    };
 
-    apply_local_dev_launch(service, &root_path, &launch)
+    if let Some(launch) = local_dev_launch_for_service(&service, &root_path) {
+        let service = apply_local_dev_launch(service, &root_path, &launch);
+        if !is_legacy_dev_localify_launch(&launch) {
+            return service;
+        }
+
+        return portable_local_dev_launch_for_service(&service, &root_path)
+            .map(|launch| apply_local_dev_launch(service.clone(), &root_path, &launch))
+            .unwrap_or(service);
+    }
+
+    portable_local_dev_launch_for_service(&service, &root_path)
+        .map(|launch| apply_local_dev_launch(service.clone(), &root_path, &launch))
+        .unwrap_or(service)
 }
 
 fn service_with_launch_for_mode(service: ConfiguredService, mode: RunMode) -> ConfiguredService {
@@ -883,6 +892,7 @@ fn service_with_launch_for_mode(service: ConfiguredService, mode: RunMode) -> Co
 }
 
 fn service_with_dev_launch(service: ConfiguredService) -> ConfiguredService {
+    let service = service_without_legacy_dev_localify_command(service);
     let Some(root_path) = service.project_root_path.as_ref().map(PathBuf::from) else {
         return service;
     };
@@ -891,6 +901,8 @@ fn service_with_dev_launch(service: ConfiguredService) -> ConfiguredService {
         return service;
     };
 
+    let mut service = service;
+    service.command = None;
     apply_local_dev_launch(service, &root_path, &launch)
 }
 
@@ -1017,11 +1029,49 @@ fn apply_local_dev_launch(
             service.path = Some(relative_path.display().to_string());
         }
     }
-    if service.command.is_none() {
+    // `dev-localify` is legacy metadata only. Localify can use it to recover
+    // old service paths, but should never choose it as a launch command.
+    if service.command.is_none() && !is_legacy_dev_localify_launch(launch) {
         service.command = Some(launch.command_parts());
     }
 
     service
+}
+
+fn service_without_legacy_dev_localify_command(
+    mut service: ConfiguredService,
+) -> ConfiguredService {
+    if service
+        .command
+        .as_deref()
+        .is_some_and(command_invokes_dev_localify)
+    {
+        service.command = None;
+    }
+    service
+}
+
+fn is_legacy_dev_localify_launch(launch: &LocalDevLaunchPlan) -> bool {
+    launch.script_name == "dev-localify"
+}
+
+fn command_invokes_dev_localify(command: &[String]) -> bool {
+    match command {
+        [binary, script] if binary == "yarn" && script == "dev-localify" => true,
+        [binary, script]
+            if matches!(binary.as_str(), "pnpm" | "bun") && script == "dev-localify" =>
+        {
+            true
+        }
+        [binary, run, script, ..]
+            if matches!(binary.as_str(), "npm" | "pnpm" | "bun")
+                && run == "run"
+                && script == "dev-localify" =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2290,14 +2340,11 @@ INVALID-NAME=https://old.example
 
         assert_eq!(service.id, "acme");
         assert_eq!(service.path.as_deref(), Some("apps/web"));
-        assert_eq!(
-            service.command,
-            Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()])
-        );
+        assert_eq!(service.command, None);
     }
 
     #[test]
-    fn service_with_local_dev_launch_infers_command_for_root_selection() {
+    fn service_with_local_dev_launch_keeps_legacy_dev_localify_path_only() {
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
         let app_dir = root.join("apps/web");
@@ -2319,9 +2366,35 @@ INVALID-NAME=https://old.example
         let service = service_with_local_dev_launch(service);
 
         assert_eq!(service.path.as_deref(), Some("apps/web"));
+        assert_eq!(service.command, None);
+    }
+
+    #[test]
+    fn service_with_local_dev_launch_replaces_persisted_dev_localify_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let app_dir = root.join("apps/web");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"name":"web","scripts":{"dev-localify":"next dev --hostname 127.0.0.1 --port 52165","dev":"next dev"}}"#,
+        )
+        .unwrap();
+        let mut service = test_service("acme", &root.display().to_string(), None);
+        service.command = Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()]);
+        service.primary_target = Some(RouteTarget::Proxy(ProxyTarget::parse("52165").unwrap()));
+
+        let service = service_with_local_dev_launch(service);
+
+        assert_eq!(service.path.as_deref(), Some("apps/web"));
         assert_eq!(
             service.command,
-            Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()])
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
         );
     }
 
@@ -2394,6 +2467,56 @@ INVALID-NAME=https://old.example
             service.command,
             Some(vec!["pnpm".into(), "run".into(), "dev".into()])
         );
+    }
+
+    #[test]
+    fn service_with_dev_launch_replaces_persisted_dev_localify_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let app_dir = root.join("apps/web");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["apps/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"name":"web","scripts":{"dev-localify":"echo Localify URL: https://store.localify && AUTH_URL=https://store.localify NEXT_PUBLIC_APP_URL=https://store.localify NEXT_PUBLIC_APP_DOMAIN=store.localify next dev --hostname 127.0.0.1 --port 61092","dev":"next dev"}}"#,
+        )
+        .unwrap();
+        let mut service = test_service("store", &root.display().to_string(), Some("apps/web"));
+        service.command = Some(vec!["pnpm".into(), "run".into(), "dev-localify".into()]);
+        service.primary_target = Some(RouteTarget::Proxy(ProxyTarget::parse("52199").unwrap()));
+
+        let service = service_with_dev_launch(service);
+
+        assert_eq!(
+            service.command,
+            Some(vec!["pnpm".into(), "run".into(), "dev".into()])
+        );
+    }
+
+    #[test]
+    fn command_invokes_dev_localify_detects_legacy_package_runner_forms() {
+        assert!(command_invokes_dev_localify(&[
+            "pnpm".into(),
+            "dev-localify".into()
+        ]));
+        assert!(command_invokes_dev_localify(&[
+            "pnpm".into(),
+            "run".into(),
+            "dev-localify".into()
+        ]));
+        assert!(command_invokes_dev_localify(&[
+            "yarn".into(),
+            "dev-localify".into()
+        ]));
+        assert!(!command_invokes_dev_localify(&[
+            "pnpm".into(),
+            "run".into(),
+            "dev".into()
+        ]));
     }
 
     #[test]
