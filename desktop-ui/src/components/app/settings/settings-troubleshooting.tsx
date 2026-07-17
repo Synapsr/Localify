@@ -48,6 +48,7 @@ export const SettingsTroubleshooting = () => {
   const install = useMutation(systemMutations.install(queryClient));
   const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
   const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
+  const trustIosSimulators = useMutation(systemMutations.trustIosSimulators());
   const startDaemon = useMutation(daemonMutations.start(queryClient));
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -93,6 +94,18 @@ export const SettingsTroubleshooting = () => {
         return;
       }
 
+      if (action === "trustIosSimulators") {
+        const result = await trustIosSimulators.mutateAsync();
+        if (result.status !== "success") {
+          setActionError(result.message);
+          showTroubleshootingFailureToast(result.message);
+          return;
+        }
+
+        toast.success("iOS Simulator trust repaired", { description: result.message });
+        return;
+      }
+
       await startDaemon.mutateAsync({ verbose: false });
       toast.success("Background service started");
     } catch (error) {
@@ -106,6 +119,7 @@ export const SettingsTroubleshooting = () => {
     (install.isPending && "install") ||
     (setupCliAccess.isPending && "setupCliAccess") ||
     (setupNodeTrust.isPending && "setupNodeTrust") ||
+    (trustIosSimulators.isPending && "trustIosSimulators") ||
     (startDaemon.isPending && "startDaemon") ||
     null;
 

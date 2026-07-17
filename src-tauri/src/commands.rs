@@ -13,9 +13,8 @@ use localify::desktop::dto::{
     LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest,
     OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto, ProjectWorktreeDiscoveryDto,
     RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RelinkProjectRootRequest,
-    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
-    RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
+    RelinkProjectRootRequest, RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto,
+    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
     SaveEnvironmentFileRequest, SettingsExportRequest, SettingsExportResultDto,
     SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
     SettingsImportResultDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
@@ -624,6 +623,11 @@ pub async fn restart_system_helper(state: tauri::State<'_, AppState>) -> Result<
 #[tauri::command]
 pub fn setup_node_trust(state: tauri::State<'_, AppState>) -> Result<NodeTrustDto, String> {
     state.api.setup_node_trust().map_err(map_error)
+}
+
+#[tauri::command]
+pub fn trust_ios_simulators(state: tauri::State<'_, AppState>) -> StepDto {
+    state.api.trust_ios_simulators()
 }
 
 #[tauri::command]

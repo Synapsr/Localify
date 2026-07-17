@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use commands::{AppState, DeepLinkPayloadDto, DeepLinkRouteDto};
 use localify::branding::BRANDING;
 use localify::desktop::DesktopApi;
-use localify::desktop::dto::{DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest};
+use localify::desktop::dto::{
+    DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest,
+};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -1212,6 +1214,7 @@ pub fn run() {
             commands::setup_cli_access,
             commands::restart_system_helper,
             commands::setup_node_trust,
+            commands::trust_ios_simulators,
             commands::get_agent_skill_status,
             commands::install_agent_skill,
             commands::list_port_conflicts,

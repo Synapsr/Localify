@@ -19,6 +19,8 @@ use crate::branding::BRANDING;
 use crate::domain::DomainRegistration;
 use crate::domain::value_objects::{ProxyTarget, RouteTarget};
 use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
+#[cfg(target_os = "macos")]
+use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::local_dev::{
     LocalDevLaunchPlan, resolve_local_dev_launch, resolve_localify_dev_launch,
     resolve_portable_local_dev_launch,
@@ -359,6 +361,7 @@ pub fn run(
         .stderr(Stdio::inherit());
 
     let ca_cert_path = paths.data_dir.join("ca.crt");
+    trust_ios_simulators_for_dev(mode, &ca_cert_path);
     if ca_cert_path.exists() {
         child
             .env("NODE_EXTRA_CA_CERTS", ca_cert_path)
@@ -374,6 +377,20 @@ pub fn run(
 
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+fn trust_ios_simulators_for_dev(mode: RunMode, cert_path: &Path) {
+    if mode != RunMode::Dev {
+        return;
+    }
+
+    if let Err(error) = trust_booted_ios_simulators(cert_path) {
+        eprintln!("Warning: could not trust the Localify CA in booted iOS Simulators: {error}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trust_ios_simulators_for_dev(_mode: RunMode, _cert_path: &Path) {}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

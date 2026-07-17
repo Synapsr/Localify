@@ -506,10 +506,10 @@ immediately pick up the newly trusted Root CA from the system trust store.
 **Solution:** Restart your browser completely after running `sudo localify install`.
 Browsers cache the trusted certificate list at startup.
 
-**iOS Simulator:** On macOS, `localify install` also adds the Root CA to any
-booted iOS Simulator via `xcrun simctl keychain`. If no iOS Simulator was
-booted during installation, boot the simulator and run `sudo localify install`
-again before testing HTTPS there.
+**iOS Simulator:** On macOS, `localify install` and `localify dev` add the Root
+CA to booted iOS Simulators via `xcrun simctl keychain`. If Safari still shows
+a privacy warning, boot the simulator and use **Settings → Troubleshooting →
+Trust booted simulators**, then fully quit and reopen Safari in the simulator.
 
 **Linux with snap browsers:** Snap-packaged browsers (Firefox, Chromium)
 are sandboxed and cannot access the system trust store. See the

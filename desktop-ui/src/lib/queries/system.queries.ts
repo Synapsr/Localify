@@ -14,6 +14,7 @@ import type {
   SettingsImportPreviewRequest,
   SettingsImportRequest,
   SettingsImportResultDto,
+  StepDto,
   UpdateAutostartRequest,
   UpdateLauncherPreferencesRequest,
   UninstallPreviewDto,
@@ -80,6 +81,10 @@ export const systemMutations = {
     mutationOptions<NodeTrustDto, Error, void>({
       mutationFn: () => tauriClient.setupNodeTrust(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
+  trustIosSimulators: () =>
+    mutationOptions<StepDto, Error, void>({
+      mutationFn: () => tauriClient.trustIosSimulators(),
     }),
   installAgentSkill: (queryClient: QueryClient) =>
     mutationOptions<AgentSkillInstallResultDto, Error, void>({

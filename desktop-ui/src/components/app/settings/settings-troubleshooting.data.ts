@@ -2,7 +2,12 @@ import type { BootstrapDto } from "@/types/localify";
 
 export type TroubleshootingIssueTone = "success" | "warning" | "info";
 
-export type TroubleshootingAction = "install" | "setupCliAccess" | "setupNodeTrust" | "startDaemon";
+export type TroubleshootingAction =
+  | "install"
+  | "setupCliAccess"
+  | "setupNodeTrust"
+  | "startDaemon"
+  | "trustIosSimulators";
 
 export interface TroubleshootingIssue {
   id: string;
@@ -77,6 +82,26 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
       action: {
         id: "install",
         label: "Repair HTTPS",
+      },
+    },
+    {
+      id: "ios-simulator-certificate-trust",
+      title: "iOS Simulator shows “This Connection Is Not Private”",
+      tone: "warning",
+      summary:
+        "Each iOS Simulator has its own trust store. A simulator booted after Localify setup may not know Localify's Root CA yet.",
+      symptoms: [
+        "Safari in an iPhone or iPad Simulator warns that a .localify connection is not private.",
+        "The same .localify URL is trusted in browsers on macOS.",
+      ],
+      solutions: [
+        "Boot every iOS Simulator you want to use.",
+        "Trust the Localify CA in the booted simulators with the action below.",
+        "Fully quit and reopen Safari in the simulator, then reload the .localify URL.",
+      ],
+      action: {
+        id: "trustIosSimulators",
+        label: "Trust booted simulators",
       },
     },
     {
@@ -232,9 +257,7 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
             "If needed, point Node directly at Localify's CA with NODE_EXTRA_CA_CERTS while debugging older environments.",
             "Restart the terminal or IDE after changing Node environment variables.",
           ],
-      commands: [
-        `env -u NODE_USE_SYSTEM_CA NODE_EXTRA_CA_CERTS="${caCertPath}" pnpm dev-localify`,
-      ],
+      commands: [`env -u NODE_USE_SYSTEM_CA NODE_EXTRA_CA_CERTS="${caCertPath}" pnpm dev-localify`],
       action: nodeTrust.ready
         ? undefined
         : {

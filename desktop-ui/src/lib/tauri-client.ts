@@ -69,6 +69,7 @@ import type {
   SettingsImportRequest,
   SettingsImportResultDto,
   StartDaemonRequest,
+  StepDto,
   UninstallPreviewDto,
   UninstallResultDto,
   TerminalCreateSessionRequest,
@@ -200,6 +201,7 @@ export interface DesktopClient {
   setupCliAccess(): Promise<CliAccessDto>;
   restartSystemHelper(): Promise<void>;
   setupNodeTrust(): Promise<NodeTrustDto>;
+  trustIosSimulators(): Promise<StepDto>;
   getAgentSkillStatus(): Promise<AgentSkillStatusDto>;
   installAgentSkill(): Promise<AgentSkillInstallResultDto>;
   listPortConflicts(): Promise<PortConflictDto[]>;
@@ -315,6 +317,7 @@ export function createDesktopClient(): DesktopClient {
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
     restartSystemHelper: () => tauriInvoke("restart_system_helper"),
     setupNodeTrust: () => tauriInvoke("setup_node_trust"),
+    trustIosSimulators: () => tauriInvoke<StepDto>("trust_ios_simulators"),
     getAgentSkillStatus: () => tauriInvoke("get_agent_skill_status"),
     installAgentSkill: () => tauriInvoke("install_agent_skill"),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),

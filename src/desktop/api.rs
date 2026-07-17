@@ -271,6 +271,15 @@ impl DesktopApi {
         Ok(map_node_trust_dto(setup.status, setup.already_ready, None))
     }
 
+    /// Repairs HTTPS trust for simulators booted after Localify was installed.
+    pub fn trust_ios_simulators(&self) -> StepDto {
+        self.ios_simulator_trust_step().unwrap_or_else(|| StepDto {
+            label: Some("Trust CA in iOS Simulator".into()),
+            status: "skipped".into(),
+            message: "iOS Simulator trust is only available from a macOS user session.".into(),
+        })
+    }
+
     pub fn agent_skill_status(&self) -> Result<AgentSkillStatusDto> {
         map_agent_skill_status(crate::agent_skill::agent_skill_status()?)
     }
@@ -3364,7 +3373,7 @@ impl DesktopApi {
             Ok(IosSimulatorTrust::NoBootedDevices) => Some(StepDto {
                 label,
                 status: "skipped".into(),
-                message: "No booted iOS Simulator found. Boot one and run setup again before testing .localify HTTPS there.".into(),
+                message: "No booted iOS Simulator found. Boot one, then retry this action before testing .localify HTTPS there.".into(),
             }),
             Ok(IosSimulatorTrust::CertificateMissing { path }) => Some(StepDto {
                 label,
