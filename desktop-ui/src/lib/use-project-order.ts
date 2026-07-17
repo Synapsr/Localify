@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const ORDER_STORAGE_KEY = "roxy.projectOrder";
-const PINNED_STORAGE_KEY = "roxy.pinnedProjects";
+const ORDER_STORAGE_KEY = "localify.projectOrder";
+const PINNED_STORAGE_KEY = "localify.pinnedProjects";
 
 export interface ProjectOrderActivity {
   id: string;

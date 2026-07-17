@@ -2,8 +2,8 @@ use std::fs::{self, OpenOptions};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use roxy::desktop::DesktopApi;
-use roxy::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
+use localify::desktop::DesktopApi;
+use localify::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
 
 use crate::branding::BRANDING;
 

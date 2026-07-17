@@ -1,5 +1,5 @@
 use anyhow::Result;
-use roxy::desktop::dto::{AddRouteRequest, RemoveRouteRequest};
+use localify::desktop::dto::{AddRouteRequest, RemoveRouteRequest};
 
 use super::backend::WriteBackend;
 use super::context::AppContext;

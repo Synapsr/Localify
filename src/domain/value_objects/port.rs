@@ -25,7 +25,7 @@ impl Port {
 
     /// Create a port allowing the full 1..=65535 range.
     ///
-    /// Use for targets where Roxy connects as a client (e.g., container
+    /// Use for targets where Localify connects as a client (e.g., container
     /// ports mapped to the host) rather than user-configured services.
     pub fn any(port: u16) -> Result<Self, PortError> {
         if port == 0 {

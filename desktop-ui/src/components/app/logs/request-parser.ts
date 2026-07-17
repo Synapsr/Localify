@@ -1,4 +1,4 @@
-import type { DomainInfoDto } from "@/types/roxy";
+import type { DomainInfoDto } from "@/types/localify";
 
 export type RequestKind = "completed" | "no-route" | "domain-not-registered";
 export type RequestNoiseKind =

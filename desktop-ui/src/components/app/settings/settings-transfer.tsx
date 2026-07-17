@@ -5,7 +5,7 @@ import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plug
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 
-import type { SettingsImportPreviewDto } from "@/types/roxy";
+import type { SettingsImportPreviewDto } from "@/types/localify";
 
 import {
   ArrowLeftIcon,

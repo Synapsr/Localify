@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
+import type { DomainInfoDto, ProjectInfoDto } from "../types/localify";
 
 import { cn } from "../lib/cn";
 import { projectMutations } from "../lib/queries";

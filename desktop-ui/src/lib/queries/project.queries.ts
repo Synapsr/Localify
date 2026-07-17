@@ -28,7 +28,7 @@ import type {
   SaveEnvironmentFileRequest,
   StopLocalDevServerRequest,
   UpdateProjectRequest,
-} from "../../types/roxy";
+} from "../../types/localify";
 
 import { tauriClient } from "../tauri-client";
 import { domainQueries } from "./domain.queries";

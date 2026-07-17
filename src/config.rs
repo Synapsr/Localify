@@ -288,10 +288,10 @@ pub struct LicensingConfig {
     pub offline_license: Option<OfflineLicenseFile>,
 }
 
-/// All resolved paths needed by Roxy components.
+/// All resolved paths needed by Localify components.
 /// Loaded once from config, then passed to components via DI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RoxyPaths {
+pub struct LocalifyPaths {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
@@ -308,7 +308,7 @@ pub struct RoxyPaths {
     pub socket_path: PathBuf,
 }
 
-impl Default for RoxyPaths {
+impl Default for LocalifyPaths {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),

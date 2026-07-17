@@ -8,7 +8,7 @@ frontend shell in `desktop-ui/`.
 
 - A separate Tauri crate in `src-tauri/`
 - A Vite + TypeScript frontend scaffold in `desktop-ui/`
-- A `roxy::desktop::DesktopApi` facade that exposes the current backend
+- A `localify::desktop::DesktopApi` facade that exposes the current backend
   actions as serializable DTOs for Tauri commands
 - A typed Tauri client and lightweight app store for future frontend work
 
@@ -22,9 +22,9 @@ application code.
 - `update_config`
 - `get_daemon_status`
 - `list_domains`
-- `install_roxy`
+- `install_localify`
 - `get_uninstall_preview`
-- `uninstall_roxy`
+- `uninstall_localify`
 - `register_domain`
 - `unregister_domain`
 - `add_route`
@@ -384,7 +384,7 @@ openssl base64 -A -in /path/to/certificate.p12 -out apple-certificate-base64.txt
   typed wrappers around Tauri `invoke`
 - `desktop-ui/src/state/app-store.ts`
   lightweight state container for bootstrap/log data
-- `desktop-ui/src/types/roxy.ts`
+- `desktop-ui/src/types/localify.ts`
   frontend DTO contracts mirroring the Rust desktop API
 - `desktop-ui/src/main.ts`
   shell rendering and event wiring

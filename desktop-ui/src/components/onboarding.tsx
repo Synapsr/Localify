@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
-import type { BootstrapDto } from "@/types/roxy";
+import type { BootstrapDto } from "@/types/localify";
 
 import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
 import {

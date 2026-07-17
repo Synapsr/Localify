@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use roxy::desktop::dto::{DaemonLaunchDto, StartDaemonRequest};
+use localify::desktop::dto::{DaemonLaunchDto, StartDaemonRequest};
 use std::env;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -15,7 +15,7 @@ use crate::branding::BRANDING;
 use crate::config::DaemonConfig;
 use crate::infrastructure::dns::check_system_resolution;
 use crate::infrastructure::network::get_lan_ip;
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
 
@@ -23,7 +23,7 @@ pub fn execute(
     foreground: bool,
     verbose: bool,
     config_path: &Path,
-    paths: &RoxyPaths,
+    paths: &LocalifyPaths,
     daemon_config: &DaemonConfig,
 ) -> Result<()> {
     if !foreground && let WriteBackend::Helper(client) = WriteBackend::resolve(config_path)? {

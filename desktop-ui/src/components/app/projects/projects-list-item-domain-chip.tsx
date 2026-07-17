@@ -9,7 +9,7 @@ import type {
   EnvironmentFileRequest,
   ProjectServiceInfoDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import {
   CheckIcon,

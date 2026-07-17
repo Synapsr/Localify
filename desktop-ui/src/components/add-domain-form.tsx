@@ -4,7 +4,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { domainMutations, utilityMutations } from "../lib/queries";
-import type { ProjectInfoDto } from "../types/roxy";
+import type { ProjectInfoDto } from "../types/localify";
 
 interface AddDomainFormProps {
   suffix: string;

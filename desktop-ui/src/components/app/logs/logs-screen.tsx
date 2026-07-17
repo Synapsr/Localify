@@ -17,13 +17,13 @@ import { parseRequests, type RequestEntry } from "./request-parser";
 
 const TAIL_LINES = 1000;
 const FOLLOW_POLL_MS = 2000;
-const CLEAR_STORAGE_KEY = "roxy.logs.clearedAt";
-const PROJECT_STORAGE_KEY = "roxy.logs.project";
-const DOMAIN_STORAGE_KEY = "roxy.logs.domain";
-const FOLLOW_STORAGE_KEY = "roxy.logs.follow";
-const VIEW_STORAGE_KEY = "roxy.logs.view";
-const DENSITY_STORAGE_KEY = "roxy.logs.density";
-const PATH_PREFIXES_STORAGE_KEY = "roxy.logs.pathPrefixes";
+const CLEAR_STORAGE_KEY = "localify.logs.clearedAt";
+const PROJECT_STORAGE_KEY = "localify.logs.project";
+const DOMAIN_STORAGE_KEY = "localify.logs.domain";
+const FOLLOW_STORAGE_KEY = "localify.logs.follow";
+const VIEW_STORAGE_KEY = "localify.logs.view";
+const DENSITY_STORAGE_KEY = "localify.logs.density";
+const PATH_PREFIXES_STORAGE_KEY = "localify.logs.pathPrefixes";
 
 function loadStoredNumber(key: string): number | null {
   if (typeof window === "undefined") return null;

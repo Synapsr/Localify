@@ -11,10 +11,10 @@ desktop-ui/dist
 src-tauri/gen
 src-tauri/binaries/localify-*
 
-assets/roxy_404.png
-assets/roxy_error.png
-assets/roxy_file_browser.png
-assets/roxy_file_browser_small.png
+assets/localify_404.png
+assets/localify_error.png
+assets/localify_file_browser.png
+assets/localify_file_browser_small.png
 
 .claude
 .rust-skills

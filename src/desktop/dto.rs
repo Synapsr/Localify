@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{
     AgentConfig, DaemonConfig, DockerConfig, KEYGEN_ACCOUNT_ID, KEYGEN_API_URL, KEYGEN_PRODUCT_ID,
-    KEYGEN_PUBLIC_KEY, RoxyPaths,
+    KEYGEN_PUBLIC_KEY, LocalifyPaths,
 };
 use crate::desktop::{
     BrowserPreference, EditorPreference, LauncherPreferences, RunActionPreference,
@@ -119,7 +119,7 @@ impl From<DaemonConfigDto> for DaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RoxyPathsDto {
+pub struct LocalifyPathsDto {
     pub data_dir: String,
     pub pid_file: String,
     pub log_file: String,
@@ -127,8 +127,8 @@ pub struct RoxyPathsDto {
     pub socket_path: String,
 }
 
-impl From<RoxyPaths> for RoxyPathsDto {
-    fn from(value: RoxyPaths) -> Self {
+impl From<LocalifyPaths> for LocalifyPathsDto {
+    fn from(value: LocalifyPaths) -> Self {
         Self {
             data_dir: value.data_dir.display().to_string(),
             pid_file: value.pid_file.display().to_string(),
@@ -139,8 +139,8 @@ impl From<RoxyPaths> for RoxyPathsDto {
     }
 }
 
-impl From<RoxyPathsDto> for RoxyPaths {
-    fn from(value: RoxyPathsDto) -> Self {
+impl From<LocalifyPathsDto> for LocalifyPaths {
+    fn from(value: LocalifyPathsDto) -> Self {
         Self {
             data_dir: value.data_dir.into(),
             pid_file: value.pid_file.into(),
@@ -209,7 +209,7 @@ impl From<AgentConfigDto> for AgentConfig {
 pub struct AppConfigDto {
     pub config_path: String,
     pub daemon: DaemonConfigDto,
-    pub paths: RoxyPathsDto,
+    pub paths: LocalifyPathsDto,
     pub docker: DockerConfigDto,
     pub agent: AgentConfigDto,
 }
@@ -218,7 +218,7 @@ pub struct AppConfigDto {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigUpdateRequest {
     pub daemon: Option<DaemonConfigDto>,
-    pub paths: Option<RoxyPathsDto>,
+    pub paths: Option<LocalifyPathsDto>,
     pub docker: Option<DockerConfigDto>,
     pub agent: Option<AgentConfigDto>,
 }

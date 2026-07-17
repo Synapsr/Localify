@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { type PropsWithChildren, useEffect, useState } from "react";
 
-import type { CreateProjectDomainRequest } from "@/types/roxy";
+import type { CreateProjectDomainRequest } from "@/types/localify";
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useAppForm } from "@/hooks/form/form";

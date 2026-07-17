@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type PropsWithChildren, useEffect, useState } from "react";
 import { z } from "zod";
 
-import type { DomainInfoDto } from "@/types/roxy";
+import type { DomainInfoDto } from "@/types/localify";
 
 import { Button } from "@/components/ui/button";
 import {

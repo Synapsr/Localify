@@ -1,5 +1,5 @@
 use anyhow::Result;
-use roxy::desktop::dto::{RegisterDomainRequest, RegisterDomainResultDto, StepDto};
+use localify::desktop::dto::{RegisterDomainRequest, RegisterDomainResultDto, StepDto};
 
 use super::backend::WriteBackend;
 use super::context::AppContext;

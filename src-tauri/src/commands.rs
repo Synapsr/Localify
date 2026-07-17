@@ -1,5 +1,5 @@
-use roxy::desktop::DesktopApi;
-use roxy::desktop::dto::{
+use localify::desktop::DesktopApi;
+use localify::desktop::dto::{
     ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
     AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
     AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
@@ -139,7 +139,7 @@ fn autostart_install_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
             status: "success".into(),
             message: format!(
                 "{} will open at login and restart the background daemon automatically.",
-                roxy::branding::BRANDING.app_name
+                localify::branding::BRANDING.app_name
             ),
         },
         Err(error) => StepDto {
@@ -147,7 +147,7 @@ fn autostart_install_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
             status: "warning".into(),
             message: format!(
                 "{} was installed, but launch at login could not be enabled: {error}",
-                roxy::branding::BRANDING.app_name
+                localify::branding::BRANDING.app_name
             ),
         },
     }
@@ -160,7 +160,7 @@ fn autostart_uninstall_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
             status: "success".into(),
             message: format!(
                 "{} will no longer open automatically at login.",
-                roxy::branding::BRANDING.app_name
+                localify::branding::BRANDING.app_name
             ),
         },
         Err(error) => StepDto {
@@ -168,7 +168,7 @@ fn autostart_uninstall_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
             status: "warning".into(),
             message: format!(
                 "{} was uninstalled, but launch at login could not be disabled: {error}",
-                roxy::branding::BRANDING.app_name
+                localify::branding::BRANDING.app_name
             ),
         },
     }
@@ -182,7 +182,7 @@ fn desktop_state_dir() -> Result<PathBuf, String> {
 
     Ok(home
         .join("Library/Application Support")
-        .join(roxy::branding::BRANDING.desktop_state_dir_name()))
+        .join(localify::branding::BRANDING.desktop_state_dir_name()))
 }
 
 fn append_updater_log(message: &str) {
@@ -590,7 +590,7 @@ pub fn detect_project_init_plan(
 }
 
 #[tauri::command]
-pub async fn install_roxy(
+pub async fn install_localify(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<InstallResultDto, String> {
@@ -663,7 +663,7 @@ pub fn get_uninstall_preview(
 }
 
 #[tauri::command]
-pub async fn uninstall_roxy(
+pub async fn uninstall_localify(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<UninstallResultDto, String> {

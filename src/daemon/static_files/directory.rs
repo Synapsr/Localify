@@ -272,8 +272,8 @@ mod tests {
         let html = render_directory_listing("/", "/project/", &entries);
 
         // Themed page structure
-        assert!(html.contains("roxy-header"));
-        assert!(html.contains("roxy-footer"));
+        assert!(html.contains("localify-header"));
+        assert!(html.contains("localify-footer"));
         // Content
         assert!(html.contains("Index of"));
         assert!(html.contains("/project/"));

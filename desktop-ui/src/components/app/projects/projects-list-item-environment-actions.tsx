@@ -10,7 +10,7 @@ import type {
   EnvironmentFileRequest,
   ProjectEnvironmentInfoDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import { CopyIcon, FileTextIcon, FolderIcon, TerminalIcon, TrashIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";

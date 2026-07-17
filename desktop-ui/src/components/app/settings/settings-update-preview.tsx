@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { AppUpdateStatus } from "@/providers/app-update-provider";
-import type { AppUpdateInfoDto } from "@/types/roxy";
+import type { AppUpdateInfoDto } from "@/types/localify";
 
 import { SettingsUpdateCard } from "./settings-update-card";
 

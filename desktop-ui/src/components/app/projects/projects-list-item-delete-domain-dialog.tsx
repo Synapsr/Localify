@@ -3,7 +3,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type PropsWithChildren, useState } from "react";
 
-import type { DomainInfoDto } from "@/types/roxy";
+import type { DomainInfoDto } from "@/types/localify";
 
 import { Button } from "@/components/ui/button";
 import {

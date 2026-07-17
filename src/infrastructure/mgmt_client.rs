@@ -114,7 +114,7 @@ impl DaemonConnection for MgmtSocketClient {
             let source_str = d["source"].as_str().unwrap_or("config");
             let https = d["https"].as_bool().unwrap_or(false);
 
-            // Parse the pattern string (handles "*.foo.roxy" and "foo.roxy")
+            // Parse the pattern string (handles "*.foo.localify" and "foo.localify")
             let is_wildcard = pattern_str.starts_with("*.");
             let base_name = if is_wildcard {
                 &pattern_str[2..]

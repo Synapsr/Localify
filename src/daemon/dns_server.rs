@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_handler_roxy_domain() {
+    fn test_query_handler_localify_domain() {
         // Build a simple A query for test.localify
         let mut packet = Packet::new_query(1234);
         let name = Name::new_unchecked("test.localify");
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_handler_non_roxy_domain() {
+    fn test_query_handler_non_localify_domain() {
         // Build a simple A query for google.com
         let mut packet = Packet::new_query(1234);
         let name = Name::new_unchecked("google.com");

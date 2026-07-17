@@ -1,4 +1,4 @@
-use crate::config::{DaemonConfig, RoxyPaths};
+use crate::config::{DaemonConfig, LocalifyPaths};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigLoadError {
@@ -17,7 +17,7 @@ pub enum ConfigLoadError {
 pub trait ConfigLoader {
     /// Load daemon configuration and paths from storage.
     /// Returns defaults if no config file exists.
-    fn load(&self) -> Result<(DaemonConfig, RoxyPaths), ConfigLoadError>;
+    fn load(&self) -> Result<(DaemonConfig, LocalifyPaths), ConfigLoadError>;
 
     /// Create a config file with default values.
     fn save_defaults(&self) -> Result<(), ConfigLoadError>;

@@ -24,8 +24,8 @@ use crate::application::ports::RegistrationProvider;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::network::get_lan_ip;
-use crate::infrastructure::paths::RoxyPaths;
-use roxy::desktop::ProjectRootStore;
+use crate::infrastructure::paths::LocalifyPaths;
+use localify::desktop::ProjectRootStore;
 
 /// Middleware that copies the client IP from `ConnectInfo` into a `ClientAddr` extension.
 async fn inject_client_addr(
@@ -55,7 +55,7 @@ impl Server {
     pub fn new(
         config: &Config,
         config_path: PathBuf,
-        paths: &RoxyPaths,
+        paths: &LocalifyPaths,
         reload_rx: mpsc::Receiver<()>,
         reload_tx: mpsc::Sender<()>,
         reload_provider: Arc<dyn RegistrationProvider>,

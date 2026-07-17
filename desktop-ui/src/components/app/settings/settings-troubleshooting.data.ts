@@ -1,4 +1,4 @@
-import type { BootstrapDto } from "@/types/roxy";
+import type { BootstrapDto } from "@/types/localify";
 
 export type TroubleshootingIssueTone = "success" | "warning" | "info";
 

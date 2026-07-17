@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn uninstall_stops_daemon_and_cleans_up() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let certs = InMemoryCertificateManager::new();
         let daemon = InMemoryDaemonControl::running(999);
         let dns = InMemoryDnsManager::already_configured();
@@ -225,8 +225,8 @@ mod tests {
     #[test]
     fn preview_shows_domain_count() {
         let repo = InMemoryDomainRepository::with_domains(vec![
-            registration("a.roxy"),
-            registration("b.roxy"),
+            registration("a.localify"),
+            registration("b.localify"),
         ]);
         let certs = InMemoryCertificateManager::new();
         let daemon = InMemoryDaemonControl::stopped();
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn uninstall_warns_on_cert_removal_failure() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let certs = InMemoryCertificateManager::always_failing();
         let daemon = InMemoryDaemonControl::stopped();
         let dns = InMemoryDnsManager::new();

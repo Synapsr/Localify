@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import type { ProjectInfoDto, ProjectWorktreeDto } from "@/types/roxy";
+import type { ProjectInfoDto, ProjectWorktreeDto } from "@/types/localify";
 
 import {
   CheckIcon,

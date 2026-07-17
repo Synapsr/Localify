@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 
 import { router } from "@/router";
-import type { DeepLinkPayloadDto } from "@/types/roxy";
+import type { DeepLinkPayloadDto } from "@/types/localify";
 
 import { tauriClient } from "./tauri-client";
 

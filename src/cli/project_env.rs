@@ -10,9 +10,9 @@ use super::backend::{WriteBackend, direct_api};
 use super::context::{AppContext, effective_current_dir};
 use crate::branding::BRANDING;
 use crate::infrastructure::config::{ConfigStore, ConfiguredProject, ConfiguredProjectEnvironment};
-use roxy::desktop::DesktopApi;
-use roxy::desktop::ProjectRootStore;
-use roxy::desktop::dto::{
+use localify::desktop::DesktopApi;
+use localify::desktop::ProjectRootStore;
+use localify::desktop::dto::{
     DiscoverProjectWorktreesRequest, EnsureProjectEnvironmentRequest,
     EnsureProjectEnvironmentResultDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
     ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto,

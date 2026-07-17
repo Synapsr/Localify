@@ -1,5 +1,5 @@
 use anyhow::Result;
-use roxy::desktop::dto::DomainPatternRequest;
+use localify::desktop::dto::DomainPatternRequest;
 
 use super::backend::WriteBackend;
 use super::context::AppContext;

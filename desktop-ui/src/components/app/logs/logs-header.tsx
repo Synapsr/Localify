@@ -1,6 +1,6 @@
 "use client";
 
-import type { DomainInfoDto, ProjectInfoDto } from "@/types/roxy";
+import type { DomainInfoDto, ProjectInfoDto } from "@/types/localify";
 
 import {
   BookmarkIcon,

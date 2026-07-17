@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use roxy::branding::BRANDING;
-use roxy::desktop::DesktopApi;
-use roxy::system_helper::{SystemHelperClient, helper_socket_path, serve};
+use localify::branding::BRANDING;
+use localify::desktop::DesktopApi;
+use localify::system_helper::{SystemHelperClient, helper_socket_path, serve};
 #[cfg(target_os = "macos")]
 const LAUNCHD_PLIST_DIR: &str = "/Library/LaunchDaemons";
 

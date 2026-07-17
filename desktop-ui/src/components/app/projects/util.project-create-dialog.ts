@@ -1,5 +1,5 @@
-const PROJECT_CREATE_DIALOG_EVENT = "roxy:projects-create-dialog-open";
-const PROJECT_CREATE_DIALOG_STORAGE_KEY = "roxy.projects.create-dialog-open";
+const PROJECT_CREATE_DIALOG_EVENT = "localify:projects-create-dialog-open";
+const PROJECT_CREATE_DIALOG_STORAGE_KEY = "localify.projects.create-dialog-open";
 
 function canUseWindow(): boolean {
   return typeof window !== "undefined";

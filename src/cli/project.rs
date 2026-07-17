@@ -8,12 +8,12 @@ use crate::branding::BRANDING;
 use crate::cli::project_env;
 use crate::infrastructure::config::{ConfigStore, ConfiguredProject};
 use crate::infrastructure::project_marker::{find_project_marker, write_project_marker};
-use roxy::desktop::ProjectRootStore;
-use roxy::desktop::dto::{
+use localify::desktop::ProjectRootStore;
+use localify::desktop::dto::{
     AddProjectServiceRequest, AddProjectServiceResultDto, MaterializeProjectServicesRequest,
     SetProjectServiceDomainRequest,
 };
-use roxy::project_init::{
+use localify::project_init::{
     FolderInitSelection, LocalAppUpdatePolicy, ServicePlan, apply_local_app_updates,
     detect_folder_init_plan, resolve_folder_init_selection,
 };

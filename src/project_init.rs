@@ -1481,31 +1481,64 @@ fn update_vite_config_content(content: &str, host: &str) -> Result<String> {
 }
 
 fn find_vite_config_object_bounds(content: &str) -> Option<(usize, usize)> {
-    if let Some(anchor_start) = content.find("defineConfig") {
-        let tail_start = anchor_start + "defineConfig".len();
-        let tail = &content[tail_start..];
-        if let Some(paren_offset) = tail.find('(') {
-            let paren_open = tail_start + paren_offset;
-            if let Some(paren_close) = find_matching_delimiter(content, paren_open, b'(', b')')
-                && let Some(bounds) = find_vite_config_object_in_define_config_args(
-                    content,
-                    paren_open + 1,
-                    paren_close,
-                )
-            {
-                return Some(bounds);
-            }
+    let mut search_start = 0;
+    while let Some(paren_open) =
+        find_identifier_call_open(content, "defineConfig", search_start, content.len())
+    {
+        if let Some(paren_close) = find_matching_delimiter(content, paren_open, b'(', b')')
+            && let Some(bounds) =
+                find_vite_config_object_in_define_config_args(content, paren_open + 1, paren_close)
+        {
+            return Some(bounds);
         }
+        search_start = paren_open + 1;
     }
 
     if let Some(anchor_start) = content.find("export default") {
-        let tail = &content[anchor_start + "export default".len()..];
-        if let Some(open_offset) = tail.find('{') {
-            let open = anchor_start + "export default".len() + open_offset;
-            if let Some(close) = find_matching_delimiter(content, open, b'{', b'}') {
-                return Some((open, close));
-            }
+        let value_start = anchor_start + "export default".len();
+        if let Some(open) = next_non_whitespace_index(content, value_start, content.len())
+            && content.as_bytes()[open] == b'{'
+            && let Some(close) = find_matching_delimiter(content, open, b'{', b'}')
+        {
+            return Some((open, close));
         }
+    }
+
+    None
+}
+
+fn find_identifier_call_open(
+    content: &str,
+    identifier: &str,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let identifier_bytes = identifier.as_bytes();
+    let mut index = start;
+
+    while index < end {
+        if let Some(next_index) = skip_comment_or_string(content, index, end) {
+            index = next_index;
+            continue;
+        }
+
+        let identifier_end = index + identifier_bytes.len();
+        if identifier_end <= end
+            && bytes[index..identifier_end] == *identifier_bytes
+            && bytes
+                .get(index.wrapping_sub(1))
+                .is_none_or(|byte| !is_identifier_byte(*byte))
+            && bytes
+                .get(identifier_end)
+                .is_none_or(|byte| !is_identifier_byte(*byte))
+            && let Some(paren_open) = next_non_whitespace_index(content, identifier_end, end)
+            && bytes[paren_open] == b'('
+        {
+            return Some(paren_open);
+        }
+
+        index += 1;
     }
 
     None
@@ -1673,14 +1706,23 @@ fn matches_identifier_property(content: &str, start: usize, end: usize, property
 }
 
 fn next_non_whitespace_is(content: &str, start: usize, end: usize, expected: u8) -> bool {
+    next_non_whitespace_index(content, start, end)
+        .is_some_and(|index| content.as_bytes()[index] == expected)
+}
+
+fn next_non_whitespace_index(content: &str, start: usize, end: usize) -> Option<usize> {
     content.as_bytes()[start..end]
         .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-        == Some(&expected)
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map(|offset| start + offset)
 }
 
 fn is_identifier_char(ch: char) -> bool {
     ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
 }
 
 fn update_existing_vite_server(
@@ -3046,6 +3088,31 @@ mod tests {
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(updated.contains("server: { ignored: true }"));
         assert!(updated.contains(&format!("port: 3001,\n      allowedHosts: ['{host}']")));
+    }
+
+    #[test]
+    fn apply_vite_config_update_skips_import_and_prior_function_calls() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("vite.config.ts");
+        let host = format!("playground{}", BRANDING.domain_suffix());
+        write_next_config(
+            &config_path,
+            "import { fileURLToPath } from 'node:url';\nimport { defineConfig } from 'vite';\n\nconst configPath = fileURLToPath(new URL('./config.json', import.meta.url));\n\nexport default defineConfig(async () => {\n  return {\n    server: {\n      host: process.env.HOST,\n    },\n    plugins: [],\n  };\n});\n",
+        );
+
+        apply_vite_config_update(&ViteConfigUpdate {
+            vite_config_path: config_path.clone(),
+            display_path: "web".into(),
+            allowed_host: host.clone(),
+        })
+        .unwrap();
+
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains(&format!(
+            "host: process.env.HOST,\n      allowedHosts: ['{host}']"
+        )));
+        assert_eq!(updated.matches("server:").count(), 1);
+        assert!(!updated.contains("};,"));
     }
 
     #[test]

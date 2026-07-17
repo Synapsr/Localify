@@ -15,7 +15,7 @@ import type {
   ProjectInfoDto,
   ProjectServiceInfoDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import { CodeIcon, PinIcon, PinSolidIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";

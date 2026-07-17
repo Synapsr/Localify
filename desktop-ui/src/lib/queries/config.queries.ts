@@ -1,7 +1,7 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import { tauriClient } from "../tauri-client";
-import type { AppConfigDto, ConfigUpdateRequest } from "../../types/roxy";
+import type { AppConfigDto, ConfigUpdateRequest } from "../../types/localify";
 import { daemonQueries } from "./daemon.queries";
 import { invalidateBootstrapAnd } from "./shared";
 

@@ -50,7 +50,7 @@ export interface DaemonConfigDto {
   logLevel: string;
 }
 
-export interface RoxyPathsDto {
+export interface LocalifyPathsDto {
   dataDir: string;
   pidFile: string;
   logFile: string;
@@ -70,14 +70,14 @@ export interface AgentConfigDto {
 export interface AppConfigDto {
   configPath: string;
   daemon: DaemonConfigDto;
-  paths: RoxyPathsDto;
+  paths: LocalifyPathsDto;
   docker: DockerConfigDto;
   agent: AgentConfigDto;
 }
 
 export interface ConfigUpdateRequest {
   daemon?: DaemonConfigDto;
-  paths?: RoxyPathsDto;
+  paths?: LocalifyPathsDto;
   docker?: DockerConfigDto;
   agent?: AgentConfigDto;
 }

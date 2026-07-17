@@ -1,7 +1,7 @@
-# Roxy Changelog
+# Localify Changelog
 
-Welcome to the Roxy changelog! This document tracks all notable changes to Roxy,
-a local development proxy tool that gives your projects custom `.roxy` domains with
+Welcome to the Localify changelog! This document tracks all notable changes to Localify,
+a local development proxy tool that gives your projects custom `.localify` domains with
 automatic HTTPS certificates. Think Laravel Valet, but written in Rust.
 
 All entries follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format,
@@ -72,7 +72,6 @@ This reverts commit 699e8ad90023f2bc00c0ad486dad2bf7145d3090.
 
 ### Miscellaneous Tasks
 
-- Update brew tap after release
 
 ## [0.1.1] - 2026-02-09
 

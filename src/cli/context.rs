@@ -2,12 +2,12 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use roxy::desktop::ProjectRootStore;
+use localify::desktop::ProjectRootStore;
 
 use crate::branding::BRANDING;
 use crate::infrastructure::{
     certs::CertificateService, config::ConfigStore, mgmt_client::MgmtSocketClient,
-    paths::RoxyPaths, pid::PidFile,
+    paths::LocalifyPaths, pid::PidFile,
 };
 
 /// Composition root: wires infrastructure adapters once,
@@ -21,7 +21,7 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn new(config_path: &Path, paths: &RoxyPaths) -> Self {
+    pub fn new(config_path: &Path, paths: &LocalifyPaths) -> Self {
         Self {
             config_path: config_path.to_path_buf(),
             config_store: ConfigStore::new(config_path.to_path_buf()),

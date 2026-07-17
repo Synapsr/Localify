@@ -12,13 +12,13 @@ use crate::infrastructure::filesystem::FileSystemSetup;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::network::get_network_info;
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 
-pub fn execute(ctx: &AppContext, paths: &RoxyPaths, config: &Config) -> Result<()> {
+pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Result<()> {
     println!("Setting up Localify...\n");
 
     if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        let result = client.install_roxy()?;
+        let result = client.install_localify()?;
         println!("  Using IP address: {}", result.lan_ip);
         for step in &result.steps {
             let label = step.label.as_deref().unwrap_or("");
@@ -70,7 +70,7 @@ pub fn execute(ctx: &AppContext, paths: &RoxyPaths, config: &Config) -> Result<(
 }
 
 #[cfg(target_os = "macos")]
-fn print_ios_simulator_trust_step(paths: &RoxyPaths) {
+fn print_ios_simulator_trust_step(paths: &LocalifyPaths) {
     let Some(outcome) = ios_simulator_trust_outcome(&paths.data_dir.join("ca.crt")) else {
         return;
     };
@@ -86,7 +86,7 @@ fn print_ios_simulator_trust_step(paths: &RoxyPaths) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn print_ios_simulator_trust_step(_paths: &RoxyPaths) {}
+fn print_ios_simulator_trust_step(_paths: &LocalifyPaths) {}
 
 #[cfg(target_os = "macos")]
 fn ios_simulator_trust_outcome(cert_path: &std::path::Path) -> Option<StepOutcome> {

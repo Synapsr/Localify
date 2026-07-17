@@ -1,5 +1,5 @@
-const PROJECT_SEARCH_FOCUS_EVENT = "roxy:projects-search-focus";
-const PROJECT_SEARCH_FOCUS_STORAGE_KEY = "roxy.projects.focus-search";
+const PROJECT_SEARCH_FOCUS_EVENT = "localify:projects-search-focus";
+const PROJECT_SEARCH_FOCUS_STORAGE_KEY = "localify.projects.focus-search";
 
 function canUseWindow(): boolean {
   return typeof window !== "undefined";

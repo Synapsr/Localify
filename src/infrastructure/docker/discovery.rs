@@ -247,9 +247,8 @@ mod tests {
             labels: labels
                 .into_iter()
                 .map(|(k, v)| {
-                    let key = k.replace("roxy.", "localify.");
-                    let value = v.replace(".roxy", BRANDING.domain_suffix());
-                    (key, value)
+                    let value = v.replace(".localify", BRANDING.domain_suffix());
+                    (k.to_string(), value)
                 })
                 .collect(),
             exposed_ports,
@@ -263,7 +262,7 @@ mod tests {
     fn explicit_opt_out_skips() {
         let info = make_info(
             vec![
-                ("roxy.enable", "false"),
+                ("localify.enable", "false"),
                 ("com.docker.compose.project", "myproject"),
                 ("com.docker.compose.service", "web"),
             ],
@@ -280,9 +279,9 @@ mod tests {
     fn explicit_opt_in_with_domain_and_port() {
         let info = make_info(
             vec![
-                ("roxy.enable", "true"),
-                ("roxy.domain", "custom.roxy"),
-                ("roxy.port", "8080"),
+                ("localify.enable", "true"),
+                ("localify.domain", "custom.localify"),
+                ("localify.port", "8080"),
             ],
             vec![],
             HashMap::from([(8080, 9090)]),
@@ -346,12 +345,12 @@ mod tests {
     // --- Domain resolution ---
 
     #[test]
-    fn roxy_domain_label_overrides_compose() {
+    fn localify_domain_label_overrides_compose() {
         let info = make_info(
             vec![
                 ("com.docker.compose.project", "myproject"),
                 ("com.docker.compose.service", "web"),
-                ("roxy.domain", "custom.roxy"),
+                ("localify.domain", "custom.localify"),
             ],
             vec![3000],
             HashMap::from([(3000, 8080)]),
@@ -367,12 +366,12 @@ mod tests {
     // --- Port resolution ---
 
     #[test]
-    fn roxy_port_label_overrides_exposed() {
+    fn localify_port_label_overrides_exposed() {
         let info = make_info(
             vec![
                 ("com.docker.compose.project", "myproject"),
                 ("com.docker.compose.service", "web"),
-                ("roxy.port", "8080"),
+                ("localify.port", "8080"),
             ],
             vec![3000, 4000],
             HashMap::from([(8080, 9090)]),
@@ -448,7 +447,7 @@ mod tests {
             vec![
                 ("com.docker.compose.project", "myproject"),
                 ("com.docker.compose.service", "web"),
-                ("roxy.wildcard", "true"),
+                ("localify.wildcard", "true"),
             ],
             vec![3000],
             HashMap::from([(3000, 8080)]),

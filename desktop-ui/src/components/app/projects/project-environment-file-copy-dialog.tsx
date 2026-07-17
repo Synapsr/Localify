@@ -9,7 +9,7 @@ import type {
   EnvironmentFileCopyRequest,
   EnvironmentFileCopyStatusDto,
   EnvironmentFileRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import { ArrowRightIcon, CopyIcon, FileTextIcon, SpinnerIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";

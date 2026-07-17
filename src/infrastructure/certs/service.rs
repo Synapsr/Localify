@@ -3,7 +3,7 @@ use super::trust_store::{TrustStore, get_trust_store};
 use super::{CertError, CertificateGenerator};
 use crate::application::ports::{CertificateError, CertificateManager};
 use crate::domain::DomainPattern;
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 
 /// High-level service for certificate operations
 pub struct CertificateService {
@@ -12,8 +12,8 @@ pub struct CertificateService {
 }
 
 impl CertificateService {
-    /// Create a new CertificateService with paths from RoxyPaths
-    pub fn new(paths: &RoxyPaths) -> Self {
+    /// Create a new CertificateService with paths from LocalifyPaths
+    pub fn new(paths: &LocalifyPaths) -> Self {
         Self {
             generator: CertificateGenerator::new(paths.data_dir.clone(), paths.certs_dir.clone()),
             ca: RootCA::new(paths.data_dir.clone()),

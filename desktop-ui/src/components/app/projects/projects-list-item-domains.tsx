@@ -10,7 +10,7 @@ import type {
   ProjectInfoDto,
   ProjectServiceInfoDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";

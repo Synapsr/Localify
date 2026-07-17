@@ -103,11 +103,11 @@ Ask: "Does any business rule behave differently here?" If yes, model the domain 
 
 ### Rule 4 — Application ports return domain types or DTOs
 
-Traits in `src/application/ports/` must never expose infrastructure types (`DaemonConfig`, `RoxyPaths`, raw PIDs, OS structures). Define an application-layer DTO if needed.
+Traits in `src/application/ports/` must never expose infrastructure types (`DaemonConfig`, `LocalifyPaths`, raw PIDs, OS structures). Define an application-layer DTO if needed.
 
 ```rust
 // BAD — infrastructure types in port interface
-fn load(&self) -> Result<(DaemonConfig, RoxyPaths)>;
+fn load(&self) -> Result<(DaemonConfig, LocalifyPaths)>;
 
 // GOOD — application-level DTO
 pub struct AppConfig { pub registrations: Vec<DomainRegistration> }

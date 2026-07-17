@@ -2,14 +2,14 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-use crate::config::{DaemonConfig, RoxyPaths};
+use crate::config::{DaemonConfig, LocalifyPaths};
 
 use super::ports::{ConfigLoader, DaemonControl};
 
 /// Fresh daemon config + paths ready for starting the daemon after a stop.
 pub struct RestartReady {
     pub daemon_config: DaemonConfig,
-    pub paths: RoxyPaths,
+    pub paths: LocalifyPaths,
 }
 
 /// Application service for restarting/reloading the daemon.

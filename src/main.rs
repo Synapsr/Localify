@@ -16,7 +16,7 @@ mod infrastructure;
 
 use cli::context::AppContext;
 use infrastructure::config::{Config, ConfigStore};
-use infrastructure::paths::RoxyPaths;
+use infrastructure::paths::LocalifyPaths;
 
 #[derive(Parser)]
 #[command(name = "localify")]
@@ -535,7 +535,7 @@ enum LicenseCommands {
 
 /// Load config from file, or return defaults if the file doesn't exist.
 /// For `install`, the config file may not exist yet, so defaults are fine.
-fn load_config_and_paths(config_path: &Path) -> Result<(Config, RoxyPaths)> {
+fn load_config_and_paths(config_path: &Path) -> Result<(Config, LocalifyPaths)> {
     let config_store = ConfigStore::new(config_path.to_path_buf());
     let config = config_store.load()?;
     let paths = config.paths.clone();
@@ -613,7 +613,7 @@ fn main() -> Result<()> {
                 detected_primary_domain: None,
             },
             config_path,
-            roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
+            localify::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
                 config.agent.promote_dev_script,
             ),
         ),
@@ -644,7 +644,7 @@ fn main() -> Result<()> {
             force,
         } => cli::remove_project::execute(project_id, delete_domains, force, &ctx),
         Commands::Project { command } => {
-            let policy = roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
+            let policy = localify::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
                 config.agent.promote_dev_script,
             );
             match command {
@@ -763,7 +763,7 @@ fn main() -> Result<()> {
                 override_command: command,
             },
             config_path,
-            roxy::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
+            localify::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
                 config.agent.promote_dev_script,
             ),
             &ctx,
@@ -785,13 +785,13 @@ fn main() -> Result<()> {
                 override_command: command,
             },
             config_path,
-            roxy::project_init::LocalAppUpdatePolicy::runtime_only(),
+            localify::project_init::LocalAppUpdatePolicy::runtime_only(),
             &ctx,
             &paths,
         ),
         Commands::Agent { command } => match command {
             AgentCommands::InstallSkill => {
-                let result = roxy::agent_skill::install_agent_skill()?;
+                let result = localify::agent_skill::install_agent_skill()?;
                 println!("Installed Localify skill for:");
                 for agent in result.installed_agents {
                     println!("  {agent}");
@@ -799,7 +799,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
             AgentCommands::SkillStatus => {
-                let status = roxy::agent_skill::agent_skill_status()?;
+                let status = localify::agent_skill::agent_skill_status()?;
                 println!("Bundled skill: {}", status.skill_dir.display());
                 println!(
                     "npx available: {}",

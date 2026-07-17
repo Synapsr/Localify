@@ -1142,6 +1142,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
+name = "localify"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "arc-swap",
+ "axum",
+ "base64",
+ "bollard",
+ "clap",
+ "clap_complete",
+ "dialoguer",
+ "ed25519-dalek",
+ "futures-util",
+ "http-body-util",
+ "humantime",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "simple-dns",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1561,46 +1601,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "roxy"
-version = "1.0.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "arc-swap",
- "axum",
- "base64",
- "bollard",
- "clap",
- "clap_complete",
- "dialoguer",
- "ed25519-dalek",
- "futures-util",
- "http-body-util",
- "humantime",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "rcgen",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "simple-dns",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

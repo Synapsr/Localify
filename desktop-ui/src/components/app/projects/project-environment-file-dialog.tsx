@@ -4,7 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import type { EnvironmentFileDto, EnvironmentFileRequest } from "@/types/roxy";
+import type { EnvironmentFileDto, EnvironmentFileRequest } from "@/types/localify";
 
 import {
   CheckIcon,

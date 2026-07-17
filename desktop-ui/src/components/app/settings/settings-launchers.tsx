@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import type { BrowserPreference } from "@/types/roxy";
+import type { BrowserPreference } from "@/types/localify";
 
 import { ChevronDownIcon, CodeIcon, ExternalLinkIcon, PlayIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";

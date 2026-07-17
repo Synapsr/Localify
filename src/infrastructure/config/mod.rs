@@ -3,7 +3,7 @@ pub mod watcher;
 
 // Re-export shared config types so existing CLI/daemon code keeps compiling.
 pub use crate::config::{
-    AgentConfig, DaemonConfig, DockerConfig, KeygenConfig, OfflineLicenseFile, RoxyPaths,
+    AgentConfig, DaemonConfig, DockerConfig, KeygenConfig, LocalifyPaths, OfflineLicenseFile,
     StoredLicense,
 };
 
@@ -170,7 +170,7 @@ pub struct Config {
     pub daemon: DaemonConfig,
 
     #[serde(default)]
-    pub paths: RoxyPaths,
+    pub paths: LocalifyPaths,
 
     #[serde(default)]
     pub docker: DockerConfig,
@@ -1796,7 +1796,7 @@ fn map_config_error(e: ConfigError) -> ConfigLoadError {
 }
 
 impl ConfigLoader for ConfigStore {
-    fn load(&self) -> Result<(DaemonConfig, RoxyPaths), ConfigLoadError> {
+    fn load(&self) -> Result<(DaemonConfig, LocalifyPaths), ConfigLoadError> {
         let config = ConfigStore::load(self).map_err(map_config_error)?;
         Ok((config.daemon, config.paths))
     }
@@ -1858,14 +1858,14 @@ mod tests {
     }
 
     fn proxy_registration(domain: &str, port: u16) -> DomainRegistration {
-        let normalized = domain.replace(".roxy", BRANDING.domain_suffix());
+        let normalized = domain.replace(".localify", BRANDING.domain_suffix());
         let pattern = DomainPattern::from_name(&normalized, false).unwrap();
         let route = Route::parse(&format!("/={port}")).unwrap();
         DomainRegistration::new(pattern, vec![route])
     }
 
     fn wildcard_proxy_registration(domain: &str, port: u16) -> DomainRegistration {
-        let normalized = domain.replace(".roxy", BRANDING.domain_suffix());
+        let normalized = domain.replace(".localify", BRANDING.domain_suffix());
         let pattern = DomainPattern::from_name(&normalized, true).unwrap();
         let route = Route::parse(&format!("/={port}")).unwrap();
         DomainRegistration::new(pattern, vec![route])
@@ -2056,12 +2056,12 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("app.roxy", 3000),
+                proxy_registration("app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
         store
-            .add_domain(proxy_registration("plain.roxy", 4000))
+            .add_domain(proxy_registration("plain.localify", 4000))
             .unwrap();
 
         store
@@ -2084,7 +2084,7 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("app.roxy", 3000),
+                proxy_registration("app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2109,13 +2109,13 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("acme.roxy", 3000),
+                proxy_registration("acme.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("admin.acme.roxy", 3001),
+                proxy_registration("admin.acme.localify", 3001),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2150,13 +2150,13 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("demo.roxy", 3000),
+                proxy_registration("demo.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("web.demo.roxy", 3001),
+                proxy_registration("web.demo.localify", 3001),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2246,7 +2246,7 @@ mod tests {
 
         store
             .add_domain_with_project(
-                wildcard_proxy_registration("client-app.roxy", 3000),
+                wildcard_proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2297,13 +2297,13 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("client-app.roxy", 3000),
+                proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("admin.client-app.roxy", 3001),
+                proxy_registration("admin.client-app.localify", 3001),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2339,7 +2339,7 @@ mod tests {
             .unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("client-app.roxy", 3000),
+                proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2365,7 +2365,7 @@ mod tests {
         let project = store.create_project("Client App").unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("client-app.roxy", 3000),
+                proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2403,7 +2403,7 @@ mod tests {
         let project = store.create_project("Client App").unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("client-app.roxy", 3000),
+                proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2476,7 +2476,7 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("old.client-app.roxy", 3000),
+                proxy_registration("old.client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2499,7 +2499,7 @@ mod tests {
                 "web",
                 ProjectServiceDomainUpdate {
                     current_domain: old_domain.clone(),
-                    new_registration: proxy_registration("new.client-app.roxy", 3001),
+                    new_registration: proxy_registration("new.client-app.localify", 3001),
                 },
             )
             .unwrap();
@@ -2538,7 +2538,7 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("client-app.roxy", 3000),
+                proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2556,7 +2556,7 @@ mod tests {
             .unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("feat-auth.client-app.roxy", 3001),
+                proxy_registration("feat-auth.client-app.localify", 3001),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2585,7 +2585,7 @@ mod tests {
                     environment_slug: "feat-auth".into(),
                     service_id: "web".into(),
                     current_domain: old_env_domain,
-                    new_registration: proxy_registration("preview.client-app.roxy", 3002),
+                    new_registration: proxy_registration("preview.client-app.localify", 3002),
                 },
             )
             .unwrap();
@@ -2607,7 +2607,7 @@ mod tests {
         let project = store.create_project("Client App").unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("client-app.roxy", 3000),
+                proxy_registration("client-app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2713,7 +2713,7 @@ mod tests {
     fn replace_domain_updates_key_and_preserves_project() {
         let (_dir, store) = temp_store();
         let project = store.create_project("Client App").unwrap();
-        let current = proxy_registration("old.roxy", 3000);
+        let current = proxy_registration("old.localify", 3000);
         let current_pattern = current.pattern().clone();
 
         store
@@ -2723,7 +2723,7 @@ mod tests {
         store
             .replace_domain_with_project(
                 &current_pattern,
-                proxy_registration("new.roxy", 3001),
+                proxy_registration("new.localify", 3001),
                 None,
             )
             .unwrap();
@@ -2741,9 +2741,9 @@ mod tests {
     fn replace_domain_renames_environment_service_references() {
         let (_dir, store) = temp_store();
         let project = store.create_project("Store").unwrap();
-        let primary = proxy_registration("store.roxy", 61092);
+        let primary = proxy_registration("store.localify", 61092);
         let primary_domain = primary.display_pattern();
-        let current = proxy_registration("feat-inventory.store.roxy", 55931);
+        let current = proxy_registration("feat-inventory.store.localify", 55931);
         let current_pattern = current.pattern().clone();
         let current_domain = current.display_pattern();
 
@@ -2786,7 +2786,7 @@ mod tests {
         store
             .replace_domain_with_project(
                 &current_pattern,
-                wildcard_proxy_registration("feat-inventory.store.roxy", 55931),
+                wildcard_proxy_registration("feat-inventory.store.localify", 55931),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2806,7 +2806,7 @@ mod tests {
     fn replace_domain_renames_project_service_references() {
         let (_dir, store) = temp_store();
         let project = store.create_project("Store").unwrap();
-        let current = proxy_registration("web.store.roxy", 3000);
+        let current = proxy_registration("web.store.localify", 3000);
         let current_pattern = current.pattern().clone();
         let current_domain = current.display_pattern();
 
@@ -2829,7 +2829,7 @@ mod tests {
         store
             .replace_domain_with_project(
                 &current_pattern,
-                wildcard_proxy_registration("web.store.roxy", 3000),
+                wildcard_proxy_registration("web.store.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2843,18 +2843,18 @@ mod tests {
     #[test]
     fn replace_domain_rejects_duplicate_without_removing_current() {
         let (_dir, store) = temp_store();
-        let current = proxy_registration("old.roxy", 3000);
+        let current = proxy_registration("old.localify", 3000);
         let current_pattern = current.pattern().clone();
 
         store.add_domain(current).unwrap();
         store
-            .add_domain(proxy_registration("existing.roxy", 3001))
+            .add_domain(proxy_registration("existing.localify", 3001))
             .unwrap();
 
         let error = store
             .replace_domain_with_project(
                 &current_pattern,
-                proxy_registration("existing.roxy", 3002),
+                proxy_registration("existing.localify", 3002),
                 None,
             )
             .unwrap_err();
@@ -2870,7 +2870,7 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("app.roxy", 3000),
+                proxy_registration("app.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
@@ -2912,20 +2912,20 @@ mod tests {
 
         store
             .add_domain_with_project(
-                proxy_registration("one.roxy", 3000),
+                proxy_registration("one.localify", 3000),
                 Some(project.id.clone()),
             )
             .unwrap();
         store
             .add_domain_with_project(
-                proxy_registration("two.roxy", 3001),
+                proxy_registration("two.localify", 3001),
                 Some(project.id.clone()),
             )
             .unwrap();
 
         store
             .add_domain_with_project(
-                proxy_registration("three.roxy", 3002),
+                proxy_registration("three.localify", 3002),
                 Some(project.id.clone()),
             )
             .unwrap();

@@ -133,9 +133,9 @@ mod tests {
         let html = render_page("Test", "<p>body</p>", "", "");
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("<title>Test - Localify</title>"));
-        assert!(html.contains("roxy-header"));
+        assert!(html.contains("localify-header"));
         assert!(html.contains("<p>body</p>"));
-        assert!(html.contains("roxy-footer"));
+        assert!(html.contains("localify-footer"));
         assert!(html.contains("local-first development proxy"));
     }
 

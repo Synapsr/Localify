@@ -226,8 +226,8 @@ mod tests {
     #[test]
     fn leaf_cert_params_include_server_auth_eku() {
         let params = build_leaf_cert_params(
-            "test.roxy",
-            vec![SanType::DnsName("test.roxy".try_into().unwrap())],
+            "test.localify",
+            vec![SanType::DnsName("test.localify".try_into().unwrap())],
         );
 
         assert_eq!(

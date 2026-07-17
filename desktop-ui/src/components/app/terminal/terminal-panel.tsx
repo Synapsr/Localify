@@ -12,7 +12,7 @@ import type {
   TerminalSessionDto,
   TerminalSessionTargetDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import {
   ChevronDownIcon,

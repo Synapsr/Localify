@@ -96,7 +96,8 @@ mod tests {
 
     #[test]
     fn config_file_provider_load_missing_file() {
-        let provider = ConfigFileProvider::new(PathBuf::from("/tmp/nonexistent-roxy-test.toml"));
+        let provider =
+            ConfigFileProvider::new(PathBuf::from("/tmp/nonexistent-localify-test.toml"));
         let result = provider.load();
         // Missing file returns empty default config with no domains
         assert!(result.is_ok());

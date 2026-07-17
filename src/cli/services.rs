@@ -8,8 +8,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Select, theme::ColorfulTheme};
-use roxy::desktop::ProjectRootStore;
-use roxy::project_init::{LocalAppUpdatePolicy, detect_folder_init_plan};
+use localify::desktop::ProjectRootStore;
+use localify::project_init::{LocalAppUpdatePolicy, detect_folder_init_plan};
 use serde::Serialize;
 
 use super::context::{AppContext, effective_current_dir};
@@ -23,9 +23,9 @@ use crate::infrastructure::local_dev::{
     LocalDevLaunchPlan, resolve_local_dev_launch, resolve_localify_dev_launch,
     resolve_portable_local_dev_launch,
 };
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
-use roxy::project_init::{
+use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
     find_existing_vite_config_path,
 };
@@ -196,7 +196,7 @@ pub fn run(
     config_path: &Path,
     policy: LocalAppUpdatePolicy,
     ctx: &AppContext,
-    paths: &RoxyPaths,
+    paths: &LocalifyPaths,
 ) -> Result<()> {
     let RunArgs {
         mode,

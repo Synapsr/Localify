@@ -5,7 +5,7 @@ export interface Divider {
   at: number;
 }
 
-const STORAGE_KEY = "roxy.logs.dividers";
+const STORAGE_KEY = "localify.logs.dividers";
 
 function loadDividers(): Divider[] {
   if (typeof window === "undefined") return [];

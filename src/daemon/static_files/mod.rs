@@ -171,7 +171,7 @@ fn rewrite_redirect_location_to_include_mount_prefix<ResBody>(
 /// Build a themed 404 page for files that don't exist.
 fn build_not_found_response(uri_path: &str) -> Response {
     let path = theme::html_escape(uri_path);
-    let image_data_uri = embedded_assets::roxy_404_data_uri();
+    let image_data_uri = embedded_assets::localify_404_data_uri();
     let body = theme::render_template(
         FILE_NOT_FOUND_TEMPLATE,
         &[("{{IMAGE_DATA_URI}}", image_data_uri), ("{{PATH}}", &path)],

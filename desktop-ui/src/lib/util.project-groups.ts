@@ -1,4 +1,4 @@
-import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
+import type { DomainInfoDto, ProjectInfoDto } from "../types/localify";
 
 export interface ProjectGroup {
   project: ProjectInfoDto;

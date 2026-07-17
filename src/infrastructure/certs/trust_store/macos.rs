@@ -306,7 +306,7 @@ keychain: "/Library/Keychains/System.keychain"
 version: 512
 class: 0x80001000 
 attributes:
-    "labl"<blob>="Roxy Local Development CA"
+    "labl"<blob>="Localify Local Development CA"
 SHA-1 hash: 11AA22BB33CC44DD55EE66FF77889900AABBCCDD
 keychain: "/Library/Keychains/System.keychain"
 SHA-1 hash: AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:00:11:22:33

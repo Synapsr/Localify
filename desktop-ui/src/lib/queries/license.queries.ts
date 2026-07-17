@@ -6,7 +6,7 @@ import type {
   ImportOfflineLicenseRequest,
   KeygenSettingsUpdateRequest,
   LicensingDto,
-} from "../../types/roxy";
+} from "../../types/localify";
 import { invalidateBootstrapAnd } from "./shared";
 
 const licenseQueryKeys = {

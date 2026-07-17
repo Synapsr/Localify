@@ -2,15 +2,15 @@ use std::fs;
 
 use crate::application::ports::{IosSimulatorTrust, SystemSetup};
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 
-/// Infrastructure service for filesystem operations required by Roxy.
+/// Infrastructure service for filesystem operations required by Localify.
 pub struct FileSystemSetup<'a> {
-    paths: &'a RoxyPaths,
+    paths: &'a LocalifyPaths,
 }
 
 impl<'a> FileSystemSetup<'a> {
-    pub fn new(paths: &'a RoxyPaths) -> Self {
+    pub fn new(paths: &'a LocalifyPaths) -> Self {
         Self { paths }
     }
 }

@@ -1,7 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 
 import { tauriClient } from "../tauri-client";
-import type { BootstrapDto } from "../../types/roxy";
+import type { BootstrapDto } from "../../types/localify";
 import { bootstrapQueryKey } from "./shared";
 
 export const bootstrapQueries = {

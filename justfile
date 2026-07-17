@@ -1,4 +1,4 @@
-# Roxy Justfile - Development task automation
+# Localify Justfile - Development task automation
 
 # Default recipe (show available commands)
 default:
@@ -33,7 +33,7 @@ fix:
 build-release:
     cargo build --release
 
-# Run roxy daemon (requires installation)
+# Run localify daemon (requires installation)
 run:
     cargo run
 

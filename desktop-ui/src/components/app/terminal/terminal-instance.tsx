@@ -5,7 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 
-import type { TerminalSessionDto } from "@/types/roxy";
+import type { TerminalSessionDto } from "@/types/localify";
 
 import { cn } from "@/lib/utils";
 import { useTerminal } from "@/providers/terminal-provider";

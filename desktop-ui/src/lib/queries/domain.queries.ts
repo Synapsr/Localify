@@ -9,7 +9,7 @@ import type {
   RegisterDomainRequest,
   RemoveRouteRequest,
   UpdateDomainRequest,
-} from "../../types/roxy";
+} from "../../types/localify";
 import { invalidateBootstrapAnd } from "./shared";
 import { projectQueries } from "./project.queries";
 

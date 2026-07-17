@@ -1,4 +1,4 @@
-# Roxy on Linux
+# Localify on Linux
 
 This guide covers Linux-specific setup details and
 troubleshooting. For general usage, see the
@@ -6,7 +6,7 @@ troubleshooting. For general usage, see the
 
 ## Supported Distributions
 
-Roxy is tested on **Ubuntu 22.04+** and **Debian 12+**.
+Localify is tested on **Ubuntu 22.04+** and **Debian 12+**.
 It should work on any distribution that uses:
 
 - **systemd-resolved** for DNS
@@ -19,29 +19,29 @@ are not yet officially supported.
 
 ### DNS Resolution
 
-On macOS, Roxy uses `/etc/resolver/roxy` to route `.roxy`
+On macOS, Localify uses `/etc/resolver/localify` to route `.localify`
 DNS queries. On Linux, it uses **systemd-resolved** with
 a drop-in configuration file:
 
 ```text
-/etc/systemd/resolved.conf.d/roxy.conf
+/etc/systemd/resolved.conf.d/localify.conf
 ```
 
-This file tells systemd-resolved to forward all `.roxy`
-queries to Roxy's built-in DNS server on port 1053.
+This file tells systemd-resolved to forward all `.localify`
+queries to Localify's built-in DNS server on port 1053.
 Other DNS queries are unaffected.
 
-The file is created automatically by `sudo roxy install`
-and removed by `sudo roxy uninstall`.
+The file is created automatically by `sudo localify install`
+and removed by `sudo localify uninstall`.
 
 ### Certificate Trust
 
 On macOS, the Root CA is added to the system Keychain.
-On Linux, Roxy copies the Root CA to the system
+On Linux, Localify copies the Root CA to the system
 certificate store and runs `update-ca-certificates`:
 
 ```text
-/usr/local/share/ca-certificates/roxy-ca.crt
+/usr/local/share/ca-certificates/localify-ca.crt
 ```
 
 This makes the CA trusted by `curl`, `wget`, `git`,
@@ -55,7 +55,7 @@ Snap-packaged browsers (Firefox, Chromium) run in a
 sandbox and **cannot access the system's certificate
 trust store**. Even with proper system CA installation,
 these browsers will show certificate warnings for
-`.roxy` domains.
+`.localify` domains.
 
 This does **not** affect:
 
@@ -66,7 +66,7 @@ This does **not** affect:
 ### Fix: Import the CA with certutil
 
 This is a **one-time** step per browser. Once the Root CA
-is imported, all `.roxy` domains (including newly
+is imported, all `.localify` domains (including newly
 registered ones) are automatically trusted.
 
 **1. Install certutil:**
@@ -75,13 +75,13 @@ registered ones) are automatically trusted.
 sudo apt install libnss3-tools
 ```
 
-**2. Import the Roxy CA into your browser:**
+**2. Import the Localify CA into your browser:**
 
 **Snap Firefox:**
 
 ```bash
-certutil -A -n "Roxy Local Development CA" -t "CT,C,C" \
-  -i /etc/roxy/ca.crt \
+certutil -A -n "Localify Local Development CA" -t "CT,C,C" \
+  -i /etc/localify/ca.crt \
   -d sql:$(find ~/snap/firefox/common/.mozilla/firefox \
     -name '*.default*' -type d | head -1)/
 ```
@@ -89,8 +89,8 @@ certutil -A -n "Roxy Local Development CA" -t "CT,C,C" \
 **Snap Chromium:**
 
 ```bash
-certutil -A -n "Roxy Local Development CA" -t "CT,C,C" \
-  -i /etc/roxy/ca.crt \
+certutil -A -n "Localify Local Development CA" -t "CT,C,C" \
+  -i /etc/localify/ca.crt \
   -d sql:$(find ~/snap/chromium -name 'nssdb' \
     -type d | head -1)/
 ```
@@ -108,12 +108,12 @@ database, bypassing the sandbox limitation.
 
 ### Removing the CA
 
-To remove the Roxy CA from a snap browser:
+To remove the Localify CA from a snap browser:
 
 **Firefox:**
 
 ```bash
-certutil -D -n "Roxy Local Development CA" \
+certutil -D -n "Localify Local Development CA" \
   -d sql:$(find ~/snap/firefox/common/.mozilla/firefox \
     -name '*.default*' -type d | head -1)/
 ```
@@ -121,7 +121,7 @@ certutil -D -n "Roxy Local Development CA" \
 **Chromium:**
 
 ```bash
-certutil -D -n "Roxy Local Development CA" \
+certutil -D -n "Localify Local Development CA" \
   -d sql:$(find ~/snap/chromium -name 'nssdb' \
     -type d | head -1)/
 ```
@@ -130,7 +130,7 @@ certutil -D -n "Roxy Local Development CA" \
 
 ### DNS Not Resolving
 
-If `curl https://myapp.roxy` fails with "Could not
+If `curl https://myapp.localify` fails with "Could not
 resolve host":
 
 **1. Check if systemd-resolved has the config:**
@@ -140,12 +140,12 @@ resolvectl status
 ```
 
 Look for `DNS Servers: 127.0.0.1:1053` and
-`DNS Domain: ~roxy` in the global section.
+`DNS Domain: ~localify` in the global section.
 
-**2. Check if the Roxy DNS server responds:**
+**2. Check if the Localify DNS server responds:**
 
 ```bash
-dig @127.0.0.1 -p 1053 myapp.roxy
+dig @127.0.0.1 -p 1053 myapp.localify
 ```
 
 If this works but `resolvectl query` doesn't, the
@@ -158,10 +158,10 @@ sudo systemctl restart systemd-resolved
 **3. Verify the drop-in file exists:**
 
 ```bash
-cat /etc/systemd/resolved.conf.d/roxy.conf
+cat /etc/systemd/resolved.conf.d/localify.conf
 ```
 
-If missing, re-run `sudo roxy install`.
+If missing, re-run `sudo localify install`.
 
 ### Port Already in Use
 
@@ -174,22 +174,22 @@ sudo ss -tlnp | grep ':1053\b'
 ```
 
 Common culprits: Apache (`apache2`), nginx, or another
-Roxy instance. Stop the conflicting service or change
-Roxy's ports in `/etc/roxy/config.toml`.
+Localify instance. Stop the conflicting service or change
+Localify's ports in `/etc/localify/config.toml`.
 
 ### Auto-Start with systemd
 
-Create a service file to start Roxy at boot:
+Create a service file to start Localify at boot:
 
 ```bash
-sudo tee /etc/systemd/system/roxy.service > /dev/null <<'EOF'
+sudo tee /etc/systemd/system/localify.service > /dev/null <<'EOF'
 [Unit]
-Description=Roxy local development proxy
+Description=Localify local development proxy
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/roxy start --foreground
+ExecStart=/usr/local/bin/localify start --foreground
 Restart=on-failure
 
 [Install]
@@ -197,11 +197,11 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now roxy
+sudo systemctl enable --now localify
 ```
 
 Check status:
 
 ```bash
-sudo systemctl status roxy
+sudo systemctl status localify
 ```

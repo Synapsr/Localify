@@ -1,12 +1,12 @@
-# git-cliff configuration for Roxy
+# git-cliff configuration for Localify
 # See: https://git-cliff.org/docs/configuration
 
 [changelog]
 # Header template
 header = """
-# Roxy Changelog\n
-Welcome to the Roxy changelog! This document tracks all notable changes to Roxy,
-a local development proxy tool that gives your projects custom `.roxy` domains with
+# Localify Changelog\n
+Welcome to the Localify changelog! This document tracks all notable changes to Localify,
+a local development proxy tool that gives your projects custom `.localify` domains with
 automatic HTTPS certificates. Think Laravel Valet, but written in Rust.\n
 All entries follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format,
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).\n

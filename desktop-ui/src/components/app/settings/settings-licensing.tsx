@@ -6,7 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
 
-import type { LicensingDto } from "@/types/roxy";
+import type { LicensingDto } from "@/types/localify";
 
 import {
   ArrowRightIcon,

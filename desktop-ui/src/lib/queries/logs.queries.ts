@@ -1,6 +1,6 @@
 import { mutationOptions, queryOptions } from "@tanstack/react-query";
 
-import type { AvailablePortDto, LogsDto, LogsRequest } from "../../types/roxy";
+import type { AvailablePortDto, LogsDto, LogsRequest } from "../../types/localify";
 
 import { tauriClient } from "../tauri-client";
 

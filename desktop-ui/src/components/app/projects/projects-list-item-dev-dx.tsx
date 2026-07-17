@@ -8,7 +8,7 @@ import type {
   ProjectEnvironmentInfoDto,
   ProjectServiceInfoDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import { ChevronDownIcon } from "@/components/icons";
 import { cn } from "@/lib/utils";

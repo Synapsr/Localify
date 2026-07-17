@@ -10,7 +10,7 @@ import {
 } from "react";
 
 import { tauriClient } from "@/lib/tauri-client";
-import type { AppUpdateInfoDto } from "@/types/roxy";
+import type { AppUpdateInfoDto } from "@/types/localify";
 
 export type AppUpdateStatus =
   | "idle"

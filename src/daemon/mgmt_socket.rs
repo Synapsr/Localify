@@ -202,8 +202,7 @@ mod tests {
     use tokio::net::UnixStream;
 
     fn test_reg(domain: &str) -> DomainRegistration {
-        let normalized = domain.replace(".roxy", ".localify");
-        let name = DomainName::new(normalized).unwrap();
+        let name = DomainName::new(domain).unwrap();
         let pattern = DomainPattern::Exact(name);
         let routes = vec![Route::parse("/=3000").unwrap()];
         DomainRegistration::new(pattern, routes)
@@ -299,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn serve_status_returns_pid_and_count() {
         let (sock, cancel, _rx, _dir) =
-            start_server(vec![test_reg("app.roxy"), test_reg("api.roxy")]).await;
+            start_server(vec![test_reg("app.localify"), test_reg("api.localify")]).await;
 
         let resp = send_command(&sock, r#"{"cmd":"status"}"#).await;
         assert_eq!(resp["ok"], true);
@@ -311,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_list_returns_domain_details() {
-        let (sock, cancel, _rx, _dir) = start_server(vec![test_reg("app.roxy")]).await;
+        let (sock, cancel, _rx, _dir) = start_server(vec![test_reg("app.localify")]).await;
 
         let resp = send_command(&sock, r#"{"cmd":"list"}"#).await;
         assert_eq!(resp["ok"], true);
@@ -330,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_reload_pushes_to_channel() {
-        let (sock, cancel, mut rx, _dir) = start_server(vec![test_reg("old.roxy")]).await;
+        let (sock, cancel, mut rx, _dir) = start_server(vec![test_reg("old.localify")]).await;
 
         let resp = send_command(&sock, r#"{"cmd":"reload"}"#).await;
         assert_eq!(resp["ok"], true);
@@ -358,7 +357,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_plain_text_status() {
-        let (sock, cancel, _rx, _dir) = start_server(vec![test_reg("app.roxy")]).await;
+        let (sock, cancel, _rx, _dir) = start_server(vec![test_reg("app.localify")]).await;
 
         let resp = send_command(&sock, "status").await;
         assert_eq!(resp["ok"], true);

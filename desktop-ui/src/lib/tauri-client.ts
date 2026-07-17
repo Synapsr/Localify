@@ -83,7 +83,7 @@ import type {
   UpdateDomainRequest,
   UpdateLauncherPreferencesRequest,
   UpdateProjectRequest,
-} from "../types/roxy";
+} from "../types/localify";
 
 import { addProjectServiceRequestSchema } from "./validators/validator.add-project-service";
 import { updateAutostartRequestSchema } from "./validators/validator.autostart";
@@ -196,7 +196,7 @@ export interface DesktopClient {
   listProjects(): Promise<ProjectInfoDto[]>;
   getAvailablePort(): Promise<AvailablePortDto>;
   detectProjectInitPlan(request: DetectProjectInitPlanRequest): Promise<DetectProjectInitPlanDto>;
-  installRoxy(): Promise<InstallResultDto>;
+  installLocalify(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
   restartSystemHelper(): Promise<void>;
   setupNodeTrust(): Promise<NodeTrustDto>;
@@ -205,7 +205,7 @@ export interface DesktopClient {
   listPortConflicts(): Promise<PortConflictDto[]>;
   killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
-  uninstallRoxy(): Promise<UninstallResultDto>;
+  uninstallLocalify(): Promise<UninstallResultDto>;
   createProject(request: CreateProjectRequest): Promise<ProjectInfoDto>;
   createProjectWithDomains(request: CreateProjectWithDomainsRequest): Promise<ProjectInfoDto>;
   initProjectFromFolder(
@@ -311,7 +311,7 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("detect_project_init_plan", {
         request: detectProjectInitPlanRequestSchema.parse(request),
       }),
-    installRoxy: () => tauriInvoke("install_roxy"),
+    installLocalify: () => tauriInvoke("install_localify"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
     restartSystemHelper: () => tauriInvoke("restart_system_helper"),
     setupNodeTrust: () => tauriInvoke("setup_node_trust"),
@@ -323,7 +323,7 @@ export function createDesktopClient(): DesktopClient {
         request: killPortConflictRequestSchema.parse(request),
       }),
     getUninstallPreview: () => tauriInvoke("get_uninstall_preview"),
-    uninstallRoxy: () => tauriInvoke("uninstall_roxy"),
+    uninstallLocalify: () => tauriInvoke("uninstall_localify"),
     createProject: (request) => tauriInvoke("create_project", { request }),
     createProjectWithDomains: (request) =>
       tauriInvoke("create_project_with_domains", {

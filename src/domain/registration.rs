@@ -156,7 +156,7 @@ mod tests {
     use crate::domain::ProxyTarget;
 
     fn make_pattern(name: &str) -> DomainPattern {
-        let normalized = name.replace(".roxy", BRANDING.domain_suffix());
+        let normalized = name.replace(".localify", BRANDING.domain_suffix());
         DomainPattern::Exact(DomainName::new(normalized).unwrap())
     }
 
@@ -171,7 +171,8 @@ mod tests {
 
     #[test]
     fn new_creates_registration_with_https_disabled() {
-        let reg = DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+        let reg =
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         assert!(!reg.is_https_enabled());
         assert_eq!(reg.routes().len(), 1);
         assert_eq!(reg.domain().as_str(), "myapp.localify");
@@ -180,7 +181,7 @@ mod tests {
     #[test]
     fn with_source_sets_source() {
         let reg = DomainRegistration::with_source(
-            make_pattern("myapp.roxy"),
+            make_pattern("myapp.localify"),
             vec![proxy_route("/", 3000)],
             RegistrationSource::External,
         );
@@ -192,7 +193,7 @@ mod tests {
     #[test]
     fn enable_https_sets_flag() {
         let mut reg =
-            DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         assert!(!reg.is_https_enabled());
         reg.enable_https();
         assert!(reg.is_https_enabled());
@@ -202,7 +203,8 @@ mod tests {
 
     #[test]
     fn match_route_returns_exact_match() {
-        let reg = DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+        let reg =
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         let matched = reg.match_route("/").unwrap();
         assert_eq!(matched.path().as_str(), "/");
     }
@@ -210,7 +212,7 @@ mod tests {
     #[test]
     fn match_route_longest_prefix_wins() {
         let reg = DomainRegistration::new(
-            make_pattern("myapp.roxy"),
+            make_pattern("myapp.localify"),
             vec![proxy_route("/", 3000), proxy_route("/api", 4000)],
         );
 
@@ -225,8 +227,10 @@ mod tests {
 
     #[test]
     fn match_route_returns_none_when_no_match() {
-        let reg =
-            DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/api", 4000)]);
+        let reg = DomainRegistration::new(
+            make_pattern("myapp.localify"),
+            vec![proxy_route("/api", 4000)],
+        );
         // /other doesn't match /api prefix
         assert!(reg.match_route("/other").is_none());
     }
@@ -236,7 +240,7 @@ mod tests {
     #[test]
     fn add_route_succeeds_for_new_path() {
         let mut reg =
-            DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         assert!(reg.add_route(proxy_route("/api", 4000)).is_ok());
         assert_eq!(reg.routes().len(), 2);
     }
@@ -244,7 +248,7 @@ mod tests {
     #[test]
     fn add_route_fails_for_duplicate_path() {
         let mut reg =
-            DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         let result = reg.add_route(proxy_route("/", 4000));
         assert!(matches!(result, Err(RegistrationError::RouteExists(_))));
     }
@@ -254,7 +258,7 @@ mod tests {
     #[test]
     fn remove_route_succeeds() {
         let mut reg = DomainRegistration::new(
-            make_pattern("myapp.roxy"),
+            make_pattern("myapp.localify"),
             vec![proxy_route("/", 3000), proxy_route("/api", 4000)],
         );
         let path = PathPrefix::new("/api").unwrap();
@@ -265,7 +269,7 @@ mod tests {
     #[test]
     fn remove_route_fails_for_last_route() {
         let mut reg =
-            DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         let path = PathPrefix::new("/").unwrap();
         let result = reg.remove_route(&path);
         assert!(matches!(
@@ -277,7 +281,7 @@ mod tests {
     #[test]
     fn remove_route_fails_for_nonexistent_path() {
         let mut reg = DomainRegistration::new(
-            make_pattern("myapp.roxy"),
+            make_pattern("myapp.localify"),
             vec![proxy_route("/", 3000), proxy_route("/api", 4000)],
         );
         let path = PathPrefix::new("/other").unwrap();
@@ -289,7 +293,8 @@ mod tests {
 
     #[test]
     fn validate_passes_for_proxy_routes() {
-        let reg = DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+        let reg =
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         assert!(reg.validate().is_ok());
     }
 
@@ -298,7 +303,7 @@ mod tests {
     #[test]
     fn display_pattern_delegates_to_domain_pattern() {
         let exact =
-            DomainRegistration::new(make_pattern("myapp.roxy"), vec![proxy_route("/", 3000)]);
+            DomainRegistration::new(make_pattern("myapp.localify"), vec![proxy_route("/", 3000)]);
         assert_eq!(exact.display_pattern(), "myapp.localify");
 
         let wildcard = DomainRegistration::new(

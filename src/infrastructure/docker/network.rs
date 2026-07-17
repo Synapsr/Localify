@@ -5,9 +5,9 @@ use std::collections::HashMap;
 /// Returns a map of container_port -> host_port for ports published
 /// to the host (via `-p` or `ports:` in compose).
 ///
-/// Roxy runs on the host and proxies to containers via their published
+/// Localify runs on the host and proxies to containers via their published
 /// ports. Container-to-container resolution uses `extra_hosts` pointing
-/// at `host-gateway` so traffic flows through Roxy on the host.
+/// at `host-gateway` so traffic flows through Localify on the host.
 pub fn get_host_port_mappings(
     ports: &Option<HashMap<String, Option<Vec<bollard::models::PortBinding>>>>,
 ) -> HashMap<u16, u16> {

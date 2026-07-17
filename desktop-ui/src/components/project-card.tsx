@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { projectMutations } from "../lib/queries";
-import type { DomainInfoDto, ProjectInfoDto } from "../types/roxy";
+import type { DomainInfoDto, ProjectInfoDto } from "../types/localify";
 import { DomainCard } from "./domain-card";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";

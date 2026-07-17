@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow, bail};
-use roxy::desktop::dto::RemoveProjectRequest;
+use localify::desktop::dto::RemoveProjectRequest;
 
 use super::backend::WriteBackend;
 use super::context::AppContext;

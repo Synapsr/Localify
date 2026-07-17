@@ -5,7 +5,7 @@ import type { AppHotkeys, AppHotkeyId } from "@/lib/hotkeys";
 import { defaultAppHotkeys } from "@/lib/hotkeys";
 import { parseStoredHotkeys } from "@/lib/validators/validator.hotkeys";
 
-const HOTKEYS_STORAGE_KEY = "roxy.app-hotkeys";
+const HOTKEYS_STORAGE_KEY = "localify.app-hotkeys";
 
 interface HotkeysContextValue {
   hotkeys: AppHotkeys;

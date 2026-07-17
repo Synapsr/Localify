@@ -29,7 +29,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "roxy-test-${{ matrix.os }}"
+          shared-key: "localify-test-${{ matrix.os }}"
           cache-on-failure: true
 
       - name: Run unit tests
@@ -51,7 +51,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "roxy-release-macos"
+          shared-key: "localify-release-macos"
           cache-on-failure: true
 
       - name: Extract version from tag
@@ -68,33 +68,33 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Build release binary
-        run: cargo build --release --bin roxy
+        run: cargo build --release --bin localify
 
       - name: Package binary
         run: |
           cd target/release
           # Copy raw binary with versioned name for direct downloads
-          cp roxy roxy-${{ steps.version.outputs.version }}-macos-arm64
-          # Create tarball with binary named "roxy" for Homebrew
-          tar -czf roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz roxy
+          cp localify localify-${{ steps.version.outputs.version }}-macos-arm64
+          # Create tarball with binary named "localify" for Homebrew
+          tar -czf localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz localify
 
       - name: Generate SHA256 checksums
         run: |
           cd target/release
-          shasum -a 256 roxy-${{ steps.version.outputs.version }}-macos-arm64 > roxy-${{ steps.version.outputs.version }}-macos-arm64.sha256
-          shasum -a 256 roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz > roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
-          cat roxy-${{ steps.version.outputs.version }}-macos-arm64.sha256
-          cat roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
+          shasum -a 256 localify-${{ steps.version.outputs.version }}-macos-arm64 > localify-${{ steps.version.outputs.version }}-macos-arm64.sha256
+          shasum -a 256 localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz > localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
+          cat localify-${{ steps.version.outputs.version }}-macos-arm64.sha256
+          cat localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
           path: |
-            target/release/roxy-${{ steps.version.outputs.version }}-macos-arm64
-            target/release/roxy-${{ steps.version.outputs.version }}-macos-arm64.sha256
-            target/release/roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz
-            target/release/roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
+            target/release/localify-${{ steps.version.outputs.version }}-macos-arm64
+            target/release/localify-${{ steps.version.outputs.version }}-macos-arm64.sha256
+            target/release/localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz
+            target/release/localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
 
   build-linux:
     needs: test
@@ -109,7 +109,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "roxy-release-linux"
+          shared-key: "localify-release-linux"
           cache-on-failure: true
 
       - name: Extract version from tag
@@ -126,33 +126,33 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Build release binary
-        run: cargo build --release --bin roxy
+        run: cargo build --release --bin localify
 
       - name: Package binary
         run: |
           cd target/release
           # Copy raw binary with versioned name for direct downloads
-          cp roxy roxy-${{ steps.version.outputs.version }}-linux-amd64
+          cp localify localify-${{ steps.version.outputs.version }}-linux-amd64
           # Create tarball
-          tar -czf roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz roxy
+          tar -czf localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz localify
 
       - name: Generate SHA256 checksums
         run: |
           cd target/release
-          sha256sum roxy-${{ steps.version.outputs.version }}-linux-amd64 > roxy-${{ steps.version.outputs.version }}-linux-amd64.sha256
-          sha256sum roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz > roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
-          cat roxy-${{ steps.version.outputs.version }}-linux-amd64.sha256
-          cat roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+          sha256sum localify-${{ steps.version.outputs.version }}-linux-amd64 > localify-${{ steps.version.outputs.version }}-linux-amd64.sha256
+          sha256sum localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz > localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+          cat localify-${{ steps.version.outputs.version }}-linux-amd64.sha256
+          cat localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-artifacts
           path: |
-            target/release/roxy-${{ steps.version.outputs.version }}-linux-amd64
-            target/release/roxy-${{ steps.version.outputs.version }}-linux-amd64.sha256
-            target/release/roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
-            target/release/roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+            target/release/localify-${{ steps.version.outputs.version }}-linux-amd64
+            target/release/localify-${{ steps.version.outputs.version }}-linux-amd64.sha256
+            target/release/localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+            target/release/localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
 
   release:
     needs: [build-macos, build-linux]
@@ -207,45 +207,17 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Roxy ${{ steps.version.outputs.version }}
+          name: Localify ${{ steps.version.outputs.version }}
           body_path: release_notes.md
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           files: |
-            artifacts/roxy-${{ steps.version.outputs.version }}-macos-arm64
-            artifacts/roxy-${{ steps.version.outputs.version }}-macos-arm64.sha256
-            artifacts/roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz
-            artifacts/roxy-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
-            artifacts/roxy-${{ steps.version.outputs.version }}-linux-amd64
-            artifacts/roxy-${{ steps.version.outputs.version }}-linux-amd64.sha256
-            artifacts/roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
-            artifacts/roxy-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
+            artifacts/localify-${{ steps.version.outputs.version }}-macos-arm64
+            artifacts/localify-${{ steps.version.outputs.version }}-macos-arm64.sha256
+            artifacts/localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz
+            artifacts/localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
+            artifacts/localify-${{ steps.version.outputs.version }}-linux-amd64
+            artifacts/localify-${{ steps.version.outputs.version }}-linux-amd64.sha256
+            artifacts/localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+            artifacts/localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update Homebrew formula
-        if: steps.version.outputs.prerelease == 'false'
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SHA256=$(cat artifacts/roxy-${VERSION}-macos-arm64.tar.gz.sha256 | awk '{print $1}')
-          URL="https://github.com/rbas/roxy/releases/download/v${VERSION}/roxy-${VERSION}-macos-arm64.tar.gz"
-          LINUX_SHA256=$(cat artifacts/roxy-${VERSION}-linux-amd64.tar.gz.sha256 | awk '{print $1}')
-          LINUX_URL="https://github.com/rbas/roxy/releases/download/v${VERSION}/roxy-${VERSION}-linux-amd64.tar.gz"
-
-          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/rbas/homebrew-roxy.git /tmp/homebrew-roxy
-
-          sed -e "s|__VERSION__|${VERSION}|g" \
-              -e "s|__URL__|${URL}|g" \
-              -e "s|__SHA256__|${SHA256}|g" \
-              -e "s|__LINUX_URL__|${LINUX_URL}|g" \
-              -e "s|__LINUX_SHA256__|${LINUX_SHA256}|g" \
-              scripts/formula.rb.template \
-              > /tmp/homebrew-roxy/Formula/roxy.rb
-
-          cd /tmp/homebrew-roxy
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/roxy.rb
-          git commit -m "chore: update roxy to ${VERSION}"
-          git push

@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 
-import type { FolderInitServiceDto, ProjectInfoDto, ProjectServiceInfoDto } from "@/types/roxy";
+import type { FolderInitServiceDto, ProjectInfoDto, ProjectServiceInfoDto } from "@/types/localify";
 
 import { Button } from "@/components/ui/button";
 import {

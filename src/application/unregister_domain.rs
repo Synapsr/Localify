@@ -59,29 +59,29 @@ mod tests {
 
     #[test]
     fn unregisters_domain_and_removes_cert() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let certs = InMemoryCertificateManager::new();
         // Install cert first so it exists
-        certs.create_and_install(&exact("myapp.roxy")).unwrap();
+        certs.create_and_install(&exact("myapp.localify")).unwrap();
         let svc = UnregisterDomain::new(&repo, &certs);
 
-        let result = svc.execute(&exact("myapp.roxy")).unwrap();
+        let result = svc.execute(&exact("myapp.localify")).unwrap();
 
         assert!(matches!(result.cert_outcome, StepOutcome::Success(_)));
-        assert!(repo.get(&exact("myapp.roxy")).unwrap().is_none());
-        assert!(!certs.exists(&exact("myapp.roxy")));
+        assert!(repo.get(&exact("myapp.localify")).unwrap().is_none());
+        assert!(!certs.exists(&exact("myapp.localify")));
     }
 
     #[test]
     fn unregisters_domain_without_cert() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let certs = InMemoryCertificateManager::new();
         let svc = UnregisterDomain::new(&repo, &certs);
 
-        let result = svc.execute(&exact("myapp.roxy")).unwrap();
+        let result = svc.execute(&exact("myapp.localify")).unwrap();
 
         assert!(matches!(result.cert_outcome, StepOutcome::Skipped(_)));
-        assert!(repo.get(&exact("myapp.roxy")).unwrap().is_none());
+        assert!(repo.get(&exact("myapp.localify")).unwrap().is_none());
     }
 
     #[test]
@@ -90,17 +90,17 @@ mod tests {
         let certs = InMemoryCertificateManager::new();
         let svc = UnregisterDomain::new(&repo, &certs);
 
-        let err = svc.execute(&exact("unknown.roxy")).err().unwrap();
+        let err = svc.execute(&exact("unknown.localify")).err().unwrap();
         assert!(err.to_string().contains("not registered"));
     }
 
     #[test]
     fn preview_returns_registration() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let certs = InMemoryCertificateManager::new();
         let svc = UnregisterDomain::new(&repo, &certs);
 
-        let reg = svc.preview(&exact("myapp.roxy")).unwrap();
+        let reg = svc.preview(&exact("myapp.localify")).unwrap();
         assert_eq!(reg.domain().as_str(), "myapp.localify");
     }
 }

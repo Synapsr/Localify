@@ -62,12 +62,12 @@ mod tests {
 
     #[test]
     fn adds_route_to_existing_domain() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let svc = ManageRoutes::new(&repo);
 
         let route = svc
             .add_route(
-                &exact("myapp.roxy"),
+                &exact("myapp.localify"),
                 PathPrefix::new("/api").unwrap(),
                 RouteTarget::Proxy(ProxyTarget::parse("3001").unwrap()),
             )
@@ -75,7 +75,7 @@ mod tests {
 
         assert_eq!(route.path().as_str(), "/api");
         // Verify persisted
-        let reg = repo.get(&exact("myapp.roxy")).unwrap().unwrap();
+        let reg = repo.get(&exact("myapp.localify")).unwrap().unwrap();
         assert_eq!(reg.routes().len(), 2);
     }
 
@@ -86,7 +86,7 @@ mod tests {
 
         let err = svc
             .add_route(
-                &exact("unknown.roxy"),
+                &exact("unknown.localify"),
                 PathPrefix::new("/api").unwrap(),
                 RouteTarget::Proxy(ProxyTarget::parse("3001").unwrap()),
             )
@@ -97,12 +97,12 @@ mod tests {
 
     #[test]
     fn add_route_fails_for_duplicate_path() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let svc = ManageRoutes::new(&repo);
 
         let err = svc
             .add_route(
-                &exact("myapp.roxy"),
+                &exact("myapp.localify"),
                 PathPrefix::new("/").unwrap(),
                 RouteTarget::Proxy(ProxyTarget::parse("4000").unwrap()),
             )
@@ -114,25 +114,25 @@ mod tests {
     #[test]
     fn removes_route_from_domain() {
         let repo = InMemoryDomainRepository::with_domains(vec![DomainRegistration::new(
-            exact("myapp.roxy"),
+            exact("myapp.localify"),
             vec![proxy_route("/", 3000), proxy_route("/api", 3001)],
         )]);
         let svc = ManageRoutes::new(&repo);
 
-        svc.remove_route(&exact("myapp.roxy"), &PathPrefix::new("/api").unwrap())
+        svc.remove_route(&exact("myapp.localify"), &PathPrefix::new("/api").unwrap())
             .unwrap();
 
-        let reg = repo.get(&exact("myapp.roxy")).unwrap().unwrap();
+        let reg = repo.get(&exact("myapp.localify")).unwrap().unwrap();
         assert_eq!(reg.routes().len(), 1);
     }
 
     #[test]
     fn remove_last_route_fails() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let svc = ManageRoutes::new(&repo);
 
         let err = svc
-            .remove_route(&exact("myapp.roxy"), &PathPrefix::new("/").unwrap())
+            .remove_route(&exact("myapp.localify"), &PathPrefix::new("/").unwrap())
             .err()
             .unwrap();
         assert!(err.to_string().contains("Cannot remove"));
@@ -140,10 +140,10 @@ mod tests {
 
     #[test]
     fn list_routes_returns_registration() {
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("myapp.localify")]);
         let svc = ManageRoutes::new(&repo);
 
-        let reg = svc.list_routes(&exact("myapp.roxy")).unwrap();
+        let reg = svc.list_routes(&exact("myapp.localify")).unwrap();
         assert_eq!(reg.routes().len(), 1);
     }
 
@@ -152,7 +152,7 @@ mod tests {
         let repo = InMemoryDomainRepository::new();
         let svc = ManageRoutes::new(&repo);
 
-        let err = svc.list_routes(&exact("unknown.roxy")).err().unwrap();
+        let err = svc.list_routes(&exact("unknown.localify")).err().unwrap();
         assert!(err.to_string().contains("not registered"));
     }
 }

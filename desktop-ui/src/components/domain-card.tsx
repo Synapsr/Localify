@@ -5,7 +5,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { domainMutations } from "../lib/queries";
-import type { DomainInfoDto, ProjectInfoDto, RouteDto } from "../types/roxy";
+import type { DomainInfoDto, ProjectInfoDto, RouteDto } from "../types/localify";
 
 interface DomainCardProps {
   domain: DomainInfoDto;

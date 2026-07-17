@@ -80,7 +80,7 @@ use crate::infrastructure::licensing::{
 };
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::network::{get_lan_ip, get_network_info};
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
@@ -2543,7 +2543,7 @@ impl DesktopApi {
         if self.should_use_system_helper() {
             let desktop_trust_step = self.remove_desktop_ca_trust_step();
             let helper = self.ensure_helper_running()?;
-            let mut result = helper.uninstall_roxy()?;
+            let mut result = helper.uninstall_localify()?;
             let uid = current_uid()?;
 
             if let Some(step) = desktop_trust_step {
@@ -3024,7 +3024,7 @@ impl DesktopApi {
         }
     }
 
-    fn load_config_and_paths(&self) -> Result<(Config, RoxyPaths)> {
+    fn load_config_and_paths(&self) -> Result<(Config, LocalifyPaths)> {
         let config = self.config_store().load()?;
         let paths = config.paths.clone();
         Ok((config, paths))
@@ -3710,7 +3710,7 @@ impl DesktopApi {
         self.config_store()
             .load()
             .map(|config| config.paths.data_dir.join("ca.crt"))
-            .unwrap_or_else(|_| RoxyPaths::default().data_dir.join("ca.crt"))
+            .unwrap_or_else(|_| LocalifyPaths::default().data_dir.join("ca.crt"))
     }
 
     #[cfg(target_os = "macos")]
@@ -5988,7 +5988,7 @@ fn domain_pattern_from_display(value: &str) -> Result<DomainPattern> {
 ///
 /// Returns whether the daemon was reloaded; a daemon that is not running is
 /// not an error, but a daemon that fails to reload is.
-fn reload_running_daemon(paths: &RoxyPaths) -> Result<bool> {
+fn reload_running_daemon(paths: &LocalifyPaths) -> Result<bool> {
     match MgmtSocketClient::new(&paths.socket_path).reload() {
         Ok(()) => Ok(true),
         Err(crate::application::ports::DaemonConnectionError::NotRunning) => Ok(false),
@@ -7390,7 +7390,7 @@ mod tests {
         service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
         unique_environment_slug, validate_settings_snapshot,
     };
-    use crate::config::{RoxyPaths, StoredLicense};
+    use crate::config::{LocalifyPaths, StoredLicense};
     use crate::desktop::dto::{
         AttachProjectWorktreeRequest, CreateProjectDomainRequest, CreateProjectWithDomainsRequest,
         EnvironmentFileRequest, InitProjectRequest, InitProjectServiceRequest,
@@ -7542,7 +7542,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let api = DesktopApi::new(
             temp_dir.path().join("config.toml"),
-            temp_dir.path().join("roxy"),
+            temp_dir.path().join("localify"),
         );
         let unmarked_root = temp_dir.path().join("unmarked");
         let marked_root = temp_dir.path().join("marked");
@@ -9228,19 +9228,19 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.toml");
         let store = ConfigStore::new(config_path.clone());
-        let paths = RoxyPaths {
+        let paths = LocalifyPaths {
             data_dir: temp_dir.path().join("data"),
-            pid_file: temp_dir.path().join("roxy.pid"),
-            log_file: temp_dir.path().join("roxy.log"),
+            pid_file: temp_dir.path().join("localify.pid"),
+            log_file: temp_dir.path().join("localify.log"),
             certs_dir: temp_dir.path().join("certs"),
-            socket_path: temp_dir.path().join("roxy.sock"),
+            socket_path: temp_dir.path().join("localify.sock"),
         };
         let mut config = Config::default();
         config.paths = paths;
 
         store.save(&config).unwrap();
 
-        let api = DesktopApi::new_direct(config_path, temp_dir.path().join("roxy"));
+        let api = DesktopApi::new_direct(config_path, temp_dir.path().join("localify"));
 
         (temp_dir, api, store)
     }

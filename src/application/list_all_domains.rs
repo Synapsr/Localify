@@ -112,10 +112,10 @@ mod tests {
     #[test]
     fn uses_daemon_when_available() {
         let daemon = InMemoryDaemonConnection::new(vec![
-            registration("app.roxy"),
-            external_registration("docker-app.roxy"),
+            registration("app.localify"),
+            external_registration("docker-app.localify"),
         ]);
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("app.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("app.localify")]);
         let certs = InMemoryCertificateManager::with_ca_installed();
 
         let svc = ListAllDomains::new(&daemon, &repo, &certs);
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn falls_back_to_config_when_daemon_not_running() {
         let daemon = NotRunningDaemonConnection;
-        let repo = InMemoryDomainRepository::with_domains(vec![registration("app.roxy")]);
+        let repo = InMemoryDomainRepository::with_domains(vec![registration("app.localify")]);
         let certs = InMemoryCertificateManager::new();
 
         let svc = ListAllDomains::new(&daemon, &repo, &certs);
@@ -146,10 +146,10 @@ mod tests {
 
     #[test]
     fn enriches_with_cert_info() {
-        let daemon = InMemoryDaemonConnection::new(vec![registration("app.roxy")]);
+        let daemon = InMemoryDaemonConnection::new(vec![registration("app.localify")]);
         let repo = InMemoryDomainRepository::new();
         let certs = InMemoryCertificateManager::with_ca_installed();
-        certs.create_and_install(&exact("app.roxy")).unwrap();
+        certs.create_and_install(&exact("app.localify")).unwrap();
 
         let svc = ListAllDomains::new(&daemon, &repo, &certs);
         let result = svc.execute().unwrap();

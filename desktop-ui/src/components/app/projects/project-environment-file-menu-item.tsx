@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import type { EnvironmentFileCandidateDto, EnvironmentFileRequest } from "@/types/roxy";
+import type { EnvironmentFileCandidateDto, EnvironmentFileRequest } from "@/types/localify";
 
 import { FileTextIcon, SpinnerIcon } from "@/components/icons";
 import {

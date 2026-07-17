@@ -6,10 +6,10 @@ use super::domain_name::{DomainName, DomainNameError};
 /// exactly or as a wildcard pattern covering one-level subdomains.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DomainPattern {
-    /// Matches only the exact domain (e.g. `myapp.roxy`).
+    /// Matches only the exact domain (e.g. `myapp.localify`).
     Exact(DomainName),
     /// Matches the base domain **and** any single-level subdomain
-    /// (e.g. `myapp.roxy` + `*.myapp.roxy`).
+    /// (e.g. `myapp.localify` + `*.myapp.localify`).
     Wildcard(DomainName),
 }
 
@@ -41,8 +41,8 @@ impl DomainPattern {
     ///
     /// - `Exact` matches only when hostname equals the domain.
     /// - `Wildcard` matches the base domain itself **and**
-    ///   any single-label subdomain (e.g. `blog.myapp.roxy`
-    ///   but **not** `a.b.myapp.roxy`).
+    ///   any single-label subdomain (e.g. `blog.myapp.localify`
+    ///   but **not** `a.b.myapp.localify`).
     pub fn matches_hostname(&self, hostname: &str) -> bool {
         match self {
             Self::Exact(domain) => hostname == domain.as_str(),
@@ -64,7 +64,7 @@ impl DomainPattern {
         }
     }
 
-    /// Human-readable display pattern (e.g. `*.myapp.roxy`).
+    /// Human-readable display pattern (e.g. `*.myapp.localify`).
     pub fn display_pattern(&self) -> String {
         match self {
             Self::Exact(d) => d.as_str().to_string(),

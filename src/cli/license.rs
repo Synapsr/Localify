@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use roxy::desktop::dto::{ActivateLicenseRequest, ImportOfflineLicenseRequest, LicensingDto};
+use localify::desktop::dto::{ActivateLicenseRequest, ImportOfflineLicenseRequest, LicensingDto};
 
 use super::backend::WriteBackend;
 use super::context::AppContext;

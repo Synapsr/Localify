@@ -19,7 +19,7 @@ import type {
   TerminalSessionDto,
   TerminalSessionTargetDto,
   TerminalTargetRequest,
-} from "@/types/roxy";
+} from "@/types/localify";
 
 import { bootstrapQueries } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";

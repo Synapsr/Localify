@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use crate::branding::BRANDING;
-use crate::config::{DaemonConfig, RoxyPaths};
+use crate::config::{DaemonConfig, LocalifyPaths};
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
 };
@@ -217,7 +217,7 @@ impl CertificateManager for InMemoryCertificateManager {
 pub struct InMemoryConfigLoader {
     file_exists: RefCell<bool>,
     daemon_config: DaemonConfig,
-    paths: RoxyPaths,
+    paths: LocalifyPaths,
 }
 
 impl InMemoryConfigLoader {
@@ -225,7 +225,7 @@ impl InMemoryConfigLoader {
         Self {
             file_exists: RefCell::new(false),
             daemon_config: DaemonConfig::default(),
-            paths: RoxyPaths::default(),
+            paths: LocalifyPaths::default(),
         }
     }
 
@@ -233,13 +233,13 @@ impl InMemoryConfigLoader {
         Self {
             file_exists: RefCell::new(true),
             daemon_config: DaemonConfig::default(),
-            paths: RoxyPaths::default(),
+            paths: LocalifyPaths::default(),
         }
     }
 }
 
 impl ConfigLoader for InMemoryConfigLoader {
-    fn load(&self) -> Result<(DaemonConfig, RoxyPaths), ConfigLoadError> {
+    fn load(&self) -> Result<(DaemonConfig, LocalifyPaths), ConfigLoadError> {
         Ok((self.daemon_config.clone(), self.paths.clone()))
     }
 
@@ -509,7 +509,7 @@ impl DaemonConnection for NotRunningDaemonConnection {
 
 /// Build an exact `DomainPattern` from a domain name string.
 pub fn exact(name: &str) -> DomainPattern {
-    let normalized = name.replace(".roxy", BRANDING.domain_suffix());
+    let normalized = name.replace(".localify", BRANDING.domain_suffix());
     DomainPattern::from_name(&normalized, false).unwrap()
 }
 

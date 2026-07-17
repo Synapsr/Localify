@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use roxy::desktop::DesktopApi;
-use roxy::desktop::dto::{
+use localify::desktop::DesktopApi;
+use localify::desktop::dto::{
     BootstrapDto, DomainInfoDto, ProjectEnvironmentInfoDto, ProjectInfoDto, ProjectServiceInfoDto,
 };
 use serde::{Deserialize, Serialize};
@@ -693,7 +693,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{service_domain_reachable, shell_command, shell_quote};
-    use roxy::desktop::dto::{
+    use localify::desktop::dto::{
         DomainInfoDto, ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto,
         ProjectServiceInfoDto, RegistrationDto, RouteDto,
     };

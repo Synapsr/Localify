@@ -6,9 +6,9 @@ use crate::application::StepOutcome;
 use crate::application::uninstall::Uninstall;
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 
-pub fn execute(force: bool, ctx: &AppContext, paths: &RoxyPaths) -> Result<()> {
+pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<()> {
     let dns_service = get_dns_service()?;
     let system = FileSystemSetup::new(paths);
 
@@ -35,7 +35,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &RoxyPaths) -> Result<()> {
 
     if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
         println!("Uninstalling Localify...\n");
-        let result = client.uninstall_roxy()?;
+        let result = client.uninstall_localify()?;
         for step in &result.steps {
             let label = step.label.as_deref().unwrap_or("");
             if step.status == "warning" {

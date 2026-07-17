@@ -6,10 +6,10 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::context::effective_current_dir;
 use crate::branding::BRANDING;
-use roxy::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
-use roxy::desktop::{DesktopApi, ProjectRootStore};
-use roxy::infrastructure::project_marker::write_project_marker;
-use roxy::project_init::{
+use localify::desktop::dto::{InitProjectRequest, InitProjectServiceRequest};
+use localify::desktop::{DesktopApi, ProjectRootStore};
+use localify::infrastructure::project_marker::write_project_marker;
+use localify::project_init::{
     FolderInitSelection, FolderInitServicePlan, LocalAppUpdatePolicy, NextConfigUpdate,
     PackageScriptUpdate, ServicePlan, ViteConfigUpdate, apply_local_app_updates, build_init_plan,
     detect_folder_init_plan, plan_current_dir_local_app_updates, resolve_folder_init_selection,

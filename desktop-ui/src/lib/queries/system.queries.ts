@@ -17,7 +17,7 @@ import type {
   UpdateAutostartRequest,
   UpdateLauncherPreferencesRequest,
   UninstallPreviewDto,
-} from "../../types/roxy";
+} from "../../types/localify";
 
 import { tauriClient } from "../tauri-client";
 import { configQueries } from "./config.queries";
@@ -63,7 +63,7 @@ export const systemQueries = {
 export const systemMutations = {
   install: (queryClient: QueryClient) =>
     mutationOptions<InstallResultDto, Error, void>({
-      mutationFn: () => tauriClient.installRoxy(),
+      mutationFn: () => tauriClient.installLocalify(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
   setupCliAccess: (queryClient: QueryClient) =>
@@ -111,7 +111,7 @@ export const systemMutations = {
     }),
   uninstall: (queryClient: QueryClient) =>
     mutationOptions({
-      mutationFn: () => tauriClient.uninstallRoxy(),
+      mutationFn: () => tauriClient.uninstallLocalify(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
 } as const;

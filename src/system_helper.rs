@@ -56,10 +56,10 @@ pub enum HelperCommand {
     GetDaemonStatus,
     ListDomains,
     ListProjects,
-    InstallRoxy,
+    InstallLocalify,
     RefreshDomainCertificates,
     GetUninstallPreview,
-    UninstallRoxy,
+    UninstallLocalify,
     CreateProject {
         request: CreateProjectRequest,
     },
@@ -171,7 +171,7 @@ impl HelperCommand {
             | Self::ListRoutes { .. }
             | Self::ReadLogs { .. }
             | Self::GetAvailablePort => HELPER_READ_TIMEOUT,
-            Self::InstallRoxy | Self::UninstallRoxy | Self::ImportSettings { .. } => {
+            Self::InstallLocalify | Self::UninstallLocalify | Self::ImportSettings { .. } => {
                 HELPER_INSTALL_TIMEOUT
             }
             Self::UpdateConfig { .. }
@@ -218,9 +218,9 @@ impl HelperCommand {
             Self::GetDaemonStatus => "read daemon status",
             Self::ListDomains => "list domains",
             Self::ListProjects => "list projects",
-            Self::InstallRoxy => "install Localify",
+            Self::InstallLocalify => "install Localify",
             Self::GetUninstallPreview => "read uninstall preview",
-            Self::UninstallRoxy => "uninstall Localify",
+            Self::UninstallLocalify => "uninstall Localify",
             Self::ImportSettings { .. } => "import settings",
             Self::GetLicensingStatus => "read licensing status",
             Self::ListPortConflicts => "list port conflicts",
@@ -234,7 +234,7 @@ impl HelperCommand {
     fn may_write_config(&self) -> bool {
         matches!(
             self,
-            Self::InstallRoxy
+            Self::InstallLocalify
                 | Self::UpdateConfig { .. }
                 | Self::CreateProject { .. }
                 | Self::CreateProjectWithDomains { .. }
@@ -317,8 +317,8 @@ impl SystemHelperClient {
         self.send(HelperCommand::ListProjects)
     }
 
-    pub fn install_roxy(&self) -> Result<InstallResultDto> {
-        self.send(HelperCommand::InstallRoxy)
+    pub fn install_localify(&self) -> Result<InstallResultDto> {
+        self.send(HelperCommand::InstallLocalify)
     }
 
     pub fn refresh_domain_certificates(&self) -> Result<CertificateRefreshDto> {
@@ -329,8 +329,8 @@ impl SystemHelperClient {
         self.send(HelperCommand::GetUninstallPreview)
     }
 
-    pub fn uninstall_roxy(&self) -> Result<UninstallResultDto> {
-        self.send(HelperCommand::UninstallRoxy)
+    pub fn uninstall_localify(&self) -> Result<UninstallResultDto> {
+        self.send(HelperCommand::UninstallLocalify)
     }
 
     pub fn create_project(&self, request: CreateProjectRequest) -> Result<ProjectInfoDto> {
@@ -930,14 +930,16 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         HelperCommand::ListProjects => {
             serde_json::to_value(api.list_projects()?).map_err(Into::into)
         }
-        HelperCommand::InstallRoxy => serde_json::to_value(api.install()?).map_err(Into::into),
+        HelperCommand::InstallLocalify => serde_json::to_value(api.install()?).map_err(Into::into),
         HelperCommand::RefreshDomainCertificates => {
             serde_json::to_value(api.refresh_domain_certificates()?).map_err(Into::into)
         }
         HelperCommand::GetUninstallPreview => {
             serde_json::to_value(api.uninstall_preview()?).map_err(Into::into)
         }
-        HelperCommand::UninstallRoxy => serde_json::to_value(api.uninstall()?).map_err(Into::into),
+        HelperCommand::UninstallLocalify => {
+            serde_json::to_value(api.uninstall()?).map_err(Into::into)
+        }
         HelperCommand::CreateProject { request } => {
             serde_json::to_value(api.create_project(request)?).map_err(Into::into)
         }
@@ -1122,7 +1124,7 @@ mod tests {
 
     #[test]
     fn config_mutations_restore_config_ownership() {
-        assert!(HelperCommand::InstallRoxy.may_write_config());
+        assert!(HelperCommand::InstallLocalify.may_write_config());
         assert!(HelperCommand::ClearLicense.may_write_config());
         assert!(
             HelperCommand::UnregisterDomain {

@@ -22,8 +22,8 @@ const ON_DEMAND_CERT_CACHE_MAX: usize = 256;
 
 /// Custom certificate resolver that selects certificates based on SNI hostname.
 ///
-/// For unknown `.roxy` domains, we generate an on-demand certificate signed by
-/// Roxy's local Root CA. This allows the HTTP layer to render a friendly
+/// For unknown `.localify` domains, we generate an on-demand certificate signed by
+/// Localify's local Root CA. This allows the HTTP layer to render a friendly
 /// "Domain Not Registered" page instead of the browser showing a TLS error.
 #[derive(Debug)]
 struct DomainCertResolver {
@@ -38,7 +38,7 @@ impl ResolvesServerCert for DomainCertResolver {
     fn resolve(&self, client_hello: rustls::server::ClientHello) -> Option<Arc<CertifiedKey>> {
         let hostname = client_hello.server_name()?.to_lowercase();
 
-        // Try cached on-demand certs first (for unregistered but valid .roxy domains).
+        // Try cached on-demand certs first (for unregistered but valid .localify domains).
         if let Some(cert) = self.on_demand.read().ok()?.get(hostname.as_str()).cloned() {
             return Some(cert);
         }
@@ -51,7 +51,7 @@ impl ResolvesServerCert for DomainCertResolver {
             }
         }
 
-        // Generate an on-demand cert for valid `.roxy` hostnames if we
+        // Generate an on-demand cert for valid `.localify` hostnames if we
         // can read the local CA private key.
         let ca_cert_der = self.ca_cert_der.as_ref()?;
         let ca_key_pem = self.ca_key_pem.as_deref()?;
@@ -90,7 +90,7 @@ pub fn create_tls_acceptor(
         Err(e) => {
             warn!(
                 error = %e,
-                "TLS: failed to load Roxy CA material (on-demand certificates disabled)"
+                "TLS: failed to load Localify CA material (on-demand certificates disabled)"
             );
             (None, None)
         }

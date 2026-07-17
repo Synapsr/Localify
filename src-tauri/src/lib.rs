@@ -10,9 +10,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use commands::{AppState, DeepLinkPayloadDto, DeepLinkRouteDto};
-use roxy::branding::BRANDING;
-use roxy::desktop::DesktopApi;
-use roxy::desktop::dto::{DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest};
+use localify::branding::BRANDING;
+use localify::desktop::DesktopApi;
+use localify::desktop::dto::{DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -1208,7 +1208,7 @@ pub fn run() {
             commands::list_projects,
             commands::get_available_port,
             commands::detect_project_init_plan,
-            commands::install_roxy,
+            commands::install_localify,
             commands::setup_cli_access,
             commands::restart_system_helper,
             commands::setup_node_trust,
@@ -1217,7 +1217,7 @@ pub fn run() {
             commands::list_port_conflicts,
             commands::kill_port_conflict,
             commands::get_uninstall_preview,
-            commands::uninstall_roxy,
+            commands::uninstall_localify,
             commands::create_project,
             commands::create_project_with_domains,
             commands::init_project_from_folder,

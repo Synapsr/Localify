@@ -1,7 +1,7 @@
 import posthog from "posthog-js";
 import { z } from "zod";
 
-import type { BootstrapDto, ProjectInfoDto } from "@/types/roxy";
+import type { BootstrapDto, ProjectInfoDto } from "@/types/localify";
 
 export type AnalyticsEventData = Record<string, boolean | number | string | null | undefined>;
 type DesktopErrorSource =

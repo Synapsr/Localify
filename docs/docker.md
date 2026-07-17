@@ -1,13 +1,13 @@
 # Docker Integration
 
-Roxy can automatically discover Docker Compose services and
-register them as `.roxy` domains. When enabled, starting a
+Localify can automatically discover Docker Compose services and
+register them as `.localify` domains. When enabled, starting a
 compose stack instantly makes services available at
-`https://<service>.<project>.roxy`.
+`https://<service>.<project>.localify`.
 
 ## Enabling Docker Integration
 
-Add the `[docker]` section to `/etc/roxy/config.toml`:
+Add the `[docker]` section to `/etc/localify/config.toml`:
 
 ```toml
 [docker]
@@ -17,34 +17,34 @@ enabled = true
 Then restart the daemon:
 
 ```bash
-sudo roxy restart
+sudo localify restart
 ```
 
-Roxy connects to the Docker socket and watches for container
-lifecycle events. When a container starts or stops, Roxy
+Localify connects to the Docker socket and watches for container
+lifecycle events. When a container starts or stops, Localify
 automatically updates its routing table.
 
 ## How Auto-Discovery Works
 
-When a container starts, Roxy evaluates it using these rules
+When a container starts, Localify evaluates it using these rules
 (in order):
 
-1. **`roxy.enable=false`** label -- skip (explicit opt-out)
-2. **`roxy.enable=true`** label -- register (explicit opt-in)
+1. **`localify.enable=false`** label -- skip (explicit opt-out)
+2. **`localify.enable=true`** label -- register (explicit opt-in)
 3. **Compose labels + exposed port** -- register automatically
 4. **Otherwise** -- skip
 
 For compose services, the domain is derived from the project
-and service names: `<service>.<project>.roxy`. For example,
+and service names: `<service>.<project>.localify`. For example,
 a service named `web` in project `myapp` becomes
-`web.myapp.roxy`.
+`web.myapp.localify`.
 
 ### Requirements for Auto-Discovery
 
 - The container must have at least one **published port**
   (`ports:` mapping in `docker-compose.yml`)
-- Roxy proxies to the **host port**, not the container port
-- If a container exposes multiple ports, set `roxy.port` to
+- Localify proxies to the **host port**, not the container port
+- If a container exposes multiple ports, set `localify.port` to
   pick one (see [Labels Reference](#labels-reference))
 
 ## Quick Start
@@ -60,30 +60,30 @@ services:
 ```
 
 ```bash
-# Enable Docker integration in Roxy config
+# Enable Docker integration in Localify config
 # (add [docker] enabled = true, then restart)
 
 # Start your compose stack
 docker compose up -d
 
-# Roxy auto-discovers and registers web.myproject.roxy
+# Localify auto-discovers and registers web.myproject.localify
 # (project name comes from directory name by default)
-open https://web.myproject.roxy
+open https://web.myproject.localify
 ```
 
-No `roxy register` needed -- it happens automatically.
+No `localify register` needed -- it happens automatically.
 
 ## Labels Reference
 
-Control Roxy behavior with container labels, either in
+Control Localify behavior with container labels, either in
 `docker-compose.yml` or via `docker run --label`.
 
 | Label | Values | Description |
 | ----- | ------ | ----------- |
-| `roxy.enable` | `true` / `false` | Force opt-in or opt-out |
-| `roxy.domain` | e.g. `app.roxy` | Override the auto-generated domain |
-| `roxy.port` | e.g. `8080` | Pick which container port to proxy |
-| `roxy.wildcard` | `true` | Register as wildcard (`*.domain`) |
+| `localify.enable` | `true` / `false` | Force opt-in or opt-out |
+| `localify.domain` | e.g. `app.localify` | Override the auto-generated domain |
+| `localify.port` | e.g. `8080` | Pick which container port to proxy |
+| `localify.wildcard` | `true` | Register as wildcard (`*.domain`) |
 
 ### Examples
 
@@ -96,7 +96,7 @@ services:
     ports:
       - "3000:3000"
     labels:
-      roxy.domain: "myapp.roxy"
+      localify.domain: "myapp.localify"
 ```
 
 **Explicit opt-in (non-compose container):**
@@ -108,8 +108,8 @@ services:
     ports:
       - "8080:80"
     labels:
-      roxy.enable: "true"
-      roxy.domain: "nginx.roxy"
+      localify.enable: "true"
+      localify.domain: "nginx.localify"
 ```
 
 **Multiple ports -- pick one:**
@@ -122,7 +122,7 @@ services:
       - "3000:3000"
       - "9090:9090"
     labels:
-      roxy.port: "3000"
+      localify.port: "3000"
 ```
 
 **Wildcard subdomains:**
@@ -134,11 +134,11 @@ services:
     ports:
       - "3000:3000"
     labels:
-      roxy.wildcard: "true"
+      localify.wildcard: "true"
 ```
 
-This registers `*.web.myproject.roxy`, so
-`anything.web.myproject.roxy` routes to the container.
+This registers `*.web.myproject.localify`, so
+`anything.web.myproject.localify` routes to the container.
 
 **Opt out a service:**
 
@@ -149,15 +149,15 @@ services:
     ports:
       - "5432:5432"
     labels:
-      roxy.enable: "false"
+      localify.enable: "false"
 ```
 
 ## Domain Name Resolution
 
-Roxy determines the domain in this order:
+Localify determines the domain in this order:
 
-1. **`roxy.domain` label** -- used as-is (must end with `.roxy`)
-2. **Compose labels** -- `<service>.<project>.roxy`
+1. **`localify.domain` label** -- used as-is (must end with `.localify`)
+2. **Compose labels** -- `<service>.<project>.localify`
 
 The compose project name defaults to the directory name. You
 can set it explicitly with `COMPOSE_PROJECT_NAME` or the
@@ -171,14 +171,14 @@ services:
     build: .
     ports:
       - "3000:3000"
-# Domain: web.myapp.roxy
+# Domain: web.myapp.localify
 ```
 
-## Container-to-Roxy Communication
+## Container-to-Localify Communication
 
 When one container needs to reach another container's
-`.roxy` domain (or any `.roxy` domain served by the host),
-Docker's default DNS won't resolve `.roxy` names. Use
+`.localify` domain (or any `.localify` domain served by the host),
+Docker's default DNS won't resolve `.localify` names. Use
 `extra_hosts` to point the domain at the host:
 
 ```yaml
@@ -191,18 +191,18 @@ services:
   worker:
     build: .
     extra_hosts:
-      - "web.myproject.roxy:host-gateway"
+      - "web.myproject.localify:host-gateway"
 ```
 
 `host-gateway` resolves to the host machine's IP (typically
 `host.docker.internal` on Docker Desktop). The `worker`
-container can now reach `http://web.myproject.roxy` through
-Roxy on the host.
+container can now reach `http://web.myproject.localify` through
+Localify on the host.
 
-Add one entry per `.roxy` domain the container needs to
+Add one entry per `.localify` domain the container needs to
 access.
 
-> **Note:** Wildcard `extra_hosts` (e.g., `*.roxy`) are not
+> **Note:** Wildcard `extra_hosts` (e.g., `*.localify`) are not
 > supported -- `/etc/hosts` does not allow wildcards. You must
 > list each domain explicitly.
 
@@ -216,37 +216,37 @@ in most setups.
 On **macOS**, Docker Desktop runs containers inside a Linux
 VM. Containers cannot reach the host via its LAN IP, but can
 reach it via `host-gateway` / `host.docker.internal`. The
-`extra_hosts` approach above is required for container-to-Roxy
+`extra_hosts` approach above is required for container-to-Localify
 communication.
 
 ## Monitoring
 
-Check which Docker containers Roxy has discovered:
+Check which Docker containers Localify has discovered:
 
 ```bash
-roxy list
+localify list
 ```
 
 Docker-discovered domains show their source as "external" in
 the output. They appear alongside manually registered domains
-but cannot be edited with `roxy register` or `roxy route` --
+but cannot be edited with `localify register` or `localify route` --
 they are managed entirely by the Docker watcher.
 
 View discovery logs:
 
 ```bash
 # See container add/remove events
-ROXY_LOG=debug sudo roxy start --foreground
+LOCALIFY_LOG=debug sudo localify start --foreground
 
 # Or check the log file
-roxy logs -f
+localify logs -f
 ```
 
 Example log output:
 
 ```text
 INFO Docker integration enabled
-INFO Docker domain added domain=web.myapp.roxy target=127.0.0.1:3000
+INFO Docker domain added domain=web.myapp.localify target=127.0.0.1:3000
 INFO Docker reconciliation complete added=1 removed=0 total=1
 ```
 
@@ -258,20 +258,20 @@ Check that:
 
 1. Docker integration is enabled (`[docker] enabled = true`)
 2. The container has published ports (`ports:` in compose)
-3. The container is not opted out (`roxy.enable=false`)
-4. The daemon is running (`roxy status`)
+3. The container is not opted out (`localify.enable=false`)
+4. The daemon is running (`localify status`)
 
 Run with debug logging to see why a container was skipped:
 
 ```bash
-ROXY_LOG=debug sudo roxy start --foreground
+LOCALIFY_LOG=debug sudo localify start --foreground
 ```
 
 Look for `Docker container skipped` messages with a reason.
 
 ### "No published host port" Error
 
-Roxy needs a host port mapping to proxy traffic. Make sure
+Localify needs a host port mapping to proxy traffic. Make sure
 your service has a `ports:` entry:
 
 ```yaml
@@ -286,17 +286,17 @@ services:
 
 ### Multiple Ports Without Label
 
-If a container exposes more than one port and no `roxy.port`
-label is set, Roxy skips it (ambiguous). Add the label:
+If a container exposes more than one port and no `localify.port`
+label is set, Localify skips it (ambiguous). Add the label:
 
 ```yaml
 labels:
-  roxy.port: "3000"
+  localify.port: "3000"
 ```
 
 ### Docker Socket Permission
 
-Roxy connects to the Docker socket
+Localify connects to the Docker socket
 (`/var/run/docker.sock` by default). If running as root
 (via `sudo`), this works automatically. If you see connection
 errors, verify the socket exists and is accessible.

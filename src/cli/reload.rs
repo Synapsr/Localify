@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use roxy::desktop::dto::StartDaemonRequest;
+use localify::desktop::dto::StartDaemonRequest;
 
 use super::backend::WriteBackend;
 use super::context::AppContext;

@@ -5,11 +5,11 @@ use std::process::Command;
 use super::super::CertError;
 use super::TrustStore;
 
-const SYSTEM_CERT_PATH: &str = "/usr/local/share/ca-certificates/roxy-ca.crt";
+const SYSTEM_CERT_PATH: &str = "/usr/local/share/ca-certificates/localify-ca.crt";
 
 /// Linux trust store implementation using `update-ca-certificates`.
 ///
-/// Standard on Debian/Ubuntu systems. Installs the Roxy Root CA into
+/// Standard on Debian/Ubuntu systems. Installs the Localify Root CA into
 /// the system certificate store so all domain certificates signed by
 /// it are automatically trusted.
 pub struct LinuxTrustStore;

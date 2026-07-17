@@ -390,7 +390,7 @@ fn build_not_registered_response(domain: &str) -> Response {
     let domain = domain.split(':').next().unwrap_or(domain);
     let domain_raw = domain.trim_end_matches('.').to_lowercase();
     let domain = theme::html_escape(&domain_raw);
-    let image_data_uri = embedded_assets::roxy_error_data_uri();
+    let image_data_uri = embedded_assets::localify_error_data_uri();
     let app_actions = build_open_app_actions("localify://open/projects");
     let register_commands = build_domain_registration_commands(&domain_raw, &domain);
     let restart_command = format!("{} restart", BRANDING.cli_command());
@@ -482,7 +482,7 @@ fn build_no_route_response(registration: &DomainRegistration, host: &str, path: 
     let domain = theme::html_escape(&domain_raw);
     let path = theme::html_escape(path);
     let reg_domain = theme::html_escape(registration.domain().as_str());
-    let image_data_uri = embedded_assets::roxy_404_data_uri();
+    let image_data_uri = embedded_assets::localify_404_data_uri();
     let app_actions = build_open_app_actions(&format!(
         "localify://open/logs?domain={}",
         theme::encode_path_segment(&domain_raw)
@@ -534,7 +534,7 @@ fn wildcard_base_domain(domain: &str) -> Option<String> {
 
     let parts: Vec<&str> = domain.split('.').collect();
     if parts.len() < 3 {
-        // myapp.roxy has len=2; no subdomain.
+        // myapp.localify has len=2; no subdomain.
         return None;
     }
 
@@ -595,7 +595,7 @@ mod tests {
     use crate::domain::{DomainName, DomainPattern, DomainRegistration, Route};
 
     fn reg(domain: &str, wildcard: bool) -> DomainRegistration {
-        let normalized = domain.replace(".roxy", BRANDING.domain_suffix());
+        let normalized = domain.replace(".localify", BRANDING.domain_suffix());
         let domain = DomainName::new(normalized).unwrap();
         let pattern = if wildcard {
             DomainPattern::Wildcard(domain)
@@ -608,8 +608,8 @@ mod tests {
 
     #[test]
     fn test_exact_overrides_wildcard_for_base_domain() {
-        let wildcard = reg("myapp.roxy", true);
-        let exact = reg("myapp.roxy", false);
+        let wildcard = reg("myapp.localify", true);
+        let exact = reg("myapp.localify", false);
         let state = RuntimeState::new(vec![wildcard, exact]);
 
         let found = state.get_domain("myapp.localify").unwrap();
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_matches_subdomain() {
-        let wildcard = reg("myapp.roxy", true);
+        let wildcard = reg("myapp.localify", true);
         let state = RuntimeState::new(vec![wildcard]);
 
         let found = state.get_domain("blog.myapp.localify").unwrap();
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn runtime_state_returns_project_root_for_registration() {
-        let registration = reg("app.roxy", false);
+        let registration = reg("app.localify", false);
         let mut project_roots = HashMap::new();
         project_roots.insert("app.localify".to_string(), "/tmp/app".to_string());
 
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn runtime_state_records_registration_access() {
-        let state = RuntimeState::new(vec![reg("app.roxy", false)]);
+        let state = RuntimeState::new(vec![reg("app.localify", false)]);
         let matched = state.get_domain("app.localify").unwrap();
 
         assert_eq!(state.last_accessed_at_for_registration(matched), None);
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_does_not_match_multi_level_subdomain() {
-        let wildcard = reg("myapp.roxy", true);
+        let wildcard = reg("myapp.localify", true);
         let state = RuntimeState::new(vec![wildcard]);
 
         // This previously matched (bug DA3) — now fixed by DomainPattern
@@ -696,8 +696,8 @@ mod tests {
 
     #[test]
     fn test_most_specific_wildcard_wins() {
-        let broad = reg("myapp.roxy", true);
-        let specific = reg("sub.myapp.roxy", true);
+        let broad = reg("myapp.localify", true);
+        let specific = reg("sub.myapp.localify", true);
         let state = RuntimeState::new(vec![broad, specific]);
 
         let found = state.get_domain("blog.sub.myapp.localify").unwrap();
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_host_is_normalized_for_lookup() {
-        let exact = reg("app.roxy", false);
+        let exact = reg("app.localify", false);
         let state = RuntimeState::new(vec![exact]);
 
         assert!(state.get_domain("APP.LOCALIFY:443").is_some());
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn resolve_route_missing_host() {
-        let state = RuntimeState::new(vec![reg("app.roxy", false)]);
+        let state = RuntimeState::new(vec![reg("app.localify", false)]);
         assert!(matches!(
             resolve_route(&state, None, "/"),
             RouteResolution::MissingHost
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn resolve_route_unknown_domain() {
-        let state = RuntimeState::new(vec![reg("app.roxy", false)]);
+        let state = RuntimeState::new(vec![reg("app.localify", false)]);
         match resolve_route(&state, Some("other.localify"), "/") {
             RouteResolution::DomainNotRegistered { host } => {
                 assert_eq!(host, "other.localify");
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn resolve_route_matched() {
-        let state = RuntimeState::new(vec![reg("app.roxy", false)]);
+        let state = RuntimeState::new(vec![reg("app.localify", false)]);
         match resolve_route(&state, Some("app.localify"), "/") {
             RouteResolution::Matched {
                 registration,
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn resolve_route_strips_port() {
-        let state = RuntimeState::new(vec![reg("app.roxy", false)]);
+        let state = RuntimeState::new(vec![reg("app.localify", false)]);
         assert!(matches!(
             resolve_route(&state, Some("app.localify:8080"), "/"),
             RouteResolution::Matched { .. }
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn runtime_state_registrations_accessor() {
-        let state = RuntimeState::new(vec![reg("b.roxy", false), reg("a.roxy", false)]);
+        let state = RuntimeState::new(vec![reg("b.localify", false), reg("a.localify", false)]);
         let regs = state.registrations();
         assert_eq!(regs.len(), 2);
         // Both present — sorted by specificity (equal length, so order is stable)
@@ -799,7 +799,7 @@ mod tests {
         use arc_swap::ArcSwap;
         use std::sync::Arc;
 
-        let original = RuntimeState::new(vec![reg("old.roxy", false)]);
+        let original = RuntimeState::new(vec![reg("old.localify", false)]);
         let shared: SharedState = Arc::new(ArcSwap::from_pointee(original));
 
         // Verify original state
@@ -807,7 +807,7 @@ mod tests {
         assert!(shared.load().get_domain("new.localify").is_none());
 
         // Swap to new state
-        let replacement = Arc::new(RuntimeState::new(vec![reg("new.roxy", false)]));
+        let replacement = Arc::new(RuntimeState::new(vec![reg("new.localify", false)]));
         shared.store(replacement);
 
         // Verify new state
@@ -822,7 +822,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::mpsc;
 
-        let original = RuntimeState::new(vec![reg("old.roxy", false)]);
+        let original = RuntimeState::new(vec![reg("old.localify", false)]);
         let shared: SharedState = Arc::new(ArcSwap::from_pointee(original));
 
         let (tx, mut rx) = mpsc::channel::<Vec<crate::domain::DomainRegistration>>(4);
@@ -837,7 +837,7 @@ mod tests {
         });
 
         // Send new registrations through the channel
-        tx.send(vec![reg("new.roxy", false)]).await.unwrap();
+        tx.send(vec![reg("new.localify", false)]).await.unwrap();
         handle.await.unwrap();
 
         assert!(shared.load().get_domain("old.localify").is_none());

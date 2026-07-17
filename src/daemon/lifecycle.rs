@@ -12,7 +12,7 @@ use crate::application::provider_registry::ProviderRegistry;
 use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::config::watcher::ConfigFileProvider;
 use crate::infrastructure::docker::DockerProvider;
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::tracing::{TracingOutput, init_tracing};
 
@@ -21,7 +21,7 @@ use crate::infrastructure::tracing::{TracingOutput, init_tracing};
 /// This handles the full daemon lifecycle: tracing initialization,
 /// PID file management, signal handling, and server execution.
 #[tokio::main]
-pub async fn run(verbose: bool, config_path: &Path, paths: &RoxyPaths) -> Result<()> {
+pub async fn run(verbose: bool, config_path: &Path, paths: &LocalifyPaths) -> Result<()> {
     // When running interactively (stdout is a TTY), log to stdout
     // When running as daemon (stdout is /dev/null), log to file
     let output = if std::io::stdout().is_terminal() {

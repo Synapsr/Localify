@@ -1,6 +1,6 @@
 [package]
 name = "localify-desktop"
-version = "0.2.14"
+version = "0.2.15"
 description = "Desktop shell for Localify"
 authors = ["Localify contributors"]
 edition = "2024"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
-roxy = { path = ".." }
+localify = { path = ".." }
 tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"

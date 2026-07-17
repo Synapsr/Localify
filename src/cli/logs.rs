@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::infrastructure::paths::RoxyPaths;
+use crate::infrastructure::paths::LocalifyPaths;
 
-pub fn execute(lines: usize, clear: bool, follow: bool, paths: &RoxyPaths) -> Result<()> {
+pub fn execute(lines: usize, clear: bool, follow: bool, paths: &LocalifyPaths) -> Result<()> {
     let log_path = &paths.log_file;
 
     if clear {

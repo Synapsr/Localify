@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { configMutations, systemMutations, systemQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import type { AppConfigDto } from "@/types/roxy";
+import type { AppConfigDto } from "@/types/localify";
 
 import { SettingsCard } from "./settings-card";
 
