@@ -8,7 +8,8 @@
 //! A marker naming a project id that no longer exists (e.g. a committed
 //! marker cloned on another machine) is treated the same as no marker.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -32,8 +33,42 @@ fn marker_path(root: &Path) -> PathBuf {
     root.join(project_marker_relative_path())
 }
 
+fn ensure_marker_is_gitignored(root: &Path) -> Result<()> {
+    let gitignore_path = root.join(".gitignore");
+    let entry = format!(".{}/project.json", BRANDING.slug());
+    let existing = match fs::read(&gitignore_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to read '{}'", gitignore_path.display()));
+        }
+    };
+    let is_already_ignored = String::from_utf8_lossy(&existing)
+        .lines()
+        .any(|line| line.trim() == entry);
+
+    if is_already_ignored {
+        return Ok(());
+    }
+
+    let mut gitignore = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gitignore_path)
+        .with_context(|| format!("Failed to open '{}'", gitignore_path.display()))?;
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        writeln!(gitignore)
+            .with_context(|| format!("Failed to update '{}'", gitignore_path.display()))?;
+    }
+    writeln!(gitignore, "{entry}")
+        .with_context(|| format!("Failed to update '{}'", gitignore_path.display()))?;
+    Ok(())
+}
+
 /// Records the project id inside the project folder. Overwrites any existing
-/// marker: re-initializing a folder must always point it at the new project.
+/// marker and keeps the machine-local file out of Git. Re-initializing a
+/// folder must always point it at the new project.
 pub fn write_project_marker(root: &Path, project_id: &str) -> Result<()> {
     let path = marker_path(root);
     if let Some(parent) = path.parent() {
@@ -47,6 +82,7 @@ pub fn write_project_marker(root: &Path, project_id: &str) -> Result<()> {
     .context("Failed to serialize the project marker")?;
     fs::write(&path, format!("{content}\n"))
         .with_context(|| format!("Failed to write project marker '{}'", path.display()))?;
+    ensure_marker_is_gitignored(root)?;
     Ok(())
 }
 
@@ -80,10 +116,15 @@ mod tests {
     fn write_then_read_round_trips() {
         let temp = tempdir().unwrap();
         write_project_marker(temp.path(), "proj-123").unwrap();
+        let expected_entry = format!(".{}/project.json\n", BRANDING.slug());
 
         assert_eq!(
             read_project_marker(temp.path()),
             Some("proj-123".to_string())
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
+            expected_entry
         );
     }
 
@@ -92,8 +133,27 @@ mod tests {
         let temp = tempdir().unwrap();
         write_project_marker(temp.path(), "old").unwrap();
         write_project_marker(temp.path(), "new").unwrap();
+        let expected_entry = format!(".{}/project.json\n", BRANDING.slug());
 
         assert_eq!(read_project_marker(temp.path()), Some("new".to_string()));
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
+            expected_entry
+        );
+    }
+
+    #[test]
+    fn write_preserves_existing_gitignore_without_trailing_newline() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".gitignore"), "node_modules").unwrap();
+
+        write_project_marker(temp.path(), "proj-123").unwrap();
+        let expected = format!("node_modules\n.{}/project.json\n", BRANDING.slug());
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
+            expected
+        );
     }
 
     #[test]
