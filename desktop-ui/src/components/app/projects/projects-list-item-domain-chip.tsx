@@ -156,7 +156,7 @@ export const ProjectDomainChip = ({
   const serviceActionDisabled =
     serviceActionPending || serviceActionUnavailable;
   const serviceActionLabel = reachable ? "Stop service" : "Launch service";
-  const serviceActionMenuLabel = serviceActionPending
+  const serviceActionStatusLabel = serviceActionPending
     ? reachable
       ? "Stopping service"
       : "Launching service"
@@ -325,6 +325,36 @@ export const ProjectDomainChip = ({
           </Tooltip>
         )}
 
+        {serviceTerminalTarget ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleToggleService();
+                  }}
+                  disabled={serviceActionDisabled}
+                  aria-label={serviceActionStatusLabel}
+                  className="ml-0.5 size-6 rounded-full text-foreground hover:bg-foreground/10 hover:text-foreground"
+                >
+                  {serviceActionPending ? (
+                    <SpinnerIcon className="animate-spin" />
+                  ) : reachable ? (
+                    <XIcon />
+                  ) : (
+                    <PlayIcon className="translate-x-px" />
+                  )}
+                </Button>
+              }
+            />
+            <TooltipContent>{serviceActionStatusLabel}</TooltipContent>
+          </Tooltip>
+        ) : null}
+
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger
             render={
@@ -352,6 +382,16 @@ export const ProjectDomainChip = ({
             <DropdownMenuItem
               onClick={(event) => {
                 event.stopPropagation();
+                void handleOpenTerminal();
+              }}
+              disabled={!hasTerminalTarget}
+            >
+              <TerminalIcon />
+              Open terminal
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={(event) => {
+                event.stopPropagation();
                 void handleCopyUrl();
               }}
             >
@@ -361,16 +401,6 @@ export const ProjectDomainChip = ({
                 <CopyIcon />
               )}
               {urlCopied ? "URL copied" : "Copy URL"}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={(event) => {
-                event.stopPropagation();
-                void handleOpenTerminal();
-              }}
-              disabled={!hasTerminalTarget}
-            >
-              <TerminalIcon />
-              Open terminal
             </DropdownMenuItem>
             <ProjectEnvironmentFileMenuItem
               active={menuOpen}
@@ -382,24 +412,7 @@ export const ProjectDomainChip = ({
                 setEnvironmentFileDialogOpen(true);
               }}
             />
-            {serviceTerminalTarget ? (
-              <DropdownMenuItem
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void handleToggleService();
-                }}
-                disabled={serviceActionDisabled}
-              >
-                {serviceActionPending ? (
-                  <SpinnerIcon className="animate-spin" />
-                ) : reachable ? (
-                  <XIcon />
-                ) : (
-                  <PlayIcon className="translate-x-px" />
-                )}
-                {serviceActionMenuLabel}
-              </DropdownMenuItem>
-            ) : null}
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={(event) => {
                 event.stopPropagation();
