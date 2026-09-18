@@ -57,6 +57,7 @@ use crate::desktop::dto::{
     UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 use crate::desktop::home_dir::user_home_dir;
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
@@ -4473,6 +4474,7 @@ fn parse_ps_etime(value: &str) -> Option<Duration> {
     ))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn command_output(output: &std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -4485,6 +4487,7 @@ fn command_output(output: &std::process::Output) -> String {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn cli_failure_message(output: &std::process::Output) -> String {
     let message = command_output(output);
     if message.is_empty() {
@@ -4555,10 +4558,12 @@ fn is_missing_macos_certificate_error(message: &str) -> bool {
         || message.contains("Unable to delete certificate matching")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn cli_shell_command(binary_path: &Path, config_path: &Path, args: &[String]) -> String {
     cli_shell_command_parts(binary_path, config_path, args).join(" ")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn cli_shell_commands(binary_path: &Path, config_path: &Path, commands: &[Vec<String>]) -> String {
     if let [args] = commands {
         return cli_shell_command(binary_path, config_path, args);
@@ -4571,6 +4576,7 @@ fn cli_shell_commands(binary_path: &Path, config_path: &Path, commands: &[Vec<St
         .join(" && ")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn cli_shell_command_parts(binary_path: &Path, config_path: &Path, args: &[String]) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(profile) = BRANDING.active_profile() {
@@ -4590,10 +4596,12 @@ fn cli_shell_command_parts(binary_path: &Path, config_path: &Path, args: &[Strin
     parts
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn escape_applescript_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }

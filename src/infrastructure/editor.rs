@@ -65,6 +65,7 @@ const EDITOR_APPS: [EditorApp; 6] = [
     },
 ];
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MACOS_APP_DIRS: [&str; 3] = [
     "/Applications",
     "/System/Applications",

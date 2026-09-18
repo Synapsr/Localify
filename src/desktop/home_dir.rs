@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 use anyhow::{Context, Result, anyhow, bail};
 
 pub fn user_home_dir() -> Result<PathBuf> {

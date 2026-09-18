@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
