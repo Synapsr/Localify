@@ -5895,7 +5895,7 @@ fn ensure_environment_domains(
     let ports = reserve_ports(missing.len())?;
     let register_domain = RegisterDomain::new(config_store, certs);
     let mut created = Vec::new();
-    for ((service_id, pattern), port) in missing.into_iter().zip(ports.into_iter()) {
+    for ((service_id, pattern), port) in missing.into_iter().zip(ports) {
         let route = Route::parse(&format!("/={port}"))
             .with_context(|| format!("Failed to create route for service '{service_id}'"))?;
         match register_domain.execute(pattern.clone(), vec![route]) {
