@@ -47,6 +47,7 @@ fn default_keygen_public_key() -> Option<String> {
     Some(KEYGEN_PUBLIC_KEY.to_string())
 }
 
+// Custom domain of the Keygen instance: only account-less `/v1/...` routes exist on it.
 pub const KEYGEN_API_URL: &str = "https://licences.localify.dev";
 pub const KEYGEN_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000000";
 pub const KEYGEN_PRODUCT_ID: &str = "00000000-0000-0000-0000-000000000000";

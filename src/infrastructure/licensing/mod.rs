@@ -145,9 +145,8 @@ impl KeygenClient {
         ensure_keygen_is_configured(config)?;
 
         let url = format!(
-            "{}/v1/accounts/{}/licenses/actions/validate-key",
-            config.effective_api_url().trim_end_matches('/'),
-            config.effective_account()
+            "{}/v1/licenses/actions/validate-key",
+            config.effective_api_url().trim_end_matches('/')
         );
 
         let response = self.send_json_request(
@@ -194,9 +193,8 @@ impl KeygenClient {
         ensure_keygen_is_configured(config)?;
 
         let url = format!(
-            "{}/v1/accounts/{}/licenses/{}/actions/check-out?ttl={}&algorithm={}",
+            "{}/v1/licenses/{}/actions/check-out?ttl={}&algorithm={}",
             config.effective_api_url().trim_end_matches('/'),
-            config.effective_account(),
             license_id.trim(),
             KEYGEN_OFFLINE_TTL_SECONDS,
             KEYGEN_OFFLINE_ALGORITHM_QUERY
@@ -255,9 +253,8 @@ impl KeygenClient {
         ensure_keygen_is_configured(config)?;
 
         let url = format!(
-            "{}/v1/accounts/{}/machines",
-            config.effective_api_url().trim_end_matches('/'),
-            config.effective_account()
+            "{}/v1/machines",
+            config.effective_api_url().trim_end_matches('/')
         );
 
         let response = self.send_json_request(
