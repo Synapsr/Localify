@@ -46,3 +46,8 @@ This repo vendors `rust-skills` at `.rust-skills/skills/`. When working on Rust:
 
 - **Rust commits** — run the checklist at the bottom of [docs/rust/conventions.md](docs/rust/conventions.md).
 - **`desktop-ui/` commits** — run `pnpm run typecheck` and re-read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Commits and pull requests
+
+- Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:`…).
+- **Never add AI attribution anywhere**: no `🤖 Generated with [Claude Code](https://claude.com/claude-code)` footer, no `Co-Authored-By: Claude …` (or any other AI tool) trailer. This applies to commit messages, pull request titles and descriptions, issues, and comments.

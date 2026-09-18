@@ -192,6 +192,8 @@ fn restart_resolved() -> Result<(), DnsError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::branding::BRANDING;
+
     #[test]
     fn test_dropin_content_format() {
         let port = 1053;
