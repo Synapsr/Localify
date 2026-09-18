@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 /// Result of attempting to trust the Root CA in booted iOS Simulators.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum IosSimulatorTrust {
     Trusted {
         device_names: Vec<String>,

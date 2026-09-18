@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -180,6 +181,7 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
     }))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn command_output(output: &std::process::Output) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -192,6 +194,7 @@ fn command_output(output: &std::process::Output) -> Option<String> {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn helper_service_label(uid: u32) -> String {
     format!("{}.{uid}", BRANDING.helper_service_prefix())
 }
@@ -201,6 +204,7 @@ fn launchd_plist_path(uid: u32) -> PathBuf {
     PathBuf::from(LAUNCHD_PLIST_DIR).join(format!("{}.plist", helper_service_label(uid)))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn launchd_plist_contents(
     label: &str,
     executable: &Path,
@@ -254,6 +258,7 @@ fn launchd_plist_contents(
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn launchd_environment_variables() -> String {
     let Some(profile) = BRANDING.active_profile() else {
         return String::new();
@@ -294,10 +299,12 @@ fn helper_matches_current_executable(_uid: u32) -> Result<bool> {
     Ok(true)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn plist_contains_executable(plist: &str, executable: &Path) -> bool {
     plist.contains(&escape_xml(&executable.display().to_string()))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
