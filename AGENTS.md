@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Task Completion Requirements
 
@@ -40,15 +40,9 @@ This repo vendors `rust-skills` at `.rust-skills/skills/`. When working on Rust:
 |---------------------|------------|
 | Any Rust file | [docs/rust/conventions.md](docs/rust/conventions.md) |
 | Module structure, new layer, DDD boundary | [docs/rust/architecture.md](docs/rust/architecture.md) |
-| `desktop-ui/` file created / moved / renamed | [docs/code-review/01-structure.md](docs/code-review/01-structure.md) |
-| Any `desktop-ui/` `.ts` / `.tsx` change | [docs/code-review/02-typescript.md](docs/code-review/02-typescript.md) |
-| React components or hooks | [docs/code-review/03-react-patterns.md](docs/code-review/03-react-patterns.md) |
-| Tauri client, React Query factories | [docs/code-review/04-data-layer.md](docs/code-review/04-data-layer.md) |
-| TanStack Form, `useAppForm`, validators | [docs/code-review/05-forms.md](docs/code-review/05-forms.md) |
-| Tailwind / styling | [docs/code-review/06-styling.md](docs/code-review/06-styling.md) |
-| Tauri command inputs, user input handling | [docs/code-review/07-security.md](docs/code-review/07-security.md) |
+| Any `desktop-ui/` change | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 
 ## Pre-commit
 
 - **Rust commits** — run the checklist at the bottom of [docs/rust/conventions.md](docs/rust/conventions.md).
-- **`desktop-ui/` commits** — run [docs/code-review/08-checklist.md](docs/code-review/08-checklist.md).
+- **`desktop-ui/` commits** — run `pnpm run typecheck` and re-read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

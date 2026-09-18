@@ -89,3 +89,18 @@ free target port unless one is explicitly provided.
 - [Linux setup](docs/linux.md)
 - [Technical overview](docs/localify-technical-overview.md)
 - [Public URLs](docs/public-urls.md)
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get
+started, and [SECURITY.md](SECURITY.md) to report a vulnerability.
+
+## Acknowledgements
+
+Localify started as a fork of [Roxy](https://github.com/rbas/roxy) by
+Martin Voldřich, which provides the original DNS, TLS, and reverse proxy
+foundations.
+
+## License
+
+[MIT](LICENSE.md)

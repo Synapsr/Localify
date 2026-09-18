@@ -2989,11 +2989,11 @@ mod tests {
         std::fs::write(
             dir.path().join("config.toml"),
             r#"
-[domains."*.store.example.com"]
-pattern = "*.store.example.com"
+[domains."*.store.example-app.io"]
+pattern = "*.store.example-app.io"
 https_enabled = true
 
-[[domains."*.store.example.com".routes]]
+[[domains."*.store.example-app.io".routes]]
 path = "/"
 target = "127.0.0.1:61092"
 "#,
@@ -3005,7 +3005,7 @@ target = "127.0.0.1:61092"
 
         assert_eq!(
             registration.pattern().display_pattern(),
-            "*.store.example.com"
+            "*.store.example-app.io"
         );
     }
 }

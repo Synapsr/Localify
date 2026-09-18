@@ -72,22 +72,6 @@ Rust conventions (DDD layer rules, module layout, YAGNI, testing strategy) live 
 | [docker.md](docker.md) | Docker integration |
 | [linux.md](linux.md) | Linux platform notes |
 
-### Code Review — Pre-commit quality gate
-
-Applied contextually: the agent (or reviewer) checks only the rules relevant to the files changed in the diff.
-
-| File | Applies when... |
-|------|----------------|
-| [00-general.md](code-review/00-general.md) | Any change |
-| [01-structure.md](code-review/01-structure.md) | Any file created, moved, or renamed |
-| [02-typescript.md](code-review/02-typescript.md) | Any `.ts` / `.tsx` file changed |
-| [03-react-patterns.md](code-review/03-react-patterns.md) | React components or hooks changed |
-| [04-data-layer.md](code-review/04-data-layer.md) | Tauri client wrappers or React Query factories changed |
-| [05-forms.md](code-review/05-forms.md) | TanStack Form code changed |
-| [06-styling.md](code-review/06-styling.md) | Tailwind classes or style files changed |
-| [07-security.md](code-review/07-security.md) | Tauri command inputs or user input handling changed |
-| [08-checklist.md](code-review/08-checklist.md) | **Always** — condensed pass/fail checklist |
-
 For Rust file changes, follow [../CLAUDE.md](../CLAUDE.md) instead.
 
 ## How to Use (for AI agents)
@@ -96,10 +80,8 @@ When asked to commit or review code:
 
 1. Run `git diff --staged` (or `git diff` if nothing staged) to see what changed.
 2. Categorize changed files:
-   - `desktop-ui/**/*.{ts,tsx,css}` → load the relevant `code-review/` files.
+   - `desktop-ui/**/*.{ts,tsx,css}` → follow the desktop UI rules in this document.
    - `apps/web/**/*.{ts,tsx,css}` → treat as standalone Next.js marketing code; keep it isolated from desktop concerns.
    - `src/**/*.rs`, `src-tauri/**/*.rs`, `Cargo.toml` → follow [../CLAUDE.md](../CLAUDE.md).
-3. Load **only** the `code-review/` files relevant to the touched domains.
-4. Always load `code-review/08-checklist.md` as a final pass for UI changes.
-5. Flag violations with the rule reference (e.g., `[TS-03]`, `[DL-01]`). Don't flag what's clean.
-6. If everything passes, proceed with the commit. No summary needed.
+3. Flag violations of the rules in this document. Don't flag what's clean.
+4. If everything passes, proceed with the commit. No summary needed.
