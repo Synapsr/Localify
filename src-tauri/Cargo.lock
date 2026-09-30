@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "localify-desktop"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "localify",
  "portable-pty",
