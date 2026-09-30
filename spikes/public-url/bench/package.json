@@ -1,0 +1,11 @@
+{
+  "name": "localify-public-url-spike-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "node run.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

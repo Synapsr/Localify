@@ -1,0 +1,17 @@
+{
+  "$schema": "../../../apps/web/node_modules/wrangler/config-schema.json",
+  "name": "localify-public-url-spike",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-26",
+  "durable_objects": {
+    "bindings": [{ "name": "PUBLIC_ENDPOINT", "class_name": "PublicEndpoint" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PublicEndpoint"] }],
+  "vars": {
+    // Local testing uses Chrome's built-in *.localhost resolution.
+    "PUBLIC_BASE_DOMAIN": "localhost",
+    "CONNECTOR_TOKEN": "spike-token",
+    // Spike-only: lets the bench measure the Worker and Durable Object hops alone.
+    "SPIKE_BASELINE_ORIGIN": "http://127.0.0.1:5199"
+  }
+}
