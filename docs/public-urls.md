@@ -30,8 +30,8 @@ V1 supports:
 - Project-attached configured local domains only.
 - Exact local domains.
 - Wildcard local domains using existing Localify semantics: root plus one subdomain label.
-- Localify-owned public URLs with a generated, editable slug.
-- Custom public URLs with DNS verification and managed TLS.
+- Localify-owned public URLs on `localify.fyi` with a generated, editable slug.
+- Custom public URLs with DNS verification and managed TLS, including wildcard custom public URLs through on-demand exact hostnames.
 - Optional access protection per public URL.
 - Path-prefix access exceptions per protected public URL.
 - Native Localify connector integrated with the daemon/runtime.
@@ -64,7 +64,7 @@ Project: Journal
 Local Domain: journal.localify
 Public Endpoint: pe_123
 Public URLs:
-  - https://journal-a8f3.localify.dev
+  - https://journal-a8f3.localify.fyi
   - https://preview.journal.com
 ```
 
@@ -89,6 +89,9 @@ Supported:
 preview.journal.com          -> journal.localify
 client-a.preview.journal.com -> client-a.journal.localify
 client-b.preview.journal.com -> client-b.journal.localify
+
+journal-a8f3.localify.fyi           -> journal.localify
+client-a--journal-a8f3.localify.fyi -> client-a.journal.localify
 ```
 
 Not supported in v1:
@@ -97,25 +100,51 @@ Not supported in v1:
 a.b.preview.journal.com -> a.b.journal.localify
 ```
 
-Wildcard custom public URLs require wildcard DNS records. If the root hostname should work, it needs its own DNS record too:
+### Project environments
+
+A wildcard public endpoint on a project's primary local domain exposes every project environment of that project. Environment local domains are exact registrations one label under the project namespace (ADR 0009), and the local router prefers them over the wildcard, so each public label reaches its own environment:
 
 ```text
-preview.journal.com   CNAME <endpoint>.localify...
-*.preview.journal.com CNAME <endpoint>.localify...
+*.app.localify on the remote machine
+
+app-a8f3.localify.fyi                     -> app.localify                (primary environment)
+feature-x--app-a8f3.localify.fyi          -> feature-x.app.localify      (single-service project)
+api--feature-x--app-a8f3.localify.fyi     -> api--feature-x.app.localify (multi-service project)
 ```
 
-Access protection on a wildcard public URL applies to the whole wildcard. If one subdomain later needs a different policy, model it as a more specific exact public URL.
+A new worktree attached as a project environment is reachable at once on the Localify-owned URL, with no public URL to create. An unknown label falls back to the primary environment, as it does locally.
+
+### Custom wildcard DNS
+
+Wildcard custom public URLs need one wildcard DNS record, plus a record for the root hostname if the root should resolve:
+
+```text
+preview.journal.com   CNAME <edge>.localify.fyi
+*.preview.journal.com CNAME <edge>.localify.fyi
+```
+
+Cloudflare for SaaS only issues wildcard custom hostnames on the Enterprise plan. Localify Cloud instead creates one exact custom hostname for the root and for each label the connector reports under the wildcard local domain, and deletes it when the label disappears (ADR 0016). Consequences:
+
+- A new environment reaches the custom domain only after its certificate is issued. Its Localify-owned URL works immediately.
+- Environment names under a custom domain appear in Certificate Transparency logs.
+- An unreported label fails at the TLS handshake instead of falling back to the root.
+- Custom hostnames count against a per-license quota, because Cloudflare charges per hostname beyond the 100 included for the whole account.
+
+Access protection on a wildcard public URL applies to the whole wildcard. If one subdomain later needs a different policy, model it as a more specific exact public URL. On a Localify-owned wildcard URL the access cookie is host-only, so each label asks for the password once.
 
 ## Localify-Owned Public URLs
 
-Localify-owned public URLs use a human-readable slug plus a short uniqueness suffix:
+Localify-owned public URLs live on `localify.fyi`, a domain kept separate from `localify.dev` (website, checkout, downloads). They use a human-readable slug plus a short uniqueness suffix, one DNS label deep so the `*.localify.fyi` certificate covers every URL (ADR 0015):
 
 ```text
-journal-a8f3.localify.dev
+journal-a8f3.localify.fyi
+client-a--journal-a8f3.localify.fyi
 ```
 
 Rules:
 
+- The last `--` separates a wildcard label from the slug, so slugs cannot contain `--`.
+- The public base domain is configuration, not code. Changing it breaks existing URLs unless both domains are served during a transition.
 - Generated at creation time.
 - Editable with availability validation.
 - Changing it is explicit because the old URL may break.
@@ -144,7 +173,7 @@ Access protection belongs to each public URL, not the public endpoint.
 Example:
 
 ```text
-https://journal-a8f3.localify.dev -> password protected
+https://journal-a8f3.localify.fyi -> password protected
 https://preview.journal.com       -> public
 ```
 
@@ -173,15 +202,17 @@ Access exceptions use Localify path-prefix semantics:
 
 Localify Cloud resolves the public URL to a public endpoint. The connector routes by local domain.
 
-The upstream app should see the public host by default:
+The upstream app sees the local domain in `Host` and the public host in `X-Forwarded-Host` (ADR 0017). Localify adds the `.localify` hostname to dev server allowlists such as Vite's `server.allowedHosts`, so a public `Host` would be rejected:
 
 ```text
-Host: preview.journal.com
+Host: journal.localify
 X-Forwarded-Host: preview.journal.com
 X-Forwarded-Proto: https
 X-Forwarded-For: <client-ip>
 X-Localify-Local-Domain: journal.localify
 ```
+
+Apps that build absolute URLs, such as OAuth redirect URIs, must read `X-Forwarded-Host`.
 
 V1 does not expose user-configurable header rewrite rules.
 
@@ -270,8 +301,10 @@ Recommended shape:
 - Worker API for CRUD, DNS verification, auth, and CLI/DesktopApi calls.
 - One Durable Object per public endpoint for connector session and traffic dispatch.
 - Storage for endpoint metadata, public URLs, quotas, retention, and audit fields.
+- `localify.fyi` as a Cloudflare zone with a wildcard DNS record and the Universal SSL certificate for `*.localify.fyi`, routed to the edge Worker.
+- Cloudflare for SaaS on the same zone for custom public URLs, with exact custom hostnames created on demand for wildcard custom URLs.
 
-The local connector remains native Localify Rust code. Cloudflare is the hosted control plane and public edge runtime, not an external tunnel binary dependency.
+The local connector remains native Localify Rust code. Cloudflare is the hosted control plane and public edge runtime, not an external tunnel binary dependency. Orchestrating `cloudflared` tunnels per machine was reconsidered and rejected (ADR 0003).
 
 ## Local Cache
 
@@ -380,9 +413,13 @@ Exact quota values are plan policy, not fixed in this document.
 
 The following still need design during implementation:
 
-- Exact connector transport protocol between daemon and Durable Object.
+- Exact connector transport protocol between daemon and Durable Object: per-stream framing, flow control, WebSocket passthrough for HMR, cancellation, and reconnection. traforo (https://github.com/remorses/traforo) is a reference for the Durable Object side. The local spike in `spikes/public-url/` validates streaming, SSE, and HMR passthrough; flow control and real network latency remain open.
+- Whether the connector dispatches public requests straight into the daemon's router instead of looping back through the local HTTP or HTTPS port.
 - Cloudflare storage choice for metadata beyond Durable Object state.
 - DNS/TLS provisioning details for custom domains.
+- How the connector reports the labels it can serve under a wildcard local domain, and how fast exact custom hostnames follow.
+- What happens when `<label>--<slug>` exceeds the 63-character DNS label limit.
+- Whether one password entry can unlock every label of a Localify-owned wildcard URL, for example through a redirect-based sign-in on a shared auth hostname.
 - Exact DTO fields and status enum names.
 - Exact CLI prompts and flag names.
 - Exact UI layout and polish.

@@ -1,0 +1,3 @@
+# Public Traffic Reaches Upstream Apps With the Local Host
+
+The connector hands public requests to local routing with `Host` set to the local domain, `X-Forwarded-Host` set to the public hostname, and `X-Forwarded-Proto: https`. This reverses ADR 0001, which forwarded the public host to the upstream app by default. Localify adds the `.localify` hostname to dev server allowlists such as Vite's `server.allowedHosts`. With the public host in `Host`, those servers would reject public traffic unless every project also allowed `localify.fyi` and each custom domain it is exposed on. The trade-off is that apps building absolute URLs, such as OAuth redirect URIs, must read `X-Forwarded-Host`, which most frameworks do once told to trust the proxy.
