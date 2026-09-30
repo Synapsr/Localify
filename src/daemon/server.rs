@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 use std::path::PathBuf;
 
 use super::dns_server::DnsServer;
+use super::launch_sessions::LaunchSessions;
 use super::proxy::{ClientAddr, Scheme};
 use super::router::{DomainAccessLog, RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
@@ -81,7 +82,8 @@ impl Server {
                 registrations,
                 project_roots,
                 domain_accesses.clone(),
-            ),
+            )
+            .with_launch_sessions(LaunchSessions::default()),
         ));
 
         let tls_acceptor = create_tls_acceptor(&https_patterns, &paths.certs_dir, &paths.data_dir)?;
@@ -115,12 +117,14 @@ impl Server {
 
         let dns_handle = spawn_dns_server(self.dns_port);
         let domain_accesses = self.state.load().domain_access_log();
+        let launch_sessions = self.state.load().launch_sessions();
         spawn_reload_listener(
             self.state.clone(),
             self.reload_rx,
             self.reload_provider,
             self.config_path,
             domain_accesses,
+            launch_sessions,
             cancel.clone(),
         );
         spawn_mgmt_socket(
@@ -163,6 +167,7 @@ fn spawn_reload_listener(
     reload_provider: Arc<dyn RegistrationProvider>,
     config_path: PathBuf,
     domain_accesses: DomainAccessLog,
+    launch_sessions: LaunchSessions,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -179,7 +184,7 @@ fn spawn_reload_listener(
                                     regs,
                                     project_roots,
                                     domain_accesses.clone(),
-                                ));
+                                ).with_launch_sessions(launch_sessions.clone()));
                                 state.store(new);
                                 info!(count, "Runtime state reloaded");
                             }

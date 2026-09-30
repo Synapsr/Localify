@@ -1,7 +1,9 @@
 pub mod dns_server;
 pub mod embedded_assets;
+pub mod launch_sessions;
 pub mod lifecycle;
 pub mod mgmt_socket;
+pub mod profile_indicator;
 pub mod proxy;
 pub mod router;
 pub mod server;

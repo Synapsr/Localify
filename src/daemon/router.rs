@@ -8,17 +8,20 @@ use arc_swap::ArcSwap;
 use axum::{
     Extension, Router,
     extract::{Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::any,
 };
 use tracing::{debug, info};
 
 use crate::branding::BRANDING;
-use crate::domain::{DomainRegistration, Route, RouteTarget};
+use crate::domain::{DomainRegistration, ProxyTarget, Route, RouteTarget};
 use crate::infrastructure::editor::open_in_editor;
+use crate::infrastructure::launch_sessions::LAUNCH_PROFILE_HEADER;
 
 use super::embedded_assets;
+use super::launch_sessions::LaunchSessions;
+use super::profile_indicator;
 use super::proxy::{ClientAddr, Scheme, proxy_request};
 use super::static_files::serve_static;
 use super::theme;
@@ -35,6 +38,7 @@ pub struct RuntimeState {
     registrations: Vec<DomainRegistration>,
     project_roots: HashMap<String, String>,
     domain_accesses: DomainAccessLog,
+    launch_sessions: LaunchSessions,
 }
 
 impl RuntimeState {
@@ -73,7 +77,14 @@ impl RuntimeState {
             registrations,
             project_roots,
             domain_accesses,
+            launch_sessions: LaunchSessions::default(),
         }
+    }
+
+    /// Keeps the launch session registry across config reloads.
+    pub fn with_launch_sessions(mut self, launch_sessions: LaunchSessions) -> Self {
+        self.launch_sessions = launch_sessions;
+        self
     }
 
     pub fn get_domain(&self, host: &str) -> Option<&DomainRegistration> {
@@ -109,6 +120,10 @@ impl RuntimeState {
 
     pub fn domain_access_log(&self) -> DomainAccessLog {
         self.domain_accesses.clone()
+    }
+
+    pub fn launch_sessions(&self) -> LaunchSessions {
+        self.launch_sessions.clone()
     }
 }
 
@@ -221,6 +236,10 @@ async fn handle_request(
     let proto = scheme.map(|Extension(s)| s.as_str()).unwrap_or("http");
     let client_ip = client_addr.map(|Extension(a)| a.0);
 
+    if method == Method::GET && path == profile_indicator::SCRIPT_PATH {
+        return profile_indicator::script_response();
+    }
+
     if method == Method::POST && path == OPEN_IN_EDITOR_PATH {
         return handle_open_in_editor(
             &state,
@@ -279,7 +298,13 @@ async fn handle_request(
                     serve_static(route.path().as_str(), dir.clone(), request).await
                 }
                 RouteTarget::Proxy(target) => {
-                    proxy_request(
+                    let launch_sessions = state.launch_sessions();
+                    let indicator = browser_indicator(&request, target, &launch_sessions);
+                    let mut request = request;
+                    if indicator.is_some() {
+                        profile_indicator::request_identity_encoding(&mut request);
+                    }
+                    let response = proxy_request(
                         target,
                         request,
                         host,
@@ -287,7 +312,12 @@ async fn handle_request(
                         client_ip,
                         state.project_root_for_registration(registration),
                     )
-                    .await
+                    .await;
+                    let response = match indicator {
+                        Some(profile) => profile_indicator::inject(response, &profile),
+                        None => response,
+                    };
+                    with_launch_profile_header(response, target, &launch_sessions)
                 }
             };
 
@@ -302,6 +332,44 @@ async fn handle_request(
             response
         }
     }
+}
+
+/// Profile to show in the page when this navigation reaches a service
+/// running on a launch profile with the browser indicator on.
+fn browser_indicator(
+    request: &Request,
+    target: &ProxyTarget,
+    launch_sessions: &LaunchSessions,
+) -> Option<String> {
+    if !is_loopback_target(target) || !profile_indicator::is_page_navigation(request) {
+        return None;
+    }
+    launch_sessions.indicator_for_port(target.port().value())
+}
+
+fn is_loopback_target(target: &ProxyTarget) -> bool {
+    matches!(target.host(), "127.0.0.1" | "localhost")
+}
+
+/// Marks responses from a service launched with a launch profile, so
+/// browser tools and API clients can tell which variables the service runs on.
+fn with_launch_profile_header(
+    mut response: Response,
+    target: &ProxyTarget,
+    launch_sessions: &LaunchSessions,
+) -> Response {
+    if !is_loopback_target(target) {
+        return response;
+    }
+    let Some(profile) = launch_sessions.profile_for_port(target.port().value()) else {
+        return response;
+    };
+    if let Ok(value) = HeaderValue::from_str(&profile) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(LAUNCH_PROFILE_HEADER), value);
+    }
+    response
 }
 
 fn handle_open_in_editor(
@@ -842,5 +910,107 @@ mod tests {
 
         assert!(shared.load().get_domain("old.localify").is_none());
         assert!(shared.load().get_domain("new.localify").is_some());
+    }
+
+    async fn html_upstream() -> (u16, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 8192];
+            let read = stream.read(&mut buffer).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&buffer[..read]).to_string());
+            let body = "<!DOCTYPE html><html><head><title>App</title></head><body>hi</body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        (port, request_rx)
+    }
+
+    #[tokio::test]
+    async fn dangerous_launch_profile_pages_get_the_browser_indicator() {
+        use std::sync::Arc;
+
+        use arc_swap::ArcSwap;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        use crate::daemon::launch_sessions::LaunchSessions;
+        use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (port, upstream_request) = html_upstream().await;
+        let domain = DomainName::new(format!("app{}", BRANDING.domain_suffix())).unwrap();
+        let registration = DomainRegistration::new(
+            DomainPattern::Exact(domain.clone()),
+            vec![Route::parse(&format!("/={port}")).unwrap()],
+        );
+        let sessions = LaunchSessions::default();
+        sessions.apply(LaunchSessionUpdate::Running {
+            session: LaunchSessionDto {
+                id: "1".into(),
+                project_id: "acme".into(),
+                environment_slug: None,
+                service_id: "web".into(),
+                profile: "prod".into(),
+                danger: true,
+                target_port: port,
+                started_at: 1,
+                expires_at: None,
+                sources: vec![],
+                browser_indicator: true,
+            },
+        });
+        let state: super::SharedState = Arc::new(ArcSwap::from_pointee(
+            RuntimeState::new(vec![registration]).with_launch_sessions(sessions),
+        ));
+
+        let response = super::create_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, domain.as_str())
+                    .header("sec-fetch-dest", "document")
+                    .header(header::ACCEPT_ENCODING, "gzip, br")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.headers()["x-localify-profile"], "prod");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.starts_with(
+            "<!DOCTYPE html><html><head><script src=\"/.localify/launch-profile.js\" data-profile=\"prod\" defer></script><title>App</title>"
+        ));
+        let upstream_request = upstream_request.await.unwrap().to_ascii_lowercase();
+        assert!(!upstream_request.contains("accept-encoding"));
+
+        let script = super::create_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/.localify/launch-profile.js")
+                    .header(header::HOST, domain.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            script.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
     }
 }

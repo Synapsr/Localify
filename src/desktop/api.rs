@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::TcpListener;
 use std::os::unix::fs::symlink;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -17,6 +18,7 @@ use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::install::Install;
 use crate::application::manage_routes::ManageRoutes;
 use crate::application::ports::DaemonConnection;
+use crate::application::ports::DaemonConnectionError;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
 use crate::application::register_domain::RegisterDomain;
@@ -65,6 +67,9 @@ use crate::desktop::port_conflicts::{
 };
 use crate::desktop::{LauncherPreferencesStore, ProjectRootStore};
 use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
+use crate::infrastructure::binary_identity::{
+    BinaryIdentity, DaemonBinaryCheck, check_daemon_binary,
+};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredDomain, ConfiguredProject, ConfiguredProjectEnvironment,
@@ -75,6 +80,7 @@ use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution,
 use crate::infrastructure::filesystem::FileSystemSetup;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
+use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
 use crate::infrastructure::licensing::{
     FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus, build_offline_imported_license,
     current_machine_fingerprint, mask_license_key, resolve_license_state,
@@ -184,6 +190,7 @@ impl DesktopApi {
             projects: self.list_projects()?,
             services: self.list_project_services()?,
             project_environments: self.list_project_environments()?,
+            launch_sessions: self.launch_sessions(),
         };
         self.backfill_project_markers(&bootstrap.projects);
         Ok(bootstrap)
@@ -2934,6 +2941,57 @@ impl DesktopApi {
         })
     }
 
+    /// Restarts the daemon when it runs an older build of the binary this API
+    /// launches daemons with, which happens when an app update or a manual
+    /// reinstall replaced the file under a running daemon.
+    pub fn restart_daemon_if_outdated(&self) -> Result<DaemonBinaryCheck> {
+        let Some(installed) = BinaryIdentity::of(&self.binary_path) else {
+            return Ok(DaemonBinaryCheck::OtherInstall);
+        };
+        let (_, paths) = self.load_config_and_paths()?;
+        let (pid, reported) = match MgmtSocketClient::new(&paths.socket_path).daemon_binary() {
+            Ok(status) => status,
+            Err(DaemonConnectionError::NotRunning) => return Ok(DaemonBinaryCheck::NotRunning),
+            Err(error) => return Err(anyhow!("Could not read the daemon status: {error}")),
+        };
+        let reported_path = match reported {
+            Some(_) => None,
+            None => pid.and_then(process_executable),
+        };
+
+        let check = check_daemon_binary(&installed, reported.as_ref(), reported_path.as_deref());
+        if check == DaemonBinaryCheck::Outdated {
+            self.restart_daemon(StartDaemonRequest { verbose: false })?;
+        }
+        Ok(check)
+    }
+
+    /// Forwards a launch session report to the daemon, through the system
+    /// helper when the daemon socket belongs to root.
+    pub fn report_launch_session(&self, update: &LaunchSessionUpdate) -> Result<()> {
+        if let Some(helper) = self.connected_helper_client()? {
+            return helper.report_launch_session(update.clone());
+        }
+
+        let (_, paths) = self.load_config_and_paths()?;
+        MgmtSocketClient::new(&paths.socket_path)
+            .report_launch_session(update)
+            .map_err(|error| anyhow!("Could not reach the {} daemon: {error}", BRANDING.app_name))
+    }
+
+    /// Services running with a launch profile. Empty when the daemon is
+    /// stopped or predates launch profiles.
+    fn launch_sessions(&self) -> Vec<LaunchSessionDto> {
+        self.load_config_and_paths()
+            .ok()
+            .and_then(|(_, paths)| {
+                MgmtSocketClient::new(&paths.socket_path)
+                    .launch_sessions()
+                    .ok()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn read_logs(&self, request: LogsRequest) -> Result<LogsDto> {
         if let Some(helper) = self.connected_helper_client()? {
             return helper.read_logs(request);
@@ -2989,6 +3047,10 @@ impl DesktopApi {
         }
 
         let mut cmd = Command::new(&self.binary_path);
+        // Own process group: launchd kills the helper's group when the helper
+        // exits (it recycles itself after every update), and the daemon must
+        // survive that.
+        cmd.process_group(0);
         cmd.arg("--config")
             .arg(&self.config_path)
             .arg("start")
@@ -3052,11 +3114,15 @@ impl DesktopApi {
         LauncherPreferencesStore::new_default()
     }
 
+    /// Command the desktop terminal runs to launch a service. The launch
+    /// profile is passed through to `localify dev`, which owns resolution,
+    /// confirmation and guardrails, so the desktop duplicates none of it.
     pub fn service_dev_command(
         &self,
         project_id: &str,
         environment_slug: &str,
         service_id: &str,
+        launch_profile: Option<&str>,
     ) -> Vec<String> {
         let mut command = Vec::new();
         if let Some(profile) = BRANDING.active_profile() {
@@ -3071,8 +3137,11 @@ impl DesktopApi {
             project_id.to_string(),
             "--env".into(),
             environment_slug.to_string(),
-            service_id.to_string(),
         ]);
+        if let Some(profile) = launch_profile {
+            command.extend(["--profile".into(), profile.to_string()]);
+        }
+        command.push(service_id.to_string());
         command
     }
 
@@ -5410,8 +5479,22 @@ fn map_project_service_info(
     })
 }
 
+/// Executable path of a running process, from the process table.
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    let output = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let command = String::from_utf8_lossy(&output.stdout);
+    command.split_whitespace().next().map(PathBuf::from)
+}
+
 fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {
+    let (launch_profiles, launch_profiles_error) =
+        crate::desktop::environment_launch_profiles(value.root_path.as_deref());
     ProjectEnvironmentInfoDto {
+        launch_profiles,
+        launch_profiles_error,
         project_id: value.project_id,
         project_name: value.project_name,
         name: value.name,
@@ -8887,6 +8970,32 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
         });
 
         assert_eq!(step.status, "skipped");
+    }
+
+    #[test]
+    fn service_dev_command_passes_an_explicit_launch_profile() {
+        let (_temp_dir, api, _store) = temp_api();
+
+        let command = api.service_dev_command("acme", "main", "web", Some("prod"));
+
+        let flag = command.iter().position(|arg| arg == "--profile").unwrap();
+        assert_eq!(command[flag + 1], "prod");
+        assert_eq!(command.last().map(String::as_str), Some("web"));
+    }
+
+    #[test]
+    fn relaunch_without_a_chosen_profile_uses_the_default_profile() {
+        // The desktop never stores a launch profile, so any launch it starts
+        // on its own (retry, relaunch after a crash) carries no --profile and
+        // `localify dev` falls back to `default`, never to a dangerous one.
+        let (_temp_dir, api, _store) = temp_api();
+
+        let command = api.service_dev_command("acme", "main", "web", None);
+
+        assert!(!command.iter().any(|arg| arg == "--profile"));
+        let preferences =
+            serde_json::to_string(&crate::desktop::LauncherPreferences::default()).unwrap();
+        assert!(!preferences.to_ascii_lowercase().contains("profile"));
     }
 
     #[test]

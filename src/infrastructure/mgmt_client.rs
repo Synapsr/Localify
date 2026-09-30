@@ -9,6 +9,8 @@ use crate::application::ports::{
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
 };
+use crate::infrastructure::binary_identity::BinaryIdentity;
+use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
 
 /// Concrete infrastructure adapter implementing `DaemonConnection`
 /// via a synchronous Unix socket client to the daemon's management socket.
@@ -57,6 +59,38 @@ impl MgmtSocketClient {
         }
 
         Ok(resp)
+    }
+
+    /// Reports the start, heartbeat or stop of a service launched with a
+    /// launch profile, for the proxy header, desktop badge and audit log.
+    #[allow(dead_code)] // Used by the CLI and desktop through the library crate.
+    pub fn report_launch_session(
+        &self,
+        update: &LaunchSessionUpdate,
+    ) -> Result<(), DaemonConnectionError> {
+        let command = serde_json::json!({ "cmd": "launch_session", "update": update });
+        self.send_command(&command.to_string()).map(|_| ())
+    }
+
+    /// Process id and binary of the running daemon. Daemons older than this
+    /// check report no binary.
+    #[allow(dead_code)] // Used by the system helper through the library crate.
+    pub fn daemon_binary(
+        &self,
+    ) -> Result<(Option<u32>, Option<BinaryIdentity>), DaemonConnectionError> {
+        let response = self.send_command("status")?;
+        let data = &response["data"];
+        let pid = data["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok());
+        let binary = serde_json::from_value(data["binary"].clone()).ok();
+        Ok((pid, binary))
+    }
+
+    /// Services currently running with a launch profile.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn launch_sessions(&self) -> Result<Vec<LaunchSessionDto>, DaemonConnectionError> {
+        let response = self.send_command("launch_sessions")?;
+        serde_json::from_value(response["data"]["sessions"].clone())
+            .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
     }
 }
 

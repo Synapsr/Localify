@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::infrastructure::launch_sessions::LaunchSessionDto;
+
 use crate::config::{
     AgentConfig, DaemonConfig, DockerConfig, KEYGEN_ACCOUNT_ID, KEYGEN_API_URL, KEYGEN_PRODUCT_ID,
     KEYGEN_PUBLIC_KEY, LocalifyPaths,
@@ -337,6 +339,22 @@ pub struct ProjectEnvironmentInfoDto {
     pub git_branch: Option<String>,
     #[serde(default)]
     pub services: Vec<ProjectEnvironmentServiceInfoDto>,
+    /// Profiles declared in this checkout's `localify.toml`.
+    #[serde(default)]
+    pub launch_profiles: Vec<LaunchProfileInfoDto>,
+    /// Why `localify.toml` could not be read, shown instead of the profiles.
+    #[serde(default)]
+    pub launch_profiles_error: Option<String>,
+}
+
+/// A launch profile a service can start with. Addresses only, no values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchProfileInfoDto {
+    pub name: String,
+    pub danger: bool,
+    #[serde(default)]
+    pub max_duration: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +481,9 @@ pub struct BootstrapDto {
     pub services: Vec<ProjectServiceInfoDto>,
     #[serde(default)]
     pub project_environments: Vec<ProjectEnvironmentInfoDto>,
+    /// Services currently running with a launch profile, from the daemon.
+    #[serde(default)]
+    pub launch_sessions: Vec<LaunchSessionDto>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

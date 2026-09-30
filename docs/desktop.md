@@ -86,6 +86,16 @@ localify-dev services list
 localify-dev run web
 ```
 
+## Updates
+
+- **In-app update:** it records whether the daemon was running and restarts it after the relaunch.
+- **Any other replacement** (DMG, manual copy): the system helper restarts on the new build and
+  compares the daemon's binary with the installed one. The daemon reports its canonical path, inode,
+  size and modification time in its management `status`. The helper restarts a daemon running an older
+  build of the same install, and leaves a daemon started from another binary (a dev build) alone.
+- **Process group:** the helper starts the daemon in its own process group, so launchd does not stop
+  the daemon when the helper recycles itself after an update.
+
 ## Launch at Login
 
 Successful desktop activation registers Localify with the official Tauri

@@ -32,6 +32,14 @@ _Avoid_: Broken service, deleted service
 A local checkout variant of a project, usually tied to a git worktree or branch, that can run the same services with distinct local domains and ports.
 _Avoid_: Project, branch project, clone
 
+**Launch Profile**:
+A named choice of where a service's variables come from when Localify starts it, declared in the checkout's `localify.toml`. It never changes the service, its local domains or its port.
+_Avoid_: Environment, env, stage, mode
+
+**Dangerous Launch Profile**:
+A launch profile marked `danger = true`, typically running on production data. It is flagged in the terminal, the browser and the desktop app while it runs, and every launch is recorded in the daemon log.
+_Avoid_: Production environment, prod env
+
 **Git Worktree**:
 A repository checkout that Localify may treat as a project environment for the same project.
 _Avoid_: Project, clone

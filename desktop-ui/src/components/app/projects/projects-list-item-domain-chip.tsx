@@ -11,6 +11,9 @@ import type {
   TerminalTargetRequest,
 } from "@/types/localify";
 
+import { LaunchProfileBadge } from "@/components/app/launch-profiles/launch-profile-badge";
+import { LaunchProfileMenu } from "@/components/app/launch-profiles/launch-profile-menu";
+import { serviceLaunchProfiles } from "@/components/app/launch-profiles/util.launch-profiles";
 import {
   CheckIcon,
   CopyIcon,
@@ -147,6 +150,7 @@ export const ProjectDomainChip = ({
   const ownedServiceSession = serviceTerminalTarget
     ? hasOwnedServiceSession(serviceTerminalTarget)
     : false;
+  const launchProfiles = serviceLaunchProfiles(data, serviceTerminalTarget);
   const serviceTarget = service?.target ?? launchTarget;
   const serviceActionPending =
     stopLocalDevServer.isPending || serviceActionInFlight;
@@ -258,6 +262,25 @@ export const ProjectDomainChip = ({
     }
   };
 
+  const handleLaunchWithProfile = async (profile: string) => {
+    if (!serviceTerminalTarget) {
+      return;
+    }
+
+    setServiceActionInFlight(true);
+    try {
+      await launchService(serviceTerminalTarget, profile);
+    } catch (error) {
+      const description =
+        error instanceof Error
+          ? error.message
+          : "Unable to launch this service.";
+      toast.error("Launch service failed", { description });
+    } finally {
+      setServiceActionInFlight(false);
+    }
+  };
+
   return (
     <>
       <span
@@ -325,6 +348,10 @@ export const ProjectDomainChip = ({
           </Tooltip>
         )}
 
+        {launchProfiles.session ? (
+          <LaunchProfileBadge session={launchProfiles.session} />
+        ) : null}
+
         {serviceTerminalTarget ? (
           <Tooltip>
             <TooltipTrigger
@@ -353,6 +380,17 @@ export const ProjectDomainChip = ({
             />
             <TooltipContent>{serviceActionStatusLabel}</TooltipContent>
           </Tooltip>
+        ) : null}
+
+        {serviceTerminalTarget && !reachable ? (
+          <LaunchProfileMenu
+            profiles={launchProfiles.profiles}
+            error={launchProfiles.profilesError}
+            serviceName={service?.name ?? pattern}
+            onLaunch={(profile) => void handleLaunchWithProfile(profile)}
+            disabled={serviceActionDisabled}
+            className="-ml-1 h-6 w-4 rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground aria-expanded:bg-foreground/10 aria-expanded:text-foreground"
+          />
         ) : null}
 
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>

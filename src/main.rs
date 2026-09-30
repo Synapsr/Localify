@@ -35,6 +35,37 @@ struct Cli {
     command: Commands,
 }
 
+/// Launch profile options shared by `dev` and `run`.
+#[derive(clap::Args, Debug, Default)]
+struct LaunchProfileFlags {
+    /// Launch profile from the project's localify.toml. Changes only the service's variables: same service, domain and port. Defaults to the profile named `default`, if any.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+
+    /// Extra dotenv file, loaded before the profile's sources (repeatable; relative to the current directory). `pass://` values are read from Proton Pass.
+    #[arg(long = "env-file", value_name = "PATH")]
+    env_file: Vec<PathBuf>,
+
+    /// Required to start a `danger = true` profile when no terminal is attached (agents, scripts, CI). Must repeat the profile name.
+    #[arg(long, value_name = "NAME")]
+    confirm_profile: Option<String>,
+
+    /// Print Proton Pass values in the service output instead of masking them
+    #[arg(long)]
+    no_masking: bool,
+}
+
+impl LaunchProfileFlags {
+    fn into_args(self) -> cli::launch_profile::LaunchProfileArgs {
+        cli::launch_profile::LaunchProfileArgs {
+            profile: self.profile,
+            env_files: self.env_file,
+            confirm_profile: self.confirm_profile,
+            no_masking: self.no_masking,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Initial setup - configures DNS and prepares Localify for use
@@ -179,9 +210,12 @@ enum Commands {
         #[arg(long)]
         project: Option<String>,
 
-        /// Project environment name/slug. Defaults to the primary environment.
+        /// Project environment (a worktree or branch checkout with its own domains and ports). Defaults to the primary environment. To change only variables, use --profile.
         #[arg(long)]
         env: Option<String>,
+
+        #[command(flatten)]
+        launch_profile: LaunchProfileFlags,
 
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
@@ -201,13 +235,32 @@ enum Commands {
         #[arg(long)]
         project: Option<String>,
 
-        /// Project environment name/slug. Defaults to the primary environment.
+        /// Project environment (a worktree or branch checkout with its own domains and ports). Defaults to the primary environment. To change only variables, use --profile.
         #[arg(long)]
         env: Option<String>,
+
+        #[command(flatten)]
+        launch_profile: LaunchProfileFlags,
 
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
+    },
+
+    /// Run a command that is not a service (database studio, migration, worker) with the variables of a launch profile, from the current folder
+    Exec {
+        #[command(flatten)]
+        launch_profile: LaunchProfileFlags,
+
+        /// Command to run, passed after `--`
+        #[arg(last = true, value_name = "COMMAND", required = true)]
+        command: Vec<String>,
+    },
+
+    /// Set up launch profiles (localify.toml) for the current project
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
     },
 
     /// Manage coding-agent integration
@@ -491,6 +544,12 @@ enum ServicesCommands {
 }
 
 #[derive(Subcommand)]
+enum ProfileCommands {
+    /// Create or update localify.toml interactively: pick sources (Proton Pass notes, pass:// references or local files), check every service, preview, then write
+    Init,
+}
+
+#[derive(Subcommand)]
 enum AgentCommands {
     /// Install the bundled Localify skill for detected coding agents
     InstallSkill,
@@ -752,6 +811,7 @@ fn main() -> Result<()> {
             service,
             project,
             env,
+            launch_profile,
             command,
         } => cli::services::run(
             cli::services::RunArgs {
@@ -761,6 +821,7 @@ fn main() -> Result<()> {
                 environment: env,
                 init_domain: None,
                 override_command: command,
+                launch_profile: launch_profile.into_args(),
             },
             config_path,
             localify::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
@@ -774,6 +835,7 @@ fn main() -> Result<()> {
             domain,
             project,
             env,
+            launch_profile,
             command,
         } => cli::services::run(
             cli::services::RunArgs {
@@ -783,12 +845,32 @@ fn main() -> Result<()> {
                 environment: env,
                 init_domain: domain,
                 override_command: command,
+                launch_profile: launch_profile.into_args(),
             },
             config_path,
             localify::project_init::LocalAppUpdatePolicy::runtime_only(),
             &ctx,
             &paths,
         ),
+        Commands::Exec {
+            launch_profile,
+            command,
+        } => {
+            let code = cli::exec::run(
+                cli::exec::ExecArgs {
+                    launch_profile: launch_profile.into_args(),
+                    command,
+                },
+                &paths,
+            )?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Commands::Profile { command } => match command {
+            ProfileCommands::Init => cli::profile_init::run(&ctx),
+        },
         Commands::Agent { command } => match command {
             AgentCommands::InstallSkill => {
                 let result = localify::agent_skill::install_agent_skill()?;

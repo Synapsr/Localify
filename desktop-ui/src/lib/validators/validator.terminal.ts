@@ -32,9 +32,15 @@ export const terminalCreateSessionRequestSchema = z.object({
   ...terminalSizeSchema,
 });
 
+// Mirrors `LaunchProfileName` on the Rust side.
+const launchProfileNameSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,31}$/, "Invalid launch profile name");
+
 export const terminalLaunchServiceRequestSchema = z.object({
   target: serviceTerminalTargetSchema,
   ...terminalSizeSchema,
+  profile: launchProfileNameSchema.nullish(),
 });
 
 export const terminalWriteRequestSchema = z.object({

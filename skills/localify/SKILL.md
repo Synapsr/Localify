@@ -243,6 +243,54 @@ localify project domain set web preview.myapp.localify --env preview
 This updates the service or environment metadata, replaces the registered route, attempts to generate
 the certificate for the new domain, and reloads the daemon.
 
+## Launch profiles
+
+A launch profile changes only the variables a service starts with. The service, its domain and its
+port stay the same. It is not a project environment: `--env` selects another checkout with its own
+domains, `--profile` selects where variables come from.
+
+Profiles live in `localify.toml` at the checkout root (commit it: it holds addresses, never values).
+`localify profile init` sets it up interactively for a person in a terminal; as an agent, suggest
+that command to the user or write the file directly:
+
+```toml
+[profiles.default]            # used when --profile is omitted; never dangerous
+sources = [{ file = ".env.development" }]
+
+[profiles.prod]
+danger = true                 # red banner, in-page indicator, audit log, fails on missing sources
+# max_duration = "4h"         # optional: Localify stops the service after this
+sources = [
+  { proton_pass_note = { vault = "Env", title = "my-app/{service_path}/.env.production" } },
+]
+```
+
+- `file` paths are relative to the service folder, even when `localify dev` runs from the repo root.
+- `proton_pass_note` reads a Proton Pass note whose body is a dotenv file. `{service_path}` is the
+  service folder relative to the project root (`apps/web`).
+- Values starting with `pass://` in a `file` source or `--env-file` are resolved through `pass-cli`.
+- The first source that defines a key wins. `[profiles.<name>.env]` forces values over every source
+  (use it to switch off emails, crons or invoicing on a production profile). Shell exports win over
+  the profile. Localify's `PORT`, `HOST` and URL variables win over both.
+- The service sees `LOCALIFY_LAUNCH_PROFILE=<name>`, plus `LOCALIFY_DANGER=1` on dangerous profiles.
+  The proxy adds `X-Localify-Profile: <name>` to its responses and, for dangerous profiles, a
+  `[PROD]` tab-title prefix plus a draggable pill in the app's pages (`browser_indicator = false`
+  turns it off). Do not remove or hide it in app code.
+
+```bash
+localify dev web --profile staging
+localify dev web --env-file ./tmp.env            # one-off file, relative to the current directory
+localify dev web --profile prod --confirm-profile prod   # dangerous profile without a terminal
+localify exec --profile staging -- pnpm db:migrate       # a command that is not a service, from its folder
+```
+
+`localify exec` runs any command with the variables of a profile, from the current folder (nearest
+`localify.toml` upwards, current folder as `{service_path}`), without `PORT`/`HOST`/URL injection,
+and exits with the command's exit code.
+
+If `pass-cli` is missing or signed out, tell the user to run `pass-cli login`; do not try to work
+around it. Full guide: `docs/launch-profiles.md` in the Localify repo.
+
 ## Routes
 
 Routes map a path prefix to a target.
@@ -352,10 +400,16 @@ Common failures:
 - After creating a Next.js or Vite project, run `localify dev` before handing the URL to the user.
 - For Next.js, expect Localify to patch an existing `next.config.*` with `allowedDevOrigins` and Localify-compatible `images.remotePatterns`.
 - For Vite, expect Localify to patch an existing `vite.config.*` with an explicit `server.allowedHosts` entry. Do not set `allowedHosts: true`.
+- Never pass `--confirm-profile` on your own. Launch a `danger = true` profile only when the user
+  explicitly asked for that profile in this task, and say that the service now runs on its data.
+- Never print, copy or write launch profile values. Do not materialize Proton Pass values into
+  `.env` files; add a source to `localify.toml` instead.
+- Use `--profile` to change variables and `--env` to change checkout. Do not create a project
+  environment to switch between development and production data.
 
 ## Run boundary
 
 `localify run` is a compatibility launch command. Prefer `localify dev` for dev servers. Use
 `localify init-project --yes`, `localify project add-service`, or `localify project env ensure` for
 explicit config mutations; use `localify dev --env <name>` when working inside a project worktree or
-branch environment.
+branch environment, and `localify dev --profile <name>` to start the same service on other variables.

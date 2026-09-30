@@ -14,9 +14,12 @@ use serde::Serialize;
 
 use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
+use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::project_env::ensure_implicit_worktree_environment;
+use super::service_supervisor::{self, LaunchOutcome, SessionReporter, SupervisedLaunch};
 use crate::branding::BRANDING;
 use crate::domain::DomainRegistration;
+use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
 use crate::domain::value_objects::{ProxyTarget, RouteTarget};
 use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
 #[cfg(target_os = "macos")]
@@ -84,6 +87,7 @@ pub struct RunArgs {
     pub environment: Option<String>,
     pub init_domain: Option<String>,
     pub override_command: Vec<String>,
+    pub launch_profile: LaunchProfileArgs,
 }
 
 pub fn list(ctx: &AppContext, json: bool) -> Result<()> {
@@ -207,6 +211,7 @@ pub fn run(
         environment,
         init_domain,
         override_command,
+        launch_profile,
     } = args;
     if init_domain.is_some()
         && (service_name.is_some() || project.is_some() || environment.is_some())
@@ -328,13 +333,21 @@ pub fn run(
     };
     warn_if_daemon_is_stopped(ctx);
 
+    let profile = launch_profile::prepare(
+        &launch_profile,
+        &service_project_root(&service, &workdir),
+        &workdir,
+        &effective_current_dir()?,
+    )?;
+
     let endpoint = service_endpoint(&service, ports, ctx)?;
     let url = service_url(&service, endpoint);
     let app_host = service_public_host(&service);
     let app_domain = service_public_domain(&service, endpoint);
     ensure_next_allowed_dev_origin(&workdir, &app_host);
     ensure_vite_allowed_host(&workdir, &app_host);
-    let url_envs = url_environment_overrides(&workdir, &url, &app_domain)?;
+    let url_envs =
+        url_environment_overrides(&workdir, &url, &app_domain, &profile_keys(profile.as_ref()))?;
     eprintln!("Starting '{}' at {}", service.id, url);
     eprintln!("  route target: {proxy_target}");
     eprintln!("  injected HOST: 127.0.0.1");
@@ -342,31 +355,62 @@ pub fn run(
     eprintln!("  injected LOCALIFY_URL: {url}");
     eprintln!("  injected URL envs: {}", env_key_list(&url_envs));
     eprintln!("  cwd: {}", workdir.display());
-    eprintln!("$ {}", command.join(" "));
+    if let Some(profile) = &profile {
+        launch_profile::print_summary(profile);
+    }
 
+    let ca_cert_path = paths.data_dir.join("ca.crt");
+    let environment = service_environment(port, &url_envs, &ca_cert_path, profile.as_ref());
+    if profile.is_some() {
+        launch_profile::print_conflicts(
+            &environment.shadowed_by_shell,
+            &environment.replaced_by_runtime,
+        );
+    }
+    eprintln!("$ {}", command.join(" "));
+    trust_ios_simulators_for_dev(mode, &ca_cert_path);
+
+    let Some(profile) = profile else {
+        return run_plain(&service, &command, &workdir, &environment);
+    };
+    let session = launch_profile::start_launch_session(
+        &profile,
+        SessionTarget {
+            project_id: service.project_id.clone(),
+            environment_slug: environment_slug(&service, effective_environment, ctx),
+            service_id: service.id.clone(),
+            target_port: port,
+            browser_indicator: profile.resolved.browser_indicator,
+        },
+        &paths.socket_path,
+    )?;
+    run_with_profile(
+        &profile,
+        &service,
+        &command,
+        &workdir,
+        &environment,
+        session,
+    )
+}
+
+fn run_plain(
+    service: &ConfiguredService,
+    command: &[String],
+    workdir: &Path,
+    environment: &LaunchEnvironment,
+) -> Result<()> {
     let mut child = Command::new(&command[0]);
     child
         .args(&command[1..])
-        .current_dir(&workdir)
-        .env("PORT", port.to_string())
-        .env("HOST", "127.0.0.1");
-
-    for (key, value) in &url_envs {
-        child.env(key, value);
-    }
-
-    child
+        .current_dir(workdir)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-
-    let ca_cert_path = paths.data_dir.join("ca.crt");
-    trust_ios_simulators_for_dev(mode, &ca_cert_path);
-    if ca_cert_path.exists() {
-        child
-            .env("NODE_EXTRA_CA_CERTS", ca_cert_path)
-            .env_remove("NODE_USE_SYSTEM_CA");
+    for key in &environment.unset {
+        child.env_remove(key);
     }
+    child.envs(environment.set.iter().map(|(key, value)| (key, value)));
 
     let status = child
         .status()
@@ -376,6 +420,119 @@ pub fn run(
     }
 
     Ok(())
+}
+
+fn run_with_profile(
+    profile: &PreparedProfile,
+    service: &ConfiguredService,
+    command: &[String],
+    workdir: &Path,
+    environment: &LaunchEnvironment,
+    session: Option<SessionReporter>,
+) -> Result<()> {
+    let dangerous_name = profile.name().filter(|_| profile.is_dangerous());
+    if let Some(name) = dangerous_name {
+        let service_label = format!("{} ({})", service.id, service.project_name);
+        launch_profile::print_danger_banner(profile, &service_label);
+        launch_profile::set_danger_title(name, &service.id);
+    }
+
+    let outcome = service_supervisor::run(SupervisedLaunch {
+        command,
+        workdir,
+        environment,
+        mask_patterns: profile.mask_patterns(),
+        max_duration: profile.max_duration(),
+        session,
+    });
+    if dangerous_name.is_some() {
+        launch_profile::reset_title();
+    }
+
+    match outcome? {
+        LaunchOutcome::Exited(status) if !status.success() => {
+            bail!("Service '{}' exited with {}", service.id, status)
+        }
+        LaunchOutcome::Expired(duration) => bail!(
+            "Service '{}' was stopped: launch profile '{}' reached its max_duration of {}.",
+            service.id,
+            profile.name().unwrap_or_default(),
+            humantime::format_duration(duration)
+        ),
+        LaunchOutcome::Exited(_) | LaunchOutcome::Interrupted => Ok(()),
+    }
+}
+
+/// Builds the service environment in priority order: Localify runtime
+/// variables, then the shell, then the launch profile.
+fn service_environment(
+    port: u16,
+    url_envs: &[(String, String)],
+    ca_cert_path: &Path,
+    profile: Option<&PreparedProfile>,
+) -> LaunchEnvironment {
+    let mut runtime = launch_profile::profile_runtime_variables(profile);
+    runtime.set.push(("PORT".into(), port.to_string()));
+    runtime.set.push(("HOST".into(), "127.0.0.1".into()));
+    runtime.set.extend(url_envs.iter().cloned());
+    if ca_cert_path.exists() {
+        runtime.set.push((
+            "NODE_EXTRA_CA_CERTS".into(),
+            ca_cert_path.display().to_string(),
+        ));
+        runtime.unset.push("NODE_USE_SYSTEM_CA".into());
+    }
+
+    let profile_variables = profile
+        .map(|profile| profile.resolved.pairs())
+        .unwrap_or_default();
+    layer_environment(
+        &runtime,
+        |key| env::var_os(key).is_some(),
+        &profile_variables,
+        &launch_profile::output_defaults(profile),
+    )
+}
+
+fn profile_keys(profile: Option<&PreparedProfile>) -> Vec<String> {
+    profile
+        .map(|profile| {
+            profile
+                .resolved
+                .variables
+                .iter()
+                .map(|variable| variable.key.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn service_project_root(service: &ConfiguredService, workdir: &Path) -> PathBuf {
+    service
+        .project_root_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workdir.to_path_buf())
+}
+
+/// Slug of the project environment the service runs in, so the desktop can
+/// put the launch profile badge on the right row.
+fn environment_slug(
+    service: &ConfiguredService,
+    requested: Option<&str>,
+    ctx: &AppContext,
+) -> Option<String> {
+    let environments = ctx
+        .config_store
+        .list_project_environments(Some(&service.project_id))
+        .ok()?;
+    let environment = match requested {
+        Some(value) => environments
+            .iter()
+            .find(|environment| environment_matches(environment, value)),
+        None => environments.iter().find(|environment| environment.primary),
+    };
+    environment.map(|environment| environment.slug.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -673,6 +830,84 @@ fn ensure_run_context_is_initialized(
             policy,
         )
     })
+}
+
+/// Project checkout containing the current directory, with each service's
+/// folder as `localify dev` resolves it.
+pub struct ProjectCheckout {
+    pub project_name: String,
+    pub root: PathBuf,
+    /// Service id and folder relative to `root`, empty for a service at the
+    /// root. Services missing from this checkout are left out.
+    pub services: Vec<(String, String)>,
+}
+
+pub fn current_project_checkout(ctx: &AppContext) -> Result<ProjectCheckout> {
+    let cwd = effective_current_dir()?;
+    let services = services_with_project_roots(ctx)?;
+    let Some((project_id, root)) = checkout_root_for_cwd(&services, &cwd, ctx) else {
+        bail!(
+            "No {} project contains '{}'. Run '{} dev' or '{} init-project' in the project folder first.",
+            BRANDING.app_name,
+            cwd.display(),
+            BRANDING.cli_command(),
+            BRANDING.cli_command()
+        );
+    };
+
+    let project_services: Vec<ConfiguredService> = services
+        .into_iter()
+        .filter(|service| service.project_id == project_id)
+        .collect();
+    let project_name = project_services
+        .first()
+        .map(|service| service.project_name.clone())
+        .unwrap_or_else(|| project_id.clone());
+    let mut folders: Vec<(String, String)> = project_services
+        .into_iter()
+        .filter_map(|mut service| {
+            service.project_root_path = Some(root.display().to_string());
+            let service = service_with_launch_for_mode(service, RunMode::Dev);
+            let workdir = service_workdir(&service).ok()?;
+            let relative = workdir.strip_prefix(&root).ok()?;
+            Some((service.id, relative.display().to_string()))
+        })
+        .collect();
+    folders.sort();
+
+    Ok(ProjectCheckout {
+        project_name,
+        root,
+        services: folders,
+    })
+}
+
+/// Most specific project or worktree root that contains `cwd`.
+fn checkout_root_for_cwd(
+    services: &[ConfiguredService],
+    cwd: &Path,
+    ctx: &AppContext,
+) -> Option<(String, PathBuf)> {
+    let project_roots = services.iter().filter_map(|service| {
+        let root = PathBuf::from(service.project_root_path.as_ref()?);
+        Some((service.project_id.clone(), root))
+    });
+    let environment_roots = ctx
+        .config_store
+        .list_project_environments(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|environment| {
+            Some((
+                environment.project_id,
+                PathBuf::from(environment.root_path?),
+            ))
+        });
+
+    project_roots
+        .chain(environment_roots)
+        .filter(|(_, root)| cwd.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())
 }
 
 fn services_with_project_roots(ctx: &AppContext) -> Result<Vec<ConfiguredService>> {
@@ -1683,10 +1918,14 @@ fn ensure_vite_allowed_host(workdir: &Path, app_host: &str) {
     }
 }
 
+/// URL and domain variables Localify points at the local domain. Keys found
+/// in the service's env files or in its launch profile are included, so a
+/// production profile cannot send OAuth callbacks or links to production.
 fn url_environment_overrides(
     workdir: &Path,
     url: &str,
     app_domain: &str,
+    profile_keys: &[String],
 ) -> Result<Vec<(String, String)>> {
     let mut keys = BTreeSet::new();
     for key in DEFAULT_URL_ENV_KEYS
@@ -1697,6 +1936,11 @@ fn url_environment_overrides(
     }
     for key in discover_url_env_keys(workdir)? {
         keys.insert(key);
+    }
+    for key in profile_keys {
+        if is_valid_env_key(key) && is_safe_url_env_key(key) {
+            keys.insert(key.clone());
+        }
     }
 
     Ok(keys
@@ -2155,7 +2399,7 @@ mod tests {
         let url = "https://feat.demo.localify.test:8443";
         let domain = "feat.demo.localify.test:8443";
 
-        let envs = url_environment_overrides(temp_dir.path(), url, domain).unwrap();
+        let envs = url_environment_overrides(temp_dir.path(), url, domain, &[]).unwrap();
 
         assert_eq!(env_value(&envs, "LOCALIFY_URL"), Some(url));
         assert_eq!(env_value(&envs, "NEXT_PUBLIC_APP_URL"), Some(url));
@@ -2186,7 +2430,7 @@ INVALID-NAME=https://old.example
 
         let url = "https://feat.demo.localify.test:8443";
         let domain = "feat.demo.localify.test:8443";
-        let envs = url_environment_overrides(temp_dir.path(), url, domain).unwrap();
+        let envs = url_environment_overrides(temp_dir.path(), url, domain, &[]).unwrap();
 
         assert_eq!(env_value(&envs, "VITE_SITE_URL"), Some(url));
         assert_eq!(env_value(&envs, "WEB_ORIGIN"), Some(url));

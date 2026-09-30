@@ -338,7 +338,11 @@ fn ensure_environment_backend(
 }
 
 fn environment_info(environment: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {
+    let (launch_profiles, launch_profiles_error) =
+        localify::desktop::environment_launch_profiles(environment.root_path.as_deref());
     ProjectEnvironmentInfoDto {
+        launch_profiles,
+        launch_profiles_error,
         project_id: environment.project_id,
         project_name: environment.project_name,
         name: environment.name,

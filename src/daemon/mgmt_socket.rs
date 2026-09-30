@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::router::SharedState;
+use crate::infrastructure::binary_identity::BinaryIdentity;
+use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 
 /// Management commands sent over the Unix socket.
 #[derive(Debug, Deserialize)]
@@ -19,6 +21,11 @@ enum MgmtCommand {
     Reload,
     #[serde(rename = "list")]
     List,
+    /// A `localify dev` launched with a profile reports start, heartbeat or stop.
+    #[serde(rename = "launch_session")]
+    LaunchSession { update: LaunchSessionUpdate },
+    #[serde(rename = "launch_sessions")]
+    LaunchSessions,
 }
 
 /// Response sent back to the management client.
@@ -66,6 +73,7 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "status" => Some(MgmtCommand::Status),
         "reload" => Some(MgmtCommand::Reload),
         "list" => Some(MgmtCommand::List),
+        "launch_sessions" => Some(MgmtCommand::LaunchSessions),
         _ => None,
     }
 }
@@ -93,6 +101,9 @@ pub async fn serve(
     // Remove stale socket file if it exists
     let _ = std::fs::remove_file(&socket_path);
 
+    // Identity of the binary this daemon runs, so the system helper can
+    // restart it after an update replaced the file.
+    let binary = BinaryIdentity::current_executable();
     let listener = UnixListener::bind(&socket_path)?;
     crate::infrastructure::file_security::restrict_key_permissions(&socket_path)
         .map_err(|e| anyhow::anyhow!("Failed to set socket permissions: {e}"))?;
@@ -112,6 +123,7 @@ pub async fn serve(
 
         let state = state.clone();
         let reload_tx = reload_tx.clone();
+        let binary = binary.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -134,6 +146,7 @@ pub async fn serve(
                         "http_port": ports.http,
                         "https_port": ports.https,
                         "dns_port": ports.dns,
+                        "binary": binary,
                     }))
                 }
                 Some(MgmtCommand::List) => {
@@ -164,6 +177,14 @@ pub async fn serve(
                     MgmtResponse::success(serde_json::json!({
                         "domains": domains,
                     }))
+                }
+                Some(MgmtCommand::LaunchSession { update }) => {
+                    state.load().launch_sessions().apply(update);
+                    MgmtResponse::success(serde_json::json!({ "recorded": true }))
+                }
+                Some(MgmtCommand::LaunchSessions) => {
+                    let sessions = state.load().launch_sessions().active();
+                    MgmtResponse::success(serde_json::json!({ "sessions": sessions }))
                 }
                 Some(MgmtCommand::Reload) => {
                     if reload_tx.send(()).await.is_ok() {
@@ -304,6 +325,7 @@ mod tests {
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["data"]["registration_count"], 2);
         assert!(resp["data"]["pid"].as_u64().unwrap() > 0);
+        assert!(resp["data"]["binary"]["inode"].as_u64().unwrap() > 0);
 
         cancel.cancel();
     }
@@ -362,6 +384,43 @@ mod tests {
         let resp = send_command(&sock, "status").await;
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["data"]["registration_count"], 1);
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn serve_records_and_lists_launch_sessions() {
+        let (sock, cancel, _rx, _dir) = start_server(vec![]).await;
+        let session = serde_json::json!({
+            "id": "42-1",
+            "projectId": "acme",
+            "environmentSlug": "main",
+            "serviceId": "web",
+            "profile": "prod",
+            "danger": true,
+            "targetPort": 3000,
+            "startedAt": 1,
+            "sources": ["Proton Pass note 'Acme/apps/web/.env.production' (vault Env): 12 keys"],
+        });
+        let running = serde_json::json!({
+            "cmd": "launch_session",
+            "update": { "state": "running", "session": session },
+        });
+
+        let resp = send_command(&sock, &running.to_string()).await;
+        assert_eq!(resp["ok"], true);
+
+        let resp = send_command(&sock, "launch_sessions").await;
+        assert_eq!(resp["data"]["sessions"][0]["profile"], "prod");
+        assert_eq!(resp["data"]["sessions"][0]["targetPort"], 3000);
+
+        let stopped = serde_json::json!({
+            "cmd": "launch_session",
+            "update": { "state": "stopped", "session": session, "reason": "exited" },
+        });
+        send_command(&sock, &stopped.to_string()).await;
+        let resp = send_command(&sock, "launch_sessions").await;
+        assert_eq!(resp["data"]["sessions"], serde_json::json!([]));
 
         cancel.cancel();
     }

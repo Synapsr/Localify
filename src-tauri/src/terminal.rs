@@ -10,6 +10,7 @@ use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
     BootstrapDto, DomainInfoDto, ProjectEnvironmentInfoDto, ProjectInfoDto, ProjectServiceInfoDto,
 };
+use localify::domain::launch_profile::LaunchProfileName;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -63,6 +64,10 @@ pub struct TerminalLaunchServiceRequest {
     pub target: TerminalTargetRequest,
     pub cols: u16,
     pub rows: u16,
+    /// Launch profile from the project's `localify.toml`; `None` launches
+    /// with the `default` profile, if any.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,7 +172,7 @@ impl TerminalManager {
         api: &DesktopApi,
         request: TerminalCreateSessionRequest,
     ) -> Result<TerminalSessionDto, String> {
-        let resolved = resolve_terminal_target(api, &request.target)?;
+        let resolved = resolve_terminal_target(api, &request.target, None)?;
         let (dto, _) = self.create_resolved_session(app, resolved, request.cols, request.rows)?;
 
         Ok(dto)
@@ -183,7 +188,10 @@ impl TerminalManager {
             return Err("Only service targets can be launched.".into());
         }
 
-        let resolved = resolve_terminal_target(api, &request.target)?;
+        if let Some(profile) = request.profile.as_deref() {
+            LaunchProfileName::new(profile).map_err(|error| error.to_string())?;
+        }
+        let resolved = resolve_terminal_target(api, &request.target, request.profile.as_deref())?;
         let command = resolved
             .command
             .clone()
@@ -426,6 +434,7 @@ fn terminal_size(cols: u16, rows: u16) -> Result<PtySize, String> {
 fn resolve_terminal_target(
     api: &DesktopApi,
     request: &TerminalTargetRequest,
+    launch_profile: Option<&str>,
 ) -> Result<ResolvedTerminalTarget, String> {
     let bootstrap = api
         .bootstrap()
@@ -508,6 +517,7 @@ fn resolve_terminal_target(
             &environment.project_id,
             &environment.slug,
             &service.id,
+            launch_profile,
         )),
     })
 }
@@ -768,6 +778,8 @@ mod tests {
                 service_id: "web".into(),
                 domain: domain.into(),
             }],
+            launch_profiles: Vec::new(),
+            launch_profiles_error: None,
         }
     }
 

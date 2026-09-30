@@ -47,6 +47,9 @@ xdg-open https://myapp.localify   # Linux
 | `sudo localify reload`                 | Reload configuration   |
 | `localify status`                      | Show daemon status     |
 | `localify logs [-n N] [-f]`            | View or follow logs    |
+| `localify dev [service] --profile <name>` | Run a service on a [launch profile](launch-profiles.md) |
+| `localify profile init`                | Set up launch profiles interactively |
+| `localify exec --profile <name> -- <cmd>` | Run a command (not a service) on a launch profile |
 | `localify completions <shell>`         | Generate completions   |
 
 **Note:** Commands that modify system configuration
@@ -116,6 +119,18 @@ Most frameworks use these automatically. For example,
 Django reads `X-Forwarded-Proto` to decide whether to
 generate `https://` URLs, and Rails uses
 `X-Forwarded-Host` for routing.
+
+### Launch Profile Header
+
+When a service was started with a
+[launch profile](launch-profiles.md)
+(`localify dev --profile <name>`), Localify adds
+`X-Localify-Profile: <name>` to its responses, so browser
+dev tools and API clients show which variables the
+service runs on. For dangerous profiles it also adds a
+same-origin `<script src="/.localify/launch-profile.js">`
+to HTML pages, which prefixes the tab title and shows a
+draggable indicator.
 
 ### Hop-by-Hop Header Stripping
 

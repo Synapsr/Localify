@@ -14,6 +14,12 @@ import type {
   TerminalTargetRequest,
 } from "@/types/localify";
 
+import { LaunchProfileBadge } from "@/components/app/launch-profiles/launch-profile-badge";
+import { LaunchProfileMenu } from "@/components/app/launch-profiles/launch-profile-menu";
+import {
+  serviceLaunchProfiles,
+  type ServiceLaunchProfiles,
+} from "@/components/app/launch-profiles/util.launch-profiles";
 import {
   ChevronDownIcon,
   PlayIcon,
@@ -478,7 +484,10 @@ function TerminalServicePicker({
   launchService,
   service,
 }: {
-  launchService: (target: TerminalTargetRequest) => Promise<TerminalSessionDto>;
+  launchService: (
+    target: TerminalTargetRequest,
+    profile?: string | null,
+  ) => Promise<TerminalSessionDto>;
   service: TerminalTreeService;
 }) {
   const { openTerminal } = useTerminal();
@@ -493,9 +502,9 @@ function TerminalServicePicker({
     }
   };
 
-  const startService = async () => {
+  const startService = async (profile: string | null = null) => {
     try {
-      await launchService(service.target);
+      await launchService(service.target, profile);
     } catch (error) {
       toast.error("Launch service failed", {
         description: error instanceof Error ? error.message : String(error),
@@ -523,6 +532,9 @@ function TerminalServicePicker({
           </span>
         ) : null}
       </button>
+      {service.launchProfiles.session ? (
+        <LaunchProfileBadge session={service.launchProfiles.session} className="dark" />
+      ) : null}
       <Tooltip>
         <TooltipTrigger
           render={
@@ -543,6 +555,15 @@ function TerminalServicePicker({
           {service.reachable ? "Service already reachable" : "Launch service"}
         </TooltipContent>
       </Tooltip>
+      {!service.reachable ? (
+        <LaunchProfileMenu
+          profiles={service.launchProfiles.profiles}
+          error={service.launchProfiles.profilesError}
+          serviceName={service.service.name}
+          onLaunch={(profile) => void startService(profile)}
+          className="-ml-1 w-4 text-neutral-500 hover:bg-white/10 hover:text-white aria-expanded:bg-white/10 aria-expanded:text-white"
+        />
+      ) : null}
     </div>
   );
 }
@@ -565,6 +586,7 @@ interface TerminalTreeEnvironment {
 
 interface TerminalTreeService {
   domain: string | null;
+  launchProfiles: ServiceLaunchProfiles;
   reachable: boolean;
   service: ProjectServiceInfoDto;
   target: TerminalTargetRequest;
@@ -588,12 +610,14 @@ function buildTerminalTree(data: BootstrapDto, search: string): TerminalTreeProj
           for (const environmentService of environment.services) {
             const service = servicesById.get(environmentService.serviceId);
             if (!service) continue;
+            const target = serviceTarget(environment, service);
 
             services.push({
               domain: environmentService.domain,
+              launchProfiles: serviceLaunchProfiles(data, target),
               reachable: domainsByPattern.get(environmentService.domain)?.targetReachable ?? false,
               service,
-              target: serviceTarget(environment, service),
+              target,
             });
           }
 

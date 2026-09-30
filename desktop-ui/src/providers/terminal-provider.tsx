@@ -40,10 +40,15 @@ interface TerminalContextValue {
   closePanel: () => void;
   closeSession: (sessionId?: string) => Promise<void>;
   findSessionForTarget: (target: TerminalTargetRequest) => TerminalSessionDto | null;
+  /** Bumped when the active session should take keyboard focus again. */
+  focusRequestId: number;
   hasOwnedServiceSession: (target: TerminalTargetRequest) => boolean;
   interruptSession: (sessionId?: string) => Promise<void>;
   isOpen: boolean;
-  launchService: (target: TerminalTargetRequest) => Promise<TerminalSessionDto>;
+  launchService: (
+    target: TerminalTargetRequest,
+    profile?: string | null,
+  ) => Promise<TerminalSessionDto>;
   newTabFromActiveTarget: () => Promise<void>;
   openSelectedTarget: () => Promise<TerminalSessionDto | null>;
   openPanel: () => void;
@@ -75,6 +80,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [panelHeight, setPanelHeightState] = useState(loadStoredPanelHeight);
   const [selectedTarget, setSelectedTargetState] = useState<TerminalTargetRequest | null>(null);
+  const [focusRequestId, setFocusRequestId] = useState(0);
   const sessionsRef = useRef(sessions);
 
   useEffect(() => {
@@ -127,6 +133,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
           session.id === event.payload.sessionId ? { ...session, status: "exited" } : session,
         ),
       );
+      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     }).then((unlisten) => {
       unlistenExit = unlisten;
     });
@@ -136,7 +143,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       unlistenOutput?.();
       unlistenExit?.();
     };
-  }, []);
+  }, [queryClient]);
 
   const setSelectedTarget = useCallback((target: TerminalTargetRequest | null) => {
     setSelectedTargetState(target);
@@ -210,14 +217,20 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     [findSessionForTarget, setActiveSessionId, upsertSession],
   );
 
+  // `profile` is never remembered: every launch starts from the default profile
+  // unless the caller picks one for this launch only.
   const launchService = useCallback(
-    async (target: TerminalTargetRequest) => {
+    async (target: TerminalTargetRequest, profile: string | null = null) => {
       const result = await tauriClient.terminalLaunchService({
         target,
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
+        profile,
       });
       upsertSession(result.session);
+      // `localify dev` may prompt (for example the service selector),
+      // so focus the terminal even when the launch reused the active session.
+      setFocusRequestId((current) => current + 1);
       await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
       return result.session;
     },
@@ -339,6 +352,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       closePanel: () => setIsOpen(false),
       closeSession,
       findSessionForTarget,
+      focusRequestId,
       hasOwnedServiceSession: (target) => Boolean(findSessionForTarget(target)),
       interruptSession,
       isOpen,
@@ -367,6 +381,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       activeSessionId,
       closeSession,
       findSessionForTarget,
+      focusRequestId,
       interruptSession,
       isOpen,
       launchService,

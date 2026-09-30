@@ -21,7 +21,7 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
   const consumedChunkCountRef = useRef(0);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalRef = useRef<XTerm | null>(null);
-  const { resizeSession, writeToSession } = useTerminal();
+  const { focusRequestId, resizeSession, writeToSession } = useTerminal();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -102,6 +102,7 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
     consumedChunkCountRef.current = chunks.length;
   }, [chunks]);
 
+  // `focusRequestId` refocuses an already active session after a launch.
   useEffect(() => {
     if (!active) return;
     const terminal = terminalRef.current;
@@ -112,7 +113,7 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
       fitAndSync(session.id, fitAddon, resizeSession);
       terminal.focus();
     });
-  }, [active, resizeSession, session.id]);
+  }, [active, focusRequestId, resizeSession, session.id]);
 
   return (
     <div

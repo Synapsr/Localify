@@ -86,6 +86,7 @@ free target port unless one is explicitly provided.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Desktop development](docs/desktop.md)
 - [Docker integration](docs/docker.md)
+- [Launch profiles](docs/launch-profiles.md)
 - [Linux setup](docs/linux.md)
 - [Technical overview](docs/localify-technical-overview.md)
 - [Public URLs](docs/public-urls.md)

@@ -33,6 +33,8 @@ use crate::desktop::dto::{
     SettingsImportRequest, SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto,
     UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
 };
+use crate::infrastructure::binary_identity::{BinaryIdentity, DaemonBinaryCheck};
+use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 
 const HELPER_PING_TIMEOUT: Duration = Duration::from_secs(1);
 const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -154,6 +156,10 @@ pub enum HelperCommand {
         request: LogsRequest,
     },
     GetAvailablePort,
+    /// Relays a `localify dev` launch session to the root-owned daemon socket.
+    ReportLaunchSession {
+        update: LaunchSessionUpdate,
+    },
 }
 
 impl HelperCommand {
@@ -170,7 +176,8 @@ impl HelperCommand {
             | Self::ListPortConflicts
             | Self::ListRoutes { .. }
             | Self::ReadLogs { .. }
-            | Self::GetAvailablePort => HELPER_READ_TIMEOUT,
+            | Self::GetAvailablePort
+            | Self::ReportLaunchSession { .. } => HELPER_READ_TIMEOUT,
             Self::InstallLocalify | Self::UninstallLocalify | Self::ImportSettings { .. } => {
                 HELPER_INSTALL_TIMEOUT
             }
@@ -227,6 +234,7 @@ impl HelperCommand {
             Self::ListRoutes { .. } => "list routes",
             Self::ReadLogs { .. } => "read logs",
             Self::GetAvailablePort => "find available port",
+            Self::ReportLaunchSession { .. } => "report a launch profile session",
             _ => "run a system helper command",
         }
     }
@@ -522,6 +530,11 @@ impl SystemHelperClient {
         self.send(HelperCommand::GetAvailablePort)
     }
 
+    pub fn report_launch_session(&self, update: LaunchSessionUpdate) -> Result<()> {
+        self.send::<serde_json::Value>(HelperCommand::ReportLaunchSession { update })
+            .map(|_| ())
+    }
+
     fn send<T>(&self, command: HelperCommand) -> Result<T>
     where
         T: DeserializeOwned,
@@ -675,6 +688,7 @@ pub fn serve(
     set_socket_owner(socket_path, allowed_uid)?;
     let startup_binary = startup_binary_identity();
     let in_flight = Arc::new(AtomicUsize::new(0));
+    spawn_outdated_daemon_check(api.clone());
 
     loop {
         let (stream, _) = listener.accept()?;
@@ -693,33 +707,44 @@ pub fn serve(
     }
 }
 
+/// Serializes daemon start, stop and restart inside the helper, so the
+/// startup check below and a desktop request never restart the daemon at the
+/// same time.
+static DAEMON_LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn daemon_lifecycle_lock() -> std::sync::MutexGuard<'static, ()> {
+    match DAEMON_LIFECYCLE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// A new helper usually means a new build (launchd respawns it after an app
+/// update or reinstall). Restart a daemon still running the previous build,
+/// whichever way the app was replaced.
+fn spawn_outdated_daemon_check(api: DesktopApi) {
+    thread::spawn(move || {
+        // Let the desktop app finish its own post-update restart first.
+        thread::sleep(Duration::from_secs(3));
+        let _lifecycle = daemon_lifecycle_lock();
+        match api.restart_daemon_if_outdated() {
+            Ok(DaemonBinaryCheck::Outdated) => eprintln!(
+                "{} helper restarted the daemon on the updated build.",
+                BRANDING.app_name
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "{} helper could not check the daemon build: {error:#}",
+                BRANDING.app_name
+            ),
+        }
+    });
+}
+
 /// Identity of the helper executable captured at startup, used to notice
 /// in-place app updates while the helper keeps running the old code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BinaryIdentity {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    size: u64,
-    modified: Option<std::time::SystemTime>,
-}
-
 fn startup_binary_identity() -> Option<BinaryIdentity> {
-    let path = std::env::current_exe().ok()?;
-    binary_identity(&path)
-}
-
-fn binary_identity(path: &Path) -> Option<BinaryIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::metadata(path).ok()?;
-    Some(BinaryIdentity {
-        path: path.to_path_buf(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
+    BinaryIdentity::current_executable()
 }
 
 /// Exits the helper once its on-disk binary was replaced (app update) and no
@@ -736,7 +761,7 @@ fn recycle_when_binary_updated(startup_binary: &Option<BinaryIdentity>, in_fligh
 
     // A missing or unreadable binary is not an update in progress we can
     // recover from by exiting; stay alive and keep serving.
-    let Some(current) = binary_identity(&startup.path) else {
+    let Some(current) = BinaryIdentity::of(&startup.path) else {
         return;
     };
 
@@ -1031,13 +1056,19 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
             serde_json::to_value(api.list_routes(request)?).map_err(Into::into)
         }
         HelperCommand::StartDaemon { request } => {
+            let _lifecycle = daemon_lifecycle_lock();
             serde_json::to_value(api.start_daemon(request)?).map_err(Into::into)
         }
-        HelperCommand::StopDaemon => serde_json::to_value(api.stop_daemon()?).map_err(Into::into),
+        HelperCommand::StopDaemon => {
+            let _lifecycle = daemon_lifecycle_lock();
+            serde_json::to_value(api.stop_daemon()?).map_err(Into::into)
+        }
         HelperCommand::RestartDaemon { request } => {
+            let _lifecycle = daemon_lifecycle_lock();
             serde_json::to_value(api.restart_daemon(request)?).map_err(Into::into)
         }
         HelperCommand::ReloadDaemon { request } => {
+            let _lifecycle = daemon_lifecycle_lock();
             serde_json::to_value(api.reload_daemon(request)?).map_err(Into::into)
         }
         HelperCommand::ReadLogs { request } => {
@@ -1045,6 +1076,10 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::GetAvailablePort => {
             serde_json::to_value(api.available_port()?).map_err(Into::into)
+        }
+        HelperCommand::ReportLaunchSession { update } => {
+            api.report_launch_session(&update)?;
+            Ok(serde_json::json!({ "recorded": true }))
         }
     }
 }
@@ -1096,13 +1131,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("localify");
         fs::write(&path, b"build-1").unwrap();
-        let before = binary_identity(&path).unwrap();
+        let before = BinaryIdentity::of(&path).unwrap();
 
-        assert_eq!(binary_identity(&path).unwrap(), before);
+        assert_eq!(BinaryIdentity::of(&path).unwrap(), before);
 
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"build-2-longer").unwrap();
-        let after = binary_identity(&path).unwrap();
+        let after = BinaryIdentity::of(&path).unwrap();
 
         assert_ne!(after, before);
     }
@@ -1111,7 +1146,7 @@ mod tests {
     fn binary_identity_is_none_for_missing_files() {
         let dir = tempfile::tempdir().unwrap();
 
-        assert!(binary_identity(&dir.path().join("missing")).is_none());
+        assert!(BinaryIdentity::of(&dir.path().join("missing")).is_none());
     }
 
     #[test]

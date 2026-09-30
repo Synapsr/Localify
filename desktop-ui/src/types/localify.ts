@@ -140,6 +140,13 @@ export interface ProjectEnvironmentServiceInfoDto {
   domain: string;
 }
 
+export interface LaunchProfileInfoDto {
+  name: string;
+  danger: boolean;
+  /** Humanized, e.g. "4h". */
+  maxDuration: string | null;
+}
+
 export interface ProjectEnvironmentInfoDto {
   projectId: string;
   projectName: string;
@@ -150,6 +157,26 @@ export interface ProjectEnvironmentInfoDto {
   gitCommonDir: string | null;
   gitBranch: string | null;
   services: ProjectEnvironmentServiceInfoDto[];
+  launchProfiles: LaunchProfileInfoDto[];
+  /** Why `localify.toml` could not be read. */
+  launchProfilesError: string | null;
+}
+
+export interface LaunchSessionDto {
+  id: string;
+  projectId: string;
+  environmentSlug: string | null;
+  serviceId: string;
+  profile: string;
+  danger: boolean;
+  targetPort: number;
+  /** Unix seconds. */
+  startedAt: number;
+  /** Unix seconds. */
+  expiresAt: number | null;
+  sources: string[];
+  /** Tab title prefix and pill shown in the app's pages. */
+  browserIndicator: boolean;
 }
 
 export interface DiscoverProjectWorktreesRequest {
@@ -228,6 +255,8 @@ export interface TerminalLaunchServiceRequest {
   target: TerminalTargetRequest;
   cols: number;
   rows: number;
+  /** Launch profile name; omitted or null launches with the default profile. */
+  profile?: string | null;
 }
 
 export interface TerminalWriteRequest {
@@ -302,6 +331,8 @@ export interface BootstrapDto {
   projects: ProjectInfoDto[];
   services: ProjectServiceInfoDto[];
   projectEnvironments: ProjectEnvironmentInfoDto[];
+  /** Services currently running with a launch profile. */
+  launchSessions: LaunchSessionDto[];
 }
 
 export interface AutostartStatusDto {
