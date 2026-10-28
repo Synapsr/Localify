@@ -1,9 +1,9 @@
 //! Runs a service launched with a launch profile until it exits.
 //!
-//! On top of a plain `Command::status()`, it masks Proton Pass values in the
-//! output, stops the service when the profile's `max_duration` elapses, keeps
-//! the daemon session alive, and survives Ctrl+C long enough to report why
-//! the service stopped.
+//! On top of a plain `Command::status()`, it masks Proton Pass and Infisical
+//! values in the output, stops the service when the profile's `max_duration`
+//! elapses, keeps the daemon session alive, and survives Ctrl+C long enough
+//! to report why the service stopped.
 
 use std::io;
 use std::os::unix::process::ExitStatusExt;

@@ -4,6 +4,7 @@
 //! Values are only held in memory; reports carry key names and counts.
 
 mod config;
+mod infisical;
 mod proton_pass;
 
 use std::fs;
@@ -15,9 +16,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 pub use config::{
-    LaunchProfile, LaunchProfiles, ProfileSource, expand_note_title, launch_profiles_file_name,
-    render_launch_profiles, validate_launch_profiles,
+    DEFAULT_INFISICAL_PATH, LaunchProfile, LaunchProfiles, ProfileSource, expand_service_template,
+    infisical_env, infisical_path, launch_profiles_file_name, render_launch_profiles,
+    validate_launch_profiles,
 };
+pub use infisical::{InfisicalCli, InfisicalFolder, project_file as infisical_project_file};
 pub use proton_pass::ProtonPassCli;
 
 use crate::domain::launch_profile::LaunchProfileName;
@@ -34,12 +37,22 @@ pub trait SecretStore: Sync {
     fn read_reference(&self, reference: &str) -> Result<Option<String>>;
 }
 
+/// Infisical access. `InfisicalCli` in production, an in-memory fake in
+/// tests.
+pub trait InfisicalStore: Sync {
+    /// Returns the secrets of one folder of an environment of the project
+    /// linked at `project_root`. Every error is reported as a missing source.
+    fn read_folder(&self, project_root: &Path, env: &str, path: &str) -> Result<InfisicalFolder>;
+}
+
 /// What to load for one service launch.
 pub struct LaunchRequest<'a> {
     pub profile: Option<&'a LaunchProfile>,
     /// `--env-file` paths, already absolute. They come before profile
     /// sources and must exist.
     pub env_files: &'a [PathBuf],
+    /// Holds `.infisical.yaml`, so the Infisical CLI finds its project.
+    pub project_root: &'a Path,
     pub service_dir: &'a Path,
     /// Service folder relative to the project root, empty at the root.
     pub service_path: &'a str,
@@ -59,7 +72,7 @@ pub struct ResolvedProfile {
 pub struct ProfileVariable {
     pub key: String,
     pub value: String,
-    /// Came from Proton Pass: masked in service output.
+    /// Came from Proton Pass or Infisical: masked in service output.
     pub secret: bool,
 }
 
@@ -70,6 +83,8 @@ pub struct SourceReport {
     pub warnings: Vec<String>,
     /// Keys whose `pass://` reference does not exist. Not injected.
     pub missing_references: Vec<String>,
+    /// Keys whose value this account may not read in Infisical. Not injected.
+    pub unreadable_keys: Vec<String>,
     required: bool,
 }
 
@@ -93,6 +108,11 @@ impl SourceReport {
                 "{}: reference not found for {}",
                 self.label,
                 self.missing_references.join(", ")
+            )),
+            SourceStatus::Loaded { .. } if !self.unreadable_keys.is_empty() => Some(format!(
+                "{}: this account cannot read the value of {}",
+                self.label,
+                self.unreadable_keys.join(", ")
             )),
             SourceStatus::Loaded { .. } => None,
         }
@@ -128,8 +148,14 @@ impl ResolvedProfile {
 ///
 /// Fails when `pass-cli` is unusable, when an `--env-file` is missing, or when
 /// any source of a dangerous profile is missing: starting on a mix of
-/// development and production values is worse than not starting.
-pub fn resolve(request: &LaunchRequest<'_>, store: &dyn SecretStore) -> Result<ResolvedProfile> {
+/// development and production values is worse than not starting. An
+/// unusable Infisical CLI is a missing source, so a project linked to
+/// Infisical still starts its `default` profile when the session expired.
+pub fn resolve(
+    request: &LaunchRequest<'_>,
+    store: &dyn SecretStore,
+    infisical: &dyn InfisicalStore,
+) -> Result<ResolvedProfile> {
     let mut loaded = Vec::new();
     if let Some(profile) = request.profile.filter(|profile| !profile.env.is_empty()) {
         loaded.push(forced_source(profile));
@@ -143,7 +169,7 @@ pub fn resolve(request: &LaunchRequest<'_>, store: &dyn SecretStore) -> Result<R
     }
     if let Some(profile) = request.profile {
         for source in &profile.sources {
-            loaded.push(load_source(source, request, store)?);
+            loaded.push(load_source(source, profile, request, store, infisical)?);
         }
     }
 
@@ -184,6 +210,7 @@ fn forced_source(profile: &LaunchProfile) -> LoadedSource {
             status: SourceStatus::Loaded { keys: 0 },
             warnings: Vec::new(),
             missing_references: Vec::new(),
+            unreadable_keys: Vec::new(),
             required: false,
         },
         entries: profile.env.clone(),
@@ -193,8 +220,10 @@ fn forced_source(profile: &LaunchProfile) -> LoadedSource {
 
 fn load_source(
     source: &ProfileSource,
+    profile: &LaunchProfile,
     request: &LaunchRequest<'_>,
     store: &dyn SecretStore,
+    infisical: &dyn InfisicalStore,
 ) -> Result<LoadedSource> {
     match source {
         ProfileSource::File { path } => load_file(
@@ -203,13 +232,48 @@ fn load_source(
             false,
         ),
         ProfileSource::ProtonPassNote { vault, title } => {
-            let title = expand_note_title(title, request.service_path);
+            let title = expand_service_template(title, request.service_path);
             let label = format!("Proton Pass note '{title}' (vault {vault})");
             match store.read_note(vault, &title)? {
                 Some(body) => Ok(parsed_source(label, &body, true, false)),
                 None => Ok(missing_source(label, "note not found".into(), false)),
             }
         }
+        ProfileSource::Infisical { env, path } => Ok(load_infisical(
+            &infisical_env(&profile.name, env.as_deref()),
+            &infisical_path(path.as_deref(), request.service_path),
+            request.project_root,
+            infisical,
+        )),
+    }
+}
+
+fn load_infisical(
+    env: &str,
+    path: &str,
+    project_root: &Path,
+    infisical: &dyn InfisicalStore,
+) -> LoadedSource {
+    let label = format!("Infisical {env} {path}");
+    let folder = match infisical.read_folder(project_root, env, path) {
+        Ok(folder) => folder,
+        Err(error) => return missing_source(label, format!("{error:#}"), false),
+    };
+    let label = match &folder.login_profile {
+        Some(profile) => format!("{label} (login profile {profile})"),
+        None => label,
+    };
+    LoadedSource {
+        report: SourceReport {
+            label,
+            status: SourceStatus::Loaded { keys: 0 },
+            warnings: Vec::new(),
+            missing_references: Vec::new(),
+            unreadable_keys: folder.hidden_keys,
+            required: false,
+        },
+        entries: folder.entries,
+        secret: true,
     }
 }
 
@@ -235,6 +299,7 @@ fn parsed_source(label: String, content: &str, secret: bool, required: bool) -> 
             status: SourceStatus::Loaded { keys: 0 },
             warnings: parsed.warnings.iter().map(ToString::to_string).collect(),
             missing_references: Vec::new(),
+            unreadable_keys: Vec::new(),
             required,
         },
         entries: parsed.entries,
@@ -249,6 +314,7 @@ fn missing_source(label: String, reason: String, required: bool) -> LoadedSource
             status: SourceStatus::Missing { reason },
             warnings: Vec::new(),
             missing_references: Vec::new(),
+            unreadable_keys: Vec::new(),
             required,
         },
         entries: Vec::new(),
@@ -383,6 +449,8 @@ mod tests {
     struct FakeStore {
         notes: HashMap<(String, String), String>,
         references: HashMap<String, String>,
+        folders: HashMap<(String, String), Vec<(String, String)>>,
+        hidden: Vec<String>,
         broken: bool,
         calls: Mutex<Vec<String>>,
     }
@@ -396,6 +464,42 @@ mod tests {
         fn with_reference(mut self, reference: &str, value: &str) -> Self {
             self.references.insert(reference.into(), value.into());
             self
+        }
+
+        fn with_folder(mut self, env: &str, path: &str, entries: &[(&str, &str)]) -> Self {
+            let entries = entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            self.folders.insert((env.into(), path.into()), entries);
+            self
+        }
+    }
+
+    impl InfisicalStore for FakeStore {
+        fn read_folder(
+            &self,
+            _project_root: &Path,
+            env: &str,
+            path: &str,
+        ) -> Result<InfisicalFolder> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("infisical {env}:{path}"));
+            if self.broken {
+                bail!("Infisical: your login session has expired");
+            }
+            match self.folders.get(&(env.into(), path.into())) {
+                Some(entries) => Ok(InfisicalFolder {
+                    entries: entries.clone(),
+                    hidden_keys: self.hidden.clone(),
+                    login_profile: None,
+                }),
+                None => bail!(
+                    "Infisical: Folder with path '{path}' in environment '{env}' was not found"
+                ),
+            }
         }
     }
 
@@ -481,9 +585,11 @@ mod tests {
             &LaunchRequest {
                 profile,
                 env_files,
+                project_root: repo.root.path(),
                 service_dir: &service_dir,
                 service_path: "apps/web",
             },
+            store,
             store,
         )
     }
@@ -603,6 +709,87 @@ mod tests {
         assert_eq!(value(&resolved, "DATABASE_URL"), Some("postgres://prod"));
         assert_eq!(resolved.sources[0].status, SourceStatus::Loaded { keys: 2 });
         assert!(resolved.sources[0].label.contains("[profiles.prod.env]"));
+    }
+
+    fn infisical(env: Option<&str>) -> ProfileSource {
+        ProfileSource::Infisical {
+            env: env.map(Into::into),
+            path: None,
+        }
+    }
+
+    #[test]
+    fn infisical_reads_the_service_folder_of_the_profile_environment() {
+        let repo = Monorepo::new();
+        repo.write(
+            "apps/web/.env.development",
+            "DATABASE_URL=local\nLOCAL_ONLY=1\n",
+        );
+        let store = FakeStore::default()
+            .with_folder("dev", "/web", &[("DATABASE_URL", "postgres://dev")])
+            .with_folder("prod", "/web", &[("DATABASE_URL", "postgres://prod")]);
+        let default = profile(
+            "default",
+            false,
+            vec![infisical(None), file(".env.development")],
+        );
+        let prod = profile("prod", true, vec![infisical(None)]);
+
+        let resolved = resolve_web(&repo, Some(&default), &[], &store).unwrap();
+        assert_eq!(value(&resolved, "DATABASE_URL"), Some("postgres://dev"));
+        assert_eq!(value(&resolved, "LOCAL_ONLY"), Some("1"));
+        assert_eq!(resolved.sources[0].label, "Infisical dev /web");
+        assert_eq!(
+            resolved.secret_values(),
+            vec![("DATABASE_URL", "postgres://dev")]
+        );
+
+        let resolved = resolve_web(&repo, Some(&prod), &[], &store).unwrap();
+        assert_eq!(value(&resolved, "DATABASE_URL"), Some("postgres://prod"));
+    }
+
+    #[test]
+    fn unusable_infisical_warns_a_normal_profile_and_fails_a_dangerous_one() {
+        let repo = Monorepo::new();
+        let store = FakeStore {
+            broken: true,
+            ..FakeStore::default()
+        };
+        let default = profile("default", false, vec![infisical(None)]);
+        let prod = profile("prod", true, vec![infisical(Some("production"))]);
+
+        let resolved = resolve_web(&repo, Some(&default), &[], &store).unwrap();
+        assert!(
+            resolved.problems()[0]
+                .contains("Infisical dev /web: Infisical: your login session has expired")
+        );
+
+        let error = resolve_web(&repo, Some(&prod), &[], &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Infisical production /web"));
+        assert!(error.contains("was not started"));
+    }
+
+    #[test]
+    fn unreadable_infisical_values_fail_a_dangerous_profile() {
+        let repo = Monorepo::new();
+        let store = FakeStore {
+            hidden: vec!["DATABASE_URL".into()],
+            ..FakeStore::default()
+        }
+        .with_folder("prod", "/web", &[("API_KEY", "k")]);
+        let prod = profile("prod", true, vec![infisical(None)]);
+        let staging = profile("staging", false, vec![infisical(Some("prod"))]);
+
+        let error = resolve_web(&repo, Some(&prod), &[], &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot read the value of DATABASE_URL"));
+
+        let resolved = resolve_web(&repo, Some(&staging), &[], &store).unwrap();
+        assert_eq!(value(&resolved, "DATABASE_URL"), None);
+        assert_eq!(resolved.problems().len(), 1);
     }
 
     #[test]

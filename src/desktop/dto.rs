@@ -339,7 +339,8 @@ pub struct ProjectEnvironmentInfoDto {
     pub git_branch: Option<String>,
     #[serde(default)]
     pub services: Vec<ProjectEnvironmentServiceInfoDto>,
-    /// Profiles declared in this checkout's `localify.toml`.
+    /// Profiles declared in this checkout's `localify.toml`, or the implicit
+    /// Infisical ones.
     #[serde(default)]
     pub launch_profiles: Vec<LaunchProfileInfoDto>,
     /// Why `localify.toml` could not be read, shown instead of the profiles.

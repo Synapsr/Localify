@@ -1,5 +1,5 @@
-//! Launch profile summaries for the desktop app, read from the same
-//! `localify.toml` the CLI uses.
+//! Launch profile summaries for the desktop app, read like the CLI does:
+//! `localify.toml`, or implicit profiles for a project linked to Infisical.
 
 use std::path::Path;
 

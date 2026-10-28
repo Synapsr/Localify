@@ -250,8 +250,10 @@ port stay the same. It is not a project environment: `--env` selects another che
 domains, `--profile` selects where variables come from.
 
 Profiles live in `localify.toml` at the checkout root (commit it: it holds addresses, never values).
-`localify profile init` sets it up interactively for a person in a terminal; as an agent, suggest
-that command to the user or write the file directly:
+A project linked to Infisical (`.infisical.yaml` at the root) without that file gets `default`,
+`staging` and `prod` (dangerous) implicitly, each reading the Infisical environment of the same name
+(`default` reads `dev`). `localify profile init` sets the file up interactively for a person in a
+terminal; as an agent, suggest that command to the user or write the file directly:
 
 ```toml
 [profiles.default]            # used when --profile is omitted; never dangerous
@@ -266,8 +268,10 @@ sources = [
 ```
 
 - `file` paths are relative to the service folder, even when `localify dev` runs from the repo root.
+- `infisical = {}` reads every secret of one Infisical folder through the `infisical` CLI. Optional
+  `env` (environment slug) and `path` (default `/{service_name}`, so `apps/web` reads `/web`).
 - `proton_pass_note` reads a Proton Pass note whose body is a dotenv file. `{service_path}` is the
-  service folder relative to the project root (`apps/web`).
+  service folder relative to the project root (`apps/web`); `{service_name}` its last segment.
 - Values starting with `pass://` in a `file` source or `--env-file` are resolved through `pass-cli`.
 - The first source that defines a key wins. `[profiles.<name>.env]` forces values over every source
   (use it to switch off emails, crons or invoicing on a production profile). Shell exports win over
@@ -278,18 +282,18 @@ sources = [
   turns it off). Do not remove or hide it in app code.
 
 ```bash
-localify dev web --profile staging
+localify dev web --profile staging                # -p staging for short
 localify dev web --env-file ./tmp.env            # one-off file, relative to the current directory
 localify dev web --profile prod --confirm-profile prod   # dangerous profile without a terminal
 localify exec --profile staging -- pnpm db:migrate       # a command that is not a service, from its folder
 ```
 
 `localify exec` runs any command with the variables of a profile, from the current folder (nearest
-`localify.toml` upwards, current folder as `{service_path}`), without `PORT`/`HOST`/URL injection,
+`localify.toml` or `.infisical.yaml` upwards, current folder as `{service_path}`), without `PORT`/`HOST`/URL injection,
 and exits with the command's exit code.
 
-If `pass-cli` is missing or signed out, tell the user to run `pass-cli login`; do not try to work
-around it. Full guide: `docs/launch-profiles.md` in the Localify repo.
+If `pass-cli` or `infisical` is missing or signed out, tell the user to run `pass-cli login` or
+`infisical login`; do not try to work around it. Full guide: `docs/launch-profiles.md` in the Localify repo.
 
 ## Routes
 
@@ -402,8 +406,8 @@ Common failures:
 - For Vite, expect Localify to patch an existing `vite.config.*` with an explicit `server.allowedHosts` entry. Do not set `allowedHosts: true`.
 - Never pass `--confirm-profile` on your own. Launch a `danger = true` profile only when the user
   explicitly asked for that profile in this task, and say that the service now runs on its data.
-- Never print, copy or write launch profile values. Do not materialize Proton Pass values into
-  `.env` files; add a source to `localify.toml` instead.
+- Never print, copy or write launch profile values. Do not materialize Proton Pass or Infisical
+  values into `.env` files; add a source to `localify.toml` instead.
 - Use `--profile` to change variables and `--env` to change checkout. Do not create a project
   environment to switch between development and production data.
 

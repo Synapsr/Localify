@@ -13,7 +13,7 @@ use super::context::effective_current_dir;
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::service_supervisor::{self, LaunchOutcome, SupervisedLaunch};
 use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
-use crate::infrastructure::launch_profiles::launch_profiles_file_name;
+use crate::infrastructure::launch_profiles::{infisical_project_file, launch_profiles_file_name};
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::project_marker::read_project_marker;
 
@@ -150,11 +150,19 @@ fn command_environment(profile: Option<&PreparedProfile>) -> LaunchEnvironment {
 }
 
 /// Nearest folder, from the current one upwards, that holds `localify.toml`.
+/// Only without one anywhere does an Infisical project file count, for
+/// implicit profiles: a nested `.infisical.json` must not replace declared
+/// profiles and their safeguards.
 fn find_profiles_root(current_dir: &Path) -> Option<PathBuf> {
     let file_name = launch_profiles_file_name();
     current_dir
         .ancestors()
         .find(|dir| dir.join(&file_name).is_file())
+        .or_else(|| {
+            current_dir
+                .ancestors()
+                .find(|dir| infisical_project_file(dir).is_some())
+        })
         .map(Path::to_path_buf)
 }
 
@@ -208,6 +216,21 @@ mod tests {
 
         assert_eq!(find_profiles_root(&nested).as_deref(), Some(dir.path()));
         assert_eq!(find_profiles_root(Path::new("/")), None);
+    }
+
+    #[test]
+    fn declared_profiles_win_over_a_nested_infisical_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("packages/database");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join(".infisical.json"), "{}").unwrap();
+        assert_eq!(
+            find_profiles_root(&nested).as_deref(),
+            Some(nested.as_path())
+        );
+
+        fs::write(dir.path().join("localify.toml"), "").unwrap();
+        assert_eq!(find_profiles_root(&nested).as_deref(), Some(dir.path()));
     }
 
     #[test]

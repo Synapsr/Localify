@@ -38,8 +38,8 @@ struct Cli {
 /// Launch profile options shared by `dev` and `run`.
 #[derive(clap::Args, Debug, Default)]
 struct LaunchProfileFlags {
-    /// Launch profile from the project's localify.toml. Changes only the service's variables: same service, domain and port. Defaults to the profile named `default`, if any.
-    #[arg(long, value_name = "NAME")]
+    /// Launch profile from the project's localify.toml, or default/staging/prod for a project linked to Infisical without one. Changes only the service's variables: same service, domain and port. Defaults to the profile named `default`, if any.
+    #[arg(short = 'p', long, value_name = "NAME")]
     profile: Option<String>,
 
     /// Extra dotenv file, loaded before the profile's sources (repeatable; relative to the current directory). `pass://` values are read from Proton Pass.
@@ -50,7 +50,7 @@ struct LaunchProfileFlags {
     #[arg(long, value_name = "NAME")]
     confirm_profile: Option<String>,
 
-    /// Print Proton Pass values in the service output instead of masking them
+    /// Print Proton Pass and Infisical values in the service output instead of masking them
     #[arg(long)]
     no_masking: bool,
 }
@@ -545,7 +545,7 @@ enum ServicesCommands {
 
 #[derive(Subcommand)]
 enum ProfileCommands {
-    /// Create or update localify.toml interactively: pick sources (Proton Pass notes, pass:// references or local files), check every service, preview, then write
+    /// Create or update localify.toml interactively: pick sources (Infisical, Proton Pass notes, pass:// references or local files), check every service, preview, then write
     Init,
 }
 

@@ -13,8 +13,8 @@ use super::service_supervisor::SessionReporter;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::RuntimeVariables;
 use crate::infrastructure::launch_profiles::{
-    self, LaunchProfiles, LaunchRequest, ProtonPassCli, ResolvedProfile, SourceStatus,
-    launch_profiles_file_name,
+    self, InfisicalCli, LaunchProfiles, LaunchRequest, ProtonPassCli, ResolvedProfile,
+    SourceStatus, launch_profiles_file_name,
 };
 use crate::infrastructure::output_masking::secret_patterns;
 
@@ -51,7 +51,8 @@ impl PreparedProfile {
     }
 
     /// Byte patterns to hide in service output, or `None` to pass the output
-    /// through untouched (no Proton Pass value, or `--no-masking`).
+    /// through untouched (no Proton Pass or Infisical value, or
+    /// `--no-masking`).
     pub fn mask_patterns(&self) -> Option<Vec<Vec<u8>>> {
         self.mask_output
             .then(|| secret_patterns(self.resolved.secret_values()))
@@ -116,7 +117,8 @@ pub fn prepare(
             "--profile {requested} needs launch profiles, but '{}' does not exist.\n\
              Declare profiles in that file, for example:\n\n\
              [profiles.{requested}]\n\
-             sources = [{{ file = \".env.{requested}\" }}]",
+             sources = [{{ file = \".env.{requested}\" }}]\n\n\
+             Or, if the project's variables live in Infisical, run 'infisical init' in that folder: default, staging and prod then read its environments.",
             project_root.join(launch_profiles_file_name()).display()
         ),
         (None, None) => None,
@@ -143,10 +145,12 @@ pub fn prepare(
         &LaunchRequest {
             profile,
             env_files: &env_files,
+            project_root,
             service_dir,
             service_path: &service_path,
         },
         &ProtonPassCli,
+        &InfisicalCli,
     )?;
 
     let mask_output = !args.no_masking && !resolved.secret_values().is_empty();
@@ -275,7 +279,9 @@ pub fn print_summary(profile: &PreparedProfile) {
         );
     }
     if profile.mask_output {
-        eprintln!("  output: Proton Pass values are masked (use --no-masking to disable)");
+        eprintln!(
+            "  output: Proton Pass and Infisical values are masked (use --no-masking to disable)"
+        );
     }
 }
 

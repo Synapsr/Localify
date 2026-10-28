@@ -1,12 +1,13 @@
 # Launch profiles
 
 A launch profile decides where a service's environment variables come from
-when Localify starts it: local dotenv files, Proton Pass, or both. The service,
+when Localify starts it: local dotenv files, Infisical, Proton Pass, or a mix. The service,
 its `.localify` domain and its port stay the same. Only the variables change.
 
 ```bash
 # From the monorepo root: pick the app in the selector, and it starts.
 localify dev --profile prod
+localify dev -p prod          # same, with the short flag
 ```
 
 ## Profiles and project environments
@@ -17,7 +18,7 @@ These are two different things, with two different flags:
 | --- | --- | --- |
 | What changes | The checkout: a Git worktree or branch | The variables the service starts with |
 | Domain and port | Its own (`feat-auth.my-app.localify`) | Unchanged |
-| Declared in | Localify config (`localify project env ensure`) | `localify.toml` in the checkout |
+| Declared in | Localify config (`localify project env ensure`) | `localify.toml` in the checkout, or implicit with Infisical |
 
 You can combine them: `localify dev web --env feat-auth --profile staging`.
 
@@ -33,10 +34,12 @@ It walks you through the setup:
 
 - **Questions:** what services start with when `--profile` is omitted, then one profile at a time
   (name, sources, dangerous or not).
+- **Infisical:** offered first when the project has `.infisical.yaml`. It asks for the environment
+  slug and the folder of each service.
 - **Proton Pass:** it lists your vaults and suggests the note title pattern your existing notes
   already follow, such as `Acme/{service_path}/.env.production`.
-- **Checks:** it marks each service ✓ or ✗ depending on whether its file or note exists. It reads
-  note titles only, never values.
+- **Checks:** it marks each service ✓ or ✗ depending on whether its file, note or Infisical folder
+  exists. It reads note titles and folder names only, never values.
 - **Writing:** it shows the file, and writes it only after you confirm. Rewriting an existing file
   drops its comments.
 
@@ -78,9 +81,11 @@ Rules:
   the last duplicate wins, as with dotenv.
 - **`file`:** the path is relative to the **service folder** (`apps/web/`), not to the folder you ran
   the command from.
+- **`infisical`:** reads every secret of one Infisical folder; see [Infisical](#infisical).
 - **`proton_pass_note`:** reads a Proton Pass note whose body is a complete dotenv file. `vault` and
-  `title` are names. `{service_path}` expands to the service folder relative to the project root, so
-  one profile covers every app of a monorepo. For `apps/web`, the example above reads
+  `title` are names. `{service_path}` expands to the service folder relative to the project root, and
+  `{service_name}` to its last segment (`web` for `apps/web`), so one profile covers every app of a
+  monorepo. For `apps/web`, the example above reads
   `Acme/apps/web/.env.production`. For a service at the root, `{service_path}/` disappears and the
   title becomes `Acme/.env.production`.
 - **`pass://` references:** any value that starts with `pass://`, in a `file` source or in
@@ -93,7 +98,8 @@ Rules:
   dangerous profiles, off otherwise; set it to change that.
 - **Typos:** an unknown key, such as `dangr = true`, is an error, so a typo cannot silently turn a
   guardrail off.
-- **No profile:** without `localify.toml` and without `--profile`, services launch exactly as before.
+- **No profile:** without `localify.toml`, without `.infisical.yaml` and without `--profile`,
+  services launch exactly as before.
 
 `--env-file <path>` adds a one-off dotenv file, before the profile's sources. It can be repeated,
 its path is relative to the current directory, and a missing file is always an error.
@@ -133,7 +139,8 @@ the variables of a profile from its folder:
 cd packages/database && localify exec --profile prod -- drizzle-kit studio --port 3005
 ```
 
-- **Which `localify.toml`:** the nearest one in the current folder or its parents.
+- **Which `localify.toml`:** the nearest one in the current folder or its parents, or the nearest
+  `.infisical.yaml` for implicit profiles.
 - **Sources:** they are read relative to the current folder, which also becomes `{service_path}`
   (`packages/database`).
 - **Variables:** Localify injects no `PORT`, `HOST` or URL variables, only the profile markers
@@ -165,7 +172,9 @@ Use them to render the app's own banner or block risky actions.
 
 ## Missing sources
 
-- **Normal profile:** the service starts, and Localify prints which file, note or reference is missing.
+- **Normal profile:** the service starts, and Localify prints which file, note, reference or Infisical
+  folder is missing. For Infisical, this includes an expired session or a missing CLI, so a plain
+  `localify dev` keeps working.
 - **Dangerous profile:** the launch fails. Starting on a mix of development and production values is
   worse than not starting.
 
@@ -190,6 +199,65 @@ Use them to render the app's own banner or block risky actions.
   root-only log through the desktop app's helper when needed), with service, profile,
   sources with key counts, timestamps and stop reason. Values are never logged.
 
+## Infisical
+
+If the project is linked to Infisical, you have nothing to write. Run this once at the project root:
+
+```bash
+infisical init      # writes .infisical.yaml; commit it
+```
+
+Without `localify.toml`, Localify then offers three profiles that read the Infisical environment of
+the same name:
+
+| Command | Infisical environment | Dangerous |
+| --- | --- | --- |
+| `localify dev` | `dev` | no |
+| `localify dev --profile staging` | `staging` | no |
+| `localify dev --profile prod` | `prod` | yes |
+
+Each service reads the folder named after its own folder: `apps/web` reads `/web`, and a service at
+the root reads `/`. The desktop app's launch menu shows the same three profiles.
+
+To change any of this (another environment, another folder, a mix with local files, forced values
+for `prod`), declare the profiles in `localify.toml`, which then replaces the implicit ones:
+
+```toml
+[profiles.default]
+sources = [
+  { infisical = {} },                 # environment dev, folder /{service_name}
+  { file = ".env.development" },      # fills in the keys Infisical does not define
+]
+
+[profiles.prod]
+danger = true
+sources = [
+  { infisical = { env = "production", path = "/{service_path}" } },
+]
+```
+
+- **`env`:** the environment slug, as shown in the project settings on Infisical. Without it,
+  `default` reads `dev` and other profiles read the environment of their own name.
+- **`path`:** the folder, starting with `/`. Defaults to `/{service_name}`. Secrets imported into
+  that folder in Infisical are included.
+- **CLI:** Localify calls the official `infisical` CLI with your login, from the project root. The
+  instance (cloud, EU or self-hosted) and the project come from the CLI's own configuration.
+  Values stay in memory and are masked in the output, like Proton Pass values.
+- **Several organizations:** when the CLI's current login profile belongs to another organization
+  than the project, Localify tries your other login profiles (`infisical profile list`) and shows
+  the one that worked next to the source. `infisical profile bind <name>` at the project root
+  skips that retry.
+- **Personal overrides:** your personal secrets override shared ones, as in `infisical run`.
+- **Unreadable values:** a key whose value your account may not read is not injected, and counts as
+  a missing source: a dangerous profile refuses to start.
+- **Time limit:** a CLI call that takes more than 20 seconds (typically an expired session waiting
+  for a browser login) is stopped, and the source counts as missing.
+
+```bash
+brew install infisical/get-cli/infisical
+infisical login
+```
+
 ## Proton Pass
 
 Localify calls the official CLI, `pass-cli`, and keeps values in memory. It writes no temporary file
@@ -202,7 +270,7 @@ pass-cli login
 
 If `pass-cli` is missing or signed out, the error gives the command to run.
 
-**Masking:** when a value comes from Proton Pass, Localify masks it in the service's output as `***`.
+**Masking:** when a value comes from Proton Pass or Infisical, Localify masks it in the service's output as `***`.
 
 - Values shorter than 8 characters are not masked.
 - `NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*` and `EXPO_PUBLIC_*` values are not masked, since they ship to
@@ -224,7 +292,8 @@ If your notes are named `<project>/<path of the file>` in one vault (for example
 
 ## Desktop app
 
-- **Launching:** the launch button uses `default`. When the checkout has other profiles, a small
+- **Launching:** the launch button uses `default`. When the checkout has other profiles (declared,
+  or implicit for a project linked to Infisical), a small
   chevron next to it offers "Launch with <name>". Dangerous profiles are red and show their time limit.
 - **Terminal:** the launch opens the integrated terminal and gives it focus.
 - **Badges:** running services show a badge with their profile name. `default` gets none.

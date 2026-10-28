@@ -2,6 +2,7 @@
 //!
 //! The file lives next to the code (and in every worktree) because it only
 //! holds addresses — file paths, vault names, note titles — never values.
+//! Without it, a project linked to Infisical gets implicit profiles.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,11 +13,24 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use super::infisical;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchProfileName;
 
 /// Placeholder expanded to the service folder, relative to the project root.
 pub const SERVICE_PATH_PLACEHOLDER: &str = "{service_path}";
+/// Placeholder expanded to the last segment of the service folder: `web` for
+/// `apps/web`. Infisical folders are usually named after the app.
+pub const SERVICE_NAME_PLACEHOLDER: &str = "{service_name}";
+/// Infisical folder read when a source does not set `path`.
+pub const DEFAULT_INFISICAL_PATH: &str = "/{service_name}";
+/// Infisical environment read by the `default` profile when a source does
+/// not set `env`. Other profiles read the environment of the same name.
+pub const DEFAULT_INFISICAL_ENV: &str = "dev";
+/// Profiles a project linked to Infisical gets without `localify.toml`:
+/// Infisical's default environments, with `prod` dangerous.
+const IMPLICIT_PROFILES: &[(&str, bool)] =
+    &[("default", false), ("staging", false), ("prod", true)];
 
 /// File name of the project launch profile file.
 pub fn launch_profiles_file_name() -> String {
@@ -26,8 +40,10 @@ pub fn launch_profiles_file_name() -> String {
 /// Launch profiles of one project checkout.
 #[derive(Debug, Clone)]
 pub struct LaunchProfiles {
+    /// `localify.toml`, or the Infisical project file for implicit profiles.
     pub path: PathBuf,
     profiles: BTreeMap<LaunchProfileName, LaunchProfile>,
+    implicit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,12 +70,30 @@ pub enum ProfileSource {
     File { path: String },
     /// Proton Pass note whose body is a complete dotenv file.
     ProtonPassNote { vault: String, title: String },
+    /// Every secret of one folder of an Infisical environment, from the
+    /// project linked by `.infisical.yaml` at the project root. `None` keeps
+    /// the default: see `infisical_env` and `DEFAULT_INFISICAL_PATH`.
+    Infisical {
+        env: Option<String>,
+        path: Option<String>,
+    },
 }
 
 impl LaunchProfiles {
-    /// Reads `localify.toml` from a project root. Returns `None` when the
-    /// project has no such file, so services launch exactly as before.
+    /// Reads the profiles of a project root: `localify.toml`, or implicit
+    /// Infisical profiles when the project only has `.infisical.yaml`.
+    /// Returns `None` when it has neither, so services launch exactly as
+    /// before.
     pub fn load(root: &Path) -> Result<Option<Self>> {
+        if let Some(profiles) = Self::load_file(root)? {
+            return Ok(Some(profiles));
+        }
+        Ok(infisical::project_file(root).map(implicit_profiles))
+    }
+
+    /// Reads `localify.toml` only, for `localify profile init`, which writes
+    /// that file.
+    pub fn load_file(root: &Path) -> Result<Option<Self>> {
         let path = root.join(launch_profiles_file_name());
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
@@ -71,7 +105,11 @@ impl LaunchProfiles {
 
         let profiles = parse_profiles(&content)
             .with_context(|| format!("Invalid launch profiles in '{}'", path.display()))?;
-        Ok(Some(Self { path, profiles }))
+        Ok(Some(Self {
+            path,
+            profiles,
+            implicit: false,
+        }))
     }
 
     #[allow(dead_code)] // Used by the desktop through the library crate.
@@ -95,6 +133,17 @@ impl LaunchProfiles {
             .find(|profile| profile.name.as_str() == requested);
         match found {
             Some(profile) => Ok(Some(profile)),
+            None if self.implicit => bail!(
+                "Launch profile '{requested}' does not exist. Without {}, {} offers {} for the Infisical project linked by '{}'.\n\
+                 Declare other profiles in {}, for example:\n\n\
+                 [profiles.{requested}]\n\
+                 sources = [{{ infisical = {{ env = \"{requested}\" }} }}]",
+                launch_profiles_file_name(),
+                BRANDING.app_name,
+                self.available_names(),
+                self.path.display(),
+                launch_profiles_file_name(),
+            ),
             None => bail!(
                 "Launch profile '{requested}' is not defined in '{}'. Available profiles: {}.",
                 self.path.display(),
@@ -142,6 +191,16 @@ struct LaunchProfileDto {
 enum ProfileSourceDto {
     File(String),
     ProtonPassNote(ProtonPassNoteDto),
+    Infisical(InfisicalDto),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InfisicalDto {
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +208,32 @@ enum ProfileSourceDto {
 struct ProtonPassNoteDto {
     vault: String,
     title: String,
+}
+
+fn implicit_profiles(project_file: PathBuf) -> LaunchProfiles {
+    let profiles = IMPLICIT_PROFILES
+        .iter()
+        .filter_map(|&(name, danger)| Some((LaunchProfileName::new(name).ok()?, danger)))
+        .map(|(name, danger)| {
+            let profile = LaunchProfile {
+                name: name.clone(),
+                danger,
+                max_duration: None,
+                browser_indicator: danger,
+                sources: vec![ProfileSource::Infisical {
+                    env: None,
+                    path: None,
+                }],
+                env: Vec::new(),
+            };
+            (name, profile)
+        })
+        .collect();
+    LaunchProfiles {
+        path: project_file,
+        profiles,
+        implicit: true,
+    }
 }
 
 fn parse_profiles(content: &str) -> Result<BTreeMap<LaunchProfileName, LaunchProfile>> {
@@ -251,25 +336,53 @@ fn source_from_dto(name: &LaunchProfileName, source: ProfileSourceDto) -> Result
             if note.vault.trim().is_empty() || note.title.trim().is_empty() {
                 bail!("Profile '{name}' has a proton_pass_note source without a vault or title.");
             }
-            validate_title_template(name, &note.title)?;
+            validate_template(name, "note title", &note.title)?;
             Ok(ProfileSource::ProtonPassNote {
                 vault: note.vault,
                 title: note.title,
             })
         }
+        ProfileSourceDto::Infisical(source) => {
+            if let Some(env) = &source.env
+                && !is_environment_slug(env)
+            {
+                bail!(
+                    "Profile '{name}' has an infisical source with env = \"{env}\". Use the environment slug shown in Infisical, such as \"dev\" or \"prod\"."
+                );
+            }
+            if let Some(path) = &source.path {
+                if !path.starts_with('/') {
+                    bail!(
+                        "Profile '{name}' has an infisical source with path = \"{path}\". Infisical folders start with '/', such as \"/{{service_name}}\"."
+                    );
+                }
+                validate_template(name, "Infisical path", path)?;
+            }
+            Ok(ProfileSource::Infisical {
+                env: source.env,
+                path: source.path,
+            })
+        }
     }
 }
 
-fn validate_title_template(name: &LaunchProfileName, title: &str) -> Result<()> {
-    let mut rest = title;
+fn is_environment_slug(env: &str) -> bool {
+    !env.is_empty()
+        && env
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+fn validate_template(name: &LaunchProfileName, what: &str, template: &str) -> Result<()> {
+    let mut rest = template;
     while let Some(start) = rest.find('{') {
         let Some(length) = rest[start..].find('}') else {
-            bail!("Profile '{name}' has an unclosed '{{' in note title '{title}'.");
+            bail!("Profile '{name}' has an unclosed '{{' in {what} '{template}'.");
         };
         let placeholder = &rest[start..start + length + 1];
-        if placeholder != SERVICE_PATH_PLACEHOLDER {
+        if placeholder != SERVICE_PATH_PLACEHOLDER && placeholder != SERVICE_NAME_PLACEHOLDER {
             bail!(
-                "Profile '{name}' uses unknown placeholder '{placeholder}' in note title '{title}'. Only {SERVICE_PATH_PLACEHOLDER} is supported."
+                "Profile '{name}' uses unknown placeholder '{placeholder}' in {what} '{template}'. Only {SERVICE_PATH_PLACEHOLDER} and {SERVICE_NAME_PLACEHOLDER} are supported."
             );
         }
         rest = &rest[start + length + 1..];
@@ -328,6 +441,21 @@ fn render_source(source: &ProfileSource) -> String {
             toml_string(vault),
             toml_string(title)
         ),
+        ProfileSource::Infisical { env, path } => {
+            let fields: Vec<String> = [("env", env), ("path", path)]
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .as_deref()
+                        .map(|value| format!("{key} = {}", toml_string(value)))
+                })
+                .collect();
+            if fields.is_empty() {
+                "{ infisical = {} }".into()
+            } else {
+                format!("{{ infisical = {{ {} }} }}", fields.join(", "))
+            }
+        }
     }
 }
 
@@ -341,18 +469,46 @@ pub fn validate_launch_profiles(content: &str) -> Result<()> {
     parse_profiles(content).map(|_| ())
 }
 
-/// Expands `{service_path}` in a note title. For a service at the project
-/// root the placeholder and its trailing slash disappear, so
-/// `Acme/{service_path}/.env.production` becomes `Acme/.env.production`.
-pub fn expand_note_title(template: &str, service_path: &str) -> String {
+/// Expands `{service_path}` and `{service_name}` in a note title or an
+/// Infisical path. For a service at the project root a placeholder and its
+/// slash disappear, so `Acme/{service_path}/.env.production` becomes
+/// `Acme/.env.production`.
+pub fn expand_service_template(template: &str, service_path: &str) -> String {
     let service_path = service_path.trim_matches('/');
-    if service_path.is_empty() {
-        return template
-            .replace(&format!("{SERVICE_PATH_PLACEHOLDER}/"), "")
-            .replace(&format!("/{SERVICE_PATH_PLACEHOLDER}"), "")
-            .replace(SERVICE_PATH_PLACEHOLDER, "");
+    let service_name = service_path.rsplit('/').next().unwrap_or_default();
+    let mut expanded = template.to_string();
+    for (placeholder, value) in [
+        (SERVICE_PATH_PLACEHOLDER, service_path),
+        (SERVICE_NAME_PLACEHOLDER, service_name),
+    ] {
+        expanded = if value.is_empty() {
+            expanded
+                .replace(&format!("{placeholder}/"), "")
+                .replace(&format!("/{placeholder}"), "")
+                .replace(placeholder, "")
+        } else {
+            expanded.replace(placeholder, value)
+        };
     }
-    template.replace(SERVICE_PATH_PLACEHOLDER, service_path)
+    expanded
+}
+
+/// Infisical environment a source reads: its own `env`, else `dev` for the
+/// `default` profile and the profile's name otherwise.
+pub fn infisical_env(profile: &LaunchProfileName, env: Option<&str>) -> String {
+    match env {
+        Some(env) => env.to_string(),
+        None if profile.is_default() => DEFAULT_INFISICAL_ENV.into(),
+        None => profile.as_str().to_string(),
+    }
+}
+
+/// Infisical folder a source reads for one service, always starting with
+/// `/`: `/web` for `apps/web` with the default path, `/` at the root.
+pub fn infisical_path(path: Option<&str>, service_path: &str) -> String {
+    let expanded = expand_service_template(path.unwrap_or(DEFAULT_INFISICAL_PATH), service_path);
+    let trimmed = expanded.trim_matches('/');
+    format!("/{trimmed}")
 }
 
 #[cfg(test)]
@@ -509,7 +665,7 @@ sources = [
     #[test]
     fn rendered_profiles_read_back_identically() {
         let (_dir, original) = write_profiles(
-            "[profiles.prod.env]\nINFAST_DRY_RUN = true\nRESEND_TOKEN = \"re_disabled\"\n\n[profiles.prod]\ndanger = true\nmax_duration = \"90m\"\nsources = [{ proton_pass_note = { vault = \"Env\", title = \"A \\\"B\\\"/{service_path}/.env.production\" } }]\n\n[profiles.default]\nsources = [{ file = \".env.development\" }]\n\n[profiles.staging]\nbrowser_indicator = true\nsources = [{ file = \".env.staging.refs\" }, { file = \".env.development\" }]\n",
+            "[profiles.prod.env]\nINFAST_DRY_RUN = true\nRESEND_TOKEN = \"re_disabled\"\n\n[profiles.prod]\ndanger = true\nmax_duration = \"90m\"\nsources = [{ proton_pass_note = { vault = \"Env\", title = \"A \\\"B\\\"/{service_path}/.env.production\" } }]\n\n[profiles.default]\nsources = [{ file = \".env.development\" }]\n\n[profiles.staging]\nbrowser_indicator = true\nsources = [{ file = \".env.staging.refs\" }, { file = \".env.development\" }]\n\n[profiles.preview]\nsources = [{ infisical = {} }, { infisical = { env = \"preview-1\", path = \"/apps/{service_path}\" } }]\n",
         );
         let profiles: Vec<LaunchProfile> = original.profiles().cloned().collect();
 
@@ -522,21 +678,110 @@ sources = [
     }
 
     #[test]
-    fn expands_service_path_in_note_titles() {
+    fn expands_service_placeholders() {
         let template = "Acme/{service_path}/.env.production";
 
         assert_eq!(
-            expand_note_title(template, "apps/web"),
+            expand_service_template(template, "apps/web"),
             "Acme/apps/web/.env.production"
         );
-        assert_eq!(expand_note_title(template, ""), "Acme/.env.production");
         assert_eq!(
-            expand_note_title("{service_path}/.env", ""),
-            ".env".to_string()
+            expand_service_template(template, ""),
+            "Acme/.env.production"
         );
+        assert_eq!(expand_service_template("{service_path}/.env", ""), ".env");
+        assert_eq!(expand_service_template("Acme/{service_path}", ""), "Acme");
         assert_eq!(
-            expand_note_title("Acme/{service_path}", ""),
-            "Acme".to_string()
+            expand_service_template("Acme/{service_name}/.env", "apps/web"),
+            "Acme/web/.env"
         );
+    }
+
+    #[test]
+    fn infisical_sources_parse_with_their_defaults() {
+        let (_dir, profiles) = write_profiles(
+            "[profiles.default]\nsources = [{ infisical = {} }]\n\n[profiles.prod]\ndanger = true\nsources = [{ infisical = { env = \"production\", path = \"/{service_path}\" } }]\n",
+        );
+
+        let default = profiles.select(None).unwrap().unwrap();
+        assert_eq!(
+            default.sources,
+            vec![ProfileSource::Infisical {
+                env: None,
+                path: None
+            }]
+        );
+        let prod = profiles.select(Some("prod")).unwrap().unwrap();
+        assert_eq!(
+            prod.sources,
+            vec![ProfileSource::Infisical {
+                env: Some("production".into()),
+                path: Some("/{service_path}".into()),
+            }]
+        );
+        assert!(
+            load_error("[profiles.prod]\nsources = [{ infisical = { env = \"Prod env\" } }]\n")
+                .contains("environment slug")
+        );
+        assert!(
+            load_error("[profiles.prod]\nsources = [{ infisical = { path = \"web\" } }]\n")
+                .contains("start with '/'")
+        );
+        assert!(
+            load_error("[profiles.prod]\nsources = [{ infisical = { project = \"x\" } }]\n")
+                .contains("unknown field")
+        );
+    }
+
+    #[test]
+    fn infisical_env_and_path_follow_the_profile_and_the_service() {
+        let default = LaunchProfileName::new("default").unwrap();
+        let staging = LaunchProfileName::new("staging").unwrap();
+
+        assert_eq!(infisical_env(&default, None), "dev");
+        assert_eq!(infisical_env(&staging, None), "staging");
+        assert_eq!(infisical_env(&staging, Some("preview")), "preview");
+        assert_eq!(infisical_path(None, "apps/web"), "/web");
+        assert_eq!(infisical_path(None, ""), "/");
+        assert_eq!(
+            infisical_path(Some("/{service_path}/"), "apps/web"),
+            "/apps/web"
+        );
+        assert_eq!(infisical_path(Some("/shared"), "apps/web"), "/shared");
+    }
+
+    #[test]
+    fn a_project_linked_to_infisical_gets_implicit_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".infisical.yaml"), "version: 1\n").unwrap();
+
+        let profiles = LaunchProfiles::load(dir.path()).unwrap().unwrap();
+        let names: Vec<(&str, bool)> = profiles
+            .profiles()
+            .map(|profile| (profile.name.as_str(), profile.danger))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("default", false), ("prod", true), ("staging", false)]
+        );
+        assert!(
+            profiles
+                .select(Some("prod"))
+                .unwrap()
+                .unwrap()
+                .browser_indicator
+        );
+        let error = profiles.select(Some("preview")).unwrap_err().to_string();
+        assert!(error.contains(".infisical.yaml"));
+        assert!(error.contains("env = \"preview\""));
+        assert!(LaunchProfiles::load_file(dir.path()).unwrap().is_none());
+
+        fs::write(
+            dir.path().join(launch_profiles_file_name()),
+            "[profiles.qa]\n",
+        )
+        .unwrap();
+        let declared = LaunchProfiles::load(dir.path()).unwrap().unwrap();
+        assert_eq!(declared.profiles().count(), 1);
     }
 }

@@ -1,8 +1,8 @@
 //! `localify profile init`: sets up `localify.toml` interactively.
 //!
 //! Asks a few questions, checks every service against the chosen sources
-//! (files on disk, note titles in Proton Pass; never values), previews the
-//! file, and writes it only after confirmation.
+//! (files on disk, note titles in Proton Pass, folder names in Infisical;
+//! never values), previews the file, and writes it only after confirmation.
 
 use std::collections::HashMap;
 use std::fs;
@@ -17,7 +17,8 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchProfileName;
 use crate::infrastructure::dotenv;
 use crate::infrastructure::launch_profiles::{
-    LaunchProfile, LaunchProfiles, ProfileSource, ProtonPassCli, expand_note_title,
+    DEFAULT_INFISICAL_PATH, InfisicalCli, LaunchProfile, LaunchProfiles, ProfileSource,
+    ProtonPassCli, expand_service_template, infisical_env, infisical_path, infisical_project_file,
     launch_profiles_file_name, render_launch_profiles, validate_launch_profiles,
 };
 
@@ -37,7 +38,10 @@ pub fn run(ctx: &AppContext) -> Result<()> {
     print_checkout(&checkout);
     let theme = ColorfulTheme::default();
     let mut profiles = existing_profiles(&checkout, &theme)?;
-    let mut changed = false;
+    // Implicit Infisical profiles apply until the file exists, so writing it
+    // is a change even when every answer keeps the defaults off.
+    let mut changed = !checkout.root.join(launch_profiles_file_name()).exists()
+        && infisical_project_file(&checkout.root).is_some();
 
     if !profiles.iter().any(|profile| profile.name.is_default())
         && let Some(default) = ask_default_profile(&checkout, &theme)?
@@ -76,7 +80,7 @@ fn existing_profiles(
     checkout: &ProjectCheckout,
     theme: &ColorfulTheme,
 ) -> Result<Vec<LaunchProfile>> {
-    match LaunchProfiles::load(&checkout.root) {
+    match LaunchProfiles::load_file(&checkout.root) {
         Ok(Some(existing)) => {
             let profiles: Vec<LaunchProfile> = existing.profiles().cloned().collect();
             let names: Vec<&str> = profiles
@@ -94,7 +98,17 @@ fn existing_profiles(
             );
             Ok(profiles)
         }
-        Ok(None) => Ok(Vec::new()),
+        Ok(None) => {
+            if let Some(file) = infisical_project_file(&checkout.root) {
+                eprintln!(
+                    "Linked to Infisical by {}: without {}, default, staging and prod already read the Infisical environments dev, staging and prod. Write {} only to change that.\n",
+                    display_file_name(&file),
+                    launch_profiles_file_name(),
+                    launch_profiles_file_name()
+                );
+            }
+            Ok(Vec::new())
+        }
         Err(error) => {
             eprintln!("{error:#}\n");
             let start_over = Confirm::with_theme(theme)
@@ -120,7 +134,8 @@ fn ask_default_profile(
     theme: &ColorfulTheme,
 ) -> Result<Option<LaunchProfile>> {
     let found = services_with_file(checkout, DEVELOPMENT_FILE);
-    let items = [
+    let linked = infisical_project_file(&checkout.root).is_some();
+    let mut items = vec![
         "Nothing extra: services keep loading their own .env files".to_string(),
         format!(
             "Load {DEVELOPMENT_FILE} in every service (found in {} of {})",
@@ -128,20 +143,31 @@ fn ask_default_profile(
             checkout.services.len()
         ),
     ];
+    if linked {
+        items.push("Read the Infisical environment dev".to_string());
+    }
     let choice = Select::with_theme(theme)
         .with_prompt("Without --profile, services start with")
         .items(&items)
-        .default(0)
+        .default(if linked { 2 } else { 0 })
         .interact()?;
 
-    Ok((choice == 1).then(|| LaunchProfile {
+    let source = match choice {
+        0 => return Ok(None),
+        1 => ProfileSource::File {
+            path: DEVELOPMENT_FILE.into(),
+        },
+        _ => ProfileSource::Infisical {
+            env: None,
+            path: None,
+        },
+    };
+    Ok(Some(LaunchProfile {
         name: default_profile_name(),
         danger: false,
         max_duration: None,
         browser_indicator: false,
-        sources: vec![ProfileSource::File {
-            path: DEVELOPMENT_FILE.into(),
-        }],
+        sources: vec![source],
         env: Vec::new(),
     }))
 }
@@ -379,19 +405,22 @@ fn ask_source(
     theme: &ColorfulTheme,
 ) -> Result<Option<ProfileSource>> {
     let items = [
+        "Infisical: one folder per service in an environment",
         "Proton Pass notes: one note per service holding a whole .env file",
         "Proton Pass references: a file in each service with pass://… values",
         "Local file in each service (values stay in plain text on disk)",
     ];
+    let linked = infisical_project_file(&checkout.root).is_some();
     let choice = Select::with_theme(theme)
         .with_prompt(format!("Where do the variables of '{name}' come from?"))
         .items(items)
-        .default(0)
+        .default(if linked { 0 } else { 1 })
         .interact()?;
 
     match choice {
-        0 => ask_proton_pass_note(checkout, name, theme),
-        1 => ask_service_file(
+        0 => ask_infisical(checkout, name, theme),
+        1 => ask_proton_pass_note(checkout, name, theme),
+        2 => ask_service_file(
             checkout,
             &format!("{}.refs", env_file_for(name.as_str())),
             theme,
@@ -449,12 +478,98 @@ fn ask_proton_pass_note(
             continue;
         }
         print_checks(checkout.services.iter().map(|(id, path)| {
-            let expected = expand_note_title(title.trim(), path);
+            let expected = expand_service_template(title.trim(), path);
             let found = titles.iter().any(|existing| existing == &expected);
             (id.as_str(), format!("{vault}: {expected}"), found)
         }));
         return Ok(Some(source));
     }
+}
+
+fn ask_infisical(
+    checkout: &ProjectCheckout,
+    name: &LaunchProfileName,
+    theme: &ColorfulTheme,
+) -> Result<Option<ProfileSource>> {
+    if infisical_project_file(&checkout.root).is_none() {
+        eprintln!(
+            "  No Infisical project is linked to {}. Run 'infisical init' there, then pick Infisical again.",
+            checkout.root.display()
+        );
+        return Ok(None);
+    }
+
+    let default_env = infisical_env(name, None);
+    loop {
+        let env: String = Input::with_theme(theme)
+            .with_prompt("Infisical environment slug")
+            .with_initial_text(default_env.clone())
+            .interact_text()?;
+        let path: String = Input::with_theme(theme)
+            .with_prompt(
+                "Folder of each service ({service_name} becomes the folder name, such as web; {service_path} the full path, such as apps/web)",
+            )
+            .with_initial_text(DEFAULT_INFISICAL_PATH)
+            .interact_text()?;
+        let (env, path) = (env.trim().to_string(), path.trim().to_string());
+        let source = ProfileSource::Infisical {
+            env: (env != default_env).then(|| env.clone()),
+            path: (path != DEFAULT_INFISICAL_PATH).then(|| path.clone()),
+        };
+        if let Err(error) = validate_source(name, &source) {
+            eprintln!("  {error:#}");
+            continue;
+        }
+        check_infisical_folders(checkout, &env, &path);
+        return Ok(Some(source));
+    }
+}
+
+/// Marks each service ✓ or ✗ depending on whether its folder exists in the
+/// environment. Lists folder names only, one call per parent folder.
+fn check_infisical_folders(checkout: &ProjectCheckout, env: &str, path: &str) {
+    let store = InfisicalCli;
+    // Listing the root first also checks that the environment exists.
+    let mut listings: HashMap<String, Vec<String>> = HashMap::new();
+    match store.folder_names(&checkout.root, env, "/") {
+        Ok(names) => {
+            listings.insert("/".into(), names);
+        }
+        Err(error) => {
+            eprintln!("  Could not check the folders: {error:#}");
+            return;
+        }
+    }
+    let mut checks = Vec::new();
+    for (id, service_path) in &checkout.services {
+        let folder = infisical_path(Some(path), service_path);
+        let found = match folder.rsplit_once('/') {
+            Some((parent, child)) if !child.is_empty() => {
+                let parent = if parent.is_empty() { "/" } else { parent };
+                if !listings.contains_key(parent) {
+                    match store.folder_names(&checkout.root, env, parent) {
+                        Ok(names) => {
+                            listings.insert(parent.to_string(), names);
+                        }
+                        Err(error) => {
+                            eprintln!("  Could not check the folders: {error:#}");
+                            return;
+                        }
+                    }
+                }
+                listings[parent].iter().any(|name| name == child)
+            }
+            _ => true,
+        };
+        checks.push((id.as_str(), format!("Infisical {env} {folder}"), found));
+    }
+    print_checks(checks.into_iter());
+}
+
+fn display_file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn ask_service_file(

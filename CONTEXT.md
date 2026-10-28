@@ -33,7 +33,7 @@ A local checkout variant of a project, usually tied to a git worktree or branch,
 _Avoid_: Project, branch project, clone
 
 **Launch Profile**:
-A named choice of where a service's variables come from when Localify starts it, declared in the checkout's `localify.toml`. It never changes the service, its local domains or its port.
+A named choice of where a service's variables come from when Localify starts it, declared in the checkout's `localify.toml`, or implicit for a project linked to Infisical. It never changes the service, its local domains or its port.
 _Avoid_: Environment, env, stage, mode
 
 **Dangerous Launch Profile**:
