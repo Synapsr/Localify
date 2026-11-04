@@ -59,7 +59,7 @@ type SectionProps = {
 
 export const LegalSection = ({ id, title, children }: SectionProps) => {
   return (
-    <section id={id} className="space-y-3">
+    <section id={id} className="scroll-mt-8 space-y-3">
       <h2 className="text-ink text-[20px] font-medium tracking-[-0.015em]">{title}</h2>
       <div className="space-y-3">{children}</div>
     </section>

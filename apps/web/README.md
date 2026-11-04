@@ -21,10 +21,10 @@ pnpm web:build
 
 Nothing is required to run or build the site. It reads these public values at build time, listed in the root [`.env.example`](../../.env.example):
 
-- `NEXT_PUBLIC_POSTHOG_TOKEN` turns on PostHog in production.
+- `NEXT_PUBLIC_POSTHOG_TOKEN` turns on PostHog and its cookie banner in production. PostHog stores and sends nothing until the visitor accepts.
 - `NEXT_PUBLIC_POSTHOG_HOST` defaults to `https://us.i.posthog.com`.
-- `NEXT_PUBLIC_POSTHOG_DISABLED=true` turns PostHog off.
-- `NEXT_PUBLIC_POSTHOG_DEBUG=true` turns PostHog on in `pnpm web:dev`.
+- `NEXT_PUBLIC_POSTHOG_DISABLED=true` turns PostHog and the banner off.
+- `NEXT_PUBLIC_POSTHOG_DEBUG=true` turns PostHog and the banner on in `pnpm web:dev`.
 - `NEXT_PUBLIC_LOCALIFY_DOWNLOADS_BASE_URL` overrides the download host, `https://downloads.localify.dev`.
 
 The Umami script in [`app/layout.tsx`](app/layout.tsx) loads in production builds only.
@@ -39,7 +39,7 @@ Messages live in [`messages/`](messages/), one file per locale: `de en es fr ja 
 
 The `Privacy` messages describe what the code does, so they change with it. Update all nine locales when you change any of these:
 
-- [`lib/analytics.ts`](lib/analytics.ts) and [`instrumentation-client.ts`](instrumentation-client.ts): website PostHog and the download attribution token.
+- [`lib/analytics.ts`](lib/analytics.ts), [`instrumentation-client.ts`](instrumentation-client.ts), and [`app/_components/cookie-banner.tsx`](app/_components/cookie-banner.tsx): website PostHog, its consent, and the download attribution token.
 - [`app/layout.tsx`](app/layout.tsx): Umami.
 - [`desktop-ui/src/lib/analytics.ts`](../../desktop-ui/src/lib/analytics.ts): desktop analytics, error reports, and session replay.
 

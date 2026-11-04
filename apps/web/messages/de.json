@@ -1,6 +1,7 @@
 {
-  "Home": {
-    "description": "Localify gibt deinen lokalen Projekten stabile .localify-Domains, vertrauenswürdiges HTTPS, DNS-Routing und eine native macOS-App — kein mkcert, kein /etc/hosts, kein Tunnel."
+  "Metadata": {
+    "title": "Localify - Lokale Domains und vertrauenswürdiges HTTPS für Entwickler",
+    "description": "Localify ist eine kostenlose Open-Source-App, die lokalen Projekten stabile .localify-Domains, vertrauenswürdiges HTTPS, DNS-Routing und eine native macOS-App gibt, ohne mkcert, ohne Änderungen an /etc/hosts und ohne Tunnel."
   },
   "Navigation": {
     "howItWorks": "So funktioniert es",
@@ -91,15 +92,15 @@
       },
       {
         "question": "Stellt es meine Arbeit online?",
-        "answer": "Nein. Localify ist kein öffentlicher Tunnel. Deine lokalen Services bleiben auf deiner Maschine — kein App-Traffic, kein Projektname und kein Request-Log wird an Localify gesendet."
+        "answer": "Nein. Localify ist kein öffentlicher Tunnel. Deine lokalen Services bleiben auf deiner Maschine — weder App-Traffic noch Request-Logs werden an Localify gesendet."
       },
       {
         "question": "Sammelt Localify Analytics?",
-        "answer": "Die offizielle Desktop-App schon: Produkt-Flows (Onboarding, Navigation, Projekterstellung), Nutzungszähler und Fehlerberichte. Diese Events enthalten keine Request-Logs, Projektnamen, Domains, lokalen Pfade oder Traffic-Inhalte. Aus Fehlerberichten werden URLs und Dateipfade entfernt, eine Meldung kann aber trotzdem das betroffene Projekt oder die Domain nennen. CLI und Daemon senden nichts."
+        "answer": "Die offizielle Desktop-App schon: Produkt-Flows (Onboarding, Navigation, Projekterstellung), Nutzungszähler und Fehlerberichte. Diese Events enthalten keine Request-Logs, Projektnamen, Domains, lokalen Pfade oder Traffic-Inhalte. Ein Filter entfernt URLs, Dateipfade, .localify-Domains und Namen in Anführungszeichen vor dem Senden aus Fehlerberichten, kann aber nicht alles erkennen. CLI und Daemon senden nichts."
       },
       {
         "question": "Auf welchen Plattformen läuft es?",
-        "answer": "Die Desktop-App läuft auf macOS mit Apple Silicon. CLI und Daemon lassen sich auch unter Linux aus dem Quellcode bauen. Windows wird nicht unterstützt."
+        "answer": "Die Desktop-App läuft vorerst auf macOS mit Apple Silicon. CLI und Daemon lassen sich auch unter Linux aus dem Quellcode bauen. Windows und eine Linux-Desktop-App sind für später geplant."
       },
       {
         "question": "Muss ich /etc/hosts bearbeiten oder mkcert installieren?",
@@ -127,28 +128,27 @@
   },
   "Footer": {
     "resources": "Ressourcen",
-    "project": "Projekt",
     "legal": "Rechtliches",
     "download": "Download",
     "source": "Quellcode",
-    "changelog": "Changelog",
     "docs": "Dokumentation",
-    "blog": "Blog",
     "contact": "Kontakt",
     "terms": "Nutzungsbedingungen",
     "privacy": "Datenschutz",
+    "legalNotice": "Impressum",
+    "cookies": "Cookies",
     "copyright": "© 2026 Téo Goulois · Open Source unter der AGPL · Still in Rust gebaut.",
     "language": "Sprache",
     "switchLanguage": "Zu {locale} wechseln"
   },
+  "CookieBanner": {
+    "label": "Cookie-Einwilligung",
+    "message": "Wir würden gern ein PostHog-Cookie verwenden, um Besuche und Downloads zu messen.",
+    "accept": "Akzeptieren",
+    "decline": "Ablehnen"
+  },
   "Legal": {
     "lastUpdated": "Zuletzt aktualisiert"
-  },
-  "Soon": {
-    "eyebrow": "Bald",
-    "title": "Diese Seite ist noch nicht fertig.",
-    "description": "Wir konzentrieren uns zuerst auf das Kernprodukt. Docs, Changelog und der Rest erscheinen hier, sobald sie bereit sind.",
-    "backHome": "Zurück zur Startseite"
   },
   "Terms": {
     "title": "Nutzungsbedingungen",
@@ -205,6 +205,12 @@
     "contact": {
       "title": "8. Kontakt",
       "prefix": "Fragen zu diesen Bedingungen? Schreib an"
+    },
+    "legalNotice": {
+      "title": "9. Impressum",
+      "publisher": "Herausgabe und Verantwortung für die Veröffentlichung: Téo Goulois",
+      "contact": "Kontakt:",
+      "host": "Hosting: Cloudflare, Inc., 101 Townsend Street, San Francisco, CA 94107, USA, +1 888-993-5273"
     }
   },
   "Privacy": {
@@ -227,9 +233,9 @@
       {
         "title": "3. Desktop-App und CLI",
         "body": [
-          "Der Localify-Daemon, die Desktop-App und die CLI laufen auf deinem Rechner. DNS, TLS-Zertifikate, Routing, Projektkonfiguration und Request-Logs werden dort verarbeitet. Abgesehen von den unten beschriebenen Fehlerberichten erhalten wir die von dir angelegten Hostnamen nicht. Die Requests, die du über den Proxy leitest, und die Logs in der App erhalten wir nie. CLI und Daemon senden keine Analytics.",
+          "Der Localify-Daemon, die Desktop-App und die CLI laufen auf deinem Rechner. DNS, TLS-Zertifikate, Routing, Projektkonfiguration und Request-Logs werden dort verarbeitet. Die von dir angelegten Hostnamen erfassen wir nicht, und aus Fehlerberichten werden sie vor dem Senden entfernt. Die Requests, die du über den Proxy leitest, und die Logs in der App erhalten wir nie. CLI und Daemon senden keine Analytics.",
           "Offizielle Desktop-Builds senden Produkt-Analytics an PostHog: aufgerufene Ansichten, Onboarding-Schritte, Aktionen wie das Anlegen eines Projekts oder das Hinzufügen einer Domain sowie Zähler wie die Anzahl deiner Projekte und Domains. Diese Events enthalten keine Projektnamen, Domains, lokalen Pfade, weitergeleiteten URLs oder Traffic. Autocapture ist aus. Ein aus dem Quellcode gebauter Build ohne PostHog-Token sendet nichts.",
-          "Die App meldet außerdem Fehler an PostHog: Name und Meldung des Fehlers, ohne URLs und Dateipfade, dazu Hashes, die gleiche Fehler gruppieren. Eine Fehlermeldung kann trotzdem das betroffene Projekt oder die Domain nennen.",
+          "Die App meldet außerdem Fehler an PostHog: Name und Meldung des Fehlers, dazu Hashes, die gleiche Fehler gruppieren. Vor dem Senden entfernt ein Filter URLs, Dateipfade, .localify-Domains und Namen in Anführungszeichen. Er arbeitet mit Mustern und kann deshalb in einer ungewöhnlichen Meldung etwas übersehen.",
           "Session Replay ist standardmäßig aus und startet nur, wenn du es in den Einstellungen der App einschaltest. Replay maskiert Texte und Eingaben und zeichnet weder Konsolen-Logs noch Netzwerk-Timings auf.",
           "Beim Start sucht die paketierte App nach Updates und lädt dazu Release-Metadaten von unserem Download-Host. Diese Anfrage kann übliche Server-Logs hinterlassen: IP-Adresse, User-Agent, Zeit und angefragte Datei. Wir nutzen sie, um Updates auszuliefern und Probleme dabei zu beheben, nicht um ein Nutzungsprofil zu erstellen."
         ]
@@ -244,9 +250,10 @@
       {
         "title": "5. Die Website",
         "body": [
-          "Im Produktivbetrieb nutzt die Website Umami, geladen von analytics.teogoulois.com, und PostHog. Beide erfassen Seitenaufrufe und Klicks auf Buttons wie den Download. Autocapture und Session-Aufzeichnung von PostHog sind aus. Wir setzen keine Werbe-Tracker und kein seitenübergreifendes Retargeting ein.",
-          "PostHog speichert eine Besucherkennung in deinem Browser, in einem Cookie und im lokalen Speicher.",
-          "Wenn du auf einen Download-Button klickst, kann die Website ein kurzes Localify-Attributionstoken in deine Zwischenablage kopieren und ersetzt damit deren Inhalt. Beim Start liest die Desktop-App die Zwischenablage und ignoriert alles, was kein solches Token ist. Findet sie eines, verknüpft sie deinen Website-Besuch in unseren Analytics mit der App. Das Token enthält eine PostHog-Besucherkennung, eine Attributions-ID, eine Quellenbezeichnung und einen Zeitstempel. Es enthält keine Projektdaten, Domains, lokalen Pfade oder Traffic."
+          "Im Produktivbetrieb nutzt die Website zwei Analytics-Tools, Umami und PostHog. Sie erfassen Seitenaufrufe und Klicks auf Buttons wie den Download. Wir setzen keine Werbe-Tracker und kein seitenübergreifendes Retargeting ein.",
+          "Umami läuft für alle Besucher. Es wird von analytics.teogoulois.com geladen und verwendet keine Cookies.",
+          "PostHog läuft nur, wenn du im Cookie-Banner akzeptierst. Dann speichert es eine Besucherkennung in einem Cookie und im lokalen Speicher und erfasst, dass du akzeptiert hast. Autocapture und Session-Aufzeichnung sind aus. Wenn du ablehnst, sendet und speichert PostHog nichts. In beiden Fällen merkt sich ein Eintrag im lokalen Speicher deine Wahl, und du kannst sie über den Cookies-Link in der Fußzeile ändern.",
+          "Wenn du akzeptiert hast, kann ein Klick auf einen Download-Button ein kurzes Localify-Attributionstoken in deine Zwischenablage kopieren und damit deren Inhalt ersetzen. Andernfalls lässt die Website deine Zwischenablage in Ruhe. Beim Start liest die Desktop-App die Zwischenablage und ignoriert alles, was kein solches Token ist. Findet sie eines, verknüpft sie deinen Website-Besuch in unseren Analytics mit der App. Das Token enthält eine PostHog-Besucherkennung, eine Attributions-ID, eine Quellenbezeichnung und einen Zeitstempel. Es enthält keine Projektdaten, Domains, lokalen Pfade oder Traffic."
         ]
       },
       {
@@ -261,7 +268,7 @@
           },
           {
             "name": "PostHog",
-            "description": "Website-Analytics sowie Produkt-Analytics und Fehlerberichte der Desktop-App."
+            "description": "Website-Analytics, wenn du akzeptierst, sowie Produkt-Analytics und Fehlerberichte der Desktop-App."
           },
           {
             "name": "Umami",
@@ -276,7 +283,7 @@
       {
         "title": "7. Warum wir diese Daten verarbeiten",
         "body": [
-          "Analytics und Fehlerberichte verarbeiten wir, weil wir ein berechtigtes Interesse daran haben zu verstehen, wie Localify genutzt wird, und Fehler zu beheben. Update-Anfragen verarbeiten wir, um Updates auszuliefern, und Support-E-Mails, um dir zu antworten."
+          "Für PostHog auf der Website stützen wir uns auf deine Einwilligung, die du jederzeit über den Cookies-Link in der Fußzeile widerrufen kannst. Umami-Analytics, Analytics der Desktop-App und Fehlerberichte verarbeiten wir, weil wir ein berechtigtes Interesse daran haben zu verstehen, wie Localify genutzt wird, und Fehler zu beheben. Update-Anfragen verarbeiten wir, um Updates auszuliefern, und Support-E-Mails, um dir zu antworten."
         ]
       },
       {

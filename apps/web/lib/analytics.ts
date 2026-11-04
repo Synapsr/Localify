@@ -24,6 +24,58 @@ const isWebAnalyticsEnabled = () => {
   );
 };
 
+type ConsentStatus = ReturnType<typeof posthog.get_explicit_consent_status>;
+
+const consentListeners = new Set<() => void>();
+
+export const subscribeToConsent = (listener: () => void) => {
+  consentListeners.add(listener);
+  return () => {
+    consentListeners.delete(listener);
+  };
+};
+
+// null when website analytics are off, so there is nothing to ask the visitor about.
+export const getConsentStatus = (): ConsentStatus | null => {
+  return isWebAnalyticsEnabled() ? posthog.get_explicit_consent_status() : null;
+};
+
+// opt_in_capturing() also sends the $pageview skipped while consent was pending, and PostHog
+// sends it only once per page load, so a second capture here would count it twice.
+export const acceptAnalytics = () => {
+  posthog.opt_in_capturing();
+  notifyConsentListeners();
+};
+
+export const declineAnalytics = () => {
+  posthog.opt_out_capturing();
+  removePostHogSessionStorage();
+  notifyConsentListeners();
+};
+
+export const resetAnalyticsConsent = () => {
+  posthog.clear_opt_in_out_capturing();
+  removePostHogSessionStorage();
+  notifyConsentListeners();
+};
+
+// Both calls above clear PostHog's cookie and local storage, but leave its window id behind.
+const removePostHogSessionStorage = () => {
+  try {
+    for (const key of Object.keys(sessionStorage)) {
+      if (key.startsWith("ph_")) sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Blocked storage has nothing to clear.
+  }
+};
+
+const notifyConsentListeners = () => {
+  for (const listener of consentListeners) {
+    listener();
+  }
+};
+
 export const initWebAnalytics = () => {
   const token = process.env.NEXT_PUBLIC_POSTHOG_TOKEN;
   if (!token || !isWebAnalyticsEnabled()) return;
@@ -35,6 +87,12 @@ export const initWebAnalytics = () => {
     capture_pageleave: false,
     autocapture: false,
     disable_session_recording: true,
+    // Nothing is stored or sent until the visitor accepts in the cookie banner.
+    opt_out_capturing_by_default: true,
+    opt_out_persistence_by_default: true,
+    // Without this, init fetches remote config and feature flags whatever the consent status.
+    // The site uses neither.
+    advanced_disable_flags: true,
     loaded: (client) => {
       client.register({ surface: "web" });
       if (isPostHogDebugEnabled()) {
@@ -60,7 +118,7 @@ const startClickTracking = () => {
       if (!element) return;
 
       const name = element.dataset.umamiEvent;
-      if (!name) return;
+      if (!name || getConsentStatus() !== "granted") return;
 
       const data = getEventProperties(element.dataset);
       if (name === "download_clicked") {

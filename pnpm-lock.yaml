@@ -171,9 +171,6 @@ importers:
       '@tailwindcss/postcss':
         specifier: ^4.2.3
         version: 4.3.4
-      agentation:
-        specifier: ^3.0.2
-        version: 3.1.2(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -226,6 +223,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
+      agentation:
+        specifier: ^3.0.2
+        version: 3.1.2(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

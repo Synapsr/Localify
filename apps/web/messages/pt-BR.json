@@ -1,6 +1,7 @@
 {
-  "Home": {
-    "description": "Localify dá aos seus projetos locais domínios .localify estáveis, HTTPS confiável, roteamento DNS e um app nativo para macOS — sem mkcert, sem /etc/hosts, sem túnel."
+  "Metadata": {
+    "title": "Localify - Domínios locais e HTTPS confiável para desenvolvedores",
+    "description": "Localify é um app gratuito e de código aberto que dá aos seus projetos locais domínios .localify estáveis, HTTPS confiável, roteamento DNS e um app nativo para macOS, sem mkcert, sem editar o /etc/hosts e sem túnel."
   },
   "Navigation": {
     "howItWorks": "Como funciona",
@@ -91,15 +92,15 @@
       },
       {
         "question": "Ele coloca meu trabalho online?",
-        "answer": "Não. Localify não é um túnel público. Seus serviços locais ficam na sua máquina — nenhum tráfego da app, nome de projeto ou log de requisição é enviado para o Localify."
+        "answer": "Não. Localify não é um túnel público. Seus serviços locais ficam na sua máquina — nenhum tráfego da app nem log de requisição é enviado para o Localify."
       },
       {
         "question": "O Localify coleta analytics?",
-        "answer": "O app desktop oficial coleta: fluxos de produto (onboarding, navegação, criação de projeto), contadores de uso e relatórios de erro. Esses eventos não incluem logs de requisição, nomes de projeto, domínios, caminhos locais nem conteúdo de tráfego. Os relatórios de erro removem URLs e caminhos de arquivo, mas uma mensagem ainda pode citar o projeto ou domínio em questão. O CLI e o daemon não enviam nada."
+        "answer": "O app desktop oficial coleta: fluxos de produto (onboarding, navegação, criação de projeto), contadores de uso e relatórios de erro. Esses eventos não incluem logs de requisição, nomes de projeto, domínios, caminhos locais nem conteúdo de tráfego. Um filtro remove URLs, caminhos de arquivo, domínios .localify e nomes entre aspas dos relatórios de erro antes do envio, embora não consiga pegar tudo. O CLI e o daemon não enviam nada."
       },
       {
         "question": "Em quais plataformas ele roda?",
-        "answer": "O app desktop roda no macOS com Apple Silicon. O CLI e o daemon também compilam a partir do código-fonte no Linux. O Windows não é suportado."
+        "answer": "Por enquanto, o app desktop roda no macOS com Apple Silicon. O CLI e o daemon também compilam a partir do código-fonte no Linux. O Windows e um app desktop para Linux estão planejados para mais adiante."
       },
       {
         "question": "Preciso editar /etc/hosts ou instalar mkcert?",
@@ -127,28 +128,27 @@
   },
   "Footer": {
     "resources": "Recursos",
-    "project": "Projeto",
     "legal": "Legal",
     "download": "Baixar",
     "source": "Código-fonte",
-    "changelog": "Changelog",
     "docs": "Documentação",
-    "blog": "Blog",
     "contact": "Contato",
     "terms": "Termos de serviço",
     "privacy": "Política de privacidade",
+    "legalNotice": "Aviso legal",
+    "cookies": "Cookies",
     "copyright": "© 2026 Téo Goulois · Open source sob a AGPL · Feito discretamente em Rust.",
     "language": "Idioma",
     "switchLanguage": "Mudar para {locale}"
   },
+  "CookieBanner": {
+    "label": "Consentimento de cookies",
+    "message": "Gostaríamos de usar um cookie do PostHog para medir visitas e downloads.",
+    "accept": "Aceitar",
+    "decline": "Recusar"
+  },
   "Legal": {
     "lastUpdated": "Última atualização"
-  },
-  "Soon": {
-    "eyebrow": "Em breve",
-    "title": "Esta página ainda não está pronta.",
-    "description": "Estamos focados em entregar o produto principal primeiro. Docs, changelog e o resto aparecem aqui quando ficarem prontos.",
-    "backHome": "Voltar ao início"
   },
   "Terms": {
     "title": "Termos de serviço",
@@ -205,6 +205,12 @@
     "contact": {
       "title": "8. Contato",
       "prefix": "Dúvidas sobre estes termos? Escreva para"
+    },
+    "legalNotice": {
+      "title": "9. Aviso legal",
+      "publisher": "Edição e direção da publicação: Téo Goulois",
+      "contact": "Contato:",
+      "host": "Hospedagem: Cloudflare, Inc., 101 Townsend Street, San Francisco, CA 94107, EUA, +1 888-993-5273"
     }
   },
   "Privacy": {
@@ -227,9 +233,9 @@
       {
         "title": "3. O app desktop e o CLI",
         "body": [
-          "O daemon, o app desktop e o CLI do Localify rodam na sua máquina. DNS, certificados TLS, roteamento, configuração de projetos e logs de requisição são tratados lá. Fora os relatórios de erro descritos abaixo, não recebemos os hostnames que você cria. Nunca recebemos as requisições que passam pelo proxy nem os logs mostrados no app. O CLI e o daemon não enviam analytics.",
+          "O daemon, o app desktop e o CLI do Localify rodam na sua máquina. DNS, certificados TLS, roteamento, configuração de projetos e logs de requisição são tratados lá. Não coletamos os hostnames que você cria, e eles são removidos dos relatórios de erro antes do envio. Nunca recebemos as requisições que passam pelo proxy nem os logs mostrados no app. O CLI e o daemon não enviam analytics.",
           "Os builds oficiais do app desktop enviam analytics de produto para o PostHog: telas vistas, etapas de onboarding, ações como criar um projeto ou adicionar um domínio, e contadores como quantos projetos e domínios você tem. Esses eventos não incluem nomes de projeto, domínios, caminhos locais, URLs proxificadas nem tráfego. O autocapture fica desligado. Um build compilado a partir do código-fonte sem token do PostHog não envia nada.",
-          "O app também reporta erros ao PostHog: o nome e a mensagem do erro, sem URLs nem caminhos de arquivo, mais hashes que agrupam erros idênticos. Uma mensagem de erro ainda pode citar o projeto ou domínio em questão.",
+          "O app também reporta erros ao PostHog: o nome e a mensagem do erro, mais hashes que agrupam erros idênticos. Antes do envio, um filtro remove URLs, caminhos de arquivo, domínios .localify e nomes entre aspas. Ele funciona por padrões, então pode deixar passar algo em uma mensagem incomum.",
           "O session replay fica desligado por padrão e só começa se você o ativar nas configurações do app. Ele mascara textos e campos de entrada, e não grava logs de console nem tempos de rede.",
           "Ao iniciar, o app empacotado procura atualizações baixando metadados de versão do nosso servidor de downloads. Essa requisição pode deixar logs de servidor comuns: endereço IP, user agent, horário e arquivo solicitado. Usamos esses logs para entregar atualizações e resolver problemas de entrega, não para criar um perfil de uso."
         ]
@@ -244,9 +250,10 @@
       {
         "title": "5. O site",
         "body": [
-          "Em produção, o site usa o Umami, carregado de analytics.teogoulois.com, e o PostHog. Eles registram visualizações de página e cliques em botões como o de download. O autocapture e a gravação de sessão do PostHog ficam desligados. Não usamos rastreadores de publicidade nem retargeting entre sites.",
-          "O PostHog guarda um identificador de visitante no seu navegador, em um cookie e no armazenamento local.",
-          "Quando você clica em um botão de download, o site pode copiar um pequeno token de atribuição do Localify para a sua área de transferência, substituindo o que havia lá. Ao iniciar, o app desktop lê a área de transferência e ignora tudo o que não for esse token. Se encontrar um, ele liga sua visita ao site ao app nas nossas analytics. O token contém um identificador de visitante do PostHog, um identificador de atribuição, um rótulo de origem e um carimbo de data e hora. Ele não contém dados de projeto, domínios, caminhos locais nem tráfego."
+          "Em produção, o site usa duas ferramentas de analytics, Umami e PostHog. Elas registram visualizações de página e cliques em botões como o de download. Não usamos rastreadores de publicidade nem retargeting entre sites.",
+          "O Umami roda para todos os visitantes. Ele é carregado de analytics.teogoulois.com e não usa cookies.",
+          "O PostHog só roda se você aceitar no aviso de cookies. Ele então guarda um identificador de visitante em um cookie e no armazenamento local, e registra que você aceitou. O autocapture e a gravação de sessão dele ficam desligados. Se você recusar, o PostHog não envia nem guarda nada. Nos dois casos, uma entrada no armazenamento local lembra sua escolha, e você pode mudá-la pelo link Cookies no rodapé.",
+          "Se você aceitou, clicar em um botão de download pode copiar um pequeno token de atribuição do Localify para a sua área de transferência, substituindo o que havia lá. Caso contrário, o site não mexe na sua área de transferência. Ao iniciar, o app desktop lê a área de transferência e ignora tudo o que não for esse token. Se encontrar um, ele liga sua visita ao site ao app nas nossas analytics. O token contém um identificador de visitante do PostHog, um identificador de atribuição, um rótulo de origem e um carimbo de data e hora. Ele não contém dados de projeto, domínios, caminhos locais nem tráfego."
         ]
       },
       {
@@ -261,7 +268,7 @@
           },
           {
             "name": "PostHog",
-            "description": "analytics do site, e analytics de produto e relatórios de erro do app desktop."
+            "description": "analytics do site se você aceitar, e analytics de produto e relatórios de erro do app desktop."
           },
           {
             "name": "Umami",
@@ -276,7 +283,7 @@
       {
         "title": "7. Por que tratamos esses dados",
         "body": [
-          "Tratamos analytics e relatórios de erro porque temos interesse legítimo em entender como o Localify é usado e em corrigir o que quebra. Tratamos as requisições de atualização para entregar atualizações, e os e-mails de suporte para responder a você."
+          "Para o PostHog no site, nos baseamos no seu consentimento, e você pode retirá-lo a qualquer momento pelo link Cookies no rodapé. Tratamos as analytics do Umami, as analytics do app desktop e os relatórios de erro porque temos interesse legítimo em entender como o Localify é usado e em corrigir o que quebra. Tratamos as requisições de atualização para entregar atualizações, e os e-mails de suporte para responder a você."
         ]
       },
       {

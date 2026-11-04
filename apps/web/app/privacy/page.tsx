@@ -3,11 +3,11 @@ import type { Metadata } from "next";
 import { getTranslations } from "next-intl/server";
 
 import { LegalPage, LegalSection } from "@/app/_components/legal-page";
+import { buildPageMetadata } from "@/app/page-metadata";
+import { routing } from "@/i18n/routing";
 
-export const metadata: Metadata = {
-  title: "Privacy Policy",
-  description:
-    "What Localify and its website collect, what they do not, and how that data is handled.",
+export const generateMetadata = (): Promise<Metadata> => {
+  return buildPageMetadata(routing.defaultLocale, "/privacy");
 };
 
 const PrivacyPage = async () => {
