@@ -39,8 +39,8 @@ importers:
         specifier: ^4.1.1
         version: 4.1.1
       '@hugeicons/react':
-        specifier: ^1.1.6
-        version: 1.1.6(react@19.2.5)
+        specifier: ^1.1.10
+        version: 1.1.10(react@19.2.5)
       '@lezer/highlight':
         specifier: ^1.2.3
         version: 1.2.3
@@ -547,8 +547,8 @@ packages:
   '@hugeicons/core-free-icons@4.1.1':
     resolution: {integrity: sha512-teqIBvPHl90ygIwKyJwTxOH8aNp1X1PjDTcMvLkEwdPxPD+8mssrZ5kXKIAJJFYPsz69a8LYQY0UPid4PAdavg==}
 
-  '@hugeicons/react@1.1.6':
-    resolution: {integrity: sha512-c2LhXJMAW5wN1pC/smBXG0YPqUON6ceR/ZdXHCjEI9KvB+hjtqYjmzIxok5hAQOeXGz0WtORgCQMzqewFKAZwg==}
+  '@hugeicons/react@1.1.10':
+    resolution: {integrity: sha512-9tAsd92yMVVGP+E+d8cM+wc0VnXuYZHNbWQi7TOe8k2neawmhiaFmVFbzyruejhOMa197/LbgvSED32ayUo3ZA==}
     peerDependencies:
       react: '>=16.0.0'
 
@@ -3428,7 +3428,7 @@ snapshots:
 
   '@hugeicons/core-free-icons@4.1.1': {}
 
-  '@hugeicons/react@1.1.6(react@19.2.5)':
+  '@hugeicons/react@1.1.10(react@19.2.5)':
     dependencies:
       react: 19.2.5
 
@@ -3501,7 +3501,7 @@ snapshots:
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.12)
       ajv: 8.18.0
-      ajv-formats: 3.0.1
+      ajv-formats: 3.0.1(ajv@8.18.0)
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
@@ -4173,8 +4173,8 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  ajv-formats@3.0.1:
-    dependencies:
+  ajv-formats@3.0.1(ajv@8.18.0):
+    optionalDependencies:
       ajv: 8.18.0
 
   ajv@8.18.0:
