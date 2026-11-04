@@ -1,6 +1,6 @@
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, KeyPair,
-    KeyUsagePurpose, NameConstraints, PKCS_ECDSA_P256_SHA256, SanType,
+    CertificateParams, CidrSubnet, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+    GeneralSubtree, KeyPair, KeyUsagePurpose, NameConstraints, PKCS_ECDSA_P256_SHA256, SanType,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -65,11 +65,15 @@ pub(crate) fn build_ca_cert_params() -> CertificateParams {
 }
 
 /// Limits the CA to the names Localify serves, so its key can never sign for
-/// another site.
+/// another site. A DNS limit says nothing about IP address names, so those are
+/// excluded outright.
 pub(crate) fn local_domains_only() -> NameConstraints {
     NameConstraints {
         permitted_subtrees: vec![GeneralSubtree::DnsName(BRANDING.domain_label().to_string())],
-        excluded_subtrees: Vec::new(),
+        excluded_subtrees: vec![
+            GeneralSubtree::IpAddress(CidrSubnet::V4([0; 4], [0; 4])),
+            GeneralSubtree::IpAddress(CidrSubnet::V6([0; 16], [0; 16])),
+        ],
     }
 }
 

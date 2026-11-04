@@ -156,7 +156,7 @@ impl RootCA {
 }
 
 /// Whether this certificate carries a critical name constraint permitting only the
-/// local suffix.
+/// local suffix and excluding every IP address.
 pub fn pem_is_limited_to_local_domains(pem: &str) -> Result<bool, CertError> {
     let invalid =
         |reason: String| CertError::GenerationError(format!("Invalid CA certificate: {reason}"));
@@ -173,7 +173,16 @@ pub fn pem_is_limited_to_local_domains(pem: &str) -> Result<bool, CertError> {
             constraints.permitted_subtrees.as_deref(),
             Some([subtree]) if matches!(subtree.base, GeneralName::DNSName(name) if name == BRANDING.domain_label())
         );
-        extension.critical && permits_only_local
+        // An IP subtree is an address and a mask, so all zeroes covers every address.
+        let excludes_every_ip = |length: usize| {
+            constraints.excluded_subtrees.as_deref().is_some_and(|subtrees| {
+                subtrees.iter().any(|subtree| {
+                    matches!(subtree.base, GeneralName::IPAddress(bytes)
+                        if bytes.len() == length && bytes.iter().all(|byte| *byte == 0))
+                })
+            })
+        };
+        extension.critical && permits_only_local && excludes_every_ip(8) && excludes_every_ip(32)
     }))
 }
 
@@ -263,6 +272,36 @@ pub(crate) mod tests {
             &sign_leaf(&ca, "bank.example.com"),
             "bank.example.com"
         ));
+    }
+
+    #[test]
+    fn clients_reject_a_certificate_for_an_ip_address() {
+        let (_dir, ca) = generated_ca();
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let san = rcgen::SanType::IpAddress("192.0.2.10".parse().unwrap());
+        let params = super::super::generator::build_leaf_cert_params("192.0.2.10", vec![san]);
+        let pem = ca.sign_certificate(params, &key).unwrap();
+        let leaf = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
+
+        assert!(!is_trusted_for(&ca, &leaf, "192.0.2.10"));
+    }
+
+    #[test]
+    fn a_ca_limited_only_to_dns_names_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = RootCA::new(dir.path().to_path_buf());
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = super::super::generator::build_ca_cert_params();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.name_constraints = Some(rcgen::NameConstraints {
+            permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(
+                BRANDING.domain_label().to_string(),
+            )],
+            excluded_subtrees: Vec::new(),
+        });
+        fs::write(ca.cert_path(), params.self_signed(&key).unwrap().pem()).unwrap();
+
+        assert!(!ca.is_limited_to_local_domains().unwrap());
     }
 
     #[test]

@@ -5,14 +5,15 @@
 //! for one approval to run a short shell script made of system tools. Everything
 //! root writes is inside that script, so nothing changes between the approval and
 //! the write. What the script writes: the resolver file, the launchd plist, trust
-//! for the CA and the terminal command link. It never writes in the user's folder
-//! except to hand old root-owned files back.
+//! for the CA and the terminal command link. It never changes anything in the
+//! user's folder: a process running as the user could plant a link there and steer
+//! root through it.
 // Both crates compile this module and each uses a part of it.
 #![allow(dead_code)]
 
 use std::fs;
-use std::io::IsTerminal;
-use std::os::unix::fs::MetadataExt;
+use std::io::{self, IsTerminal, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -252,7 +253,6 @@ pub struct LegacyRoots {
     pub etc_dir: PathBuf,
     pub var_run: PathBuf,
     pub var_log: PathBuf,
-    pub state_dir: PathBuf,
 }
 
 impl LegacyRoots {
@@ -263,7 +263,6 @@ impl LegacyRoots {
             etc_dir: "/etc".into(),
             var_run: "/var/run".into(),
             var_log: "/var/log".into(),
-            state_dir: BRANDING.config_dir(),
         }
     }
 }
@@ -278,7 +277,6 @@ pub struct LegacyInstall {
     pub config_dir: Option<PathBuf>,
     pub log_dir: Option<PathBuf>,
     pub root_daemon: bool,
-    pub root_owned_state: bool,
 }
 
 impl LegacyInstall {
@@ -310,7 +308,6 @@ impl LegacyInstall {
             config_dir,
             log_dir,
             root_daemon: false,
-            root_owned_state: has_root_owned_entry(&roots.state_dir, 3),
         }
     }
 
@@ -346,24 +343,6 @@ fn entries_starting_with(dir: &Path, prefix: &str) -> Vec<PathBuf> {
 }
 
 /// Whether this folder, or anything down to `depth` levels inside it, belongs to root.
-fn has_root_owned_entry(dir: &Path, depth: u32) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(dir) else {
-        return false;
-    };
-    if metadata.uid() == 0 {
-        return true;
-    }
-    if !metadata.is_dir() || depth == 0 {
-        return false;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    entries
-        .flatten()
-        .any(|entry| has_root_owned_entry(&entry.path(), depth - 1))
-}
-
 fn root_daemon_running() -> bool {
     Command::new("/usr/bin/pgrep")
         .args(["-u", "0", "-f", ROOT_DAEMON_PATTERN])
@@ -570,13 +549,29 @@ impl SystemChanges {
             .parent()
             .map(|parent| parent.to_string_lossy().to_string())
             .unwrap_or_else(|| "/".into());
+        // Root writes here, so a folder the user could swap for a link must not steer it.
+        let checks = link
+            .link
+            .ancestors()
+            .skip(1)
+            .filter(|folder| *folder != Path::new("/"))
+            .map(|folder| format!("root_controls {}", shell_quote(&folder.to_string_lossy())))
+            .collect::<Vec<_>>()
+            .join(" && ");
         vec![
+            r#"root_controls() { [ ! -L "$1" ] && { [ ! -e "$1" ] || [ "$(/usr/bin/stat -f %u "$1")" = 0 ]; }; }"#
+                .to_string(),
+            format!("if {checks}; then"),
             format!("/bin/mkdir -p {}", shell_quote(&parent)),
             format!(
                 "/bin/ln -sfn {} {} || fail 'Could not link the terminal command.'",
                 shell_quote(&link.target.to_string_lossy()),
                 shell_quote(&path)
             ),
+            "else".to_string(),
+            "echo 'Skipped the terminal command link: its folder is not controlled by root.' >&2"
+                .to_string(),
+            "fi".to_string(),
         ]
     }
 
@@ -709,7 +704,6 @@ pub struct SystemRemoval {
     pub ca_cert: Option<PathBuf>,
     pub cli_link: Option<PathBuf>,
     pub service: bool,
-    pub user: String,
 }
 
 impl SystemRemoval {
@@ -740,24 +734,9 @@ impl SystemRemoval {
                 shell_quote(&link.to_string_lossy())
             ));
         }
-        if self.legacy.root_owned_state {
-            script.push(take_back_state_dir_command(
-                &self.user,
-                &BRANDING.config_dir(),
-            ));
-        }
         script.push("exit 0".to_string());
         script.join("\n")
     }
-}
-
-/// Hands root-owned files in the user's folder back to the user.
-fn take_back_state_dir_command(user: &str, state_dir: &Path) -> String {
-    format!(
-        "/usr/sbin/chown -R -h {} {}",
-        shell_quote(user),
-        shell_quote(&state_dir.to_string_lossy())
-    )
 }
 
 // ---------- reading the current state ----------
@@ -1051,18 +1030,77 @@ impl SystemRequest<'_> {
     }
 }
 
-/// An old dev helper can leave files in the user's folder owned by root. This must
-/// run before the CA can be replaced, so it takes its own approval, and only on a
-/// machine with such a leftover.
-pub fn repair_root_owned_state(approval: Approval) -> Result<()> {
-    let state_dir = BRANDING.config_dir();
-    if !has_root_owned_entry(&state_dir, 3) {
-        return Ok(());
+/// An old dev helper can leave files in the user's folder owned by root. Root must
+/// not fix that: a process running as the user could plant a hard link there, and a
+/// `chown` as root would hand over the system file it points to. So the user's
+/// process deals with them alone. A readable file becomes the user's by being copied
+/// over itself, and anything else moves aside, with the command to remove it.
+pub fn reclaim_root_owned_state() {
+    let moved = reclaim_entry(&BRANDING.config_dir(), 3, &|_, metadata| {
+        metadata.uid() == 0
+    });
+    for path in moved {
+        eprintln!(
+            "Moved a file an older version left to root: {0}\nRemove it with: sudo rm -rf {0}",
+            shell_quote(&path.to_string_lossy())
+        );
     }
-    run_with_approval(
-        &take_back_state_dir_command(&current_user()?, &state_dir),
-        approval,
-    )
+}
+
+fn reclaim_entry(
+    path: &Path,
+    depth: u32,
+    is_root_owned: &dyn Fn(&Path, &fs::Metadata) -> bool,
+) -> Vec<PathBuf> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Vec::new();
+    };
+    if is_root_owned(path, &metadata) {
+        if metadata.is_file() && copy_over_itself(path, &metadata).is_ok() {
+            return Vec::new();
+        }
+        return move_aside(path).into_iter().collect();
+    }
+    if !metadata.is_dir() || depth == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|entry| reclaim_entry(&entry.path(), depth - 1, is_root_owned))
+        .collect()
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn copy_over_itself(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    let contents = fs::read(path)?;
+    let temp = with_suffix(path, ".reclaiming");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(metadata.permissions().mode() & 0o777)
+        .open(&temp)?;
+    let written = file
+        .write_all(&contents)
+        .and_then(|()| fs::rename(&temp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written
+}
+
+fn move_aside(path: &Path) -> Option<PathBuf> {
+    let free = (0..100)
+        .map(|index| with_suffix(path, &format!(".root-owned-{index}")))
+        .find(|candidate| fs::symlink_metadata(candidate).is_err())?;
+    fs::rename(path, &free).ok().map(|()| free)
 }
 
 /// Whether this Mac has been through install, so a config change has to be applied
@@ -1082,7 +1120,6 @@ pub fn removal_for_this_machine(
         ca_cert: ca_cert.map(Path::to_path_buf),
         cli_link: cli_link.map(Path::to_path_buf),
         service: BRANDING.uses_launchd_service() && service_plist_path().exists(),
-        user: current_user()?,
     })
 }
 
@@ -1104,15 +1141,90 @@ mod tests {
         }
     }
 
-    #[test]
-    fn it_finds_files_root_left_in_a_folder_but_not_the_users_own() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("data/certs")).unwrap();
-        fs::write(dir.path().join("data/certs/app.key"), "").unwrap();
+    /// Tests can't create files owned by root, so they name the ones to treat that way.
+    fn root_owned(names: &'static [&'static str]) -> impl Fn(&Path, &fs::Metadata) -> bool {
+        move |path, _| {
+            path.file_name()
+                .is_some_and(|name| names.iter().any(|candidate| name == *candidate))
+        }
+    }
 
-        assert!(!has_root_owned_entry(dir.path(), 3));
-        // Everything under /usr belongs to root on any system.
-        assert!(has_root_owned_entry(Path::new("/usr"), 0));
+    #[test]
+    fn a_hard_link_to_a_system_file_leaves_that_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let system_file = dir.path().join("system-file");
+        fs::write(&system_file, "system").unwrap();
+        let state = dir.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::hard_link(&system_file, state.join("planted")).unwrap();
+
+        let moved = reclaim_entry(&state, 3, &root_owned(&["planted"]));
+
+        assert!(moved.is_empty());
+        assert_eq!(fs::read_to_string(state.join("planted")).unwrap(), "system");
+        let system = fs::metadata(&system_file).unwrap();
+        assert_ne!(
+            fs::metadata(state.join("planted")).unwrap().ino(),
+            system.ino()
+        );
+        assert_eq!(system.nlink(), 1);
+    }
+
+    #[test]
+    fn what_cannot_be_copied_moves_aside_without_following_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let certs = state.join("certs");
+        fs::create_dir_all(&certs).unwrap();
+        fs::write(certs.join("inside"), "kept").unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, "elsewhere").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, state.join("link")).unwrap();
+        fs::write(state.join("mine"), "mine").unwrap();
+
+        let mut moved = reclaim_entry(&state, 3, &root_owned(&["certs", "link"]));
+        moved.sort();
+
+        assert_eq!(
+            moved,
+            vec![
+                state.join("certs.root-owned-0"),
+                state.join("link.root-owned-0")
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("certs.root-owned-0/inside")).unwrap(),
+            "kept"
+        );
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "elsewhere");
+        assert_eq!(fs::read_to_string(state.join("mine")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn root_never_changes_owners_in_the_users_folder() {
+        for script in [all_changes().script(), full_removal().script()] {
+            assert!(!script.contains("chown -R"), "{script}");
+        }
+    }
+
+    #[test]
+    fn the_terminal_link_is_only_written_through_folders_root_controls() {
+        let script = SystemChanges {
+            cli_link: Some(CliLink {
+                link: "/usr/local/bin/localify".into(),
+                target: "/Applications/Localify.app/Contents/MacOS/localify".into(),
+            }),
+            ..SystemChanges::default()
+        }
+        .script();
+
+        assert_valid_sh(&script);
+        for folder in ["/usr/local/bin", "/usr/local"] {
+            assert!(
+                script.contains(&format!("root_controls '{folder}'")),
+                "{script}"
+            );
+        }
     }
 
     fn empty_roots(dir: &Path) -> LegacyRoots {
@@ -1127,7 +1239,6 @@ mod tests {
             etc_dir: root("etc"),
             var_run: root("run"),
             var_log: root("log"),
-            state_dir: root("state"),
         }
     }
 
@@ -1324,7 +1435,6 @@ mod tests {
                 config_dir: Some("/etc/localify".into()),
                 log_dir: Some("/var/log/localify".into()),
                 root_daemon: true,
-                root_owned_state: false,
             },
             stale_keychain_hashes: vec!["AABB".into()],
             resolver_content: Some(resolver_content(1053)),
@@ -1363,15 +1473,11 @@ mod tests {
 
     fn full_removal() -> SystemRemoval {
         SystemRemoval {
-            legacy: LegacyInstall {
-                root_owned_state: true,
-                ..all_changes().legacy
-            },
+            legacy: all_changes().legacy,
             keychain_hashes: vec!["AABB".into()],
             ca_cert: Some("/Users/dev/Library/ca.crt".into()),
             cli_link: Some("/usr/local/bin/localify".into()),
             service: true,
-            user: "dev".into(),
         }
     }
 
@@ -1388,7 +1494,6 @@ mod tests {
             "delete-certificate -Z 'AABB'".to_string(),
             "remove-trusted-cert -d '/Users/dev/Library/ca.crt'".to_string(),
             "rm -rf '/etc/localify'".to_string(),
-            "/usr/sbin/chown -R -h 'dev'".to_string(),
         ] {
             assert!(script.contains(&expected), "missing: {expected}");
         }

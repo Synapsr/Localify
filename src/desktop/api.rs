@@ -2080,10 +2080,11 @@ impl DesktopApi {
     }
 
     /// What has to happen before the approval is asked for: the old config moves to
-    /// the user's folder, and files an old dev helper left to root come back.
+    /// the user's folder, and files an old dev helper left to root are reclaimed.
     fn prepare_macos_install(&self) -> Result<()> {
         macos_system::migrate_legacy_config(&self.config_path)?;
-        macos_system::repair_root_owned_state(self.approval())
+        macos_system::reclaim_root_owned_state();
+        Ok(())
     }
 
     pub fn refresh_domain_certificates(&self) -> Result<CertificateRefreshDto> {
