@@ -175,7 +175,10 @@ async fn serve(
 
     let managed = launchd_listeners.is_some();
     let listeners = match launchd_listeners {
-        Some(listeners) => listeners,
+        Some(listeners) => {
+            listeners.ensure_ipv4()?;
+            listeners
+        }
         None => DaemonListeners::bind(&config.daemon)?,
     };
 
