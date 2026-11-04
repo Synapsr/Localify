@@ -1,0 +1,9 @@
+Localify
+Copyright (c) 2026 Téo Goulois
+
+Localify is licensed under the GNU Affero General Public License, version 3
+only (AGPL-3.0-only). See the LICENSE file.
+
+Localify derives from Roxy (https://github.com/rbas/roxy) by Martin Voldřich.
+Roxy's code remains under the MIT license. See the LICENSE-MIT file, which
+contains its copyright notice and license text.

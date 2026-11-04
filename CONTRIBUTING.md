@@ -51,6 +51,18 @@ Please also read:
   before you invest time in it.
 - Never commit secrets. `.env` files are ignored; keep it that way.
 
+## Contributor license agreement
+
+Every contribution requires accepting the [contributor license agreement](CLA.md).
+You keep your copyright and give Téo Goulois a license to use your contribution,
+including under terms other than the AGPL. Accept it by ticking the box in the
+pull request template.
+
+## Code of conduct
+
+Everyone taking part in this project follows the
+[code of conduct](CODE_OF_CONDUCT.md).
+
 ## Reporting bugs
 
 Open an issue with your OS version, Localify version (`localify --version`),
@@ -61,5 +73,6 @@ Security issues should **not** be reported in public issues. See
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the
-[MIT License](LICENSE.md).
+Localify is licensed under [AGPL-3.0-only](LICENSE). Code from Roxy, the project
+it derives from, remains under the [MIT license](LICENSE-MIT). See
+[NOTICE](NOTICE).
