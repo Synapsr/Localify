@@ -742,6 +742,14 @@ fn keychain_ca_hashes(keychain: &Path) -> Result<Vec<String>> {
     )))
 }
 
+/// Whether this CA is stored in the login keychain. Trust settings alone are not
+/// enough: the daemon sends only the leaf certificate, so clients must find the CA
+/// there to build the chain.
+pub fn login_keychain_holds(ca_cert: &Path) -> Result<bool> {
+    let hash = certificate_sha1(ca_cert)?;
+    Ok(keychain_ca_hashes(&login_keychain_path()?)?.contains(&hash))
+}
+
 pub fn login_keychain_path() -> Result<PathBuf> {
     let output = Command::new("/usr/bin/security")
         .arg("login-keychain")

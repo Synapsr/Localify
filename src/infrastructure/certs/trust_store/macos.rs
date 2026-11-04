@@ -52,6 +52,12 @@ impl TrustStore for MacOsTrustStore {
     }
 
     fn is_ca_trusted(&self, cert_path: &Path) -> Result<bool, CertError> {
+        let held = macos_system::login_keychain_holds(cert_path)
+            .map_err(|e| CertError::TrustStoreError(e.to_string()))?;
+        if !held {
+            return Ok(false);
+        }
+
         let keychain = macos_system::login_keychain_path()
             .map_err(|e| CertError::TrustStoreError(e.to_string()))?;
         verify_certificate_trust(cert_path, &keychain.to_string_lossy())

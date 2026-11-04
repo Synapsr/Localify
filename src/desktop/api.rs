@@ -2046,8 +2046,6 @@ impl DesktopApi {
             .collect::<Vec<_>>();
         if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
             steps.push(service_ready_step(managed.start()));
-            // Older builds also trusted their CA here, and its key is gone now.
-            let _ = macos_system::delete_login_keychain_cas(None);
         }
         let refresh = self.refresh_domain_certificates_local()?;
         steps.extend(refresh.steps);
