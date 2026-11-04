@@ -359,7 +359,7 @@ pub fn migrate_legacy_config(config_path: &Path) -> Result<bool> {
 fn copy_config_to_user_folder(legacy_path: &Path, config_path: &Path) -> Result<bool> {
     // A folder this user cannot read must not count as no old config: the script removes
     // that folder, so this has to fail and say so.
-    if config_path.exists() || !legacy_path.try_exists().unwrap_or(true) {
+    if !legacy_path.try_exists().unwrap_or(true) {
         return Ok(false);
     }
 
@@ -369,6 +369,22 @@ fn copy_config_to_user_folder(legacy_path: &Path, config_path: &Path) -> Result<
             legacy_path.display()
         )
     })?;
+    // The script removes the old folder, so its domains must not be lost when a newer
+    // config already exists. That config keeps its own settings.
+    if config_path.exists() {
+        let store = ConfigStore::new(config_path.to_path_buf());
+        let mut current = store
+            .load()
+            .context("Failed to read the config in your user folder")?;
+        let added = current.adopt_missing_from(migrated);
+        if added > 0 {
+            store
+                .save(&current)
+                .context("Failed to save the config in your user folder")?;
+        }
+        return Ok(added > 0);
+    }
+
     migrated.paths = LocalifyPaths::default();
     // Listening everywhere was the old Linux default rather than a choice.
     if cfg!(target_os = "linux") {
@@ -646,7 +662,8 @@ fn root_daemon_pattern() -> &'static str {
     }
 }
 
-pub(crate) fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
+/// Stops what is running. It has to go first, so the ports are free.
+pub(crate) fn legacy_stop_commands(legacy: &LegacyInstall) -> Vec<String> {
     let mut commands = Vec::new();
 
     for label in &legacy.helper_labels {
@@ -664,6 +681,14 @@ pub(crate) fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
         ));
         commands.push(format!("/usr/bin/pkill -9 -u 0 -f {pattern}"));
     }
+    commands
+}
+
+/// Removes what the old install left. The Linux script runs this only once the new
+/// service works, so a failure leaves the old files for another try.
+pub(crate) fn legacy_removal_commands(legacy: &LegacyInstall) -> Vec<String> {
+    let mut commands = Vec::new();
+
     for path in legacy
         .helper_plists
         .iter()
@@ -688,6 +713,12 @@ pub(crate) fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
             shell_quote(&dir.to_string_lossy())
         ));
     }
+    commands
+}
+
+pub(crate) fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
+    let mut commands = legacy_stop_commands(legacy);
+    commands.extend(legacy_removal_commands(legacy));
     commands
 }
 
@@ -1728,6 +1759,26 @@ SHA-1 hash: AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:00:11:22:33
         let config = ConfigStore::new(target).load().unwrap();
         assert_eq!(config.daemon.http_port, 8081);
         assert_eq!(config.paths.pid_file, LocalifyPaths::default().pid_file);
+    }
+
+    #[test]
+    fn migrating_keeps_old_domains_when_a_newer_config_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy.toml");
+        fs::write(
+            &legacy,
+            "[daemon]\nhttp_port = 8081\n[domains.\"old.localify\"]\npattern = \"old.localify\"\nhttps_enabled = true\n[[domains.\"old.localify\".routes]]\npath = \"/\"\ntarget = \"127.0.0.1:3000\"\n",
+        )
+        .unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, "[daemon]\nhttp_port = 9000\n").unwrap();
+
+        assert!(copy_config_to_user_folder(&legacy, &target).unwrap());
+
+        let text = fs::read_to_string(&target).unwrap();
+        assert!(text.contains("old.localify"), "{text}");
+        let config = ConfigStore::new(target).load().unwrap();
+        assert_eq!(config.daemon.http_port, 9000);
     }
 
     #[test]

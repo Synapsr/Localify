@@ -14,7 +14,8 @@ use anyhow::{Result, bail};
 use crate::branding::BRANDING;
 use crate::infrastructure::certs::ca::pem_is_limited_to_local_domains;
 use crate::infrastructure::macos_system::{
-    LegacyInstall, ServiceSpec, SystemRequest, legacy_commands, shell_quote,
+    LegacyInstall, ServiceSpec, SystemRequest, legacy_commands, legacy_removal_commands,
+    legacy_stop_commands, shell_quote,
 };
 use crate::infrastructure::service_sockets::{HTTP_SOCKETS, HTTPS_SOCKETS};
 
@@ -187,118 +188,172 @@ impl SystemChanges {
         self == &Self::default()
     }
 
-    /// The script root runs. It names only system tools by absolute path. The service
-    /// goes first: if it fails, the script stops with the old resolver and CA in place.
+    /// The script root runs. It names only system tools by absolute path. It works as one
+    /// step: each file it changes keeps a `.previous` copy until everything has worked,
+    /// and any failure puts the old files back and restarts what used them.
     pub fn script(&self) -> String {
-        let mut script = vec![
-            "umask 022".to_string(),
-            r#"fail() { echo "$1" >&2; exit 1; }"#.to_string(),
-        ];
-        script.extend(legacy_commands(&self.legacy));
-        script.extend(self.service_commands());
-        script.extend(self.resolver_commands());
-        script.extend(self.ca_commands());
+        let mut script = vec!["umask 022".to_string(), self.restore_function()];
+        script.push(format!(
+            r#"fail() {{ restore; echo "$1{}" >&2; exit 1; }}"#,
+            self.failure_note()
+        ));
+        script.extend(legacy_stop_commands(&self.legacy));
+        script.extend(self.write_commands());
+        script.extend(self.activate_commands());
+        for path in self.changed_files().iter().map(|(path, _)| path) {
+            script.push(format!("/bin/rm -f {}", previous_quoted(path)));
+        }
+        script.extend(legacy_removal_commands(&self.legacy));
         script.push("exit 0".to_string());
         script.join("\n")
     }
 
-    /// Writes the units and starts them. systemd refuses a socket whose port is taken,
-    /// but `enable --now` still exits 0, so the script asks about each socket. If one
-    /// failed, the previous units go back and the error says how to check.
-    fn service_commands(&self) -> Vec<String> {
-        if self.units.is_empty() {
-            return Vec::new();
+    /// The old root daemon cannot come back: starting it would run a user-writable
+    /// binary as root. Its files stay for another try, and the error says what happened.
+    fn failure_note(&self) -> &'static str {
+        if self.legacy.is_empty() {
+            " The setup was not changed."
+        } else {
+            " The old install's daemon is stopped, and its files are kept. Fix this, then run the install again."
         }
-        let names = unit_names().map(|name| shell_quote(&name)).join(" ");
-        let previous = |path: &Path| shell_quote(&format!("{}.previous", path.display()));
-        let current = |path: &Path| shell_quote(&path.to_string_lossy());
+    }
 
-        let mut commands = vec![format!("{SYSTEMCTL} stop {names} 2>/dev/null")];
-        for (path, content) in &self.units {
-            commands.push(format!(
-                "[ -f {0} ] && /bin/mv {0} {1}",
-                current(path),
-                previous(path)
-            ));
-            commands.push(format!(
-                "/usr/bin/printf '%s' {} > {} || fail 'Could not write {}.'",
-                shell_quote(content),
-                current(path),
-                path.display()
-            ));
-            commands.push(format!("/bin/chmod 644 {}", current(path)));
-        }
-        commands.push(format!("{SYSTEMCTL} daemon-reload"));
-
-        let restore: Vec<String> = self
+    fn changed_files(&self) -> Vec<(PathBuf, &str)> {
+        let mut files: Vec<(PathBuf, &str)> = self
             .units
             .iter()
-            .map(|(path, _)| {
-                format!(
-                    "  /bin/rm -f {0}\n  if [ -f {1} ]; then /bin/mv {1} {0}; had_previous=1; fi",
-                    current(path),
-                    previous(path)
-                )
-            })
+            .map(|(path, content)| (path.clone(), content.as_str()))
             .collect();
-        let sockets = [http_socket_name(), https_socket_name()]
-            .map(|name| shell_quote(&name))
-            .join(" ");
-        commands.push(format!(
-            r#"{SYSTEMCTL} enable --now {names} >/dev/null 2>&1
-failed=""
-for unit in {sockets}; do {SYSTEMCTL} is-active --quiet "$unit" || failed="$failed $unit"; done
-if [ -n "$failed" ]; then
-  {SYSTEMCTL} disable --now {names} 2>/dev/null
-  {SYSTEMCTL} reset-failed {names} 2>/dev/null
-  had_previous=""
-{restore}
-  {SYSTEMCTL} daemon-reload
-  [ -z "$had_previous" ] || {SYSTEMCTL} enable --now {names} 2>/dev/null
-  fail "systemd could not open$failed, usually because another program holds its port, so the setup was not changed. Check with: sudo ss -ltnp"
-fi"#,
-            restore = restore.join("\n"),
-        ));
+        if let Some(content) = &self.resolver_content {
+            files.push((BRANDING.resolved_drop_in_file(), content));
+        }
+        if let Some(pem) = &self.ca_pem {
+            files.push((PathBuf::from(CA_STORE_FILE), pem));
+        }
+        files
+    }
+
+    /// Puts every changed file back and restarts what uses it. Safe at any point: a file
+    /// not yet touched has no `.previous` copy, and goes only if this install added it.
+    fn restore_function(&self) -> String {
+        let mut lines = vec!["restore() {".to_string()];
+        let names = unit_names().map(|name| shell_quote(&name)).join(" ");
+        if !self.units.is_empty() {
+            lines.push(format!("  {SYSTEMCTL} disable --now {names} 2>/dev/null"));
+            lines.push(format!("  {SYSTEMCTL} reset-failed {names} 2>/dev/null"));
+            lines.push("  had_units=\"\"".to_string());
+        }
         for (path, _) in &self.units {
-            commands.push(format!("/bin/rm -f {}", previous(path)));
+            lines.push(format!(
+                "  /bin/rm -f {}",
+                shell_quote(&path.to_string_lossy())
+            ));
+            lines.push(format!(
+                "  if [ -f {0} ]; then /bin/mv {0} {1}; had_units=1; fi",
+                previous_quoted(path),
+                shell_quote(&path.to_string_lossy())
+            ));
+        }
+        for path in self.non_unit_files() {
+            lines.push(format!(
+                "  /bin/rm -f {}",
+                shell_quote(&path.to_string_lossy())
+            ));
+            lines.push(format!(
+                "  if [ -f {0} ]; then /bin/mv {0} {1}; fi",
+                previous_quoted(&path),
+                shell_quote(&path.to_string_lossy())
+            ));
+        }
+        if !self.units.is_empty() {
+            lines.push(format!("  {SYSTEMCTL} daemon-reload"));
+            lines.push(format!(
+                r#"  [ -z "$had_units" ] || {SYSTEMCTL} enable --now {names} 2>/dev/null"#
+            ));
+        }
+        if self.resolver_content.is_some() {
+            lines.push(format!(
+                "  {SYSTEMCTL} restart systemd-resolved 2>/dev/null"
+            ));
+        }
+        if self.ca_pem.is_some() {
+            lines.push(format!("  {UPDATE_CA} --fresh >/dev/null 2>&1"));
+        }
+        lines.push("  :".to_string());
+        lines.push("}".to_string());
+        lines.join("\n")
+    }
+
+    fn non_unit_files(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if self.resolver_content.is_some() {
+            files.push(BRANDING.resolved_drop_in_file());
+        }
+        if self.ca_pem.is_some() {
+            files.push(PathBuf::from(CA_STORE_FILE));
+        }
+        files
+    }
+
+    fn write_commands(&self) -> Vec<String> {
+        let mut commands = Vec::new();
+        if !self.units.is_empty() {
+            let names = unit_names().map(|name| shell_quote(&name)).join(" ");
+            commands.push(format!("{SYSTEMCTL} stop {names} 2>/dev/null"));
+        }
+        if self.resolver_content.is_some() {
+            commands.push(format!(
+                "/bin/mkdir -p {RESOLVED_DROP_IN_DIR} || fail 'Could not create {RESOLVED_DROP_IN_DIR}.'"
+            ));
+        }
+        for (path, content) in self.changed_files() {
+            let current = shell_quote(&path.to_string_lossy());
+            commands.push(format!(
+                "[ -f {current} ] && /bin/mv {current} {}",
+                previous_quoted(&path)
+            ));
+            commands.push(format!(
+                "/usr/bin/printf '%s' {} > {current} || fail 'Could not write {}.'",
+                shell_quote(content),
+                path.display()
+            ));
+            commands.push(format!("/bin/chmod 644 {current}"));
         }
         commands
     }
 
-    fn resolver_commands(&self) -> Vec<String> {
-        let Some(content) = &self.resolver_content else {
-            return Vec::new();
-        };
-        let file = shell_quote(&BRANDING.resolved_drop_in_file().to_string_lossy());
-        vec![
-            format!(
-                "/bin/mkdir -p {RESOLVED_DROP_IN_DIR} || fail 'Could not create {RESOLVED_DROP_IN_DIR}.'"
-            ),
-            format!(
-                "/usr/bin/printf '%s' {} > {file} || fail 'Could not write the DNS settings.'",
-                shell_quote(content)
-            ),
-            format!("/bin/chmod 644 {file}"),
-            format!(
+    /// `enable --now` exits 0 even when a socket's port is taken, so each one is checked.
+    fn activate_commands(&self) -> Vec<String> {
+        let mut commands = Vec::new();
+        if !self.units.is_empty() {
+            let names = unit_names().map(|name| shell_quote(&name)).join(" ");
+            let sockets = [http_socket_name(), https_socket_name()]
+                .map(|name| shell_quote(&name))
+                .join(" ");
+            commands.push(format!("{SYSTEMCTL} daemon-reload"));
+            commands.push(format!(
+                r##"{SYSTEMCTL} enable --now {names} >/dev/null 2>&1
+failed=""
+for unit in {sockets}; do {SYSTEMCTL} is-active --quiet "$unit" || failed="$failed $unit"; done
+[ -z "$failed" ] || fail "systemd could not open$failed, usually because another program holds its port. Check with: sudo ss -ltnp.""##
+            ));
+        }
+        if self.resolver_content.is_some() {
+            commands.push(format!(
                 "{SYSTEMCTL} restart systemd-resolved || fail 'Could not restart systemd-resolved.'"
-            ),
-        ]
+            ));
+        }
+        if self.ca_pem.is_some() {
+            commands.push(format!(
+                "{UPDATE_CA} >/dev/null || fail 'update-ca-certificates failed.'"
+            ));
+        }
+        commands
     }
+}
 
-    fn ca_commands(&self) -> Vec<String> {
-        let Some(pem) = &self.ca_pem else {
-            return Vec::new();
-        };
-        let file = shell_quote(CA_STORE_FILE);
-        vec![
-            format!(
-                "/usr/bin/printf '%s' {} > {file} || fail 'Could not write the CA to the system store.'",
-                shell_quote(pem)
-            ),
-            format!("/bin/chmod 644 {file}"),
-            format!("{UPDATE_CA} >/dev/null || fail 'update-ca-certificates failed.'"),
-        ]
-    }
+fn previous_quoted(path: &Path) -> String {
+    shell_quote(&format!("{}.previous", path.display()))
 }
 
 /// Everything `SystemChanges` can add, for uninstall.
@@ -530,40 +585,92 @@ mod tests {
     }
 
     #[test]
-    fn a_taken_port_changes_nothing_else() {
-        let script = all_changes().script();
-
-        let start = script.find("enable --now").unwrap();
-        let rollback = script.find("systemd could not open").unwrap();
-        let resolver = script.find("Could not write the DNS settings").unwrap();
-        let ca = script.find("Could not write the CA").unwrap();
-
-        assert!(start < rollback && rollback < resolver && resolver < ca);
-    }
-
-    #[test]
     fn each_socket_is_checked_because_enable_now_exits_zero_on_failure() {
         let script = all_changes().script();
 
-        let start = script.find("enable --now").unwrap();
-        let check = script.find("is-active --quiet \"$unit\"").unwrap();
-        assert!(start < check);
-        assert!(script.contains(&http_socket_name()));
-        assert!(script.contains(&https_socket_name()));
+        let start = script.find("enable --now 'localify").unwrap();
+        let body = &script[start..];
+        assert!(body.contains("is-active --quiet \"$unit\""));
+        assert!(body.contains(&http_socket_name()));
+        assert!(body.contains(&https_socket_name()));
     }
 
     #[test]
-    fn a_failed_start_puts_the_previous_units_back() {
+    fn any_failure_puts_back_the_units_the_dns_and_the_ca() {
         let script = all_changes().script();
 
-        let failed = script.find(r#"if [ -n "$failed" ]; then"#).unwrap();
-        let tail = &script[failed..];
-        let disable = tail.find("disable --now").unwrap();
-        let restore = tail.find("/bin/mv").unwrap();
-        let reload = tail.find("daemon-reload").unwrap();
-        let again = tail.find(r#"[ -z "$had_previous" ]"#).unwrap();
+        let restore =
+            &script[script.find("restore() {").unwrap()..script.find("fail() {").unwrap()];
+        for (path, _) in all_changes().changed_files() {
+            assert!(
+                restore.contains(&format!("{}.previous", path.display())),
+                "{path:?}"
+            );
+        }
+        let disable = restore.find("disable --now").unwrap();
+        let put_back = restore.find("/bin/mv").unwrap();
+        let reload = restore.find("daemon-reload").unwrap();
+        let again = restore.find(r#"[ -z "$had_units" ]"#).unwrap();
+        assert!(disable < put_back && put_back < reload && reload < again);
+        assert!(restore.contains("restart systemd-resolved"));
+        assert!(restore.contains("--fresh"));
 
-        assert!(disable < restore && restore < reload && reload < again);
+        let fail = script.find("fail() { restore;").unwrap();
+        assert!(fail < script.find("/usr/bin/printf").unwrap());
+    }
+
+    #[test]
+    fn the_old_copies_go_only_after_everything_has_worked() {
+        let script = all_changes().script();
+
+        let last_step = script.find("update-ca-certificates failed").unwrap();
+        for (path, _) in all_changes().changed_files() {
+            let removal = format!("/bin/rm -f '{}.previous'", path.display());
+            assert!(script.find(&removal).unwrap() > last_step, "{removal}");
+        }
+    }
+
+    #[test]
+    fn a_change_to_one_thing_only_touches_that_thing() {
+        let script = SystemChanges {
+            resolver_content: Some(resolved_drop_in(1053)),
+            ..SystemChanges::default()
+        }
+        .script();
+
+        assert!(!script.contains("enable --now"), "{script}");
+        assert!(!script.contains("--fresh"), "{script}");
+        assert!(script.contains("restart systemd-resolved"));
+    }
+
+    #[test]
+    fn the_old_install_stops_first_and_goes_last() {
+        let script = SystemChanges {
+            legacy: LegacyInstall {
+                config_dir: Some("/etc/localify".into()),
+                root_daemon: true,
+                ..LegacyInstall::default()
+            },
+            ..all_changes()
+        }
+        .script();
+
+        let stop = script.find("/usr/bin/pkill -u 0").unwrap();
+        // The last one: `restore` has the first, and it runs only on failure.
+        let start = script.rfind("enable --now 'localify").unwrap();
+        let last_step = script.find("update-ca-certificates failed").unwrap();
+        let remove = script.find("/bin/rm -rf '/etc/localify'").unwrap();
+        assert!(stop < start && start < last_step && last_step < remove);
+        assert!(script.contains("its files are kept"));
+    }
+
+    #[test]
+    fn a_failure_says_nothing_changed_only_when_that_is_true() {
+        assert!(
+            all_changes()
+                .script()
+                .contains("The setup was not changed.")
+        );
     }
 
     #[test]
