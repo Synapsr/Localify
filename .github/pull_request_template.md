@@ -6,6 +6,7 @@
 
 - [ ] `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` pass (Rust changes)
 - [ ] `pnpm run typecheck` passes (`desktop-ui/` changes)
+- [ ] `pnpm web:typecheck` and `pnpm web:build` pass (`apps/web/` changes)
 - [ ] Docs updated if behaviour changed
 
 ## Contributor license agreement

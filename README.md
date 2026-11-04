@@ -67,17 +67,21 @@ administrator password to set up the system helper.
 
 ## Telemetry
 
-Official desktop builds send product analytics to PostHog. They send explicit
-events only, with no autocapture, and never include project names, domains,
-request logs, or local paths. Session replay is off by default, and you can turn
-it on in Settings. Builds without `VITE_PUBLIC_POSTHOG_TOKEN` send nothing, and
-the CLI and daemon have no telemetry.
+Official desktop builds send product analytics and error reports to PostHog.
+They send explicit events only, with no autocapture, and analytics events never
+include project names, domains, request logs, or local paths. Error reports have
+URLs and file paths removed, but a message can still name the project or domain
+it's about. Session replay is off by default, and you can turn it on in Settings.
+Builds without `VITE_PUBLIC_POSTHOG_TOKEN` send nothing, and the CLI and daemon
+have no telemetry.
 
 ## Repository layout
 
 - `src/`: Rust library, CLI, daemon, DNS, TLS, routing, and project logic.
 - `src-tauri/`: Tauri desktop shell and commands.
 - `desktop-ui/`: React, Vite, and TanStack desktop interface.
+- `apps/web/`: Next.js website, [localify.dev](https://localify.dev). See
+  [apps/web/README.md](apps/web/README.md).
 - `skills/localify/`: bundled agent skill for working with Localify projects.
 
 ## Development
@@ -106,6 +110,12 @@ Run the desktop app with the development profile:
 pnpm tauri:dev
 ```
 
+Run the website:
+
+```bash
+pnpm web:dev
+```
+
 ## Quality checks
 
 Rust changes must pass:
@@ -120,6 +130,13 @@ Desktop UI changes must also pass:
 
 ```bash
 pnpm run typecheck
+```
+
+Website changes must pass:
+
+```bash
+pnpm web:typecheck
+pnpm web:build
 ```
 
 ## Documentation
@@ -153,4 +170,9 @@ foundations.
 
 Localify is licensed under the [GNU Affero General Public License v3.0
 only](LICENSE). It derives from Roxy, whose code remains under the
-[MIT license](LICENSE-MIT). See [NOTICE](NOTICE).
+[MIT license](LICENSE-MIT).
+
+The AGPL doesn't cover everything here. The Localify name and logo aren't
+licensed, and neither is the media in `apps/web/public/` and
+`desktop-ui/public/videos/`. `progresive-blur.tsx` is adapted from Skiper UI.
+[NOTICE](NOTICE) has the details.

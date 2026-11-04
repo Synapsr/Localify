@@ -10,7 +10,7 @@ This document is the entry point for all architecture and convention decisions f
 2. **Desktop UI stays local-only** — The desktop UI talks to the Rust core through Tauri commands only. There is no HTTP client, no SQL driver, no ORM, no auth in `desktop-ui/`.
 3. **Type-safe end-to-end** — TypeScript strict mode in the desktop UI. DTOs in [desktop-ui/src/types/localify.ts](../desktop-ui/src/types/localify.ts) mirror the serializable types returned by `DesktopApi` (see [src/desktop/](../src/desktop/)).
 4. **Minimal abstraction** — No premature helpers or wrappers. Three similar lines beats one clever abstraction.
-5. **Minimal workspace** — The repo holds one app: the Tauri desktop shell and its React UI. The website lives in its own repository.
+5. **Minimal workspace, separate apps** — The repo can host multiple app entry points when needed. Today that means the Tauri desktop shell plus a standalone website under `apps/web`. There are still no shared packages or internal frontend libraries.
 6. **Convention over configuration** — File naming, folder structure, and patterns are standardized so any contributor (or agent) can navigate the code instantly.
 
 ## Imposed Stack
@@ -52,6 +52,20 @@ Rust conventions (DDD layer rules, module layout, YAGNI, testing strategy) live 
 - No i18n in v1
 - No shared component library package — shadcn primitives (Base UI under the hood) are copied into `desktop-ui/src/components/ui/` and live in the repo
 
+### Website (`apps/web`)
+
+| Concern | Technology | Non-negotiable |
+|---------|-----------|----------------|
+| Framework | Next.js App Router | Yes |
+| Language | TypeScript (strict) | Yes |
+| Styling | Tailwind CSS and `app/globals.css` | Yes |
+| Translations | next-intl, with identical keys in every locale | Yes |
+| Runtime | Cloudflare Workers through OpenNext, with no data layer | Yes |
+
+The site points people at the download and the source. It sells nothing, so it has no checkout, accounts, API routes, or server-side secrets.
+
+`apps/web` code stays isolated from desktop concerns. It imports nothing from `desktop-ui/` or `src/`, and they import nothing from it. Its copy describes what the product does today, using [apps/web/LANDING.md](../apps/web/LANDING.md) and [apps/web/TECHNICAL-REFERENCE.md](../apps/web/TECHNICAL-REFERENCE.md) as references.
+
 ## Documents
 
 ### Localify operational guides
@@ -72,6 +86,7 @@ When asked to commit or review code:
 1. Run `git diff --staged` (or `git diff` if nothing staged) to see what changed.
 2. Categorize changed files:
    - `desktop-ui/**/*.{ts,tsx,css}` → follow the desktop UI rules in this document.
+   - `apps/web/**/*.{ts,tsx,css}` → treat as standalone Next.js website code; keep it isolated from desktop concerns.
    - `src/**/*.rs`, `src-tauri/**/*.rs`, `Cargo.toml` → follow [../CLAUDE.md](../CLAUDE.md).
 3. Flag violations of the rules in this document. Don't flag what's clean.
 4. If everything passes, proceed with the commit. No summary needed.

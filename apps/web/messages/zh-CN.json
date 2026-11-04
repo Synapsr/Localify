@@ -1,0 +1,314 @@
+{
+  "Home": {
+    "description": "Localify 为本地项目提供稳定的 .localify 域名、可信 HTTPS、DNS 路由和原生 macOS 应用 — 无需 mkcert，无需 /etc/hosts，无需隧道。"
+  },
+  "Navigation": {
+    "howItWorks": "工作方式",
+    "faq": "FAQ",
+    "source": "源代码",
+    "cta": "下载"
+  },
+  "Hero": {
+    "titleLine1": "你的项目，",
+    "titleLine2": "不止于 :3000",
+    "description": "给项目起个名字，别再为端口纠结。.localify URL、本地 DNS、浏览器信任的 HTTPS。",
+    "download": "下载 macOS 版",
+    "source": "查看源代码",
+    "availability": "免费开源，采用 AGPL 许可。桌面应用支持 macOS。"
+  },
+  "DemoDialog": {
+    "title": "想真正试试 Localify 吗？",
+    "description": "下载桌面应用，设置你的第一个本地域名。",
+    "later": "以后再说",
+    "download": "立即下载"
+  },
+  "AgentSkill": {
+    "title": "让智能体搞定一切。",
+    "description": "用 Claude Code、Codex 或 Cursor 运行 /localify，它就会配置好整个项目。要修复任何问题，直接和它说就行。"
+  },
+  "Problem": {
+    "titleLine1": "真正改变的",
+    "titleLine2": "是这些。",
+    "cards": {
+      "urls": {
+        "title": "有意义的 URL。",
+        "body": "studio.localify、admin.localify、docs.localify。不用再在 :3000、:3001、:5173 之间纠结。"
+      },
+      "ui": {
+        "title": "一个应用，不是 CLI。",
+        "body": "你的项目、URL、日志 — 全在一个地方。没有配置文件需要修改。"
+      },
+      "agents": {
+        "title": "多个代理，零冲突。",
+        "body": "Cursor、Claude Code 和你自己的 dev server 并排运行。每个项目都保持自己稳定的 URL。"
+      }
+    }
+  },
+  "HowItWorks": {
+    "titleLine1": "它是如何运作的，",
+    "titleLine2": "具体来说。",
+    "description": "安装时一次授权。一个文件夹或一次 localify init-project。每个应用一个 HTTPS 域名。就这么简单。",
+    "steps": [
+      {
+        "title": "一次密码，零设置。",
+        "body": "首次启动时，Localify 会询问一次管理员密码。之后它会自行配置证书颁发机构、DNS 和守护进程。"
+      },
+      {
+        "title": "选择文件夹，Localify 自动补全。",
+        "body": "Localify 扫描文件夹，识别其中的应用，并为每个应用建议一个 hostname。你检查并确认即可。"
+      },
+      {
+        "title": "localify init-project，直接从你的编辑器运行。",
+        "body": "已经在编辑器里？从终端运行 localify init-project。同样的自动补全流程，同样的确认。项目会出现在应用中。"
+      },
+      {
+        "title": "按名称管理项目，而不是按端口。",
+        "body": "每个项目都有带可信 HTTPS 的 .localify hostnames。标签页清晰可读，演示更像真实产品，端口变化不再破坏环境。"
+      },
+      {
+        "title": "启动、监控，无需打开编辑器。",
+        "body": "Localify 同时是你的本地 dashboard：一键启动任何项目，一眼看清谁在运行。完美适合 vibecoding，无需打开 IDE。"
+      }
+    ]
+  },
+  "Faq": {
+    "titleLine1": "常见问题，",
+    "titleLine2": "直接回答。",
+    "description": "这里是简短答案。如果漏了什么，欢迎联系我们。",
+    "supportPrefix": "仍然卡住？",
+    "items": [
+      {
+        "question": "Localify 是什么？",
+        "answer": "Localify 为每个本地项目提供带可信 HTTPS 的稳定 .localify URL。不用再在 localhost:3000、localhost:5173 和 localhost:8080 之间来回切换，直接在浏览器中打开 app.localify 或 admin.localify。"
+      },
+      {
+        "question": "它免费吗？",
+        "answer": "免费。Localify 是采用 AGPL 许可的免费开源软件，无需账户，项目和域名数量不受限制。源代码在 GitHub 上。"
+      },
+      {
+        "question": "它适合谁？",
+        "answer": "适合在本地运行多个应用、在不同技术栈间切换，或者让 AI agent 并行工作的开发者 — 而不必管理端口冲突。"
+      },
+      {
+        "question": "它会把我的工作放到网上吗？",
+        "answer": "不会。Localify 不是公开隧道。你的本地服务仍在你的机器上 — 应用流量、项目名称或请求日志都不会发送给 Localify。"
+      },
+      {
+        "question": "Localify 会收集 analytics 吗？",
+        "answer": "官方桌面应用会收集：产品流程（onboarding、导航、项目创建）、使用计数和错误报告。这些事件不包含请求日志、项目名称、域名、本地路径或流量内容。错误报告会移除 URL 和文件路径，但消息中仍可能提到相关的项目或域名。CLI 和守护进程不发送任何内容。"
+      },
+      {
+        "question": "它支持哪些平台？",
+        "answer": "桌面应用运行在 Apple Silicon 的 macOS 上。CLI 和守护进程也可以在 Linux 上从源代码构建。不支持 Windows。"
+      },
+      {
+        "question": "需要编辑 /etc/hosts 或安装 mkcert 吗？",
+        "answer": "不需要。Localify 会在 onboarding 期间处理本地 resolver、本地证书机构和 Node 信任设置。之后新的 .localify hostname 无需按项目配置即可工作。"
+      },
+      {
+        "question": "它支持 Docker、Next.js 或我的 framework 吗？",
+        "answer": "支持。Localify 按 hostname 路由，所以任何监听本地端口的服务都能工作。Docker、Next.js、Vite、Rails、你自己写的服务器 — 不限技术栈。"
+      },
+      {
+        "question": "它和 ngrok 或 Cloudflare Tunnel 有什么不同？",
+        "answer": "ngrok 和 Cloudflare Tunnel 把你的服务暴露到互联网上。Localify 只在本地运行：没有 cloud，没有公开隧道，只为日常开发提供干净的 URL。"
+      },
+      {
+        "question": "可以和 Cursor、Claude Code 或多个 AI 代理同时使用吗？",
+        "answer": "是的——这其实是核心用例。在任何项目中运行 /localify，你的智能体就会配置好一切：每个应用一个域名、受信任的 HTTPS 以及 dev 脚本。之后多个智能体可以并行处理不同的应用，完全不会有端口冲突。"
+      }
+    ]
+  },
+  "FinalCta": {
+    "description": "别再和 localhost 较劲。Localify 是采用 AGPL 许可的免费开源软件。",
+    "download": "下载 macOS 版",
+    "source": "查看源代码",
+    "requirements": "Apple Silicon 的 macOS · 可在 Linux 上从源代码构建 CLI"
+  },
+  "Footer": {
+    "resources": "资源",
+    "project": "项目",
+    "legal": "法律",
+    "download": "下载",
+    "source": "源代码",
+    "changelog": "更新日志",
+    "docs": "文档",
+    "blog": "博客",
+    "contact": "联系",
+    "terms": "服务条款",
+    "privacy": "隐私政策",
+    "copyright": "© 2026 Téo Goulois · 基于 AGPL 开源 · 用 Rust 安静构建。",
+    "language": "语言",
+    "switchLanguage": "切换到 {locale}"
+  },
+  "Legal": {
+    "lastUpdated": "最后更新"
+  },
+  "Soon": {
+    "eyebrow": "即将推出",
+    "title": "这个页面还没有准备好。",
+    "description": "我们正在优先交付核心产品。文档、更新日志和其他页面会在准备好后出现在这里。",
+    "backHome": "返回首页"
+  },
+  "Terms": {
+    "title": "服务条款",
+    "updatedAt": "2026 年 11 月 4 日",
+    "intro": "Localify 免费且开源。许可证已经规定了大部分内容，所以这些条款很短。如有不清楚的地方，请写信至 support@localify.dev。",
+    "sections": [
+      {
+        "title": "1. 我们是谁",
+        "body": [
+          "Localify 由 Téo Goulois（“我们”）制作。它是一个本地开发代理，由 Rust 守护进程、CLI 和桌面应用组成，通过受信任的 HTTPS 将 .localify 域名路由到你自己机器上的服务。"
+        ]
+      },
+      {
+        "title": "2. 软件许可证",
+        "body": [
+          "Localify 软件采用 GNU Affero General Public License 第 3 版（仅限此版本，AGPL-3.0-only）授权。你如何使用、修改和再分发软件，由该许可证规定。本页的任何内容都不会剥夺它赋予你的权利。"
+        ],
+        "link": {
+          "label": "阅读 AGPL-3.0",
+          "href": "https://www.gnu.org/licenses/agpl-3.0.html"
+        }
+      },
+      {
+        "title": "3. 无需购买",
+        "body": [
+          "没有购买，没有许可证密钥，也没有激活限制。使用 Localify 不需要账户。"
+        ]
+      },
+      {
+        "title": "4. 名称、标志和媒体",
+        "body": [
+          "AGPL 不涵盖 Localify 的名称和标志，它们也不向你授权。如果你分发修改版本，请使用你自己的名称和标志。本网站和应用中的图片和视频同样不在 AGPL 授权范围内。"
+        ]
+      },
+      {
+        "title": "5. 无担保",
+        "body": [
+          "在法律允许的范围内，Localify 按“原样”提供，不附带任何形式的担保。许可证第 15 和第 16 条规定了担保免责和责任限制。Localify 是开发工具，不适用于生产流量、公共托管，也不能作为不受信任服务的安全边界。"
+        ]
+      },
+      {
+        "title": "6. 使用网站",
+        "body": [
+          "这些条款也适用于网站 localify.dev。请勿将其用于任何非法用途，也不要试图破坏它、使其过载或进入其非公开部分。"
+        ]
+      },
+      {
+        "title": "7. 条款变更",
+        "body": [
+          "随着项目的变化，我们可能会更新本页。届时我们会修改顶部的日期。"
+        ]
+      }
+    ],
+    "contact": {
+      "title": "8. 联系方式",
+      "prefix": "对这些条款有疑问？请发邮件至"
+    }
+  },
+  "Privacy": {
+    "title": "隐私政策",
+    "updatedAt": "2026 年 11 月 4 日",
+    "intro": "你的本地开发环境留在你的机器上。桌面应用和 CLI 把 DNS、TLS、路由、项目和请求日志都保存在那里。本页说明数据离开你设备的情况，以及网站收集的内容。",
+    "sections": [
+      {
+        "title": "1. 简要说明",
+        "body": [
+          "Localify 不收集请求日志、本地路径，也不收集你运行的服务的任何流量信息。完成设置后，代理在本地工作。数据只在四种情况下到达我们：你访问网站、官方桌面应用发送产品分析和错误报告、应用检查更新，或你给我们发邮件。"
+        ]
+      },
+      {
+        "title": "2. 我们是谁",
+        "body": [
+          "Téo Goulois（“我们”）是本页所述数据的控制者。你可以通过 support@localify.dev 联系我们。"
+        ]
+      },
+      {
+        "title": "3. 桌面应用和 CLI",
+        "body": [
+          "Localify 守护进程、桌面应用和 CLI 都在你的机器上运行。DNS、TLS 证书、路由、项目配置和请求日志都在那里处理。除下文所述的错误报告外，我们不会收到你创建的 hostname。我们绝不会收到经代理的请求或应用中显示的日志。CLI 和守护进程不发送分析数据。",
+          "官方桌面版本会向 PostHog 发送产品分析：查看的界面、onboarding 步骤、创建项目或添加域名等操作，以及项目和域名数量等计数。这些事件不包含项目名称、域名、本地路径、被代理的 URL 或流量。Autocapture 已关闭。不带 PostHog 令牌、从源代码构建的版本不发送任何内容。",
+          "应用还会向 PostHog 报告错误：错误名称和消息（已移除 URL 和文件路径），以及用于归并相同错误的哈希值。错误消息中仍可能提到相关的项目或域名。",
+          "会话回放默认关闭，只有在应用设置中开启后才会启动。回放会遮盖文本和输入内容，不记录控制台日志或网络时序。",
+          "打包版应用启动时，会从我们的下载服务器获取版本元数据以检查更新。该请求可能留下标准服务器日志：IP 地址、用户代理、时间和所请求的文件。我们用这些日志来交付更新和排查交付问题，不用于建立使用画像。"
+        ]
+      },
+      {
+        "title": "4. 旧版应用",
+        "body": [
+          "旧版应用使用许可证密钥。如果你在旧版上激活过密钥，该版本可能仍会联系 licences.localify.dev 进行验证，并发送密钥和机器指纹。机器指纹是从机器的稳定标识符派生的、不可逆的标识符。当前版本没有许可证检查，不会发出此请求。",
+          "许可证服务商 Keygen 保存这些激活记录，其中包括激活时可获取的平台、主机名和设备名称。这些记录会一直保留，直到应要求删除。如需删除，请发邮件至 support@localify.dev。"
+        ]
+      },
+      {
+        "title": "5. 网站",
+        "body": [
+          "生产环境的网站使用从 analytics.teogoulois.com 加载的 Umami，以及 PostHog。它们记录页面浏览和下载等按钮的点击。PostHog 的 autocapture 和会话录制已关闭。我们不使用广告跟踪器，也不做跨站再营销。",
+          "PostHog 会在你的浏览器中通过 Cookie 和本地存储保存访客标识符。",
+          "当你点击下载按钮时，网站可能会把一个简短的 Localify 归因令牌复制到你的剪贴板，替换其中原有的内容。桌面应用启动时会读取剪贴板，并忽略此令牌以外的所有内容。如果找到令牌，它会在我们的分析数据中把你的网站访问与应用关联起来。令牌包含 PostHog 访客标识符、归因 ID、来源标签和时间戳。它不包含项目数据、域名、本地路径或流量。"
+        ]
+      },
+      {
+        "title": "6. 服务提供商",
+        "body": [
+          "我们使用以下服务提供商："
+        ],
+        "list": [
+          {
+            "name": "Cloudflare",
+            "description": "托管网站、下载文件和更新文件。"
+          },
+          {
+            "name": "PostHog",
+            "description": "网站分析，以及桌面应用的产品分析和错误报告。"
+          },
+          {
+            "name": "Umami",
+            "description": "网站分析。"
+          },
+          {
+            "name": "电子邮件服务商",
+            "description": "你发给我们的支持邮件。"
+          }
+        ]
+      },
+      {
+        "title": "7. 我们为何处理这些数据",
+        "body": [
+          "我们处理分析数据和错误报告，是基于了解 Localify 使用情况并修复问题的正当利益。我们处理更新请求是为了交付更新，处理支持邮件是为了回复你。"
+        ]
+      },
+      {
+        "title": "8. 保留期限",
+        "body": [
+          "支持邮件在对支持工作有用期间保留，之后删除。分析数据和服务器日志保留在上述服务提供商处，遵循各服务的保留设置。现有的许可证记录保留在服务商处，直到应要求删除。"
+        ]
+      },
+      {
+        "title": "9. 你的权利",
+        "body": [
+          "你可以要求我们提供我们持有的关于你的数据副本、更正数据或删除数据。在适用 GDPR 或类似法律的情况下，你还可以反对或限制某些处理、要求数据可携带，或向当地数据保护机构投诉。请发邮件至 support@localify.dev，我们会在合理时间内回复。"
+        ]
+      },
+      {
+        "title": "10. 国际传输",
+        "body": [
+          "我们和我们的服务提供商可能在你所在国家以外处理数据，包括美国。在需要时，我们依靠充分性认定或标准合同条款等传输机制。"
+        ]
+      },
+      {
+        "title": "11. 儿童",
+        "body": [
+          "Localify 是面向成年人的开发工具，不面向 16 岁以下的儿童，我们也不会故意收集他们的个人数据。"
+        ]
+      },
+      {
+        "title": "12. 政策变更",
+        "body": [
+          "如果我们改变数据处理方式，会更新本页和顶部的日期。如果变更重大，我们会在网站上提示。"
+        ]
+      }
+    ]
+  }
+}

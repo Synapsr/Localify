@@ -1,0 +1,144 @@
+# Landing page reference
+
+Source of truth for the copy, features, and product facts on the website (`apps/web/`). Read the relevant parts before you write a section. If something here is wrong, fix it here first, then update the section that depends on it.
+
+For the full Rust and desktop picture (architecture, DNS, TLS, proxy behavior, control plane), see [TECHNICAL-REFERENCE.md](TECHNICAL-REFERENCE.md).
+
+---
+
+## 1. Positioning
+
+- **One-liner**: stable local domains and trusted HTTPS for developers, free and open source.
+- **Category**: local development proxy, HTTPS for localhost.
+- **Audience**: developers who run several projects at once and care about DX. AI coding tools (Claude Code, Codex, Cursor) make that workflow the default.
+- **Tone**: pragmatic, technical, understated. Close to Linear, Raycast, or Arc in voice.
+- **Actions**: downloading the app is the primary action. Viewing the source at <https://github.com/Synapsr/Localify> is the secondary one.
+
+## 2. The problem we solve
+
+Working with AI agents means running several dev servers in parallel. Each one wants port 3000 by default, and each one points its env (`BASE_URL`, OAuth callbacks) at `http://localhost:3000`.
+
+- **Port collisions**: opening a second project bumps it to `:3001`, which silently breaks anything its env hard-coded to `:3000`.
+- **No mental map**: four tabs all say "localhost".
+- **Demos feel unfinished**: `http://localhost:3000` doesn't look like a product.
+- **Side effects compound**: webhooks and OAuth callbacks can't tolerate moving ports.
+
+## 3. How the app works
+
+1. **Download the app.**
+2. **Onboarding**: on first launch it asks for the administrator password once, then sets up HTTPS, DNS, and the daemon.
+3. **Add projects**, two ways:
+   - **Pick a folder**: Localify scans it and fills in what it can (name, apps, ports, likely domains). The user reviews and confirms.
+   - **CLI**: `localify init-project` in the project directory does the same from the editor's terminal.
+4. **Use the domains**: each project exposes one or more `.localify` hostnames that open directly in the browser.
+
+## 4. Features
+
+The product is organized around **projects**. Everything else is either a way to create a project or something a project exposes.
+
+### 4.1 Projects as the primary abstraction
+
+A project groups several apps under one name. Each app gets its own `.localify` hostname, and they share the project's dashboard, logs, and settings. Developers think in projects, not domains.
+
+### 4.2 Two ways in: folder or CLI
+
+Pick a folder in the app (Localify scans it, detects apps, proposes fields, and the user confirms), or run `localify init-project` from the editor's terminal.
+
+### 4.3 Open in editor, launch server
+
+Each project card can open the folder in the user's editor and start the dev server. The main view doubles as a status dashboard across all projects.
+
+### 4.4 Request logs
+
+A feed of incoming requests per project, with method, path, and status.
+
+### 4.5 Customizable hotkeys
+
+Users can remap the app's hotkeys in settings.
+
+### 4.6 Setup is handled
+
+DNS, TLS, CA install, Node trust, and CLI install happen during onboarding. There's no `/etc/hosts` editing, no `mkcert`, and no `NODE_EXTRA_CA_CERTS` setup. This is the headline promise.
+
+### 4.7 Set up by your AI agent
+
+Localify ships a skill for Claude Code, Codex, and Cursor (`localify agent install-skill`, or the desktop **Settings → AI agents** toggle). In any project, the developer runs `/localify` and the agent bootstraps it with `localify init-project --yes`: it reserves ports, registers `.localify` domains, wires trusted HTTPS, and updates dev scripts. The site shows this as an inline step in **How it works** (`public/videos/agent.mp4`).
+
+## 5. Technical snapshot
+
+High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TECHNICAL-REFERENCE.md).
+
+- Localify is a **Rust daemon** combining four pieces: a **local DNS server**, an **HTTP server**, an **HTTPS server**, and a **Unix management socket** for the CLI and desktop app ([src/daemon/server.rs](../../src/daemon/server.rs), [src/daemon/mgmt_socket.rs](../../src/daemon/mgmt_socket.rs)).
+- Install creates the folders and config, generates a **local Root CA**, installs it in the trust store, and configures the OS to route `.localify` DNS queries to the embedded DNS ([src/application/install.rs](../../src/application/install.rs), [src/infrastructure/dns/macos.rs](../../src/infrastructure/dns/macos.rs)).
+- The embedded DNS only resolves `.localify` and refuses anything else ([src/daemon/dns_server.rs](../../src/daemon/dns_server.rs)).
+- Routing runs on **domain registrations**: exact or wildcard patterns with per-path-prefix routes. Matching uses **host specificity**, then **longest path prefix** ([src/domain/value_objects/domain_pattern.rs](../../src/domain/value_objects/domain_pattern.rs), [src/domain/registration.rs](../../src/domain/registration.rs), [src/daemon/router.rs](../../src/daemon/router.rs)).
+- The HTTP proxy rewrites the URI toward the target, injects `X-Forwarded-*`, strips hop-by-hop headers, and forwards the response. WebSockets get an upgrade handshake, then a bidirectional stream copy ([src/daemon/proxy.rs](../../src/daemon/proxy.rs)).
+- TLS uses **rustls + SNI**. For registered domains Localify loads or generates the cert. For a valid but unknown `.localify` hostname it can mint a **cert on the fly**, signed by the local CA, so the browser shows a proper app error instead of a raw TLS failure ([src/daemon/tls.rs](../../src/daemon/tls.rs)).
+- When the domain is unknown, the route is missing, or the upstream is down, the daemon renders **diagnostic HTML pages**. If the domain is bound to a local project, those pages can offer **Open in editor** and **Run dev**, locked to same-origin and loopback ([src/daemon/router.rs](../../src/daemon/router.rs)).
+
+**Shipping features** (what copy can claim today):
+
+- Custom `.localify` domains with trusted local HTTPS.
+- Wildcard subdomains (one level).
+- Path-based routing to a port, `host:port`, or static folder.
+- WebSocket support.
+- Live request logs and a daemon log viewer.
+- Project mode with grouped domains and `init-project` bootstrap ([src/cli/init_project.rs](../../src/cli/init_project.rs)).
+- Docker and Compose auto-discovery ([docs/docker.md](../../docs/docker.md)).
+- Tauri desktop app with **Projects / Logs / Settings** ([shared-navigation.constants.ts](../../desktop-ui/src/components/shared/shared-navigation.constants.ts)).
+- Node.js trust onboarding to prevent server-side TLS errors in Node and Next ([src/desktop/node_trust.rs](../../src/desktop/node_trust.rs)).
+- Desktop packaging, CLI sidecar, and auto-update ([docs/desktop.md](../../docs/desktop.md)).
+
+### Facts copy can use
+
+- **License**: free and open source under AGPL-3.0-only. No account, and no limit on projects or domains.
+- **Platforms**: the desktop app runs on macOS. The release pipeline builds it on Apple Silicon runners. The CLI and daemon also build from source on Linux. There is no Windows support.
+- **Architecture**: Rust daemon plus Tauri desktop UI.
+- **Offline**: the proxy, DNS, and TLS need no internet after install.
+- **Telemetry**: official desktop builds send product analytics and error reports to PostHog. The CLI and daemon send nothing. The privacy policy has the details.
+
+## 6. Differentiators
+
+- **vs. `/etc/hosts` + `mkcert`**: Localify sets up DNS, the local CA, and Node trust in one permission prompt, with no manual `mkcert -install`, `NODE_EXTRA_CA_CERTS` exports, or per-project scripts.
+- **vs. ngrok, Cloudflare Tunnel**: Localify is local, not a tunnel. URLs don't expire, and nothing traverses the internet.
+- **vs. Caddy, nginx**: a different problem. They optimize for running production-shaped configs on a dev box. Localify optimizes for DX: a simple UI, no config files, and a natural flow for juggling many projects.
+
+## 7. Proof
+
+There are no users yet, so the site carries no testimonials, ratings, customer logos, or usage numbers. Add one only when it's real and we can name the source.
+
+## 8. Page sections
+
+Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
+
+| Section | File | Notes |
+|---|---|---|
+| Hero | `app/_sections/hero.tsx` | Download and source actions, interactive mockup of the Projects view with a download dialog |
+| What changes | `app/_sections/problem.tsx` | Three cards |
+| How it works | `app/_sections/how-it-works.tsx` | Steps plus the inline agent row (see 4.7) |
+| FAQ | `app/_sections/faq.tsx` | |
+| Final CTA | `app/_sections/final-cta.tsx` | Download and source actions, requirements |
+
+## 9. How it works videos
+
+`app/_sections/how-it-works.tsx` plays one muted, looping video per row, from `public/videos/`:
+
+| Row | File |
+|---|---|
+| Setup | `flow-1-web.mp4` |
+| Pick a folder | `flow-2-web.mp4` |
+| Agent | `agent.mp4` |
+| `localify init-project` | `flow-3-web.mp4` |
+| Projects by name | `flow-4-web.mp4` |
+| Launch and monitor | `flow-5-web.mp4` |
+
+Target a 4:3 aspect, 5 to 15 seconds, a clean loop, no audio, and under 2 MB: `ffmpeg -i in.mov -c:v libx264 -crf 30 -vf scale=1280:-2 -an out.mp4`.
+
+## 10. Copy conventions
+
+- Sentence case for headings.
+- Inline code style (`studio.localify`, `127.0.0.1:5173`) for hostnames and ports.
+- Use a number only if it was measured.
+- Describe what the product does today. Roadmap items and features that don't exist yet stay off the page.
+- American English spelling.
+- Every string exists in all nine locales, with a real translation.
