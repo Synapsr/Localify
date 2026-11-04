@@ -557,12 +557,12 @@ function HowItWorksStep({
     video: string;
   }> = [
     {
-      title: "Drop a folder, get a project",
+      title: "Pick a folder, get a project",
       description: `Localify scans the folder, detects each app, and proposes ${suffix} hostnames. Works for a single project or a whole monorepo.`,
       video: FLOW_VIDEOS[0],
     },
     {
-      title: "Or run localify init from your editor",
+      title: "Or run localify init-project from your editor",
       description:
         "Same result, interactive prompts. The project shows up in the app, ready to go.",
       video: FLOW_VIDEOS[1],
