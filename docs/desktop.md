@@ -64,6 +64,7 @@ from the installed app:
 - pid, socket, logs and resolver names based on `localify-dev`
 - domains under `.localify.test` instead of `.localify`
 - ports 8080, 8443 and 1054, so no launchd service: the app starts the daemon itself
+- an old root daemon from the installed app is left alone: this profile only stops its own
 
 One approval writes `/etc/resolver/localify.test` and the `localify-dev` link.
 

@@ -37,6 +37,8 @@ pub const RESTART_EXIT_CODE: i32 = 75;
 /// Matches a daemon older builds started as root. Anchored at the end so it cannot
 /// match the shell running this script, whose text contains it.
 const ROOT_DAEMON_PATTERN: &str = "[Ll]ocalify.* start --foreground$";
+/// The dev profile runs beside an installed app, so it only looks for its own daemon.
+const DEV_ROOT_DAEMON_PATTERN: &str = "[L]ocalify Dev.* start --foreground$";
 
 /// `launchctl` target of the daemon service.
 fn service_target() -> String {
@@ -333,7 +335,7 @@ fn entries_starting_with(dir: &Path, prefix: &str) -> Vec<PathBuf> {
 /// Whether this folder, or anything down to `depth` levels inside it, belongs to root.
 fn root_daemon_running() -> bool {
     Command::new("/usr/bin/pgrep")
-        .args(["-u", "0", "-f", ROOT_DAEMON_PATTERN])
+        .args(["-u", "0", "-f", root_daemon_pattern()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -620,6 +622,14 @@ fi"#
 
 /// Everything from the old install goes first, so the ports are free before
 /// launchd tries to open them.
+fn root_daemon_pattern() -> &'static str {
+    if BRANDING.is_dev_profile() {
+        DEV_ROOT_DAEMON_PATTERN
+    } else {
+        ROOT_DAEMON_PATTERN
+    }
+}
+
 fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
     let mut commands = Vec::new();
 
@@ -631,7 +641,7 @@ fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
     }
     // A daemon started with sudo has no helper, only these traces of it.
     if !legacy.is_empty() {
-        let pattern = shell_quote(ROOT_DAEMON_PATTERN);
+        let pattern = shell_quote(root_daemon_pattern());
         commands.push(format!("/usr/bin/pkill -u 0 -f {pattern}"));
         commands.push(format!(
             "n=0; while /usr/bin/pgrep -u 0 -f {pattern} >/dev/null && [ $n -lt 20 ]; do /bin/sleep 0.1; n=$((n+1)); done"
@@ -1606,12 +1616,40 @@ mod tests {
     }
 
     #[test]
+    fn the_dev_pattern_spares_an_installed_app() {
+        let pattern = |text: &str, config: &str| {
+            let output = Command::new("/usr/bin/grep")
+                .args(["-E", "-c", text])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        stdin.write_all(config.as_bytes())?;
+                    }
+                    drop(child.stdin.take());
+                    child.wait_with_output()
+                })
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim() == "1"
+        };
+        let installed = "/Applications/Localify.app/Contents/MacOS/localify --config /etc/localify/config.toml start --foreground\n";
+        let dev = "/x/target/debug/localify --config /Users/me/Library/Application Support/Localify Dev/config.toml start --foreground\n";
+
+        assert!(pattern(ROOT_DAEMON_PATTERN, installed));
+        assert!(pattern(ROOT_DAEMON_PATTERN, dev));
+        assert!(!pattern(DEV_ROOT_DAEMON_PATTERN, installed));
+        assert!(pattern(DEV_ROOT_DAEMON_PATTERN, dev));
+    }
+
+    #[test]
     fn the_script_cannot_match_its_own_root_daemon_pattern() {
         // pkill -f reads the full command line of the shell running the script.
         // Anchored at the end, the pattern only matches when the line ends there.
         let script = all_changes().script();
 
         assert!(ROOT_DAEMON_PATTERN.ends_with("$"));
+        assert!(DEV_ROOT_DAEMON_PATTERN.ends_with("$"));
         assert!(!script.ends_with(" start --foreground"));
     }
 
