@@ -17,7 +17,7 @@ impl MacOsTrustStore {
 }
 
 impl TrustStore for MacOsTrustStore {
-    /// Trust is set by the install, which can ask macOS to confirm it on screen. See
+    /// Trust is set when someone asks for it, because macOS confirms it on screen. See
     /// `macos_system::trust_in_login_keychain`.
     fn add_ca(&self, _cert_path: &Path) -> Result<(), CertError> {
         Err(CertError::PermissionDenied)

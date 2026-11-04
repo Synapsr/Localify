@@ -34,6 +34,7 @@ application code.
 - `stop_daemon`
 - `restart_daemon`
 - `reload_daemon`
+- `trust_ca`
 - `read_logs`
 
 ## Development Notes
@@ -47,7 +48,9 @@ launch the daemon. Production defaults are:
   user and holds ports 80 and 443 for it
 
 The Root CA is trusted in your login keychain, for your account only. That needs no
-administrator, and macOS confirms it in its own window. Both profiles work this way.
+administrator, and macOS confirms it in its own window. The install leaves this for
+later so that it asks for one password: `localify trust` or the app's Trust HTTPS
+button does it. Both profiles work this way.
 
 `pnpm tauri:dev` runs with `LOCALIFY_PROFILE=dev`. That profile is isolated
 from the installed app:

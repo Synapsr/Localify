@@ -32,7 +32,7 @@ pub trait SystemSetup {
     /// Takes those changes back out, asking for at most one approval.
     fn remove_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>>;
 
-    /// The command that finishes CA trust by hand, where trusting it can wait.
+    /// The command that trusts the CA, where the install leaves that for later.
     fn ca_trust_command(&self) -> Option<String>;
 
     /// Trust the Root CA in booted iOS Simulators when the platform supports it.

@@ -8,15 +8,10 @@ use crate::branding::BRANDING;
 use crate::config::DaemonConfig;
 use crate::domain::RegistrationSource;
 use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution};
-use crate::infrastructure::macos_system::{self, LegacyInstall};
+use crate::infrastructure::macos_system::LegacyInstall;
 use crate::infrastructure::network::get_network_info;
-use crate::infrastructure::paths::LocalifyPaths;
 
-pub fn execute(
-    ctx: &AppContext,
-    paths: &LocalifyPaths,
-    daemon_config: &DaemonConfig,
-) -> Result<()> {
+pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
     let network_info = get_network_info();
 
     let service = QueryDaemonStatus::new(&ctx.daemon, &ctx.cert_service, &network_info);
@@ -26,8 +21,8 @@ pub fn execute(
         "trusted".to_string()
     } else if status.ca_trust_pending {
         format!(
-            "created, trust pending. HTTP and Node.js work; browsers will warn about HTTPS.\n    Finish it on a Mac with a screen: {}",
-            trust_command(paths)
+            "not trusted yet. HTTP and Node.js work; browsers will warn about HTTPS.\n    Trust it with: {}",
+            trust_command()
         )
     } else {
         format!("not installed. Run: {}", BRANDING.admin_command("install"))
@@ -112,9 +107,9 @@ fn print_dns_resolution_status(check: SystemResolutionCheck) {
     );
 }
 
-fn trust_command(paths: &LocalifyPaths) -> String {
+fn trust_command() -> String {
     if cfg!(target_os = "macos") {
-        macos_system::trust_command(&paths.data_dir.join("ca.crt"))
+        BRANDING.admin_command("trust")
     } else {
         BRANDING.admin_command("install")
     }

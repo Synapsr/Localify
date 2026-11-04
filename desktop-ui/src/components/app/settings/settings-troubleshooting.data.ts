@@ -7,6 +7,7 @@ export type TroubleshootingAction =
   | "setupCliAccess"
   | "setupNodeTrust"
   | "startDaemon"
+  | "trustCa"
   | "trustIosSimulators";
 
 export interface TroubleshootingIssue {
@@ -62,7 +63,7 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
   const setupComplete =
     !data.environment.systemSetupRequired &&
     data.environment.cliAccessReady &&
-    data.daemon.caInstalled;
+    (data.daemon.caInstalled || data.daemon.caTrustPending);
 
   return [
     {
@@ -77,7 +78,7 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
         "The warning can appear for a local domain such as `porteportfolio.localify`.",
       ],
       solutions: [
-        "Run the HTTPS repair so Localify refreshes macOS trust, regenerates local HTTPS certificates, and restarts the background service.",
+        "Run the HTTPS repair so Localify regenerates local HTTPS certificates and restarts. If the app then shows Trust HTTPS, click it and confirm in macOS.",
         "Fully quit and reopen the browser after the repair so it reloads the macOS trust state.",
         "If the warning still appears after the repair and browser restart, contact support@localify.dev.",
       ],
@@ -124,15 +125,22 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
             "If a browser still shows a warning, fully quit and reopen it so it reloads the macOS trust list.",
           ]
         : [
-            "Run setup again so Localify can install its CA into your macOS keychain.",
+            data.daemon.caTrustPending
+              ? "Click Trust HTTPS and confirm in the macOS window."
+              : "Run setup again so Localify can create its CA.",
             "After trust is installed, fully quit and reopen your browsers and developer tools.",
           ],
       action: data.daemon.caInstalled
         ? undefined
-        : {
-            id: "install",
-            label: "Run setup again",
-          },
+        : data.daemon.caTrustPending
+          ? {
+              id: "trustCa",
+              label: "Trust HTTPS",
+            }
+          : {
+              id: "install",
+              label: "Run setup again",
+            },
     },
     {
       id: "cli-access",

@@ -77,6 +77,11 @@ export const systemMutations = {
       mutationFn: () => tauriClient.setupNodeTrust(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
+  trustCa: (queryClient: QueryClient) =>
+    mutationOptions<void, Error, void>({
+      mutationFn: () => tauriClient.trustCa(),
+      onSuccess: async () => invalidateBootstrapAnd(queryClient, []),
+    }),
   trustIosSimulators: () =>
     mutationOptions<StepDto, Error, void>({
       mutationFn: () => tauriClient.trustIosSimulators(),

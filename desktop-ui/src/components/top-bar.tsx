@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
+import { HttpsTrustNotice } from "@/components/app/https-trust-notice";
 import { bootstrapQueries, daemonMutations } from "../lib/queries";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
@@ -88,6 +89,7 @@ export function TopBar() {
           </div>
         </div>
       )}
+      <HttpsTrustNotice />
     </div>
   );
 }

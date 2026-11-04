@@ -49,7 +49,8 @@ export const SettingsStatus = () => {
   if (!data) return null;
 
   const appName = data.environment.appName;
-  // Trust that waits for a screen is not a broken setup: only HTTPS in browsers waits.
+  // Trust waits until someone asks for it. That is not a broken setup: only HTTPS in
+  // browsers waits.
   const isSetup =
     !data.environment.systemSetupRequired &&
     data.environment.cliAccessReady &&

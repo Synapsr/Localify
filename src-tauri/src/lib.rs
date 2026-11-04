@@ -1140,6 +1140,7 @@ pub fn run() {
             commands::install_localify,
             commands::setup_cli_access,
             commands::setup_node_trust,
+            commands::trust_ca,
             commands::trust_ios_simulators,
             commands::get_agent_skill_status,
             commands::install_agent_skill,

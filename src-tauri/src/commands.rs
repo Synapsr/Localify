@@ -505,6 +505,14 @@ pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDt
 }
 
 #[tauri::command]
+pub async fn trust_ca(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.trust_ca().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
 pub fn setup_node_trust(state: tauri::State<'_, AppState>) -> Result<NodeTrustDto, String> {
     state.api.setup_node_trust().map_err(map_error)
 }
