@@ -1588,6 +1588,12 @@ mod tests {
 
         assert!(bootstrap < check && check < rollback);
         assert!(unload < restore && restore < error);
+
+        let syntax = Command::new("/bin/sh")
+            .args(["-n", "-c", &script])
+            .output()
+            .unwrap();
+        assert!(syntax.status.success(), "{syntax:?}");
     }
 
     #[test]

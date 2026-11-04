@@ -19,13 +19,15 @@ pub fn activate(name: &str) -> io::Result<Option<Vec<TcpListener>>> {
     Ok(activate_fds(name)?.map(|fds| {
         fds.into_iter()
             .map(TcpListener::from)
-            .filter(|listener| {
-                listener
-                    .local_addr()
-                    .is_ok_and(|address| address.port() != 0)
-            })
+            .filter(is_bound)
             .collect()
     }))
+}
+
+fn is_bound(listener: &TcpListener) -> bool {
+    listener
+        .local_addr()
+        .is_ok_and(|address| address.port() != 0)
 }
 
 #[cfg(target_os = "macos")]
@@ -83,6 +85,23 @@ fn activate_fds(_name: &str) -> io::Result<Option<Vec<std::os::fd::OwnedFd>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_launchd_could_not_bind_is_not_a_listener() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        // SAFETY: `socket` returns a new descriptor that nothing else owns, or -1,
+        // which the assert rejects before `from_raw_fd` sees it.
+        let unbound = unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0);
+            TcpListener::from(OwnedFd::from_raw_fd(fd))
+        };
+        let bound = TcpListener::bind("127.0.0.1:0").unwrap();
+
+        assert!(!is_bound(&unbound));
+        assert!(is_bound(&bound));
+    }
 
     #[test]
     fn a_process_launchd_did_not_start_has_no_sockets() {
