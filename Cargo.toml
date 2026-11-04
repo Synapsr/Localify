@@ -78,7 +78,7 @@ base64 = "0.22.1"
 sha2 = "0.10"
 
 # Docker
-bollard = "0.20"
+bollard = "0.21"
 futures-util = "0.3"
 
 [profile.release]
