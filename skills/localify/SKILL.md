@@ -371,7 +371,7 @@ localify logs
 localify logs -f
 ```
 
-Restart routing after config changes:
+`register`, `unregister` and `route` take effect as soon as they return. After other config changes, restart routing:
 
 ```bash
 localify reload

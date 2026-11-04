@@ -283,6 +283,24 @@ fn push_path_candidate(candidates: &mut Vec<OsString>, path_env: Option<OsString
     candidates.push(path_env);
 }
 
+/// An interactive shell takes over the terminal it finds. Run from a terminal, that
+/// stops whatever else is using it, so this shell gets a session with no terminal.
+#[cfg(target_os = "macos")]
+fn detach_from_terminal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the closure runs in the child between fork and exec. `setsid` is
+    // async-signal-safe, and the closure allocates nothing and shares no state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn login_shell_path_env() -> Option<OsString> {
     const PATH_START: &str = "__LOCALIFY_PATH_START__";
@@ -292,11 +310,12 @@ fn login_shell_path_env() -> Option<OsString> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
-    let output = Command::new(shell)
+    let mut command = Command::new(shell);
+    command
         .arg("-lic")
-        .arg(format!("printf '{}%s{}' \"$PATH\"", PATH_START, PATH_END))
-        .output()
-        .ok()?;
+        .arg(format!("printf '{}%s{}' \"$PATH\"", PATH_START, PATH_END));
+    detach_from_terminal(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -381,6 +400,21 @@ fn command_failure_message(output: &std::process::Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_detached_shell_gets_its_own_session() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo $$; ps -o pgid= -p $$"]);
+        detach_from_terminal(&mut command);
+
+        let output = command.output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        let ids: Vec<&str> = text.split_whitespace().collect();
+
+        assert_eq!(ids.len(), 2, "{text}");
+        assert_eq!(ids[0], ids[1]);
+    }
 
     #[test]
     fn skill_install_command_accepts_npx_package_prompt() {
