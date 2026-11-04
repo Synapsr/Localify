@@ -46,12 +46,12 @@ pub fn map_port_error(protocol: &str, port: u16, error: std::io::Error) -> anyho
     }
 }
 
-/// macOS lets a user listen on a low port on all interfaces but not on loopback,
-/// so a daemon on this path cannot serve 80 and 443 without launchd.
+/// A normal user cannot listen on a low port on loopback, so a daemon on this path
+/// cannot serve 80 and 443 without launchd or systemd.
 fn low_port_guidance() -> String {
-    if cfg!(target_os = "macos") {
+    if BRANDING.installs_with_one_approval() {
         format!(
-            "Run `{}` so launchd can open it for the daemon, or use ports from 1024 up.",
+            "Run `{}` so the system can open it for the daemon, or use ports from 1024 up.",
             BRANDING.admin_command("install")
         )
     } else {

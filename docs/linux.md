@@ -31,8 +31,8 @@ This file tells systemd-resolved to forward all `.localify`
 queries to Localify's built-in DNS server on port 1053.
 Other DNS queries are unaffected.
 
-The file is created automatically by `sudo localify install`
-and removed by `sudo localify uninstall`.
+The file is created automatically by `localify install`
+and removed by `localify uninstall`.
 
 ### Certificate Trust
 
@@ -48,14 +48,29 @@ certificate store and runs `update-ca-certificates`:
 This makes the CA trusted by `curl`, `wget`, `git`,
 Electron apps, and non-sandboxed browsers.
 
-## Running as Root
+## No Root After the Install
 
-Linux does not have the macOS setup yet, where launchd holds the ports and nothing of
-Localify's runs as root. A daemon started with `sudo` stays root for as long as it
-runs, and that includes its static routes: a route can serve any file on the machine.
-Point static routes only at folders you would share with anyone who can reach the
-port, and bear in mind that on Linux the daemon listens on every interface. To keep it
-on this machine, run `sudo localify lan disable`, then restart it.
+`localify install` asks for your `sudo` password once. It runs a script of system tools,
+never the Localify binary, that writes the systemd units, the DNS drop-in and the Root CA.
+After that nothing of Localify's runs as root:
+
+- systemd holds ports 80 and 443 on `127.0.0.1` and `::1`, and hands them to the daemon.
+- The daemon runs as you, from your `~/.config/localify/`. A static route can only serve
+  files you can read.
+- `stop`, `start`, `restart`, `register` and updates need no password.
+- Only this machine can connect until you run `localify lan enable`.
+
+Localify refuses to run under `sudo`. A taken port stops the install with the old setup
+back in place: find what holds it with `sudo ss -ltnp`.
+
+With no terminal, `localify install` only works with passwordless `sudo`.
+
+### Run as Root, or With No systemd
+
+As root, or in a container with no systemd, Localify works as a plain process: files in
+`/etc/localify/`, and it listens on every interface unless you set `lan_access = false`.
+A root daemon's static routes can serve any file on the machine, so point them only at
+folders you would share with anyone who can reach the port.
 
 ## Snap Browsers and Certificate Trust
 
@@ -91,7 +106,7 @@ sudo apt install libnss3-tools
 
 ```bash
 certutil -A -n "Localify Local Development CA" -t "CT,C,C" \
-  -i /etc/localify/ca.crt \
+  -i ~/.config/localify/data/ca.crt \
   -d sql:$(find ~/snap/firefox/common/.mozilla/firefox \
     -name '*.default*' -type d | head -1)/
 ```
@@ -100,7 +115,7 @@ certutil -A -n "Localify Local Development CA" -t "CT,C,C" \
 
 ```bash
 certutil -A -n "Localify Local Development CA" -t "CT,C,C" \
-  -i /etc/localify/ca.crt \
+  -i ~/.config/localify/data/ca.crt \
   -d sql:$(find ~/snap/chromium -name 'nssdb' \
     -type d | head -1)/
 ```
@@ -171,7 +186,7 @@ sudo systemctl restart systemd-resolved
 cat /etc/systemd/resolved.conf.d/localify.conf
 ```
 
-If missing, re-run `sudo localify install`.
+If missing, re-run `localify install`.
 
 ### Port Already in Use
 
@@ -185,33 +200,9 @@ sudo ss -tlnp | grep ':1053\b'
 
 Common culprits: Apache (`apache2`), nginx, or another
 Localify instance. Stop the conflicting service or change
-Localify's ports in `/etc/localify/config.toml`.
+Localify's ports in `~/.config/localify/config.toml`, then run `localify install`.
 
-### Auto-Start with systemd
+### Auto-Start
 
-Create a service file to start Localify at boot:
-
-```bash
-sudo tee /etc/systemd/system/localify.service > /dev/null <<'EOF'
-[Unit]
-Description=Localify local development proxy
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/localify start --foreground
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now localify
-```
-
-Check status:
-
-```bash
-sudo systemctl status localify
-```
+`localify install` sets this up: systemd starts the daemon at boot, and `localify stop`
+stays stopped across a reboot. See [No Root After the Install](#no-root-after-the-install).

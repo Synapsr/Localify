@@ -570,21 +570,22 @@ fn ensure_rustls_crypto_provider() -> Result<()> {
     }
 }
 
-/// Files created as root would land in the user's folder, and nothing on macOS
-/// needs it: the commands that do ask for their own approval.
-#[cfg(target_os = "macos")]
-fn refuse_root_on_macos() -> Result<()> {
-    if infrastructure::process::is_root() {
+/// Files created as root would land in the user's folder, and nothing needs it: the
+/// commands that do ask for their own approval. Root on Linux stays allowed without
+/// sudo, and with no systemd, because a container may have no other user.
+fn refuse_sudo() -> Result<()> {
+    if !infrastructure::process::is_root() {
+        return Ok(());
+    }
+    let through_sudo_with_systemd = std::env::var_os("SUDO_USER").is_some()
+        && BRANDING.has_systemd()
+        && !BRANDING.is_dev_profile();
+    if cfg!(target_os = "macos") || (cfg!(target_os = "linux") && through_sudo_with_systemd) {
         anyhow::bail!(
-            "{0} does not run as root on macOS. Run it without sudo: it asks for an administrator's approval when it needs one.",
+            "{0} does not run as root. Run it without sudo: it asks for an administrator's approval when it needs one.",
             BRANDING.app_name
         );
     }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn refuse_root_on_macos() -> Result<()> {
     Ok(())
 }
 
@@ -630,7 +631,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    refuse_root_on_macos()?;
+    refuse_sudo()?;
 
     let (config, paths) = load_config_and_paths(config_path)?;
     let ctx = AppContext::new(config_path, &paths);

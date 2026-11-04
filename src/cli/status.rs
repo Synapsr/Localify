@@ -28,9 +28,9 @@ pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
         format!("not installed. Run: {}", BRANDING.admin_command("install"))
     };
 
-    if BRANDING.uses_launchd_service() && LegacyInstall::needs_migration() {
+    if BRANDING.uses_system_service() && LegacyInstall::needs_migration() {
         println!(
-            "An older {0} install is still on this Mac and runs as root.\nRun '{1}' once to replace it. It asks for one approval.\n",
+            "An older {0} install is still on this machine and runs as root.\nRun '{1}' once to replace it. It asks for one approval.\n",
             BRANDING.app_name,
             BRANDING.admin_command("install")
         );

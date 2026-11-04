@@ -394,7 +394,7 @@ Common failures:
 - Do not edit `/etc/hosts` manually for Localify domains.
 - Do not run a second proxy to solve a Localify routing issue.
 - Do not bypass certificate errors as a fix. Repair Localify trust instead.
-- On macOS, do not run Localify with `sudo`: it refuses. Nothing of Localify's runs as root there, and `localify install`, `uninstall` and `lan` ask for an administrator's approval themselves. On Linux, commands that change the setup need `sudo`.
+- Do not run Localify with `sudo`: it refuses on macOS and on Linux with systemd. Nothing of Localify's runs as root there, and `localify install`, `uninstall` and `lan` ask for an administrator's approval themselves. In a container with no systemd, run it as root.
 - Keep project routes explicit and small.
 - Use wildcard domains only when the app actually needs tenant or subdomain testing.
 - Use `localify project domain set` for project service domain changes. Do not hand-edit the

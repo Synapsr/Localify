@@ -3,6 +3,7 @@ use anyhow::Result;
 use super::context::{AppContext, direct_api, require_config_writable};
 use crate::application::StepOutcome;
 use crate::application::uninstall::Uninstall;
+use crate::branding::BRANDING;
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::paths::LocalifyPaths;
@@ -27,7 +28,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         println!("  - DNS configuration for *.localify domains");
         println!("  - All registered domains ({})", preview.domain_count);
         println!("  - All SSL certificates from system trust store");
-        if cfg!(target_os = "macos") {
+        if BRANDING.installs_with_one_approval() {
             println!("  - The background service, and the terminal command it installed");
         }
         println!("  - All data in {}/", preview.data_dir);
@@ -35,7 +36,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         return Ok(());
     }
 
-    if cfg!(target_os = "macos") {
+    if BRANDING.installs_with_one_approval() {
         println!("Uninstalling Localify...\n");
         let result = direct_api(&ctx.config_path)?.uninstall()?;
         for step in &result.steps {

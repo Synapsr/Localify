@@ -26,7 +26,7 @@ use crate::branding::{BRANDING, user_home_dir};
 use crate::config::{DaemonConfig, LocalifyPaths};
 use crate::infrastructure::certs::ca::pem_is_limited_to_local_domains;
 use crate::infrastructure::config::ConfigStore;
-use crate::infrastructure::launchd_sockets::{HTTP_SOCKETS, HTTPS_SOCKETS};
+use crate::infrastructure::service_sockets::{HTTP_SOCKETS, HTTPS_SOCKETS};
 
 const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 const RESOLVER_DIR: &str = "/etc/resolver";
@@ -190,7 +190,7 @@ fn plist_program(plist: &str) -> Option<String> {
     )
 }
 
-fn current_user() -> Result<String> {
+pub(crate) fn current_user() -> Result<String> {
     let output = Command::new("/usr/bin/id")
         .arg("-un")
         .output()
@@ -311,7 +311,7 @@ impl LegacyInstall {
     }
 
     /// What is on this machine right now, including a running root daemon.
-    fn on_this_machine() -> Self {
+    pub(crate) fn on_this_machine() -> Self {
         Self {
             root_daemon: root_daemon_running(),
             ..Self::detect(&LegacyRoots::system())
@@ -350,14 +350,16 @@ pub fn migrate_legacy_config(config_path: &Path) -> Result<bool> {
     let legacy_path = PathBuf::from("/etc")
         .join(BRANDING.slug())
         .join("config.toml");
-    if !BRANDING.uses_launchd_service() {
+    if !BRANDING.uses_system_service() {
         return Ok(false);
     }
     copy_config_to_user_folder(&legacy_path, config_path)
 }
 
 fn copy_config_to_user_folder(legacy_path: &Path, config_path: &Path) -> Result<bool> {
-    if config_path.exists() || !legacy_path.exists() {
+    // A folder this user cannot read must not count as no old config: the script removes
+    // that folder, so this has to fail and say so.
+    if config_path.exists() || !legacy_path.try_exists().unwrap_or(true) {
         return Ok(false);
     }
 
@@ -368,6 +370,10 @@ fn copy_config_to_user_folder(legacy_path: &Path, config_path: &Path) -> Result<
         )
     })?;
     migrated.paths = LocalifyPaths::default();
+    // Listening everywhere was the old Linux default rather than a choice.
+    if cfg!(target_os = "linux") {
+        migrated.daemon.lan_access = false;
+    }
 
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)
@@ -417,6 +423,10 @@ pub fn run_with_approval(script: &str, approval: Approval) -> Result<()> {
                 .stdin(Stdio::inherit())
                 .output()
         }
+        // Linux has no dialog to show, so with no terminal only passwordless sudo works.
+        Approval::Dialog if cfg!(target_os = "linux") => Command::new("/usr/bin/sudo")
+            .args(["-n", "/bin/sh", "-c", script])
+            .output(),
         Approval::Dialog => Command::new("/usr/bin/osascript")
             .arg("-e")
             .arg(format!(
@@ -426,13 +436,19 @@ pub fn run_with_approval(script: &str, approval: Approval) -> Result<()> {
             ))
             .output(),
     }
-    .context("Failed to ask macOS for an administrator's approval")?;
+    .context("Failed to ask for an administrator's approval")?;
 
     if output.status.success() {
         return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if cfg!(target_os = "linux") && stderr.contains("a password is required") {
+        bail!(
+            "sudo needs a password, and this session has no terminal to ask for it. Run `{}` from a terminal.",
+            BRANDING.admin_command("install")
+        );
+    }
     if stderr.contains("(-128)") || stderr.contains("User canceled") {
         bail!("The administrator approval was declined, so nothing was changed.");
     }
@@ -453,7 +469,7 @@ pub fn run_with_approval(script: &str, approval: Approval) -> Result<()> {
     );
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
@@ -630,7 +646,7 @@ fn root_daemon_pattern() -> &'static str {
     }
 }
 
-fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
+pub(crate) fn legacy_commands(legacy: &LegacyInstall) -> Vec<String> {
     let mut commands = Vec::new();
 
     for label in &legacy.helper_labels {
@@ -963,7 +979,7 @@ pub struct SystemRequest<'a> {
 }
 
 impl SystemRequest<'_> {
-    fn service_spec(&self) -> Result<ServiceSpec> {
+    pub(crate) fn service_spec(&self) -> Result<ServiceSpec> {
         check_service_binary(self.binary)?;
         Ok(ServiceSpec {
             user: current_user()?,

@@ -23,11 +23,11 @@ impl CertificateService {
 
     /// Initialize the Root CA (called during `localify install`).
     ///
-    /// On macOS this only creates the CA: `localify trust` then trusts it in the login
-    /// keychain. A CA from an older build has no name constraint, so it is replaced
-    /// along with the leaf certificates it signed.
+    /// As a normal user this only creates the CA: `localify trust` then trusts it on
+    /// macOS, and the install's script does on Linux. A CA from an older build has no
+    /// name constraint, so it is replaced along with the leaf certificates it signed.
     pub fn init_ca(&self) -> Result<(), CertError> {
-        if cfg!(target_os = "macos")
+        if BRANDING.installs_with_one_approval()
             && self.ca.exists()
             && !self.ca.is_limited_to_local_domains()?
         {
@@ -40,7 +40,7 @@ impl CertificateService {
             self.ca.generate()?;
         }
 
-        if cfg!(target_os = "macos") {
+        if BRANDING.installs_with_one_approval() {
             return Ok(());
         }
 
@@ -59,7 +59,7 @@ impl CertificateService {
             return Ok(false);
         }
 
-        if cfg!(target_os = "macos") && !self.ca.is_limited_to_local_domains()? {
+        if BRANDING.installs_with_one_approval() && !self.ca.is_limited_to_local_domains()? {
             return Ok(false);
         }
 

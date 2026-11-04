@@ -52,8 +52,9 @@ removes all of it, with one more approval.
 HTTP and Node.js work right away. For HTTPS in browsers, run `localify trust` once
 and confirm in the macOS window.
 
-On Linux, run `sudo localify install` and `sudo localify start`, and use `sudo` for
-the commands below.
+On Linux with systemd it works the same way: one `sudo` password at install, then nothing
+of Localify's runs as root. The install also trusts the certificate, so HTTPS works in
+tools that use the system store. See [Localify on Linux](docs/linux.md).
 
 ## Local CLI example
 

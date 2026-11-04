@@ -8,16 +8,15 @@ use crate::application::StepOutcome;
 use crate::application::ports::{IosSimulatorTrust, SystemSetup};
 use crate::branding::BRANDING;
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
-use crate::infrastructure::macos_system::{
-    self, Approval, SystemRemoval, SystemRequest, run_with_approval,
-};
+use crate::infrastructure::macos_system::{self, Approval, SystemRequest, run_with_approval};
 use crate::infrastructure::paths::LocalifyPaths;
+use crate::infrastructure::system_service;
 
 /// Infrastructure service for filesystem operations required by Localify.
 pub struct FileSystemSetup<'a> {
     paths: &'a LocalifyPaths,
     install: Option<(SystemRequest<'a>, Approval)>,
-    removal: Option<(SystemRemoval, Approval)>,
+    removal: Option<(String, Approval)>,
     state_dir: Option<PathBuf>,
 }
 
@@ -41,11 +40,11 @@ impl<'a> FileSystemSetup<'a> {
     /// Localify state, which on macOS holds the config too.
     pub fn with_system_removal(
         mut self,
-        removal: SystemRemoval,
+        removal_script: String,
         approval: Approval,
         state_dir: Option<PathBuf>,
     ) -> Self {
-        self.removal = Some((removal, approval));
+        self.removal = Some((removal_script, approval));
         self.state_dir = state_dir;
         self
     }
@@ -91,17 +90,16 @@ impl SystemSetup for FileSystemSetup<'_> {
             return Ok(Vec::new());
         };
 
-        let changes = request.changes()?;
         let label = "System setup".to_string();
 
-        if changes.is_empty() {
+        let Some(script) = system_service::pending_script(request)? else {
             return Ok(vec![(
                 label,
                 StepOutcome::Skipped("Already in place.".into()),
             )]);
-        }
+        };
 
-        run_with_approval(&changes.script(), *approval)?;
+        run_with_approval(&script, *approval)?;
         Ok(vec![(
             label,
             StepOutcome::Success("Applied with one administrator approval.".into()),
@@ -109,17 +107,19 @@ impl SystemSetup for FileSystemSetup<'_> {
     }
 
     fn remove_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>> {
-        let Some((removal, approval)) = &self.removal else {
+        let Some((removal_script, approval)) = &self.removal else {
             return Ok(Vec::new());
         };
 
-        run_with_approval(&removal.script(), *approval)?;
+        run_with_approval(removal_script, *approval)?;
 
         let mut steps = vec![(
             "Remove system setup".to_string(),
             StepOutcome::Success("Removed with one administrator approval.".into()),
         )];
-        if let Some(step) = macos_system::remove_login_keychain_ca() {
+        if cfg!(target_os = "macos")
+            && let Some(step) = macos_system::remove_login_keychain_ca()
+        {
             steps.push(step);
         }
         Ok(steps)

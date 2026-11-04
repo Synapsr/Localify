@@ -5,7 +5,7 @@ use std::process::Command;
 use super::super::CertError;
 use super::TrustStore;
 
-const SYSTEM_CERT_PATH: &str = "/usr/local/share/ca-certificates/localify-ca.crt";
+use crate::infrastructure::linux_system::CA_STORE_FILE as SYSTEM_CERT_PATH;
 
 /// Linux trust store implementation using `update-ca-certificates`.
 ///
@@ -101,7 +101,11 @@ impl TrustStore for LinuxTrustStore {
             return Ok(false);
         }
 
-        Ok(Path::new(SYSTEM_CERT_PATH).exists())
+        // The store must hold this CA, not one left by an earlier install.
+        match (fs::read(cert_path), fs::read(SYSTEM_CERT_PATH)) {
+            (Ok(ours), Ok(installed)) => Ok(ours == installed),
+            _ => Ok(false),
+        }
     }
 }
 
