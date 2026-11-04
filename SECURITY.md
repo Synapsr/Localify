@@ -1,7 +1,8 @@
 # Security Policy
 
-Localify installs a local certificate authority, runs a privileged system
-helper, and manages local DNS. Security reports are taken seriously.
+Localify installs a local certificate authority limited to its own domain suffix,
+and manages local DNS. On macOS it asks for an administrator's approval once at
+install and keeps no root process afterwards. Security reports are taken seriously.
 
 ## Reporting a vulnerability
 

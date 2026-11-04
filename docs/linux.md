@@ -36,7 +36,7 @@ and removed by `sudo localify uninstall`.
 
 ### Certificate Trust
 
-On macOS, the Root CA is added to the system Keychain.
+On macOS, the Root CA is trusted in your login keychain, for your account only.
 On Linux, Localify copies the Root CA to the system
 certificate store and runs `update-ca-certificates`:
 
@@ -46,6 +46,15 @@ certificate store and runs `update-ca-certificates`:
 
 This makes the CA trusted by `curl`, `wget`, `git`,
 Electron apps, and non-sandboxed browsers.
+
+## Running as Root
+
+Linux does not have the macOS setup yet, where launchd holds the ports and nothing of
+Localify's runs as root. A daemon started with `sudo` stays root for as long as it
+runs, and that includes its static routes: a route can serve any file on the machine.
+Point static routes only at folders you would share with anyone who can reach the
+port, and bear in mind that on Linux the daemon listens on every interface. To keep it
+on this machine, run `sudo localify lan disable`, then restart it.
 
 ## Snap Browsers and Certificate Trust
 

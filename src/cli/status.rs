@@ -4,51 +4,60 @@ use std::time::Duration;
 use super::context::AppContext;
 use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::list_all_domains::ListAllDomains;
+use crate::branding::BRANDING;
 use crate::config::DaemonConfig;
 use crate::domain::RegistrationSource;
 use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution};
+use crate::infrastructure::macos_system::{self, LegacyInstall};
 use crate::infrastructure::network::get_network_info;
+use crate::infrastructure::paths::LocalifyPaths;
 
-pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
+pub fn execute(
+    ctx: &AppContext,
+    paths: &LocalifyPaths,
+    daemon_config: &DaemonConfig,
+) -> Result<()> {
     let network_info = get_network_info();
 
-    let service = QueryDaemonStatus::new(&ctx.pid_file, &ctx.cert_service, &network_info);
+    let service = QueryDaemonStatus::new(&ctx.daemon, &ctx.cert_service, &network_info);
     let status = service.execute()?;
 
-    let offline_note = if status.lan_ip.is_loopback() {
-        " (offline)"
+    let ca_label = if status.ca_installed {
+        "trusted".to_string()
+    } else if status.ca_trust_pending {
+        format!(
+            "created, trust pending. HTTP and Node.js work; browsers will warn about HTTPS.\n    Finish it on a Mac with a screen: {}",
+            trust_command(paths)
+        )
     } else {
-        ""
+        format!("not installed. Run: {}", BRANDING.admin_command("install"))
     };
 
-    let ca_label = if status.ca_installed {
-        "installed"
-    } else {
-        "not installed"
-    };
+    if BRANDING.uses_launchd_service() && LegacyInstall::needs_migration() {
+        println!(
+            "An older {0} install is still on this Mac and runs as root.\nRun '{1}' once to replace it. It asks for one approval.\n",
+            BRANDING.app_name,
+            BRANDING.admin_command("install")
+        );
+    }
 
     match status.pid {
         Some(pid) => {
             println!("Localify daemon: running (PID: {})", pid);
-            println!("  LAN IP: {}{}", status.lan_ip, offline_note);
             println!("  Root CA: {}", ca_label);
             println!("  HTTP:  http://localhost:{}", daemon_config.http_port);
             println!("  HTTPS: https://localhost:{}", daemon_config.https_port);
             print_dns_resolution_status(check_system_resolution(Duration::from_millis(1500)));
-            if !status.lan_ip.is_loopback() {
-                println!(
-                    "\n  Access from other devices: use http://{}",
-                    status.lan_ip
-                );
-            }
         }
         None => {
             println!("Localify daemon: stopped");
-            println!("  LAN IP: {}{}", status.lan_ip, offline_note);
             println!("  Root CA: {}", ca_label);
-            println!("\nStart with: sudo localify start");
+            println!("\nStart with: {}", BRANDING.admin_command("start"));
         }
     }
+
+    println!();
+    super::lan::print_status(daemon_config);
 
     // List domains via ListAllDomains (daemon + Docker, or config fallback)
     let list_svc = ListAllDomains::new(&ctx.mgmt_client, &ctx.config_store, &ctx.cert_service);
@@ -101,4 +110,12 @@ fn print_dns_resolution_status(check: SystemResolutionCheck) {
     println!(
         "       If a VPN is active, its DNS or leak-protection settings may be bypassing macOS /etc/resolver."
     );
+}
+
+fn trust_command(paths: &LocalifyPaths) -> String {
+    if cfg!(target_os = "macos") {
+        macos_system::trust_command(&paths.data_dir.join("ca.crt"))
+    } else {
+        BRANDING.admin_command("install")
+    }
 }

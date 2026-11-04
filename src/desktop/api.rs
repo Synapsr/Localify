@@ -18,7 +18,7 @@ use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::install::Install;
 use crate::application::manage_routes::ManageRoutes;
 use crate::application::ports::DaemonConnection;
-use crate::application::ports::DaemonConnectionError;
+use crate::application::ports::DaemonControl;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
 use crate::application::register_domain::RegisterDomain;
@@ -57,17 +57,12 @@ use crate::desktop::dto::{
     StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
     UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
-#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
-use crate::desktop::home_dir::user_home_dir;
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
 use crate::desktop::{LauncherPreferencesStore, ProjectRootStore};
 use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
-use crate::infrastructure::binary_identity::{
-    BinaryIdentity, DaemonBinaryCheck, check_daemon_binary,
-};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredDomain, ConfiguredProject, ConfiguredProjectEnvironment,
@@ -79,11 +74,17 @@ use crate::infrastructure::filesystem::FileSystemSetup;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
+use crate::infrastructure::macos_system::{
+    self, Approval, CliLink, LegacyInstall, SystemChanges, SystemRequest,
+};
+use crate::infrastructure::managed_daemon::ManagedDaemon;
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::LocalifyPaths;
-use crate::infrastructure::pid::PidFile;
-use crate::infrastructure::port_check::ensure_daemon_ports_available;
+use crate::infrastructure::pid::{DaemonHandle, PidFile};
+use crate::infrastructure::port_check::{
+    ensure_daemon_ports_available, ensure_lan_ports_available,
+};
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
@@ -91,7 +92,6 @@ use crate::project_init::{
     FolderInitSelection, LocalAppUpdatePolicy, apply_local_app_updates, detect_folder_init_plan,
     resolve_folder_init_selection,
 };
-use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
 
 const CLI_INSTALL_DIR: &str = "/usr/local/bin";
 const SETTINGS_TRANSFER_VERSION: u32 = 1;
@@ -113,7 +113,7 @@ const MAX_ENV_FILE_BYTES: u64 = 1024 * 1024;
 pub struct DesktopApi {
     config_path: PathBuf,
     binary_path: PathBuf,
-    direct_mode: bool,
+    cli_mode: bool,
 }
 
 fn dns_resolution_status(daemon_running: bool) -> DnsResolutionDto {
@@ -147,32 +147,21 @@ impl DesktopApi {
         Self {
             config_path,
             binary_path,
-            direct_mode: false,
+            cli_mode: false,
         }
     }
 
-    pub fn new_direct(config_path: PathBuf, binary_path: PathBuf) -> Self {
+    /// The API as the CLI uses it: it asks for approval on the terminal when it has
+    /// one, and leaves app-only steps such as the terminal command link alone.
+    pub fn for_cli(config_path: PathBuf, binary_path: PathBuf) -> Self {
         Self {
             config_path,
             binary_path,
-            direct_mode: true,
+            cli_mode: true,
         }
     }
 
     pub fn bootstrap(&self) -> Result<BootstrapDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            let mut bootstrap = helper.get_bootstrap()?;
-            bootstrap.environment = self.environment();
-            bootstrap.daemon.ca_installed = self.effective_desktop_ca_installed()?;
-            bootstrap.launcher_preferences = self.effective_launcher_preferences()?.into();
-            bootstrap.launcher_availability = self.launcher_availability();
-            bootstrap.projects = self.enrich_projects_with_local_paths(bootstrap.projects)?;
-            bootstrap.services = self.list_project_services()?;
-            bootstrap.project_environments = self.list_project_environments()?;
-            self.backfill_project_markers(&bootstrap.projects);
-            return Ok(bootstrap);
-        }
-
         let bootstrap = BootstrapDto {
             environment: self.environment(),
             config: self.read_config()?,
@@ -191,10 +180,9 @@ impl DesktopApi {
 
     /// Writes the in-project marker for pre-marker projects whose root still
     /// exists, so a future folder move can be re-linked. Never overwrites an
-    /// existing marker and never runs as the system helper (root would own
-    /// the files).
+    /// existing marker.
     fn backfill_project_markers(&self, projects: &[ProjectInfoDto]) {
-        if self.direct_mode {
+        if self.cli_mode {
             return;
         }
 
@@ -216,7 +204,7 @@ impl DesktopApi {
             binary_path: self.binary_path.display().to_string(),
             binary_exists: self.binary_path.exists(),
             fixed_domain_suffix: BRANDING.domain_suffix().into(),
-            cli_helper_ready: self.direct_mode || self.cli_helper_ready(),
+            system_setup_required: self.system_setup_required(),
             cli_access_ready: self.cli_access_ready(),
             cli_command_path: self.cli_command_path().display().to_string(),
             node_trust: self.node_trust_status_dto(),
@@ -224,47 +212,7 @@ impl DesktopApi {
     }
 
     pub fn setup_cli_access(&self) -> Result<CliAccessDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.setup_cli_access();
-        }
-
         self.install_cli_access()
-    }
-
-    /// Recreates the privileged helper so the desktop app can recover from a
-    /// stale launchd service or a helper that accepts connections but stops
-    /// answering requests.
-    pub fn restart_system_helper(&self) -> Result<()> {
-        if !self.should_use_system_helper() {
-            return Ok(());
-        }
-
-        let socket_path = self.helper_socket_path()?;
-        let client = SystemHelperClient::new(socket_path.clone());
-        if self.recover_helper_without_admin(&client)? {
-            return Ok(());
-        }
-
-        let uid = current_uid()?;
-        let commands = [
-            vec![
-                "helper".into(),
-                "uninstall-service".into(),
-                "--uid".into(),
-                uid.to_string(),
-            ],
-            vec![
-                "helper".into(),
-                "ensure-running".into(),
-                "--socket".into(),
-                socket_path.display().to_string(),
-                "--uid".into(),
-                uid.to_string(),
-            ],
-        ];
-
-        self.run_cli_commands_with_admin(&commands)?;
-        Ok(())
     }
 
     pub fn setup_node_trust(&self) -> Result<NodeTrustDto> {
@@ -290,21 +238,14 @@ impl DesktopApi {
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.get_config();
-        }
-
         let config = self.config_store().load()?;
         Ok(map_config(self.config_path.as_path(), config))
     }
 
     pub fn update_config(&self, request: ConfigUpdateRequest) -> Result<AppConfigDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.update_config(request);
-        }
-
         self.ensure_config_writable()?;
         let mut config = self.config_store().load()?;
+        let previous_daemon = config.daemon.clone();
 
         if let Some(daemon) = request.daemon {
             config.daemon = daemon.into();
@@ -320,30 +261,94 @@ impl DesktopApi {
         }
 
         config.validate()?;
+
+        let system_changed = cfg!(target_os = "macos")
+            && macos_system::system_setup_done()
+            && (previous_daemon.http_port != config.daemon.http_port
+                || previous_daemon.https_port != config.daemon.https_port
+                || previous_daemon.dns_port != config.daemon.dns_port
+                || previous_daemon.lan_access != config.daemon.lan_access);
+
+        if system_changed && config.daemon.lan_access && !previous_daemon.lan_access {
+            ensure_lan_ports_available(config.daemon.http_port, config.daemon.https_port)?;
+        }
+
         self.config_store().save(&config)?;
+
+        if system_changed && let Err(error) = self.apply_system_changes_for(&config) {
+            // The system still has the old settings, so the config must say so too.
+            config.daemon = previous_daemon;
+            self.config_store().save(&config)?;
+            return Err(error);
+        }
+
         Ok(map_config(self.config_path.as_path(), config))
     }
 
-    pub fn daemon_status(&self) -> Result<DaemonStatusDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            let mut status = helper.get_daemon_status()?;
-            status.ca_installed = self.effective_desktop_ca_installed()?;
-            return Ok(status);
+    /// Rewrites what the config decides on the system side, such as the sockets in
+    /// the launchd plist. Asks for one approval, then waits for the daemon to answer.
+    fn apply_system_changes_for(&self, config: &Config) -> Result<()> {
+        let paths = &config.paths;
+        let changes = self.system_request(config, None).changes()?;
+        if !changes.is_empty() {
+            macos_system::run_with_approval(&changes.script(), self.approval())?;
         }
+        if let Some(managed) = ManagedDaemon::find(&self.config_path, paths, &config.daemon) {
+            managed.start()?;
+        }
+        Ok(())
+    }
 
+    fn approval(&self) -> Approval {
+        if self.cli_mode {
+            Approval::for_cli()
+        } else {
+            Approval::Dialog
+        }
+    }
+
+    fn system_request<'a>(
+        &'a self,
+        config: &'a Config,
+        cli_link: Option<CliLink>,
+    ) -> SystemRequest<'a> {
+        SystemRequest {
+            config_path: &self.config_path,
+            binary: &self.binary_path,
+            daemon: &config.daemon,
+            paths: &config.paths,
+            cli_link,
+        }
+    }
+
+    fn system_setup_required(&self) -> bool {
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
+        let Ok(config) = self.config_store().load() else {
+            return false;
+        };
+        self.system_request(&config, None).setup_required()
+    }
+
+    pub fn daemon_status(&self) -> Result<DaemonStatusDto> {
         let config = self.config_store().load()?;
         let paths = config.paths.clone();
 
-        let pid_file = PidFile::new(paths.pid_file.clone());
+        let daemon = DaemonHandle::new(&paths);
         let certs = CertificateService::new(&paths);
         let network = get_network_info();
-        let status = QueryDaemonStatus::new(&pid_file, &certs, &network).execute()?;
+        let status = QueryDaemonStatus::new(&daemon, &certs, &network).execute()?;
+        let ca_trust_command = (cfg!(target_os = "macos") && status.ca_trust_pending)
+            .then(|| macos_system::trust_command(&paths.data_dir.join("ca.crt")));
 
         Ok(DaemonStatusDto {
             running: status.pid.is_some(),
             pid: status.pid,
             lan_ip: status.lan_ip.to_string(),
             ca_installed: status.ca_installed,
+            ca_trust_pending: status.ca_trust_pending,
+            ca_trust_command,
             http_port: config.daemon.http_port,
             https_port: config.daemon.https_port,
             dns_port: config.daemon.dns_port,
@@ -352,10 +357,6 @@ impl DesktopApi {
     }
 
     pub fn list_domains(&self) -> Result<Vec<DomainInfoDto>> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.list_domains();
-        }
-
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
         let cert_trusted = certs.is_trusted().ok();
@@ -427,10 +428,6 @@ impl DesktopApi {
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectInfoDto>> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return self.enrich_projects_with_local_paths(helper.list_projects()?);
-        }
-
         let (_, paths) = self.load_config_and_paths()?;
         let domain_accesses = daemon_domain_accesses(&paths.socket_path);
         let configured_domains = self.config_store().list_configured_domains()?;
@@ -592,29 +589,6 @@ impl DesktopApi {
         &self,
         request: AttachProjectWorktreeRequest,
     ) -> Result<AttachProjectWorktreeResultDto> {
-        if self.should_use_system_helper_for_worktree_attach() {
-            let helper = self.ensure_helper_running()?;
-            match helper.attach_project_worktree(request.clone()) {
-                Ok(result) => return Ok(result),
-                Err(error) if should_restart_helper_after_attach_error(&error, &request) => {
-                    self.restart_system_helper().with_context(|| {
-                        "The system helper is running an older build for worktree attach, and Localify could not restart it automatically."
-                    })?;
-                    return self
-                        .ensure_helper_running()?
-                        .attach_project_worktree(request);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        self.attach_project_worktree_direct(request)
-    }
-
-    pub(crate) fn attach_project_worktree_direct(
-        &self,
-        request: AttachProjectWorktreeRequest,
-    ) -> Result<AttachProjectWorktreeResultDto> {
         self.ensure_config_writable()?;
         let project_id = request.project_id.trim();
         if project_id.is_empty() {
@@ -732,10 +706,6 @@ impl DesktopApi {
     }
 
     pub fn create_project(&self, request: CreateProjectRequest) -> Result<ProjectInfoDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.create_project(request);
-        }
-
         self.ensure_config_writable()?;
         let project = self.config_store().create_project(&request.name)?;
         Ok(map_project_info(project, 0, false, None))
@@ -745,12 +715,6 @@ impl DesktopApi {
         &self,
         request: CreateProjectWithDomainsRequest,
     ) -> Result<ProjectInfoDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .create_project_with_domains(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -834,10 +798,6 @@ impl DesktopApi {
     }
 
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.init_project(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -918,10 +878,6 @@ impl DesktopApi {
         &self,
         request: AddProjectServiceRequest,
     ) -> Result<AddProjectServiceResultDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.add_project_service(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -965,12 +921,6 @@ impl DesktopApi {
         &self,
         request: SetProjectServiceDomainRequest,
     ) -> Result<SetProjectServiceDomainResultDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .set_project_service_domain(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -1048,12 +998,6 @@ impl DesktopApi {
         &self,
         request: MaterializeProjectServicesRequest,
     ) -> Result<MaterializeProjectServicesResultDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .materialize_project_services(request);
-        }
-
         self.ensure_config_writable()?;
         let config_store = self.config_store();
         let project = configured_project(&config_store, &request.project_id)?;
@@ -1086,12 +1030,6 @@ impl DesktopApi {
         &self,
         request: EnsureProjectEnvironmentRequest,
     ) -> Result<EnsureProjectEnvironmentResultDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .ensure_project_environment(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -1280,10 +1218,6 @@ impl DesktopApi {
     }
 
     pub fn update_project(&self, request: UpdateProjectRequest) -> Result<ProjectInfoDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.update_project(request);
-        }
-
         let UpdateProjectRequest {
             id,
             name,
@@ -1358,16 +1292,13 @@ impl DesktopApi {
         }
 
         self.store_project_root_path(&project.id, &root_path)?;
-        // Best-effort: in helper mode the config root stays as-is and the
-        // local metadata written above takes precedence over the stale path.
-        if !self.should_use_system_helper() {
-            let _ = self.config_store().update_project(
-                &project.id,
-                None,
-                None,
-                Some(root_path.display().to_string()),
-            );
-        }
+        // Best-effort: the local metadata written above takes precedence.
+        let _ = self.config_store().update_project(
+            &project.id,
+            None,
+            None,
+            Some(root_path.display().to_string()),
+        );
 
         project.root_path = Some(root_path.display().to_string());
         project.root_path_missing = false;
@@ -1909,10 +1840,6 @@ impl DesktopApi {
     }
 
     pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.remove_project(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -1968,12 +1895,6 @@ impl DesktopApi {
         &self,
         request: RemoveProjectEnvironmentRequest,
     ) -> Result<RemoveProjectEnvironmentResultDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .remove_project_environment(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -2035,10 +1956,6 @@ impl DesktopApi {
         &self,
         request: AssignDomainProjectRequest,
     ) -> Result<DomainInfoDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.assign_domain_project(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -2085,10 +2002,6 @@ impl DesktopApi {
     }
 
     pub fn available_port(&self) -> Result<AvailablePortDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.get_available_port();
-        }
-
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .context("Failed to ask the OS for an available local port")?;
         let port = listener
@@ -2100,19 +2013,21 @@ impl DesktopApi {
     }
 
     pub fn install(&self) -> Result<InstallResultDto> {
-        if self.should_use_system_helper() {
-            return self.install_with_system_helper();
+        if cfg!(target_os = "macos") {
+            self.prepare_macos_install()?;
         }
 
-        let daemon_was_running = self
-            .daemon_status()
-            .map(|status| status.running)
-            .unwrap_or(false);
         let (config, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
         let dns = get_dns_service()?;
         let network = get_network_info();
-        let system = FileSystemSetup::new(&paths);
+        let mut system = FileSystemSetup::new(&paths);
+        if cfg!(target_os = "macos") {
+            system = system.with_system_install(
+                self.system_request(&config, self.cli_link_needing_approval()),
+                self.approval(),
+            );
+        }
 
         let result = Install::new(
             &certs,
@@ -2129,18 +2044,27 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
+        if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
+            steps.push(service_ready_step(managed.start()));
+        }
         let refresh = self.refresh_domain_certificates_local()?;
         steps.extend(refresh.steps);
         if refresh.refreshed {
-            steps.push(self.restart_daemon_after_certificate_refresh_step(daemon_was_running));
+            let daemon_running = self
+                .daemon_status()
+                .map(|status| status.running)
+                .unwrap_or(false);
+            steps.push(self.restart_daemon_after_certificate_refresh_step(daemon_running));
         }
-        if !self.direct_mode {
-            steps.push(self.cli_access_step_with(|_| self.install_cli_access()));
-            if let Some(step) = self.node_trust_step() {
-                steps.push(step);
-            }
+        if !self.cli_mode {
+            steps.push(self.cli_access_step());
         }
-        if let Some(step) = agent_skill_install_step(config.agent.install_skill) {
+        if let Some(step) = self.node_trust_step() {
+            steps.push(step);
+        }
+        if !self.cli_mode
+            && let Some(step) = agent_skill_install_step(config.agent.install_skill)
+        {
             steps.push(step);
         }
 
@@ -2150,65 +2074,15 @@ impl DesktopApi {
         })
     }
 
-    fn install_with_system_helper(&self) -> Result<InstallResultDto> {
-        self.run_privileged_desktop_install()?;
-
-        let helper = self.ensure_helper_running()?;
-        let daemon_was_running = helper
-            .get_daemon_status()
-            .map(|status| status.running)
-            .unwrap_or(false);
-        let mut steps = vec![StepDto {
-            label: Some("System setup".into()),
-            status: "success".into(),
-            message: format!(
-                "{} system setup completed with administrator privileges.",
-                BRANDING.app_name
-            ),
-        }];
-
-        if let Some(step) = self.ensure_desktop_ca_trust_step()? {
-            steps.push(step);
-        }
-
-        let refresh = helper.refresh_domain_certificates()?;
-        steps.extend(refresh.steps);
-        if refresh.refreshed {
-            steps.push(restart_daemon_after_certificate_refresh_step_with(
-                daemon_was_running,
-                || helper.restart_daemon(StartDaemonRequest { verbose: false }),
-            ));
-        }
-
-        let status = self.daemon_status()?;
-        steps.push(root_ca_verification_step(status.ca_installed));
-        if let Some(step) = self.ios_simulator_trust_step() {
-            steps.push(step);
-        }
-        steps.push(self.cli_access_step_with(|_| helper.setup_cli_access()));
-        if let Some(step) = self.node_trust_step() {
-            steps.push(step);
-        }
-        let install_agent_skill = self
-            .config_store()
-            .load()
-            .map(|config| config.agent.install_skill)
-            .unwrap_or(true);
-        if let Some(step) = agent_skill_install_step(install_agent_skill) {
-            steps.push(step);
-        }
-
-        Ok(InstallResultDto {
-            lan_ip: status.lan_ip,
-            steps,
-        })
+    /// What has to happen before the approval is asked for: the old config moves to
+    /// the user's folder, and files an old dev helper left to root are reclaimed.
+    fn prepare_macos_install(&self) -> Result<()> {
+        macos_system::migrate_legacy_config(&self.config_path)?;
+        macos_system::reclaim_root_owned_state();
+        Ok(())
     }
 
     pub fn refresh_domain_certificates(&self) -> Result<CertificateRefreshDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.refresh_domain_certificates();
-        }
-
         self.refresh_domain_certificates_local()
     }
 
@@ -2281,20 +2155,16 @@ impl DesktopApi {
     }
 
     pub fn uninstall_preview(&self) -> Result<UninstallPreviewDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.get_uninstall_preview();
-        }
-
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
         let dns = get_dns_service()?;
         let system = FileSystemSetup::new(&paths);
-        let pid_file = PidFile::new(paths.pid_file.clone());
+        let daemon = DaemonHandle::new(&paths);
 
         let preview = Uninstall::new(
             &self.config_store(),
             &certs,
-            &pid_file,
+            &daemon,
             &dns,
             &system,
             paths.data_dir.display().to_string(),
@@ -2308,53 +2178,32 @@ impl DesktopApi {
     }
 
     pub fn uninstall(&self) -> Result<UninstallResultDto> {
-        if self.should_use_system_helper() {
-            let desktop_trust_step = self.remove_desktop_ca_trust_step();
-            let helper = self.ensure_helper_running()?;
-            let mut result = helper.uninstall_localify()?;
-            let uid = current_uid()?;
-
-            if let Some(step) = desktop_trust_step {
-                result.steps.push(step);
-            }
-            if let Some(step) = self.remove_node_trust_step() {
-                result.steps.push(step);
-            }
-
-            match self.run_cli_command_with_admin(&[
-                "helper".into(),
-                "uninstall-service".into(),
-                "--uid".into(),
-                uid.to_string(),
-            ]) {
-                Ok(_) => result.steps.push(StepDto {
-                    label: Some("Remove privileged helper".into()),
-                    status: "success".into(),
-                    message: format!("Removed the persistent {} desktop helper.", BRANDING.app_name),
-                }),
-                Err(error) => result.steps.push(StepDto {
-                    label: Some("Remove privileged helper".into()),
-                    status: "warning".into(),
-                    message: format!(
-                        "{} was uninstalled, but the persistent desktop helper could not be removed: {error}",
-                        BRANDING.app_name
-                    ),
-                }),
-            }
-
-            return Ok(result);
-        }
-
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
         let dns = get_dns_service()?;
-        let system = FileSystemSetup::new(&paths);
-        let pid_file = PidFile::new(paths.pid_file.clone());
+        let daemon = DaemonHandle::new(&paths);
+        let mut system = FileSystemSetup::new(&paths);
+        if cfg!(target_os = "macos") {
+            let removal =
+                macos_system::removal_for_this_machine(self.managed_cli_link().as_deref())?;
+            let state_dir = BRANDING.config_dir();
+            system = system.with_system_removal(
+                removal,
+                self.approval(),
+                self.config_path
+                    .starts_with(&state_dir)
+                    .then_some(state_dir),
+            );
+        }
+
+        // These read the current state, which the steps below take away.
+        let node_step = self.remove_node_trust_step();
+        let removes_cli_link = self.managed_cli_link().is_some();
 
         let result = Uninstall::new(
             &self.config_store(),
             &certs,
-            &pid_file,
+            &daemon,
             &dns,
             &system,
             paths.data_dir.display().to_string(),
@@ -2366,12 +2215,16 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
-        if !self.direct_mode {
+        if removes_cli_link {
+            steps.push(StepDto {
+                label: Some("Remove command line access".into()),
+                status: "success".into(),
+                message: format!("Removed `{}`.", BRANDING.cli_command()),
+            });
+        } else if !self.cli_mode {
             steps.push(self.remove_cli_access_step());
-            if let Some(step) = self.remove_node_trust_step() {
-                steps.push(step);
-            }
         }
+        steps.extend(node_step);
 
         Ok(UninstallResultDto { steps })
     }
@@ -2380,18 +2233,6 @@ impl DesktopApi {
         &self,
         request: RegisterDomainRequest,
     ) -> Result<RegisterDomainResultDto> {
-        if self.should_use_system_helper() {
-            let routes = request
-                .routes
-                .iter()
-                .map(|route| normalize_desktop_route(route))
-                .collect::<Result<Vec<_>>>()?;
-
-            return self
-                .ensure_helper_running()?
-                .register_domain(RegisterDomainRequest { routes, ..request });
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -2414,18 +2255,6 @@ impl DesktopApi {
     }
 
     pub fn update_domain(&self, request: UpdateDomainRequest) -> Result<RegisterDomainResultDto> {
-        if self.should_use_system_helper() {
-            let routes = request
-                .routes
-                .iter()
-                .map(|route| normalize_desktop_route(route))
-                .collect::<Result<Vec<_>>>()?;
-
-            return self
-                .ensure_helper_running()?
-                .update_domain(UpdateDomainRequest { routes, ..request });
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -2464,7 +2293,7 @@ impl DesktopApi {
             match certs.create_and_install(&pattern) {
                 Ok(()) => {
                     registration.enable_https();
-                    StepOutcome::Success("Certificate installed and trusted.".into())
+                    StepOutcome::Success("Certificate issued by the Localify CA.".into())
                 }
                 Err(error) => StepOutcome::Warning(format!(
                     "Failed to generate certificate: {error}. HTTPS will not be available for this domain."
@@ -2498,10 +2327,6 @@ impl DesktopApi {
         &self,
         request: DomainPatternRequest,
     ) -> Result<UnregisterDomainResultDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.unregister_domain(request);
-        }
-
         self.ensure_config_writable()?;
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
@@ -2515,10 +2340,6 @@ impl DesktopApi {
     }
 
     pub fn add_route(&self, request: AddRouteRequest) -> Result<RegistrationMutationDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.add_route(request);
-        }
-
         self.ensure_config_writable()?;
         let pattern = DomainPattern::from_name(&request.domain, request.wildcard)?;
         let path = PathPrefix::new(&request.path)?;
@@ -2534,10 +2355,6 @@ impl DesktopApi {
     }
 
     pub fn remove_route(&self, request: RemoveRouteRequest) -> Result<RegistrationMutationDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.remove_route(request);
-        }
-
         self.ensure_config_writable()?;
         let pattern = DomainPattern::from_name(&request.domain, request.wildcard)?;
         let path = PathPrefix::new(&request.path)?;
@@ -2554,20 +2371,12 @@ impl DesktopApi {
     }
 
     pub fn list_routes(&self, request: DomainPatternRequest) -> Result<RegistrationDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.list_routes(request);
-        }
-
         let pattern = parse_pattern(&request)?;
         let registration = ManageRoutes::new(&self.config_store()).list_routes(&pattern)?;
         Ok(map_registration(registration))
     }
 
     pub fn list_port_conflicts(&self) -> Result<Vec<PortConflictDto>> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.list_port_conflicts();
-        }
-
         let (config, _) = self.load_config_and_paths()?;
         let conflicts = list_daemon_port_conflicts(
             config.daemon.http_port,
@@ -2579,10 +2388,6 @@ impl DesktopApi {
     }
 
     pub fn kill_port_conflict(&self, request: KillPortConflictRequest) -> Result<PortConflictDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.kill_port_conflict(request);
-        }
-
         let (config, _) = self.load_config_and_paths()?;
         let conflict = kill_daemon_port_conflict(
             config.daemon.http_port,
@@ -2597,84 +2402,87 @@ impl DesktopApi {
     }
 
     pub fn start_daemon(&self, request: StartDaemonRequest) -> Result<DaemonLaunchDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.start_daemon(request);
+        let (config, paths) = self.load_config_and_paths()?;
+        if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
+            return Ok(daemon_launch(managed.start()?, &config.daemon));
+        }
+        if BRANDING.uses_launchd_service() && LegacyInstall::needs_migration() {
+            bail!(
+                "An older {} install is still on this Mac and runs as root. Set up {} again to replace it.",
+                BRANDING.app_name,
+                BRANDING.app_name
+            );
         }
 
-        let (config, paths) = self.load_config_and_paths()?;
-        let pid_file = PidFile::new(paths.pid_file.clone());
-        let ready = StartDaemon::new(&pid_file, &config.daemon).preflight()?;
-        ensure_daemon_ports_available(ready.http_port, ready.https_port, config.daemon.dns_port)?;
+        let daemon = DaemonHandle::new(&paths);
+        let ready = StartDaemon::new(&daemon, &config.daemon).preflight()?;
+        ensure_daemon_ports_available(
+            ready.http_port,
+            ready.https_port,
+            config.daemon.dns_port,
+            config.daemon.lan_access,
+        )?;
         let child = self
             .spawn_daemon_process(request.verbose)
             .with_context(|| {
                 format!("Failed to launch daemon via {}", self.binary_path.display())
             })?;
+        let pid_file = PidFile::new(paths.pid_file.clone());
         let pid = self.wait_for_daemon_start(child, &pid_file, &paths.log_file)?;
 
-        Ok(DaemonLaunchDto {
-            pid,
-            lan_ip: get_lan_ip().to_string(),
-            http_port: ready.http_port,
-            https_port: ready.https_port,
-            dns_port: config.daemon.dns_port,
-        })
+        Ok(daemon_launch(pid, &config.daemon))
     }
 
     pub fn stop_daemon(&self) -> Result<DaemonStatusDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.stop_daemon();
+        let (config, paths) = self.load_config_and_paths()?;
+        if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
+            managed.stop()?;
+            return self.daemon_status();
         }
 
-        let (_, paths) = self.load_config_and_paths()?;
-        let pid_file = PidFile::new(paths.pid_file);
-        StopDaemon::new(&pid_file).execute()?;
+        StopDaemon::new(&DaemonHandle::new(&paths)).execute()?;
         self.daemon_status()
     }
 
     pub fn restart_daemon(&self, request: StartDaemonRequest) -> Result<DaemonLaunchDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.restart_daemon(request);
+        let (config, paths) = self.load_config_and_paths()?;
+        if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
+            return Ok(daemon_launch(managed.restart()?, &config.daemon));
         }
 
-        let config_store = self.config_store();
-        let (_, paths) = self.load_config_and_paths()?;
-        let pid_file = PidFile::new(paths.pid_file);
-        let ready = RestartDaemon::new(&pid_file, &config_store).restart()?;
-        ensure_daemon_ports_available(
-            ready.daemon_config.http_port,
-            ready.daemon_config.https_port,
-            ready.daemon_config.dns_port,
-        )?;
-        let child = self.spawn_daemon_process(request.verbose)?;
-        let pid = self.wait_for_daemon_start(
-            child,
-            &PidFile::new(ready.paths.pid_file.clone()),
-            &ready.paths.log_file,
-        )?;
-
-        Ok(DaemonLaunchDto {
-            pid,
-            lan_ip: get_lan_ip().to_string(),
-            http_port: ready.daemon_config.http_port,
-            https_port: ready.daemon_config.https_port,
-            dns_port: ready.daemon_config.dns_port,
-        })
+        let daemon = DaemonHandle::new(&paths);
+        let ready = RestartDaemon::new(&daemon, &self.config_store()).restart()?;
+        self.spawn_after_stop(ready, request)
     }
 
     pub fn reload_daemon(&self, request: StartDaemonRequest) -> Result<DaemonLaunchDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.reload_daemon(request);
+        let (config, paths) = self.load_config_and_paths()?;
+        let daemon = DaemonHandle::new(&paths);
+        if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
+            if !daemon.is_running()? {
+                bail!(
+                    "{} daemon is not running.\nStart it with: {}",
+                    BRANDING.app_name,
+                    BRANDING.admin_command("start")
+                );
+            }
+            return Ok(daemon_launch(managed.restart()?, &config.daemon));
         }
 
-        let config_store = self.config_store();
-        let (_, paths) = self.load_config_and_paths()?;
-        let pid_file = PidFile::new(paths.pid_file);
-        let ready = RestartDaemon::new(&pid_file, &config_store).reload()?;
+        let ready = RestartDaemon::new(&daemon, &self.config_store()).reload()?;
+        self.spawn_after_stop(ready, request)
+    }
+
+    fn spawn_after_stop(
+        &self,
+        ready: crate::application::restart_daemon::RestartReady,
+        request: StartDaemonRequest,
+    ) -> Result<DaemonLaunchDto> {
         ensure_daemon_ports_available(
             ready.daemon_config.http_port,
             ready.daemon_config.https_port,
             ready.daemon_config.dns_port,
+            ready.daemon_config.lan_access,
         )?;
         let child = self.spawn_daemon_process(request.verbose)?;
         let pid = self.wait_for_daemon_start(
@@ -2683,47 +2491,11 @@ impl DesktopApi {
             &ready.paths.log_file,
         )?;
 
-        Ok(DaemonLaunchDto {
-            pid,
-            lan_ip: get_lan_ip().to_string(),
-            http_port: ready.daemon_config.http_port,
-            https_port: ready.daemon_config.https_port,
-            dns_port: ready.daemon_config.dns_port,
-        })
+        Ok(daemon_launch(pid, &ready.daemon_config))
     }
 
-    /// Restarts the daemon when it runs an older build of the binary this API
-    /// launches daemons with, which happens when an app update or a manual
-    /// reinstall replaced the file under a running daemon.
-    pub fn restart_daemon_if_outdated(&self) -> Result<DaemonBinaryCheck> {
-        let Some(installed) = BinaryIdentity::of(&self.binary_path) else {
-            return Ok(DaemonBinaryCheck::OtherInstall);
-        };
-        let (_, paths) = self.load_config_and_paths()?;
-        let (pid, reported) = match MgmtSocketClient::new(&paths.socket_path).daemon_binary() {
-            Ok(status) => status,
-            Err(DaemonConnectionError::NotRunning) => return Ok(DaemonBinaryCheck::NotRunning),
-            Err(error) => return Err(anyhow!("Could not read the daemon status: {error}")),
-        };
-        let reported_path = match reported {
-            Some(_) => None,
-            None => pid.and_then(process_executable),
-        };
-
-        let check = check_daemon_binary(&installed, reported.as_ref(), reported_path.as_deref());
-        if check == DaemonBinaryCheck::Outdated {
-            self.restart_daemon(StartDaemonRequest { verbose: false })?;
-        }
-        Ok(check)
-    }
-
-    /// Forwards a launch session report to the daemon, through the system
-    /// helper when the daemon socket belongs to root.
+    /// Forwards a launch session report to the daemon.
     pub fn report_launch_session(&self, update: &LaunchSessionUpdate) -> Result<()> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.report_launch_session(update.clone());
-        }
-
         let (_, paths) = self.load_config_and_paths()?;
         MgmtSocketClient::new(&paths.socket_path)
             .report_launch_session(update)
@@ -2744,10 +2516,6 @@ impl DesktopApi {
     }
 
     pub fn read_logs(&self, request: LogsRequest) -> Result<LogsDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.read_logs(request);
-        }
-
         let (_, paths) = self.load_config_and_paths()?;
         let log_path = paths.log_file;
 
@@ -2798,9 +2566,7 @@ impl DesktopApi {
         }
 
         let mut cmd = Command::new(&self.binary_path);
-        // Own process group: launchd kills the helper's group when the helper
-        // exits (it recycles itself after every update), and the daemon must
-        // survive that.
+        // Own process group, so the daemon outlives the app that started it.
         cmd.process_group(0);
         cmd.arg("--config")
             .arg(&self.config_path)
@@ -2958,7 +2724,7 @@ impl DesktopApi {
     }
 
     fn store_project_root_path(&self, project_id: &str, root_path: &Path) -> Result<()> {
-        if self.direct_mode {
+        if self.cli_mode {
             return Ok(());
         }
 
@@ -2974,7 +2740,7 @@ impl DesktopApi {
     }
 
     fn remove_project_root_path(&self, project_id: &str) -> Result<()> {
-        if self.direct_mode {
+        if self.cli_mode {
             return Ok(());
         }
 
@@ -2985,18 +2751,6 @@ impl DesktopApi {
         }
     }
 
-    fn should_use_system_helper(&self) -> bool {
-        !self.direct_mode && (self.config_path.starts_with("/etc") || BRANDING.is_dev_profile())
-    }
-
-    fn should_use_system_helper_for_worktree_attach(&self) -> bool {
-        !self.direct_mode && self.config_path.starts_with("/etc")
-    }
-
-    fn cli_helper_ready(&self) -> bool {
-        self.connected_helper_client().ok().flatten().is_some()
-    }
-
     fn cli_access_ready(&self) -> bool {
         cli_command_points_to_binary(&self.cli_command_path(), &self.binary_path)
     }
@@ -3005,14 +2759,20 @@ impl DesktopApi {
         PathBuf::from(CLI_INSTALL_DIR).join(BRANDING.cli_command())
     }
 
+    /// Links the terminal command, asking for approval only when the user cannot
+    /// write to the folder, which is the usual case on Apple Silicon Macs.
     fn install_cli_access(&self) -> Result<CliAccessDto> {
         self.ensure_cli_binary_exists()?;
 
         let command_path = self.cli_command_path();
         let already_ready = cli_command_points_to_binary(&command_path, &self.binary_path);
 
-        if !already_ready {
-            ensure_cli_command_link(&command_path, &self.binary_path)?;
+        if !already_ready && let Some(link) = self.link_cli_or_defer()? {
+            let changes = SystemChanges {
+                cli_link: Some(link),
+                ..SystemChanges::default()
+            };
+            macos_system::run_with_approval(&changes.script(), self.approval())?;
         }
 
         Ok(CliAccessDto {
@@ -3022,29 +2782,49 @@ impl DesktopApi {
         })
     }
 
-    fn cli_access_step_with(
-        &self,
-        setup: impl FnOnce(&SystemHelperClient) -> Result<CliAccessDto>,
-    ) -> StepDto {
+    /// Tries to link as the user. Returns the link when it takes an administrator.
+    fn link_cli_or_defer(&self) -> Result<Option<CliLink>> {
+        let link = self.cli_command_path();
+        match ensure_cli_command_link(&link, &self.binary_path) {
+            Ok(()) => Ok(None),
+            Err(error) if cfg!(target_os = "macos") && is_permission_denied(&error) => {
+                Ok(Some(CliLink {
+                    link,
+                    target: self.binary_path.clone(),
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The link to include in the install's one approval, if it needs one. Any other
+    /// failure is reported by `cli_access_step` once the install is done.
+    fn cli_link_needing_approval(&self) -> Option<CliLink> {
+        if self.cli_mode || self.cli_access_ready() || !self.binary_path.exists() {
+            return None;
+        }
+        self.link_cli_or_defer().ok().flatten()
+    }
+
+    /// The link uninstall should remove: ours, and only if it still points here.
+    fn managed_cli_link(&self) -> Option<PathBuf> {
+        (cfg!(target_os = "macos") && self.cli_access_ready()).then(|| self.cli_command_path())
+    }
+
+    fn cli_access_step(&self) -> StepDto {
         let label = Some("Install command line access".into());
+        let command_path = self.cli_command_path();
 
-        if self.should_use_system_helper() {
-            let helper = match self.ensure_helper_running() {
-                Ok(helper) => helper,
-                Err(error) => {
-                    return StepDto {
-                        label,
-                        status: "warning".into(),
-                        message: format!(
-                            "{} finished installing, but the `{}` terminal command could not be enabled: {error}",
-                            BRANDING.app_name,
-                            BRANDING.cli_command(),
-                        ),
-                    };
-                }
+        if self.cli_access_ready() {
+            return StepDto {
+                label,
+                status: "success".into(),
+                message: format!(
+                    "`{}` is available at {}.",
+                    BRANDING.cli_command(),
+                    command_path.display(),
+                ),
             };
-
-            return map_cli_access_step(label, setup(&helper));
         }
 
         map_cli_access_step(label, self.install_cli_access())
@@ -3109,10 +2889,6 @@ impl DesktopApi {
     }
 
     fn node_trust_step(&self) -> Option<StepDto> {
-        if self.direct_mode {
-            return None;
-        }
-
         let label = Some("Enable Node.js certificate trust".into());
 
         Some(match self.setup_node_trust() {
@@ -3144,10 +2920,6 @@ impl DesktopApi {
     }
 
     fn remove_node_trust_step(&self) -> Option<StepDto> {
-        if self.direct_mode {
-            return None;
-        }
-
         let label = Some("Remove Node.js certificate trust".into());
 
         Some(match node_trust::uninstall(&self.ca_cert_path()) {
@@ -3212,7 +2984,6 @@ impl DesktopApi {
                     reason
                 ),
             }),
-            Ok(IosSimulatorTrust::CurrentUserUnavailable) => None,
             Err(error) => Some(StepDto {
                 label,
                 status: "warning".into(),
@@ -3228,297 +2999,6 @@ impl DesktopApi {
         None
     }
 
-    fn connected_helper_client(&self) -> Result<Option<SystemHelperClient>> {
-        if !self.should_use_system_helper() {
-            return Ok(None);
-        }
-
-        let client = SystemHelperClient::new(self.helper_socket_path()?);
-        if client.ping().is_err() {
-            return Ok(None);
-        }
-
-        self.refresh_outdated_helper_once(&client);
-
-        if self.helper_matches_binary_path()? && self.helper_matches_runtime_config(&client)? {
-            return Ok(Some(client));
-        }
-
-        eprintln!(
-            "ignoring running {} helper because it does not match the current runtime at {}",
-            BRANDING.app_name,
-            self.binary_path.display()
-        );
-        Ok(None)
-    }
-
-    fn ensure_helper_running(&self) -> Result<SystemHelperClient> {
-        let socket_path = self.helper_socket_path()?;
-        let client = SystemHelperClient::new(socket_path.clone());
-        if client.ping().is_ok() {
-            self.refresh_outdated_helper_once(&client);
-        }
-        if client.ping().is_ok()
-            && self.helper_matches_binary_path()?
-            && self.helper_matches_runtime_config(&client)?
-        {
-            return Ok(client);
-        }
-
-        if self.recover_helper_without_admin(&client)? {
-            return Ok(client);
-        }
-
-        let uid = current_uid()?;
-        let args = vec![
-            "helper".into(),
-            "ensure-running".into(),
-            "--socket".into(),
-            socket_path.display().to_string(),
-            "--uid".into(),
-            uid.to_string(),
-        ];
-        self.run_cli_command_with_admin(&args)?;
-
-        for _ in 0..50 {
-            if client.ping().is_ok() {
-                return Ok(client);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        bail!(
-            "{} system helper did not become ready in time.",
-            BRANDING.app_name
-        )
-    }
-
-    /// Detects, once per app process, a helper that kept running a previous
-    /// build after an in-place app update (its process predates the binary on
-    /// disk) and refreshes it: silently for helpers that support relaunching,
-    /// with a single automatic administrator prompt for legacy helpers that
-    /// predate the relaunch command. Without this, users would have to run
-    /// `launchctl kickstart` by hand after updating.
-    #[cfg(target_os = "macos")]
-    fn refresh_outdated_helper_once(&self, client: &SystemHelperClient) {
-        use std::sync::OnceLock;
-        static ATTEMPTED: OnceLock<()> = OnceLock::new();
-        if ATTEMPTED.set(()).is_err() {
-            return;
-        }
-
-        if let Err(error) = self.refresh_outdated_helper(client) {
-            eprintln!(
-                "{} could not refresh the outdated system helper: {error}",
-                BRANDING.app_name
-            );
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn refresh_outdated_helper_once(&self, _client: &SystemHelperClient) {}
-
-    #[cfg(target_os = "macos")]
-    fn refresh_outdated_helper(&self, client: &SystemHelperClient) -> Result<()> {
-        let socket_path = self.helper_socket_path()?;
-        let Some(started_at) = helper_process_started_at(&socket_path) else {
-            return Ok(());
-        };
-        let binary_path =
-            fs::canonicalize(&self.binary_path).unwrap_or_else(|_| self.binary_path.clone());
-        let Ok(modified) = fs::metadata(&binary_path).and_then(|metadata| metadata.modified())
-        else {
-            return Ok(());
-        };
-        if modified <= started_at {
-            return Ok(());
-        }
-        if !self.helper_matches_binary_path()? {
-            // The service points at another binary; the mutation paths own
-            // that case with a full reinstall.
-            return Ok(());
-        }
-
-        // Helpers that know the relaunch command recycle without credentials.
-        if client.relaunch_helper().is_ok() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            wait_for_helper_ping(client);
-            return Ok(());
-        }
-
-        // Legacy helper from before the relaunch command: refresh it with a
-        // single automatic administrator prompt.
-        let uid = current_uid()?;
-        self.run_cli_command_with_admin(&[
-            "helper".into(),
-            "ensure-running".into(),
-            "--socket".into(),
-            socket_path.display().to_string(),
-            "--uid".into(),
-            uid.to_string(),
-        ])?;
-        wait_for_helper_ping(client);
-        Ok(())
-    }
-
-    /// Recovers a stale or unreachable helper without an administrator prompt
-    /// when the launchd service already points at the current binary: the
-    /// helper is asked to exit (or has already exited) and launchd's
-    /// `KeepAlive` respawns it from the same path, picking up in-place app
-    /// updates. Returns whether the helper became healthy.
-    #[cfg(target_os = "macos")]
-    fn recover_helper_without_admin(&self, client: &SystemHelperClient) -> Result<bool> {
-        if !self.helper_matches_binary_path()? {
-            return Ok(false);
-        }
-
-        if client.ping().is_ok() {
-            if client.relaunch_helper().is_err() {
-                // A helper too old to know the relaunch command cannot recycle
-                // itself; fall back to the administrator prompt.
-                return Ok(false);
-            }
-            // Give the acknowledged exit a moment so the poll below observes
-            // the respawned helper, not the one about to terminate.
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-
-        // launchd throttles service respawns (up to ~10s for services that
-        // just started); poll a little past that.
-        for _ in 0..150 {
-            if client.ping().is_ok() && self.helper_matches_runtime_config(client)? {
-                return Ok(true);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        Ok(false)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn recover_helper_without_admin(&self, _client: &SystemHelperClient) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn run_privileged_desktop_install(&self) -> Result<()> {
-        let socket_path = self.helper_socket_path()?;
-        let uid = current_uid()?;
-        let commands = [
-            vec!["install".into()],
-            vec![
-                "helper".into(),
-                "uninstall-service".into(),
-                "--uid".into(),
-                uid.to_string(),
-            ],
-            vec![
-                "helper".into(),
-                "ensure-running".into(),
-                "--socket".into(),
-                socket_path.display().to_string(),
-                "--uid".into(),
-                uid.to_string(),
-            ],
-        ];
-
-        self.run_cli_commands_with_admin(&commands)?;
-        Ok(())
-    }
-
-    fn helper_matches_runtime_config(&self, client: &SystemHelperClient) -> Result<bool> {
-        if !BRANDING.is_dev_profile() {
-            return Ok(true);
-        }
-
-        let helper_config = match client.get_config() {
-            Ok(config) => config,
-            Err(_) => return Ok(false),
-        };
-        let current_config = self.config_store().load()?;
-        let expected_path = self.config_path.display().to_string();
-
-        Ok(helper_config.config_path == expected_path
-            && helper_config.daemon.http_port == current_config.daemon.http_port
-            && helper_config.daemon.https_port == current_config.daemon.https_port
-            && helper_config.daemon.dns_port == current_config.daemon.dns_port)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn helper_matches_binary_path(&self) -> Result<bool> {
-        let uid = current_uid()?;
-        let plist_path = PathBuf::from("/Library/LaunchDaemons").join(format!(
-            "{}.{}.plist",
-            BRANDING.helper_service_prefix(),
-            uid
-        ));
-
-        if !plist_path.exists() {
-            return Ok(false);
-        }
-
-        let plist = fs::read_to_string(&plist_path).with_context(|| {
-            format!(
-                "Failed to read the {} helper plist at {}",
-                BRANDING.app_name,
-                plist_path.display()
-            )
-        })?;
-
-        let expected_binary =
-            fs::canonicalize(&self.binary_path).unwrap_or_else(|_| self.binary_path.clone());
-        Ok(plist.contains(&escape_xml(&expected_binary.display().to_string())))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn helper_matches_binary_path(&self) -> Result<bool> {
-        Ok(true)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn run_cli_command_with_admin(&self, args: &[String]) -> Result<String> {
-        self.run_cli_commands_with_admin(&[args.to_vec()])
-    }
-
-    #[cfg(target_os = "macos")]
-    fn run_cli_commands_with_admin(&self, commands: &[Vec<String>]) -> Result<String> {
-        self.ensure_cli_binary_exists()?;
-
-        let command = cli_shell_commands(&self.binary_path, &self.config_path, commands);
-        let script = format!(
-            "do shell script \"{}\" with administrator privileges",
-            escape_applescript_string(&command)
-        );
-
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .context(format!(
-                "Failed to launch macOS administrator prompt for {}",
-                BRANDING.app_name
-            ))?;
-
-        if output.status.success() {
-            return Ok(command_output(&output));
-        }
-
-        bail!(cli_failure_message(&output));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn run_cli_command_with_admin(&self, _args: &[String]) -> Result<String> {
-        self.run_cli_commands_with_admin(&[])
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn run_cli_commands_with_admin(&self, _commands: &[Vec<String>]) -> Result<String> {
-        bail!(
-            "Desktop system-mode actions currently require macOS administrator integration. \
-             Run the equivalent `{}` CLI command manually on this platform.",
-            BRANDING.cli_command()
-        )
-    }
-
     fn ensure_cli_binary_exists(&self) -> Result<()> {
         if self.binary_path.exists() {
             return Ok(());
@@ -3532,67 +3012,11 @@ impl DesktopApi {
         );
     }
 
-    fn helper_socket_path(&self) -> Result<PathBuf> {
-        Ok(helper_socket_path(current_uid()?))
-    }
-
     fn ca_cert_path(&self) -> PathBuf {
         self.config_store()
             .load()
             .map(|config| config.paths.data_dir.join("ca.crt"))
             .unwrap_or_else(|_| LocalifyPaths::default().data_dir.join("ca.crt"))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn effective_desktop_ca_installed(&self) -> Result<bool> {
-        let cert_path = self.ca_cert_path();
-
-        if macos_user_ca_is_trusted(&cert_path)? {
-            return Ok(true);
-        }
-
-        let (_, paths) = self.load_config_and_paths()?;
-        let certs = CertificateService::new(&paths);
-        certs.is_ca_installed().map_err(Into::into)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn effective_desktop_ca_installed(&self) -> Result<bool> {
-        let (_, paths) = self.load_config_and_paths()?;
-        let certs = CertificateService::new(&paths);
-        certs.is_ca_installed().map_err(Into::into)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn ensure_desktop_ca_trust_step(&self) -> Result<Option<StepDto>> {
-        Ok(Some(macos_ensure_user_ca_trust(&self.ca_cert_path())?))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn ensure_desktop_ca_trust_step(&self) -> Result<Option<StepDto>> {
-        Ok(None)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn remove_desktop_ca_trust_step(&self) -> Option<StepDto> {
-        let cert_path = self.ca_cert_path();
-
-        Some(match macos_remove_user_ca_trust(&cert_path) {
-            Ok(step) => step,
-            Err(error) => StepDto {
-                label: Some("Remove CA trust from your macOS account".into()),
-                status: "warning".into(),
-                message: format!(
-                    "{} removed its system components, but the CA could not be fully removed from your macOS login keychain: {error}",
-                    BRANDING.app_name
-                ),
-            },
-        })
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn remove_desktop_ca_trust_step(&self) -> Option<StepDto> {
-        None
     }
 
     fn ensure_config_writable(&self) -> Result<()> {
@@ -4135,111 +3559,6 @@ fn parse_desktop_route(route: &str) -> Result<Route> {
     Ok(Route::new(path, target))
 }
 
-fn normalize_desktop_route(route: &str) -> Result<String> {
-    let trimmed = route.trim();
-    if trimmed.contains('=') {
-        Route::parse(trimmed).map_err(|error| anyhow::anyhow!("Invalid route: {error}"))?;
-        return Ok(trimmed.to_string());
-    }
-
-    RouteTarget::parse(trimmed)
-        .map_err(|error| anyhow::anyhow!("Invalid route target: {error}"))?;
-    Ok(format!("/={trimmed}"))
-}
-
-/// Polls the helper socket until it answers, covering the launchd respawn
-/// throttle (~10s for services that restarted recently).
-#[cfg(target_os = "macos")]
-fn wait_for_helper_ping(client: &SystemHelperClient) -> bool {
-    for _ in 0..150 {
-        if client.ping().is_ok() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    false
-}
-
-/// Returns when the helper process serving the given socket started, derived
-/// from `ps` elapsed time. `None` when the process cannot be identified.
-#[cfg(target_os = "macos")]
-fn helper_process_started_at(socket_path: &Path) -> Option<SystemTime> {
-    let pattern = format!("helper serve --socket {}", socket_path.display());
-    let output = Command::new("pgrep")
-        .arg("-f")
-        .arg(&pattern)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pid = stdout.lines().next()?.trim();
-    if pid.is_empty() {
-        return None;
-    }
-
-    let output = Command::new("ps")
-        .args(["-o", "etime=", "-p", pid])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let elapsed = parse_ps_etime(String::from_utf8_lossy(&output.stdout).trim())?;
-    SystemTime::now().checked_sub(elapsed)
-}
-
-/// Parses `ps -o etime=` values shaped as `[[dd-]hh:]mm:ss`.
-#[cfg(target_os = "macos")]
-fn parse_ps_etime(value: &str) -> Option<Duration> {
-    let (days, clock) = match value.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, value),
-    };
-
-    let parts = clock.split(':').collect::<Vec<_>>();
-    let (hours, minutes, seconds): (u64, u64, u64) = match parts.as_slice() {
-        [hours, minutes, seconds] => (
-            hours.parse().ok()?,
-            minutes.parse().ok()?,
-            seconds.parse().ok()?,
-        ),
-        [minutes, seconds] => (0, minutes.parse().ok()?, seconds.parse().ok()?),
-        _ => return None,
-    };
-
-    Some(Duration::from_secs(
-        ((days * 24 + hours) * 60 + minutes) * 60 + seconds,
-    ))
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn command_output(output: &std::process::Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (false, true) => stdout,
-        (true, false) => stderr,
-        (false, false) => format!("{stdout}\n{stderr}"),
-        (true, true) => String::new(),
-    }
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn cli_failure_message(output: &std::process::Output) -> String {
-    let message = command_output(output);
-    if message.is_empty() {
-        format!(
-            "{} CLI command failed without diagnostic output.",
-            BRANDING.app_name
-        )
-    } else {
-        message
-    }
-}
-
 fn daemon_start_failure_message(status: std::process::ExitStatus, log_path: &Path) -> String {
     let exit_detail = status
         .code()
@@ -4288,62 +3607,6 @@ fn startup_log_excerpt(log_path: &Path) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
-}
-
-#[cfg(target_os = "macos")]
-fn is_missing_macos_certificate_error(message: &str) -> bool {
-    message.contains("could not be found")
-        || message.contains("The specified item could not be found")
-        || message.contains("The certificate was not found")
-        || message.contains("Unable to delete certificate matching")
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn cli_shell_command(binary_path: &Path, config_path: &Path, args: &[String]) -> String {
-    cli_shell_command_parts(binary_path, config_path, args).join(" ")
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn cli_shell_commands(binary_path: &Path, config_path: &Path, commands: &[Vec<String>]) -> String {
-    if let [args] = commands {
-        return cli_shell_command(binary_path, config_path, args);
-    }
-
-    commands
-        .iter()
-        .map(|args| cli_shell_command_parts(binary_path, config_path, args).join(" "))
-        .collect::<Vec<_>>()
-        .join(" && ")
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn cli_shell_command_parts(binary_path: &Path, config_path: &Path, args: &[String]) -> Vec<String> {
-    let mut parts = Vec::new();
-    if let Some(profile) = BRANDING.active_profile() {
-        parts.push(format!(
-            "{}={}",
-            BRANDING.profile_env(),
-            shell_escape(&profile)
-        ));
-    }
-
-    parts.extend([
-        shell_escape(&binary_path.to_string_lossy()),
-        shell_escape("--config"),
-        shell_escape(&config_path.to_string_lossy()),
-    ]);
-    parts.extend(args.iter().map(|arg| shell_escape(arg)));
-    parts
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'"'"'"#))
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn escape_applescript_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn cli_command_points_to_binary(command_path: &Path, binary_path: &Path) -> bool {
@@ -4480,22 +3743,6 @@ fn map_cli_access_step(label: Option<String>, result: Result<CliAccessDto>) -> S
     }
 }
 
-fn root_ca_verification_step(ca_installed: bool) -> StepDto {
-    if ca_installed {
-        return StepDto {
-            label: Some("Root CA".into()),
-            status: "success".into(),
-            message: "Root CA is trusted by macOS.".into(),
-        };
-    }
-
-    StepDto {
-        label: Some("Root CA".into()),
-        status: "warning".into(),
-        message: "Root CA setup finished, but macOS still does not trust it. HTTPS certificates will not work until the CA is trusted.".into(),
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn format_ios_simulator_names(device_names: &[String]) -> String {
     match device_names {
@@ -4523,385 +3770,6 @@ fn map_node_trust_dto(
         launchctl_ready: status.launchctl_ready,
         last_error,
     }
-}
-
-#[cfg(target_os = "macos")]
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-#[cfg(target_os = "macos")]
-fn macos_user_ca_is_trusted(cert_path: &Path) -> Result<bool> {
-    if !cert_path.exists() {
-        return Ok(false);
-    }
-
-    let keychain_path = macos_login_keychain_path()?;
-    let cert_path = path_as_utf8(cert_path)?;
-    let keychain_path = path_as_utf8(&keychain_path)?;
-    let output = Command::new("security")
-        .args([
-            "verify-cert",
-            "-c",
-            &cert_path,
-            "-p",
-            "basic",
-            "-L",
-            "-k",
-            &keychain_path,
-        ])
-        .output()
-        .context(format!(
-            "Failed to verify the {} CA trust in the current macOS account",
-            BRANDING.app_name
-        ))?;
-
-    Ok(output.status.success())
-}
-
-#[cfg(target_os = "macos")]
-fn macos_ensure_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
-    if !cert_path.exists() {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: "warning".into(),
-            message: format!(
-                "The {} CA file does not exist yet, so it could not be trusted by this macOS account.",
-                BRANDING.app_name
-            ),
-        });
-    }
-
-    let keychain_path = macos_login_keychain_path()?;
-    let removed_stale = match delete_stale_macos_keychain_certificates(&keychain_path, cert_path) {
-        Ok(removed) => removed,
-        Err(error) => {
-            return Ok(StepDto {
-                label: Some("Trust CA in your macOS account".into()),
-                status: "warning".into(),
-                message: format!(
-                    "macOS could not remove stale {} CA entries before applying trust: {error}",
-                    BRANDING.app_name
-                ),
-            });
-        }
-    };
-
-    if macos_keychain_contains_certificate(&keychain_path, cert_path)?
-        && macos_user_ca_is_trusted(cert_path)?
-    {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: if removed_stale > 0 {
-                "success".into()
-            } else {
-                "skipped".into()
-            },
-            message: if removed_stale > 0 {
-                format!(
-                    "Removed stale {} CA entries and verified the current CA trust for this macOS account.",
-                    BRANDING.app_name
-                )
-            } else {
-                format!(
-                    "The {} CA was already trusted by this macOS account.",
-                    BRANDING.app_name
-                )
-            },
-        });
-    }
-
-    if let Err(error) = delete_macos_keychain_certificates(&keychain_path) {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: "warning".into(),
-            message: format!(
-                "macOS could not remove stale {} CA entries before applying trust: {error}",
-                BRANDING.app_name
-            ),
-        });
-    }
-
-    let cert_path_value = path_as_utf8(cert_path)?;
-    let keychain_path_value = path_as_utf8(&keychain_path)?;
-    let output = Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-r",
-            "trustRoot",
-            "-k",
-            &keychain_path_value,
-            &cert_path_value,
-        ])
-        .output()
-        .context(format!(
-            "Failed to ask macOS to trust the {} CA for this account",
-            BRANDING.app_name
-        ))?;
-
-    if !output.status.success() {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: "warning".into(),
-            message: format!(
-                "macOS did not trust the {} CA for this account: {}",
-                BRANDING.app_name,
-                cli_failure_message(&output)
-            ),
-        });
-    }
-
-    if !macos_keychain_contains_certificate(&keychain_path, cert_path)?
-        || !macos_user_ca_is_trusted(cert_path)?
-    {
-        return Ok(StepDto {
-            label: Some("Trust CA in your macOS account".into()),
-            status: "warning".into(),
-            message: format!(
-                "macOS accepted the {} CA trust request, but verification still failed.",
-                BRANDING.app_name
-            ),
-        });
-    }
-
-    Ok(StepDto {
-        label: Some("Trust CA in your macOS account".into()),
-        status: "success".into(),
-        message: format!(
-            "The {} CA is trusted by this macOS account.",
-            BRANDING.app_name
-        ),
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn macos_remove_user_ca_trust(cert_path: &Path) -> Result<StepDto> {
-    let keychain_path = macos_login_keychain_path()?;
-    let had_trust = macos_user_ca_is_trusted(cert_path)?;
-
-    if cert_path.exists() {
-        let cert_path = path_as_utf8(cert_path)?;
-        let output = Command::new("security")
-            .args(["remove-trusted-cert", &cert_path])
-            .output()
-            .context(format!(
-                "Failed to remove the trusted {} CA from the current macOS account",
-                BRANDING.app_name
-            ))?;
-
-        if !output.status.success() {
-            let message = cli_failure_message(&output);
-            let not_found = is_missing_macos_certificate_error(&message);
-
-            if !not_found {
-                bail!(
-                    "Failed to remove the trusted {} CA from your macOS login keychain: {}",
-                    BRANDING.app_name,
-                    message
-                );
-            }
-        }
-    }
-
-    let removed_certs = delete_macos_keychain_certificates(&keychain_path)?;
-
-    if had_trust || removed_certs > 0 {
-        return Ok(StepDto {
-            label: Some("Remove CA trust from your macOS account".into()),
-            status: "success".into(),
-            message: format!(
-                "Removed the {} local CA from your macOS login keychain for this account.",
-                BRANDING.app_name
-            ),
-        });
-    }
-
-    Ok(StepDto {
-        label: Some("Remove CA trust from your macOS account".into()),
-        status: "skipped".into(),
-        message: format!(
-            "No {} CA trust entry was present in your macOS login keychain.",
-            BRANDING.app_name
-        ),
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn macos_login_keychain_path() -> Result<PathBuf> {
-    let output = Command::new("security")
-        .arg("login-keychain")
-        .output()
-        .context("Failed to resolve the current macOS login keychain")?;
-
-    if output.status.success() {
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let keychain = raw.trim().trim_matches('"');
-        if !keychain.is_empty() {
-            return Ok(PathBuf::from(keychain));
-        }
-    }
-
-    Ok(user_home_dir()?.join("Library/Keychains/login.keychain-db"))
-}
-
-#[cfg(target_os = "macos")]
-fn delete_macos_keychain_certificates(keychain_path: &Path) -> Result<usize> {
-    let mut removed = 0;
-
-    for hash in find_macos_keychain_certificate_hashes(keychain_path)? {
-        delete_macos_keychain_certificate_hash(keychain_path, &hash)?;
-        removed += 1;
-    }
-
-    Ok(removed)
-}
-
-#[cfg(target_os = "macos")]
-fn delete_stale_macos_keychain_certificates(
-    keychain_path: &Path,
-    cert_path: &Path,
-) -> Result<usize> {
-    let current_hash = certificate_sha1(cert_path)?;
-    let mut removed = 0;
-
-    for hash in find_macos_keychain_certificate_hashes(keychain_path)? {
-        if hash != current_hash {
-            delete_macos_keychain_certificate_hash(keychain_path, &hash)?;
-            removed += 1;
-        }
-    }
-
-    Ok(removed)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_keychain_contains_certificate(keychain_path: &Path, cert_path: &Path) -> Result<bool> {
-    let current_hash = certificate_sha1(cert_path)?;
-    Ok(find_macos_keychain_certificate_hashes(keychain_path)?
-        .iter()
-        .any(|hash| hash == &current_hash))
-}
-
-#[cfg(target_os = "macos")]
-fn find_macos_keychain_certificate_hashes(keychain_path: &Path) -> Result<Vec<String>> {
-    let keychain_path = path_as_utf8(keychain_path)?;
-    let output = Command::new("security")
-        .args([
-            "find-certificate",
-            "-c",
-            BRANDING.ca_name().as_str(),
-            "-a",
-            "-Z",
-            &keychain_path,
-        ])
-        .output()
-        .context(format!(
-            "Failed to find {} CA entries in the macOS login keychain",
-            BRANDING.app_name
-        ))?;
-
-    if output.status.success() {
-        return Ok(parse_security_sha1_hashes(&String::from_utf8_lossy(
-            &output.stdout,
-        )));
-    }
-
-    let message = cli_failure_message(&output);
-    if is_missing_macos_certificate_error(&message) {
-        return Ok(Vec::new());
-    }
-
-    bail!(
-        "Failed to find {} CA entries in your macOS login keychain: {}",
-        BRANDING.app_name,
-        message
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn delete_macos_keychain_certificate_hash(keychain_path: &Path, hash: &str) -> Result<()> {
-    let keychain_path = path_as_utf8(keychain_path)?;
-    let output = Command::new("security")
-        .args(["delete-certificate", "-Z", hash, &keychain_path])
-        .output()
-        .context(format!(
-            "Failed to remove a stale {} CA from the macOS login keychain",
-            BRANDING.app_name
-        ))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let message = cli_failure_message(&output);
-    if is_missing_macos_certificate_error(&message) {
-        return Ok(());
-    }
-
-    bail!(
-        "Failed to delete the {} CA from your macOS login keychain: {}",
-        BRANDING.app_name,
-        message
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn certificate_sha1(cert_path: &Path) -> Result<String> {
-    let cert_path = path_as_utf8(cert_path)?;
-    let output = Command::new("openssl")
-        .args(["x509", "-in", &cert_path, "-noout", "-fingerprint", "-sha1"])
-        .output()
-        .context(format!(
-            "Failed to calculate the {} CA fingerprint with openssl",
-            BRANDING.app_name
-        ))?;
-
-    if output.status.success() {
-        return parse_openssl_certificate_sha1(&String::from_utf8_lossy(&output.stdout));
-    }
-
-    bail!(
-        "Failed to calculate the {} CA fingerprint: {}",
-        BRANDING.app_name,
-        cli_failure_message(&output)
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn parse_security_sha1_hashes(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| line.strip_prefix("SHA-1 hash:"))
-        .map(normalize_certificate_hash)
-        .filter(|hash| !hash.is_empty())
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn parse_openssl_certificate_sha1(output: &str) -> Result<String> {
-    output
-        .lines()
-        .find_map(|line| line.split_once('=').map(|(_, value)| value))
-        .map(normalize_certificate_hash)
-        .filter(|hash| !hash.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Unexpected openssl fingerprint output: {}", output.trim()))
-}
-
-#[cfg(target_os = "macos")]
-fn normalize_certificate_hash(value: &str) -> String {
-    value.trim().replace(':', "").to_ascii_uppercase()
-}
-
-#[cfg(target_os = "macos")]
-fn path_as_utf8(path: &Path) -> Result<String> {
-    path.to_str()
-        .map(|value| value.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8: {}", path.display()))
 }
 
 fn is_missing_home_error(error: &anyhow::Error) -> bool {
@@ -5061,16 +3929,6 @@ fn map_project_service_info(
         target: value.primary_target.map(|target| target.to_string()),
         inferred: value.inferred,
     })
-}
-
-/// Executable path of a running process, from the process table.
-fn process_executable(pid: u32) -> Option<PathBuf> {
-    let output = Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let command = String::from_utf8_lossy(&output.stdout);
-    command.split_whitespace().next().map(PathBuf::from)
 }
 
 fn map_project_environment_info(value: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {
@@ -5865,51 +4723,6 @@ fn rollback_environment_domains(
     for pattern in patterns {
         let _ = unregister_domain.execute(pattern);
     }
-}
-
-fn is_stale_system_helper_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("system helper closed the connection without replying")
-        && message.contains("older build")
-}
-
-fn is_attach_project_not_git_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("is not inside a Git repository") && message.contains("attach worktrees")
-}
-
-fn should_restart_helper_after_attach_error(
-    error: &anyhow::Error,
-    request: &AttachProjectWorktreeRequest,
-) -> bool {
-    if is_stale_system_helper_error(error) {
-        return true;
-    }
-
-    is_attach_project_not_git_error(error) && attach_request_points_to_valid_git_worktree(request)
-}
-
-fn attach_request_points_to_valid_git_worktree(request: &AttachProjectWorktreeRequest) -> bool {
-    let worktree_root = PathBuf::from(request.root_path.trim());
-    if worktree_root.as_os_str().is_empty() {
-        return false;
-    }
-    let worktree_root = fs::canonicalize(&worktree_root).unwrap_or(worktree_root);
-    let Some(worktree_common_dir) = git_common_dir(&worktree_root) else {
-        return false;
-    };
-
-    let primary_common_dir = request
-        .primary_root_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|root_path| !root_path.is_empty())
-        .and_then(|root_path| git_common_dir(Path::new(root_path)))
-        .or_else(|| {
-            infer_primary_worktree_root(&worktree_root).and_then(|root| git_common_dir(&root))
-        });
-
-    primary_common_dir.as_ref() == Some(&worktree_common_dir)
 }
 
 #[derive(Debug, Clone)]
@@ -6968,6 +5781,41 @@ fn map_port_conflict(value: PortConflictProcess) -> PortConflictDto {
     }
 }
 
+/// Summary of a daemon that just started, whichever way it was started.
+fn daemon_launch(pid: u32, daemon: &crate::config::DaemonConfig) -> DaemonLaunchDto {
+    DaemonLaunchDto {
+        pid,
+        lan_ip: get_lan_ip().to_string(),
+        http_port: daemon.http_port,
+        https_port: daemon.https_port,
+        dns_port: daemon.dns_port,
+    }
+}
+
+fn service_ready_step(result: Result<u32>) -> StepDto {
+    let label = Some("Background service".into());
+    match result {
+        Ok(pid) => StepDto {
+            label,
+            status: "success".into(),
+            message: format!("Running as you (PID {pid}), and it starts at boot."),
+        },
+        Err(error) => StepDto {
+            label,
+            status: "warning".into(),
+            message: error.to_string(),
+        },
+    }
+}
+
+fn is_permission_denied(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    })
+}
+
 fn map_step(label: Option<String>, outcome: StepOutcome) -> StepDto {
     match outcome {
         StepOutcome::Success(message) => StepDto {
@@ -6983,6 +5831,11 @@ fn map_step(label: Option<String>, outcome: StepOutcome) -> StepDto {
         StepOutcome::Skipped(message) => StepDto {
             label,
             status: "skipped".into(),
+            message,
+        },
+        StepOutcome::Pending(message) => StepDto {
+            label,
+            status: "pending".into(),
             message,
         },
     }
@@ -7064,24 +5917,22 @@ mod tests {
     use super::{
         CliRemovalOutcome, DesktopApi, EnvironmentFileTarget, ROOT_ENV_FILE_FALLBACK,
         apply_local_project_root_paths_to_environments, cli_command_points_to_binary,
-        cli_shell_command, cli_shell_commands, ensure_cli_command_link,
-        ensure_environment_file_target, ensure_existing_domain_https, env_file_target,
-        environment_file_modified_at, environment_service_domains, export_route_string,
-        git_command, infer_primary_worktree_root, is_stale_system_helper_error,
-        normalize_desktop_route, normalize_project_snapshot_id, parse_desktop_route,
-        parse_git_worktree_porcelain, read_environment_file_target, remove_cli_command_link,
-        resolve_attach_primary_git_root, restart_daemon_after_certificate_refresh_step_with,
-        service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
+        ensure_cli_command_link, ensure_environment_file_target, ensure_existing_domain_https,
+        env_file_target, environment_file_modified_at, environment_service_domains,
+        export_route_string, git_command, infer_primary_worktree_root,
+        normalize_project_snapshot_id, parse_desktop_route, parse_git_worktree_porcelain,
+        read_environment_file_target, remove_cli_command_link, resolve_attach_primary_git_root,
+        restart_daemon_after_certificate_refresh_step_with, service_env_root, slugify,
         unique_environment_slug, validate_settings_snapshot,
     };
     use crate::config::LocalifyPaths;
     use crate::desktop::dto::{
-        AttachProjectWorktreeRequest, CreateProjectDomainRequest, CreateProjectWithDomainsRequest,
-        EnvironmentFileRequest, InitProjectRequest, InitProjectServiceRequest, LogsRequest,
-        ProjectInfoDto, ProjectServiceInfoDto, RelinkProjectRootRequest,
-        RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
-        SaveEnvironmentFileRequest, SettingsImportPreviewRequest, SettingsImportRequest,
-        SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSnapshotDto,
+        CreateProjectDomainRequest, CreateProjectWithDomainsRequest, EnvironmentFileRequest,
+        InitProjectRequest, InitProjectServiceRequest, LogsRequest, ProjectInfoDto,
+        ProjectServiceInfoDto, RelinkProjectRootRequest, RemoveProjectEnvironmentRequest,
+        RemoveProjectRequest, RouteDto, SaveEnvironmentFileRequest, SettingsImportPreviewRequest,
+        SettingsImportRequest, SettingsTransferDomainDto, SettingsTransferProjectDto,
+        SettingsTransferSnapshotDto,
     };
     use crate::domain::{DomainPattern, DomainRegistration, Route, RouteTarget};
     use crate::infrastructure::config::{
@@ -7390,94 +6241,6 @@ mod tests {
             Some("feature-worktree-env".into())
         );
         assert_eq!(slugify("  ---  "), None);
-    }
-
-    #[test]
-    fn stale_system_helper_error_matches_closed_older_helper_message() {
-        let error = anyhow::anyhow!(
-            "Localify system helper closed the connection without replying. \
-             It is likely running an older build."
-        );
-
-        assert!(is_stale_system_helper_error(&error));
-    }
-
-    #[test]
-    fn attach_missing_root_path_error_does_not_restart_helper() {
-        let error = anyhow::anyhow!("Project 'acme' has no root path.");
-        let request = AttachProjectWorktreeRequest {
-            project_id: "acme".into(),
-            root_path: "/Users/dev/.codex/worktrees/0815/ACME".into(),
-            primary_root_path: None,
-        };
-
-        assert!(!should_restart_helper_after_attach_error(&error, &request));
-    }
-
-    #[test]
-    fn attach_not_git_project_error_does_not_restart_helper() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let project_root = temp_dir.path().join("project");
-        let worktree_root = temp_dir.path().join("worktree");
-        fs::create_dir(&project_root).unwrap();
-        fs::create_dir(&worktree_root).unwrap();
-        let error = anyhow::anyhow!(
-            "Project 'acme' is not inside a Git repository, so Localify cannot attach worktrees."
-        );
-        let request = AttachProjectWorktreeRequest {
-            project_id: "acme".into(),
-            root_path: worktree_root.display().to_string(),
-            primary_root_path: Some(project_root.display().to_string()),
-        };
-
-        assert!(!should_restart_helper_after_attach_error(&error, &request));
-    }
-
-    #[test]
-    fn attach_not_git_project_error_restarts_helper_for_valid_git_worktree() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let (primary_root, worktree_root) = create_git_repo_with_worktree(temp_dir.path());
-        let error = anyhow::anyhow!(
-            "Project 'acme' is not inside a Git repository, so Localify cannot attach worktrees."
-        );
-        let request = AttachProjectWorktreeRequest {
-            project_id: "acme".into(),
-            root_path: worktree_root.display().to_string(),
-            primary_root_path: Some(primary_root.display().to_string()),
-        };
-
-        assert!(should_restart_helper_after_attach_error(&error, &request));
-    }
-
-    #[test]
-    fn attach_stale_helper_error_restarts_helper_once() {
-        let error = anyhow::anyhow!(
-            "Localify system helper closed the connection without replying. \
-             It is likely running an older build."
-        );
-        let request = AttachProjectWorktreeRequest {
-            project_id: "acme".into(),
-            root_path: "/Users/dev/.codex/worktrees/0815/ACME".into(),
-            primary_root_path: Some("/Users/dev/Developer/acme/ACME".into()),
-        };
-
-        assert!(should_restart_helper_after_attach_error(&error, &request));
-    }
-
-    #[test]
-    fn worktree_attach_uses_helper_only_for_system_config() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let user_api = DesktopApi::new(
-            temp_dir.path().join("Localify Dev").join("config.toml"),
-            temp_dir.path().join("localify"),
-        );
-        let system_api = DesktopApi::new(
-            PathBuf::from("/etc/localify/config.toml"),
-            temp_dir.path().join("localify"),
-        );
-
-        assert!(!user_api.should_use_system_helper_for_worktree_attach());
-        assert!(system_api.should_use_system_helper_for_worktree_attach());
     }
 
     #[test]
@@ -7951,11 +6714,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_desktop_route_wraps_bare_target_at_root() {
-        assert_eq!(normalize_desktop_route("3000").unwrap(), "/=3000");
-    }
-
-    #[test]
     fn export_route_string_preserves_root_route_explicitly() {
         let route = export_route_string(RouteDto {
             path: "/".into(),
@@ -8001,91 +6759,6 @@ mod tests {
 
         let error = validate_settings_snapshot(&snapshot).unwrap_err();
         assert!(error.to_string().contains("appears more than once"));
-    }
-
-    #[test]
-    fn shell_escape_quotes_single_quotes_safely() {
-        assert_eq!(shell_escape("my'app"), "'my'\"'\"'app'");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn parse_security_sha1_hashes_extracts_hashes() {
-        let output = "\
-SHA-256 hash: AE97C0D9A5C003B5CC12D1AC0DCF40FB6FF54A54559B537AB9132E1E3055237B
-SHA-1 hash: C8:DE:C7:92:EA:38:EF:36:4E:DC:AE:D5:33:41:41:5A:E8:46:0A:D5
-keychain: \"/Users/test/Library/Keychains/login.keychain-db\"
-SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
-";
-
-        assert_eq!(
-            super::parse_security_sha1_hashes(output),
-            vec![
-                "C8DEC792EA38EF364EDCAED53341415AE8460AD5",
-                "EF0D835649DD3E4D1D109862315A09B1EA40C27F"
-            ]
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn parse_openssl_certificate_sha1_normalizes_hash() {
-        let output =
-            "sha1 Fingerprint=C8:DE:C7:92:EA:38:EF:36:4E:DC:AE:D5:33:41:41:5A:E8:46:0A:D5\n";
-
-        assert_eq!(
-            super::parse_openssl_certificate_sha1(output).unwrap(),
-            "C8DEC792EA38EF364EDCAED53341415AE8460AD5"
-        );
-    }
-
-    #[test]
-    fn cli_shell_command_quotes_all_args() {
-        let command = cli_shell_command(
-            Path::new("/tmp/localify"),
-            Path::new("/etc/localify/config.toml"),
-            &[
-                "register".into(),
-                "my app.localify".into(),
-                "--route".into(),
-                "/=3000".into(),
-            ],
-        );
-
-        assert_eq!(
-            command,
-            "'/tmp/localify' '--config' '/etc/localify/config.toml' 'register' 'my app.localify' '--route' '/=3000'"
-        );
-    }
-
-    #[test]
-    fn cli_shell_commands_runs_commands_in_one_admin_session() {
-        let command = cli_shell_commands(
-            Path::new("/tmp/localify"),
-            Path::new("/etc/localify/config.toml"),
-            &[
-                vec!["install".into()],
-                vec![
-                    "helper".into(),
-                    "uninstall-service".into(),
-                    "--uid".into(),
-                    "501".into(),
-                ],
-                vec![
-                    "helper".into(),
-                    "ensure-running".into(),
-                    "--socket".into(),
-                    "/var/run/localify-helper-501.sock".into(),
-                    "--uid".into(),
-                    "501".into(),
-                ],
-            ],
-        );
-
-        assert_eq!(
-            command,
-            "'/tmp/localify' '--config' '/etc/localify/config.toml' 'install' && '/tmp/localify' '--config' '/etc/localify/config.toml' 'helper' 'uninstall-service' '--uid' '501' && '/tmp/localify' '--config' '/etc/localify/config.toml' 'helper' 'ensure-running' '--socket' '/var/run/localify-helper-501.sock' '--uid' '501'"
-        );
     }
 
     #[test]
@@ -8186,7 +6859,7 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
     fn ensure_config_writable_creates_missing_parent_directory() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("missing").join("config.toml");
-        let api = DesktopApi::new_direct(config_path.clone(), temp_dir.path().join("localify"));
+        let api = DesktopApi::for_cli(config_path.clone(), temp_dir.path().join("localify"));
 
         api.ensure_config_writable().unwrap();
 
@@ -8834,27 +7507,6 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
         assert!(!registration.is_https_enabled());
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn parse_ps_etime_handles_all_ps_formats() {
-        use super::parse_ps_etime;
-
-        assert_eq!(
-            parse_ps_etime("05:41"),
-            Some(Duration::from_secs(5 * 60 + 41))
-        );
-        assert_eq!(
-            parse_ps_etime("02:03:04"),
-            Some(Duration::from_secs((2 * 60 + 3) * 60 + 4))
-        );
-        assert_eq!(
-            parse_ps_etime("20638-15:19:49"),
-            Some(Duration::from_secs(((20638 * 24 + 15) * 60 + 19) * 60 + 49))
-        );
-        assert_eq!(parse_ps_etime(""), None);
-        assert_eq!(parse_ps_etime("garbage"), None);
-    }
-
     #[test]
     fn ensure_project_environment_preserves_customized_wildcard_domains() {
         let (temp_dir, api, store) = temp_api();
@@ -8964,7 +7616,7 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
 
         store.save(&config).unwrap();
 
-        let api = DesktopApi::new_direct(config_path, temp_dir.path().join("localify"));
+        let api = DesktopApi::for_cli(config_path, temp_dir.path().join("localify"));
 
         (temp_dir, api, store)
     }

@@ -53,7 +53,7 @@ impl<'a> RegisterDomain<'a> {
         let cert_outcome = match self.certs.create_and_install(&pattern) {
             Ok(()) => {
                 registration.enable_https();
-                StepOutcome::Success("Certificate installed and trusted.".into())
+                StepOutcome::Success("Certificate issued by the Localify CA.".into())
             }
             Err(e) => StepOutcome::Warning(format!(
                 "Failed to generate certificate: {}. \

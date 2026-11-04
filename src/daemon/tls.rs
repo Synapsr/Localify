@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::domain::{DomainName, DomainPattern};
 use crate::infrastructure::certs::CertificateGenerator;
-use crate::infrastructure::certs::generator::build_leaf_cert_params;
+use crate::infrastructure::certs::generator::{build_leaf_cert_params, is_local_domain};
 
 const ON_DEMAND_CERT_CACHE_MAX: usize = 256;
 
@@ -55,7 +55,7 @@ impl ResolvesServerCert for DomainCertResolver {
         // can read the local CA private key.
         let ca_cert_der = self.ca_cert_der.as_ref()?;
         let ca_key_pem = self.ca_key_pem.as_deref()?;
-        if DomainName::new(hostname.as_str()).is_err() {
+        if !can_sign_on_demand(&hostname) {
             warn!(hostname = %hostname, "TLS: no certificate for domain");
             return None;
         }
@@ -77,6 +77,12 @@ impl ResolvesServerCert for DomainCertResolver {
             }
         }
     }
+}
+
+/// The CA only signs for valid names under the local suffix, whoever asks. Its
+/// name constraint would make any other certificate useless anyway.
+fn can_sign_on_demand(hostname: &str) -> bool {
+    DomainName::new(hostname).is_ok() && is_local_domain(hostname)
 }
 
 /// Load all domain certificates into a single TLS acceptor with SNI
@@ -219,4 +225,42 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     PrivateKeyDer::from_pem_file(path)
         .with_context(|| format!("Failed to load private key from: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::branding::BRANDING;
+    use crate::infrastructure::certs::ca::RootCA;
+    use crate::infrastructure::certs::ca::tests::is_trusted_for;
+
+    #[test]
+    fn only_valid_names_under_the_local_suffix_get_a_certificate_on_demand() {
+        assert!(can_sign_on_demand(&format!(
+            "added-while-running{}",
+            BRANDING.domain_suffix()
+        )));
+        assert!(can_sign_on_demand(&format!(
+            "deep.sub.app{}",
+            BRANDING.domain_suffix()
+        )));
+
+        assert!(!can_sign_on_demand("bank.example.com"));
+        assert!(!can_sign_on_demand("localhost"));
+        assert!(!can_sign_on_demand("evil.localify.example.com"));
+    }
+
+    #[test]
+    fn a_certificate_made_on_demand_is_trusted_through_the_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = RootCA::new(dir.path().to_path_buf());
+        ca.generate().unwrap();
+        let (cert, key) = load_ca_material(dir.path()).unwrap();
+        let host = format!("added-while-running{}", BRANDING.domain_suffix());
+
+        let certified =
+            generate_on_demand_certified_key(&host, &cert.unwrap(), &key.unwrap()).unwrap();
+
+        assert!(is_trusted_for(&ca, &certified.cert[0], &host));
+    }
 }

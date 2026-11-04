@@ -2,6 +2,7 @@ use super::ca::RootCA;
 use super::trust_store::{TrustStore, get_trust_store};
 use super::{CertError, CertificateGenerator};
 use crate::application::ports::{CertificateError, CertificateManager};
+use crate::branding::BRANDING;
 use crate::domain::DomainPattern;
 use crate::infrastructure::paths::LocalifyPaths;
 
@@ -20,11 +21,27 @@ impl CertificateService {
         }
     }
 
-    /// Initialize the Root CA (called during `localify install`)
+    /// Initialize the Root CA (called during `localify install`).
+    ///
+    /// On macOS this only creates the CA: the install then trusts it in the login
+    /// keychain. A CA from an older build has no name constraint, so it is replaced
+    /// along with the leaf certificates it signed.
     pub fn init_ca(&self) -> Result<(), CertError> {
+        if cfg!(target_os = "macos")
+            && self.ca.exists()
+            && !self.ca.is_limited_to_local_domains()?
+        {
+            self.generator.delete_all()?;
+            self.ca.delete()?;
+        }
+
         if !self.ca.exists() {
             // Generate CA
             self.ca.generate()?;
+        }
+
+        if cfg!(target_os = "macos") {
+            return Ok(());
         }
 
         let cert_path = self.ca.cert_path();
@@ -42,8 +59,17 @@ impl CertificateService {
             return Ok(false);
         }
 
+        if cfg!(target_os = "macos") && !self.ca.is_limited_to_local_domains()? {
+            return Ok(false);
+        }
+
         let trust_store = get_trust_store()?;
         trust_store.is_ca_trusted(&self.ca.cert_path())
+    }
+
+    /// Whether the CA exists, whether or not the system trusts it yet.
+    pub fn ca_exists(&self) -> bool {
+        self.ca.exists()
     }
 
     /// Generate a certificate for a domain pattern (signed by the Root CA).
@@ -52,9 +78,10 @@ impl CertificateService {
     /// For wildcard patterns, generates a cert with SANs for base + *.base.
     pub fn create_and_install(&self, pattern: &DomainPattern) -> Result<(), CertError> {
         if !self.ca.exists() {
-            return Err(CertError::GenerationError(
-                "Root CA not found. Run 'sudo localify install' first.".to_string(),
-            ));
+            return Err(CertError::GenerationError(format!(
+                "Root CA not found. Run '{}' first.",
+                BRANDING.admin_command("install")
+            )));
         }
 
         let cert = self.generator.generate(pattern)?;
@@ -94,6 +121,10 @@ impl CertificateManager for CertificateService {
     fn is_ca_installed(&self) -> Result<bool, CertificateError> {
         CertificateService::is_ca_installed(self)
             .map_err(|e| CertificateError::OperationFailed(e.into()))
+    }
+
+    fn ca_exists(&self) -> bool {
+        CertificateService::ca_exists(self)
     }
 
     fn create_and_install(&self, pattern: &DomainPattern) -> Result<(), CertificateError> {

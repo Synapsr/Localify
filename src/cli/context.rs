@@ -1,13 +1,14 @@
 use std::env;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use localify::desktop::ProjectRootStore;
+use localify::desktop::{DesktopApi, ProjectRootStore};
 
 use crate::branding::BRANDING;
 use crate::infrastructure::{
     certs::CertificateService, config::ConfigStore, mgmt_client::MgmtSocketClient,
-    paths::LocalifyPaths, pid::PidFile,
+    paths::LocalifyPaths, pid::DaemonHandle,
 };
 
 /// Composition root: wires infrastructure adapters once,
@@ -16,7 +17,7 @@ pub struct AppContext {
     pub config_path: PathBuf,
     pub config_store: ConfigStore,
     pub cert_service: CertificateService,
-    pub pid_file: PidFile,
+    pub daemon: DaemonHandle,
     pub mgmt_client: MgmtSocketClient,
 }
 
@@ -26,10 +27,63 @@ impl AppContext {
             config_path: config_path.to_path_buf(),
             config_store: ConfigStore::new(config_path.to_path_buf()),
             cert_service: CertificateService::new(paths),
-            pid_file: PidFile::new(paths.pid_file.clone()),
+            daemon: DaemonHandle::new(paths),
             mgmt_client: MgmtSocketClient::new(&paths.socket_path),
         }
     }
+}
+
+/// Fails with what to do next when this process cannot write the config, rather
+/// than later with a bare permission error. On macOS the config is the user's, so
+/// this only matters for a daemon on Linux, whose config belongs to root.
+pub fn require_config_writable(config_path: &Path) -> Result<()> {
+    if config_writable(config_path) {
+        return Ok(());
+    }
+
+    bail!(
+        "This command needs to modify {}, which you cannot write to.\n\
+         Re-run it with: {}",
+        config_path.display(),
+        BRANDING.admin_command("<same command>")
+    )
+}
+
+fn config_writable(config_path: &Path) -> bool {
+    if config_path.exists() {
+        return OpenOptions::new().write(true).open(config_path).is_ok();
+    }
+
+    let Some(parent) = config_path.parent() else {
+        return false;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+
+    let probe = parent.join(format!(
+        ".{}-write-test-{}",
+        BRANDING.slug(),
+        std::process::id()
+    ));
+    match OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Builds a `DesktopApi` for the CLI commands whose logic lives in the shared API.
+pub fn direct_api(config_path: &Path) -> Result<DesktopApi> {
+    let binary_path = env::current_exe().with_context(|| {
+        format!(
+            "Failed to resolve the {} executable path",
+            BRANDING.cli_command()
+        )
+    })?;
+    Ok(DesktopApi::for_cli(config_path.to_path_buf(), binary_path))
 }
 
 /// Resolve the real project directory when a command is launched from an
@@ -171,6 +225,37 @@ fn home_dir_from_env() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_writable_config_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+
+        assert!(require_config_writable(&config_path).is_ok());
+    }
+
+    #[test]
+    fn a_missing_config_in_a_writable_folder_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nested").join("config.toml");
+
+        assert!(require_config_writable(&config_path).is_ok());
+    }
+
+    #[test]
+    fn a_read_only_config_says_what_to_do() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let error = require_config_writable(&config_path).unwrap_err();
+
+        assert!(error.to_string().contains("Re-run it with"));
+    }
 
     #[test]
     fn decodes_agent_project_cache_with_hyphenated_folder_names() {

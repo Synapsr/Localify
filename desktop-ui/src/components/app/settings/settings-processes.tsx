@@ -31,8 +31,8 @@ export const SettingsProcesses = () => {
         <div>
           <h2 className="text-sm font-semibold">Processes</h2>
           <p className="text-xs text-[--color-muted]">
-            Check whether the local daemon and the privileged CLI helper are ready, and enable
-            them if needed.
+            Check whether the local daemon and the terminal command are ready, and enable them if
+            needed.
           </p>
         </div>
 
@@ -64,22 +64,22 @@ export const SettingsProcesses = () => {
           <div className="flex flex-col gap-3 rounded-lg border border-[--color-border] p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2">
-                <p className="text-sm font-medium text-[--color-ink]">CLI helper</p>
-                <Badge tone={data.environment.cliHelperReady ? "accent" : "muted"}>
-                  {data.environment.cliHelperReady ? "Enabled" : "Disabled"}
+                <p className="text-sm font-medium text-[--color-ink]">Terminal command</p>
+                <Badge tone={data.environment.cliAccessReady ? "accent" : "muted"}>
+                  {data.environment.cliAccessReady ? "Enabled" : "Disabled"}
                 </Badge>
               </div>
               <p className="text-xs text-[--color-muted]">
-                Lets desktop actions write the system config through the installed helper.
+                Installs the command at {data.environment.cliCommandPath}.
               </p>
             </div>
             <Button
-              variant={data.environment.cliHelperReady ? "secondary" : "primary"}
+              variant={data.environment.cliAccessReady ? "secondary" : "primary"}
               loading={setupCliAccess.isPending}
-              disabled={data.environment.cliHelperReady}
+              disabled={data.environment.cliAccessReady}
               onClick={() => setupCliAccess.mutate()}
             >
-              {data.environment.cliHelperReady ? "CLI helper ready" : "Enable CLI helper"}
+              {data.environment.cliAccessReady ? "Command ready" : "Enable command"}
             </Button>
           </div>
         </div>

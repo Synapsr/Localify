@@ -82,8 +82,20 @@ impl Branding {
             .unwrap_or(self.domain_suffix())
     }
 
+    /// On macOS everything lives in the user's folder and no Localify process
+    /// runs as root. Linux keeps its system paths until it gets the same design.
+    fn uses_user_directories(&self) -> bool {
+        cfg!(target_os = "macos") || self.is_dev_profile()
+    }
+
+    /// Whether launchd owns the daemon: production on macOS. The dev profile
+    /// uses unprivileged ports, so the app starts its daemon directly.
+    pub fn uses_launchd_service(&self) -> bool {
+        cfg!(target_os = "macos") && !self.is_dev_profile()
+    }
+
     pub fn config_dir(&self) -> PathBuf {
-        if self.is_dev_profile() {
+        if self.uses_user_directories() {
             return self.local_application_support_dir();
         }
 
@@ -95,7 +107,7 @@ impl Branding {
     }
 
     pub fn data_dir(&self) -> PathBuf {
-        if self.is_dev_profile() {
+        if self.uses_user_directories() {
             return self.config_dir().join("data");
         }
 
@@ -103,7 +115,7 @@ impl Branding {
     }
 
     pub fn pid_file(&self) -> PathBuf {
-        if self.is_dev_profile() {
+        if self.uses_user_directories() {
             return self.config_dir().join(format!("{}.pid", self.slug()));
         }
 
@@ -111,7 +123,7 @@ impl Branding {
     }
 
     pub fn log_file(&self) -> PathBuf {
-        if self.is_dev_profile() {
+        if self.uses_user_directories() {
             return self
                 .config_dir()
                 .join("logs")
@@ -122,7 +134,7 @@ impl Branding {
     }
 
     pub fn certs_dir(&self) -> PathBuf {
-        if self.is_dev_profile() {
+        if self.uses_user_directories() {
             return self.data_dir().join("certs");
         }
 
@@ -141,11 +153,13 @@ impl Branding {
         PathBuf::from("/etc/systemd/resolved.conf.d").join(format!("{}.conf", self.slug()))
     }
 
-    pub fn helper_socket_path(&self, uid: u32) -> PathBuf {
-        PathBuf::from(format!("/var/run/{}-helper-{uid}.sock", self.slug()))
+    /// launchd label of the daemon service.
+    pub fn service_label(&self) -> String {
+        format!("dev.{}.daemon", self.slug())
     }
 
-    pub fn helper_service_prefix(&self) -> String {
+    /// Label prefix of the root helper older builds installed, one per uid.
+    pub fn legacy_helper_prefix(&self) -> String {
         format!("dev.{}.helper", self.slug())
     }
 
@@ -165,6 +179,16 @@ impl Branding {
 
     pub fn cli_command(&self) -> &'static str {
         self.slug()
+    }
+
+    /// A command as the user should type it when it needs root. On macOS
+    /// Localify asks for the approval itself and refuses to run as root.
+    pub fn admin_command(&self, args: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("{} {args}", self.cli_command())
+        } else {
+            format!("sudo {} {args}", self.cli_command())
+        }
     }
 
     pub fn runtime_desktop_name(&self) -> String {
@@ -221,7 +245,7 @@ fn argv0_command_name(argv0: &OsStr) -> Option<&str> {
     Path::new(argv0).file_stem()?.to_str()
 }
 
-fn user_home_dir() -> Option<PathBuf> {
+pub fn user_home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
@@ -260,6 +284,28 @@ mod tests {
             active_profile_from_env_and_args(None, Some(OsStr::new("/usr/local/bin/localify"))),
             None
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keeps_every_path_in_the_users_folder() {
+        for path in [
+            BRANDING.config_path(),
+            BRANDING.data_dir(),
+            BRANDING.pid_file(),
+            BRANDING.log_file(),
+            BRANDING.certs_dir(),
+            BRANDING.socket_path(),
+        ] {
+            assert!(!path.starts_with("/etc"), "{}", path.display());
+            assert!(!path.starts_with("/var"), "{}", path.display());
+            assert!(
+                path.to_string_lossy()
+                    .contains("Library/Application Support"),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]

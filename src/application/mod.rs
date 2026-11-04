@@ -24,6 +24,9 @@ pub enum StepOutcome {
     Success(String),
     Warning(String),
     Skipped(String),
+    /// The work is done but one last step needs the user, such as confirming CA
+    /// trust on a machine with a screen. Unlike a warning, nothing went wrong.
+    Pending(String),
 }
 
 impl fmt::Display for StepOutcome {
@@ -32,6 +35,7 @@ impl fmt::Display for StepOutcome {
             Self::Success(msg) => write!(f, "{}", msg),
             Self::Warning(msg) => write!(f, "Warning: {}", msg),
             Self::Skipped(msg) => write!(f, "Skipped: {}", msg),
+            Self::Pending(msg) => write!(f, "Pending: {}", msg),
         }
     }
 }

@@ -14,6 +14,9 @@ pub trait CertificateManager {
     /// Check if the Root CA exists and is trusted.
     fn is_ca_installed(&self) -> Result<bool, CertificateError>;
 
+    /// Check if the Root CA exists, whether or not the system trusts it yet.
+    fn ca_exists(&self) -> bool;
+
     /// Generate and install a certificate for the given domain pattern.
     fn create_and_install(&self, pattern: &DomainPattern) -> Result<(), CertificateError>;
 

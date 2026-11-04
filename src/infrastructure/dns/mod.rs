@@ -12,17 +12,19 @@ pub use system_resolution::{SystemResolutionCheck, check_system_resolution};
 #[derive(Error, Debug)]
 pub enum DnsError {
     #[error(
-        "Permission denied. DNS configuration requires root privileges.\nRun with: sudo {} install",
-        BRANDING.cli_command()
+        "Permission denied. DNS configuration requires an administrator.\nRun: {}",
+        BRANDING.admin_command("install")
     )]
     PermissionDenied,
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     #[error("Failed to write DNS configuration to {path}: {source}")]
     WriteError {
         path: PathBuf,
         source: std::io::Error,
     },
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     #[error("Failed to remove DNS configuration from {path}: {source}")]
     RemoveError {
         path: PathBuf,

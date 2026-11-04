@@ -705,59 +705,6 @@ fn handle_tray_action_error<R: Runtime>(app: &AppHandle<R>, id: &str, error: Str
     );
 }
 
-fn recover_daemon_after_app_update<R: Runtime + 'static>(app: &AppHandle<R>) {
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = commands::consume_post_update_daemon_restart(&app);
-        match result {
-            Ok(true) => {}
-            Ok(false) => {}
-            Err(error) => {
-                eprintln!("failed to restart daemon after app update: {error}");
-
-                #[cfg(target_os = "macos")]
-                show_message_dialog(
-                    &app,
-                    "Daemon Restart Failed",
-                    format!(
-                        "Localify was updated, but the background daemon could not be restarted automatically.\n\n{error}"
-                    ),
-                    MessageDialogKind::Error,
-                );
-            }
-        }
-    });
-}
-
-fn start_daemon_after_login<R: Runtime + 'static>(app: &AppHandle<R>) {
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let status = match state.api.daemon_status() {
-            Ok(status) => status,
-            Err(error) => {
-                eprintln!("failed to inspect daemon status during login start: {error}");
-                return;
-            }
-        };
-
-        if status.running || !status.ca_installed {
-            return;
-        }
-
-        if let Err(error) = state
-            .api
-            .start_daemon(StartDaemonRequest { verbose: false })
-        {
-            eprintln!("failed to start daemon during login start: {error}");
-        }
-
-        if let Err(error) = sync_tray_menu(&app) {
-            eprintln!("failed to refresh tray after login start: {error}");
-        }
-    });
-}
-
 fn copy_tray_domain_url<R: Runtime>(app: &AppHandle<R>, domain: &str) -> Result<(), String> {
     let url = tray_domain_url(app, domain)?;
     copy_text_to_clipboard(&url)
@@ -1150,11 +1097,7 @@ pub fn run() {
             }
             setup_app_menu(app.handle())?;
             setup_tray(app.handle())?;
-            recover_daemon_after_app_update(app.handle());
-            let autostart_launch = launched_from_autostart();
-            if autostart_launch {
-                start_daemon_after_login(app.handle());
-            } else {
+            if !launched_from_autostart() {
                 open_main_window(app.handle())?;
             }
             if let Err(error) = handle_startup_deep_links(app.handle()) {
@@ -1196,7 +1139,6 @@ pub fn run() {
             commands::detect_project_init_plan,
             commands::install_localify,
             commands::setup_cli_access,
-            commands::restart_system_helper,
             commands::setup_node_trust,
             commands::trust_ios_simulators,
             commands::get_agent_skill_status,

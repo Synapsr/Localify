@@ -6,4 +6,3 @@ pub mod desktop;
 pub mod domain;
 pub mod infrastructure;
 pub mod project_init;
-pub mod system_helper;

@@ -48,7 +48,10 @@ pub struct EnvironmentDto {
     pub binary_path: String,
     pub binary_exists: bool,
     pub fixed_domain_suffix: String,
-    pub cli_helper_ready: bool,
+    /// The system still needs one administrator approval: a first run, an older
+    /// install to replace, or a config change the system has not caught up with.
+    #[serde(default)]
+    pub system_setup_required: bool,
     #[serde(default = "default_cli_access_ready")]
     pub cli_access_ready: bool,
     #[serde(default = "default_cli_command_path")]
@@ -92,6 +95,8 @@ pub struct DaemonConfigDto {
     pub https_port: u16,
     pub dns_port: u16,
     pub log_level: String,
+    #[serde(default)]
+    pub lan_access: bool,
 }
 
 impl From<DaemonConfig> for DaemonConfigDto {
@@ -101,6 +106,7 @@ impl From<DaemonConfig> for DaemonConfigDto {
             https_port: value.https_port,
             dns_port: value.dns_port,
             log_level: value.log_level,
+            lan_access: value.lan_access,
         }
     }
 }
@@ -112,6 +118,7 @@ impl From<DaemonConfigDto> for DaemonConfig {
             https_port: value.https_port,
             dns_port: value.dns_port,
             log_level: value.log_level,
+            lan_access: value.lan_access,
         }
     }
 }
@@ -452,6 +459,12 @@ pub struct DaemonStatusDto {
     pub pid: Option<u32>,
     pub lan_ip: String,
     pub ca_installed: bool,
+    /// The CA exists but macOS does not trust it yet, for lack of a screen to
+    /// confirm on. `ca_trust_command` finishes it.
+    #[serde(default)]
+    pub ca_trust_pending: bool,
+    #[serde(default)]
+    pub ca_trust_command: Option<String>,
     pub http_port: u16,
     pub https_port: u16,
     pub dns_port: u16,

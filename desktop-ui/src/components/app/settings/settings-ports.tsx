@@ -18,6 +18,7 @@ export const SettingsPorts = () => {
   const [httpPort, setHttpPort] = useState(daemon?.httpPort ?? 80);
   const [httpsPort, setHttpsPort] = useState(daemon?.httpsPort ?? 443);
   const [dnsPort, setDnsPort] = useState(daemon?.dnsPort ?? 1053);
+  const [lanAccess, setLanAccess] = useState(daemon?.lanAccess ?? false);
 
   if (!daemon) return null;
 
@@ -29,6 +30,7 @@ export const SettingsPorts = () => {
         httpPort,
         httpsPort,
         dnsPort,
+        lanAccess,
       },
     });
   }
@@ -39,8 +41,8 @@ export const SettingsPorts = () => {
         <div className="space-y-1">
           <h2 className="text-sm font-semibold">Ports</h2>
           <p className="text-xs text-[--color-muted]">
-            Changes take effect on the next daemon restart. In system mode, saves go through the
-            installed helper instead of writing directly into system files.
+            Changing these needs an administrator's approval once, then Localify restarts by
+            itself.
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-3">
@@ -72,6 +74,24 @@ export const SettingsPorts = () => {
             />
           </div>
         </div>
+        <label className="flex items-start gap-3 text-sm">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={lanAccess}
+            onChange={(e) => setLanAccess(e.target.checked)}
+          />
+          <span className="space-y-0.5">
+            <span className="block font-medium">Let other devices on this network connect</span>
+            <span className="block text-xs text-[--color-muted]">
+              Off by default: only this Mac can reach your projects. Turn this on to test from a
+              phone, and only on a network you trust.
+            </span>
+          </span>
+        </label>
+        {updateConfig.error ? (
+          <p className="text-xs text-[--color-danger]">{updateConfig.error.message}</p>
+        ) : null}
         <div className="flex justify-end">
           <Button variant="primary" loading={updateConfig.isPending} onClick={savePorts}>
             Save

@@ -6,8 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
-use super::backend::{WriteBackend, direct_api};
-use super::context::{AppContext, effective_current_dir};
+use super::context::{AppContext, direct_api, effective_current_dir, require_config_writable};
 use crate::branding::BRANDING;
 use crate::infrastructure::config::{ConfigStore, ConfiguredProject, ConfiguredProjectEnvironment};
 use localify::desktop::DesktopApi;
@@ -112,7 +111,7 @@ pub fn list(args: ListEnvArgs, ctx: &AppContext) -> Result<()> {
 }
 
 pub fn discover(args: DiscoverEnvArgs, config_path: &Path, _ctx: &AppContext) -> Result<()> {
-    let api = DesktopApi::new_direct(config_path.to_path_buf(), current_binary_path()?);
+    let api = DesktopApi::for_cli(config_path.to_path_buf(), current_binary_path()?);
     let discovery = api.discover_project_worktrees(DiscoverProjectWorktreesRequest {
         project_id: args.project,
     })?;
@@ -215,7 +214,7 @@ pub fn copy_env(args: CopyEnvArgs, config_path: &Path) -> Result<()> {
         bail!("Pass one or more --path values, or use --all.");
     }
 
-    let api = DesktopApi::new_direct(config_path.to_path_buf(), current_binary_path()?);
+    let api = DesktopApi::for_cli(config_path.to_path_buf(), current_binary_path()?);
     let result = api.copy_environment_files(EnvironmentFileCopyRequest {
         project_id: args.project,
         source_environment_slug: args.from,
@@ -331,10 +330,8 @@ fn ensure_environment_backend(
     ctx: &AppContext,
     request: EnsureProjectEnvironmentRequest,
 ) -> Result<EnsureProjectEnvironmentResultDto> {
-    match WriteBackend::resolve(&ctx.config_path)? {
-        WriteBackend::Direct => direct_api(&ctx.config_path)?.ensure_project_environment(request),
-        WriteBackend::Helper(client) => client.ensure_project_environment(request),
-    }
+    require_config_writable(&ctx.config_path)?;
+    direct_api(&ctx.config_path)?.ensure_project_environment(request)
 }
 
 fn environment_info(environment: ConfiguredProjectEnvironment) -> ProjectEnvironmentInfoDto {

@@ -19,6 +19,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+# Reads the name constraint back from a CA on disk. rcgen already builds it.
+x509-parser = "0.18"
 time = { version = "0.3", features = ["formatting"] }
 
 # Async runtime
@@ -66,6 +68,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities
 humantime = "2.1"
+# geteuid, and free for launch_activate_socket's result
+libc = "0.2"
 dialoguer = { version = "0.12", default-features = false }
 
 # Tracing

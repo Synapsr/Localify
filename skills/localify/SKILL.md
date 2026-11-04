@@ -380,8 +380,9 @@ localify restart
 
 Common failures:
 
-- Domain does not resolve: setup/DNS resolver may be missing, daemon may be stopped, or the wrong Localify profile is active.
-- HTTPS warning: local CA may not be installed or trusted by the current browser/runtime.
+- Domain does not resolve: setup/DNS resolver may be missing, daemon may be stopped, or the wrong Localify profile is active. `localify stop` keeps the daemon stopped until `localify start`.
+- HTTPS warning: local CA may not be installed or trusted by the current browser/runtime. On a machine with no screen, trust stays pending after install: HTTP and Node.js work, and `localify status` prints the exact command to finish it. Do not run that command for the user; it needs their password and a confirmation on screen.
+- Another device cannot connect: on macOS only this Mac can reach Localify by default. Run `localify lan enable` only when the user asks for it, because it exposes their dev servers to the network.
 - Browser works but Node.js fails: Node may need Localify's CA via its trust integration or `NODE_EXTRA_CA_CERTS`.
 - Localify page shows target unavailable: the upstream dev server is not listening on the configured target.
 - Wrong app responds: inspect `localify list`, route specificity, wildcard domains, and stale dev servers.
@@ -393,6 +394,7 @@ Common failures:
 - Do not edit `/etc/hosts` manually for Localify domains.
 - Do not run a second proxy to solve a Localify routing issue.
 - Do not bypass certificate errors as a fix. Repair Localify trust instead.
+- On macOS, do not run Localify with `sudo`: it refuses. Nothing of Localify's runs as root there, and `localify install`, `uninstall` and `lan` ask for an administrator's approval themselves. On Linux, commands that change the setup need `sudo`.
 - Keep project routes explicit and small.
 - Use wildcard domains only when the app actually needs tenant or subdomain testing.
 - Use `localify project domain set` for project service domain changes. Do not hand-edit the

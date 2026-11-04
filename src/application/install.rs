@@ -51,6 +51,8 @@ impl<'a> Install<'a> {
         self.create_directories(&mut steps)?;
         self.ensure_config_file(&mut steps)?;
         self.init_root_ca(&mut steps);
+        steps.extend(self.system.apply_system_changes()?);
+        self.report_ca_trust(&mut steps);
         self.trust_ios_simulators(&mut steps);
         self.configure_dns(dns_port, &mut steps)?;
 
@@ -86,19 +88,36 @@ impl<'a> Install<'a> {
         let ca_outcome = match self.certs.is_ca_installed() {
             Ok(true) => StepOutcome::Skipped("Root CA already installed.".into()),
             _ => match self.certs.init_ca() {
-                Ok(()) => StepOutcome::Success(
-                    "Root CA created and installed in system trust store.".into(),
-                ),
+                Ok(()) => StepOutcome::Success("Root CA ready.".into()),
                 Err(e) => StepOutcome::Warning(format!(
                     "Failed to create Root CA: {}. \
                      HTTPS certificates will not work. \
-                     Run 'sudo {} install' to enable HTTPS.",
+                     Run '{}' to enable HTTPS.",
                     e,
-                    BRANDING.cli_command()
+                    BRANDING.admin_command("install")
                 )),
             },
         };
         steps.push(("Root CA".into(), ca_outcome));
+    }
+
+    /// A CA the system does not trust yet does not fail the install: macOS needs an
+    /// on-screen confirmation, which a machine with no screen cannot give. Everything
+    /// else keeps working, and the user gets the exact command to finish it.
+    fn report_ca_trust(&self, steps: &mut Vec<(String, StepOutcome)>) {
+        let outcome = match self.certs.is_ca_installed() {
+            Ok(true) => StepOutcome::Success("The system trusts the Root CA.".into()),
+            _ if !self.certs.ca_exists() => return,
+            _ => match self.system.ca_trust_command() {
+                Some(command) => StepOutcome::Pending(format!(
+                    "Trust is pending: macOS needs a confirmation on screen. HTTP and Node.js work now. To finish, run this on a Mac with a screen:\n    {command}"
+                )),
+                None => StepOutcome::Warning(
+                    "The system does not trust the Root CA yet. HTTPS certificates will not work until it does.".into(),
+                ),
+            },
+        };
+        steps.push(("CA trust".into(), outcome));
     }
 
     fn trust_ios_simulators(&self, steps: &mut Vec<(String, StepOutcome)>) {
@@ -119,8 +138,6 @@ impl<'a> Install<'a> {
                 "Xcode simctl is not available; iOS Simulator HTTPS trust was not configured. {}",
                 reason
             )),
-            #[cfg(target_os = "macos")]
-            Ok(IosSimulatorTrust::CurrentUserUnavailable) => return,
             #[cfg(not(target_os = "macos"))]
             Ok(IosSimulatorTrust::UnsupportedPlatform) => return,
             Err(error) => StepOutcome::Warning(format!(
@@ -323,6 +340,44 @@ mod tests {
             .find(|(label, _)| label == "Root CA")
             .unwrap();
         assert!(matches!(ca_step.1, StepOutcome::Warning(_)));
+    }
+
+    #[test]
+    fn trust_that_needs_a_screen_is_pending_and_the_install_still_finishes() {
+        let certs = InMemoryCertificateManager::created_but_untrusted();
+        let config = InMemoryConfigLoader::new();
+        let dns = InMemoryDnsManager::new();
+        let network = InMemoryNetworkInfo::with_ip(Ipv4Addr::LOCALHOST);
+        let system = InMemorySystemSetup::with_trust_command("security add-trusted-cert x");
+        let svc = make_install(&certs, &config, &dns, &network, &system);
+
+        let result = svc.execute().unwrap();
+
+        let trust_step = result
+            .steps
+            .iter()
+            .find(|(label, _)| label == "CA trust")
+            .unwrap();
+        let StepOutcome::Pending(message) = &trust_step.1 else {
+            panic!("expected a pending step, got {:?}", trust_step.1);
+        };
+        assert!(message.contains("security add-trusted-cert x"));
+        // Nothing after the trust step was skipped.
+        assert!(dns.is_configured());
+        assert!(config.exists());
+    }
+
+    #[test]
+    fn declining_the_approval_stops_the_install() {
+        let certs = InMemoryCertificateManager::new();
+        let config = InMemoryConfigLoader::new();
+        let dns = InMemoryDnsManager::new();
+        let network = InMemoryNetworkInfo::with_ip(Ipv4Addr::LOCALHOST);
+        let system = InMemorySystemSetup::declining_approval();
+        let svc = make_install(&certs, &config, &dns, &network, &system);
+
+        assert!(svc.execute().is_err());
+        assert!(!dns.is_configured());
     }
 
     #[test]

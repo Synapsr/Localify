@@ -195,9 +195,8 @@ Use them to render the app's own banner or block risky actions.
   time is up, and says so.
 - **Daemon required:** a dangerous launch needs the Localify daemon, which records it. If the daemon
   cannot be reached, the service does not start.
-- **Audit log:** every start and stop goes to the daemon log (`localify logs`, which reads the
-  root-only log through the desktop app's helper when needed), with service, profile,
-  sources with key counts, timestamps and stop reason. Values are never logged.
+- **Audit log:** every start and stop goes to the daemon log (`localify logs`), with service,
+  profile, sources with key counts, timestamps and stop reason. Values are never logged.
 
 ## Infisical
 

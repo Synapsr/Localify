@@ -7,7 +7,8 @@ compose stack instantly makes services available at
 
 ## Enabling Docker Integration
 
-Add the `[docker]` section to `/etc/localify/config.toml`:
+Add the `[docker]` section to `config.toml`
+(`~/Library/Application Support/Localify Desktop/` on macOS, `/etc/localify/` on Linux):
 
 ```toml
 [docker]
@@ -17,10 +18,10 @@ enabled = true
 Then restart the daemon:
 
 ```bash
-sudo localify restart
+localify restart
 ```
 
-Localify connects to the Docker socket and watches for container
+On Linux, use `sudo`. Localify connects to the Docker socket and watches for container
 lifecycle events. When a container starts or stops, Localify
 automatically updates its routing table.
 
@@ -217,7 +218,9 @@ On **macOS**, Docker Desktop runs containers inside a Linux
 VM. Containers cannot reach the host via its LAN IP, but can
 reach it via `host-gateway` / `host.docker.internal`. The
 `extra_hosts` approach above is required for container-to-Localify
-communication.
+communication. Localify listens on loopback by default there. If a
+container cannot reach it, run `localify lan enable`, which lets
+Localify listen on every interface.
 
 ## Monitoring
 
@@ -236,7 +239,7 @@ View discovery logs:
 
 ```bash
 # See container add/remove events
-LOCALIFY_LOG=debug sudo localify start --foreground
+LOCALIFY_LOG=debug localify start --foreground
 
 # Or check the log file
 localify logs -f
@@ -264,7 +267,7 @@ Check that:
 Run with debug logging to see why a container was skipped:
 
 ```bash
-LOCALIFY_LOG=debug sudo localify start --foreground
+LOCALIFY_LOG=debug localify start --foreground
 ```
 
 Look for `Docker container skipped` messages with a reason.
@@ -297,6 +300,6 @@ labels:
 ### Docker Socket Permission
 
 Localify connects to the Docker socket
-(`/var/run/docker.sock` by default). If running as root
-(via `sudo`), this works automatically. If you see connection
-errors, verify the socket exists and is accessible.
+(`/var/run/docker.sock` by default). On macOS the daemon runs as you, so you need
+access to that socket, which Docker Desktop gives you. On Linux a daemon started with
+`sudo` has it. If you see connection errors, verify the socket exists and is accessible.

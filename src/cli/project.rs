@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::backend::{WriteBackend, direct_api};
-use super::context::{AppContext, effective_current_dir};
+use super::context::{AppContext, direct_api, effective_current_dir, require_config_writable};
 use crate::branding::BRANDING;
 use crate::cli::project_env;
 use crate::infrastructure::config::{ConfigStore, ConfiguredProject};
@@ -67,11 +66,10 @@ pub fn configure_dev(
         project_id: project.id.clone(),
         root_path: current_dir.display().to_string(),
     };
-    let materialized = match WriteBackend::resolve(config_path)? {
-        WriteBackend::Direct => direct_api(config_path)?.materialize_project_services(request)?,
-        WriteBackend::Helper(client) => client.materialize_project_services(request)?,
-    }
-    .materialized;
+    require_config_writable(config_path)?;
+    let materialized = direct_api(config_path)?
+        .materialize_project_services(request)?
+        .materialized;
     // Best-effort: lets a moved folder be re-linked to this project later.
     let _ = write_project_marker(&current_dir, &project.id);
     let update_results = apply_local_app_updates(
@@ -178,12 +176,8 @@ pub fn set_domain(args: SetDomainArgs, ctx: &AppContext) -> Result<()> {
         domain: args.domain.clone(),
         environment_slug: environment_slug.clone(),
     };
-    let result = match WriteBackend::resolve(&ctx.config_path)? {
-        WriteBackend::Direct => {
-            direct_api(&ctx.config_path)?.set_project_service_domain(request)?
-        }
-        WriteBackend::Helper(client) => client.set_project_service_domain(request)?,
-    };
+    require_config_writable(&ctx.config_path)?;
+    let result = direct_api(&ctx.config_path)?.set_project_service_domain(request)?;
 
     print_daemon_state(result.daemon_reloaded);
     match environment_slug {
@@ -267,7 +261,7 @@ pub(crate) struct HealedProjectRoot {
 /// Walks up from `current_dir` to the nearest project marker. When the marker
 /// names a known project and none of its stored roots still exists, the local
 /// project-roots metadata is pointed at the marker folder and the shared
-/// config root is updated best-effort (it may be helper-owned). A folder
+/// config root is updated best-effort (root owns it on Linux). A folder
 /// *copy* — the stored root still exists — is left untouched, and a marker
 /// naming an unknown project (e.g. committed and cloned from another machine)
 /// is ignored.
@@ -306,7 +300,7 @@ pub(crate) fn heal_moved_project_root(
         .set(&project.id, &marker_root)
         .ok()?;
     let root_path = marker_root.display().to_string();
-    // Best-effort: the shared config may only be writable through the helper.
+    // Best-effort: the marker above is what matters for finding the folder.
     let _ = config_store.update_project(&project.id, None, None, Some(root_path.clone()));
     project.root_path = Some(root_path);
 
@@ -348,10 +342,8 @@ fn register_project_service(
         command: service.command.clone(),
     };
 
-    match WriteBackend::resolve(config_path)? {
-        WriteBackend::Direct => direct_api(config_path)?.add_project_service(request),
-        WriteBackend::Helper(client) => client.add_project_service(request),
-    }
+    require_config_writable(config_path)?;
+    direct_api(config_path)?.add_project_service(request)
 }
 
 pub(crate) fn print_daemon_state(reloaded: bool) {

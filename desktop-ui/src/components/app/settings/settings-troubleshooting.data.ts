@@ -60,7 +60,9 @@ export const buildTroubleshootingIssues = (data: BootstrapDto): TroubleshootingI
   const dnsResolvedIps = dnsResolution.resolvedIps.join(", ");
   const caCertPath = nodeTrust.caCertPath || `${data.config.paths.dataDir}/ca.crt`;
   const setupComplete =
-    data.environment.cliHelperReady && data.environment.cliAccessReady && data.daemon.caInstalled;
+    !data.environment.systemSetupRequired &&
+    data.environment.cliAccessReady &&
+    data.daemon.caInstalled;
 
   return [
     {

@@ -1,9 +1,8 @@
-pub mod backend;
 pub mod context;
 pub mod exec;
-pub mod helper;
 pub mod init_project;
 pub mod install;
+pub mod lan;
 pub mod launch_profile;
 pub mod list;
 pub mod list_projects;

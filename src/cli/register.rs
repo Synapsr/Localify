@@ -1,8 +1,7 @@
+use crate::branding::BRANDING;
 use anyhow::Result;
-use localify::desktop::dto::{RegisterDomainRequest, RegisterDomainResultDto, StepDto};
 
-use super::backend::WriteBackend;
-use super::context::AppContext;
+use super::context::{AppContext, require_config_writable};
 use crate::application::StepOutcome;
 use crate::application::register_domain::RegisterDomain;
 use crate::domain::{DomainPattern, Route};
@@ -15,20 +14,7 @@ pub fn execute(
 ) -> Result<()> {
     let pattern = DomainPattern::from_name(&domain, wildcard)?;
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        println!(
-            "Generating SSL certificate for {}...",
-            pattern.display_pattern()
-        );
-        let result = client.register_domain(RegisterDomainRequest {
-            domain,
-            wildcard,
-            routes,
-            project_id: None,
-        })?;
-        print_registration_result(&result, wildcard);
-        return Ok(());
-    }
+    require_config_writable(&ctx.config_path)?;
 
     let parsed_routes: Vec<Route> = routes
         .iter()
@@ -50,12 +36,13 @@ pub fn execute(
         StepOutcome::Warning(msg) => {
             eprintln!("  {}", msg);
             eprintln!(
-                "  Run 'sudo localify register {}{}' to enable HTTPS.",
+                "  Run '{}' to enable HTTPS, then register {}{} again.",
+                BRANDING.admin_command("install"),
                 result.registration.domain(),
                 if wildcard { " --wildcard" } else { "" }
             );
         }
-        StepOutcome::Skipped(msg) => println!("  {}", msg),
+        StepOutcome::Skipped(msg) | StepOutcome::Pending(msg) => println!("  {}", msg),
     }
 
     println!(
@@ -77,38 +64,4 @@ pub fn execute(
     println!("\nStart the proxy with: localify start");
 
     Ok(())
-}
-
-fn print_registration_result(result: &RegisterDomainResultDto, wildcard: bool) {
-    print_step(&result.cert_outcome);
-    if result.cert_outcome.status == "warning" {
-        eprintln!(
-            "  Run 'sudo localify register {}{}' to enable HTTPS.",
-            result.registration.domain,
-            if wildcard { " --wildcard" } else { "" }
-        );
-    }
-
-    println!("\nRegistered domain: {}", result.registration.pattern);
-    println!("  Routes:");
-    for route in &result.registration.routes {
-        println!("    {} -> {}", route.path, route.target);
-    }
-    println!(
-        "  HTTPS: {}",
-        if result.registration.https_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    println!("\nStart the proxy with: localify start");
-}
-
-pub(crate) fn print_step(step: &StepDto) {
-    if step.status == "warning" {
-        eprintln!("  {}", step.message);
-    } else {
-        println!("  {}", step.message);
-    }
 }

@@ -1732,6 +1732,7 @@ mod tests {
             https_port: 8443,
             dns_port: 5353,
             log_level: "debug".to_string(),
+            lan_access: false,
         };
         assert!(config.validate().is_ok());
     }

@@ -265,7 +265,7 @@ const buildDesktopUsageProperties = (bootstrap: BootstrapDto): AnalyticsEventDat
     usage_has_standalone_domains: standaloneDomainCount > 0,
     usage_daemon_running: bootstrap.daemon.running,
     usage_ca_installed: bootstrap.daemon.caInstalled,
-    usage_cli_helper_ready: bootstrap.environment.cliHelperReady,
+    usage_system_setup_required: bootstrap.environment.systemSetupRequired,
     usage_cli_access_ready: bootstrap.environment.cliAccessReady,
     usage_node_trust_ready: bootstrap.environment.nodeTrust.ready,
   };

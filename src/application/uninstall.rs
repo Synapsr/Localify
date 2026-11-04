@@ -61,11 +61,13 @@ impl<'a> Uninstall<'a> {
         })
     }
 
-    /// Perform the full uninstall: stop daemon, remove certs, DNS,
-    /// data directory, PID file, and logs.
+    /// Perform the full uninstall: remove what needed an administrator, stop the
+    /// daemon, remove certs, DNS, data directory, PID file, and logs. Declining the
+    /// approval leaves everything in place.
     pub fn execute(&self) -> Result<UninstallResult> {
         let mut steps: Vec<(String, StepOutcome)> = Vec::new();
 
+        steps.extend(self.system.remove_system_changes()?);
         self.stop_daemon(&mut steps)?;
         self.remove_certificates(&mut steps);
         self.remove_dns(&mut steps)?;
@@ -77,7 +79,7 @@ impl<'a> Uninstall<'a> {
 
     fn stop_daemon(&self, steps: &mut Vec<(String, StepOutcome)>) -> Result<()> {
         if self.daemon.get_running_pid()?.is_some() {
-            self.daemon.stop_gracefully(Duration::from_millis(500))?;
+            self.daemon.stop_gracefully(Duration::from_secs(5))?;
             steps.push((
                 "Stop daemon".into(),
                 StepOutcome::Success("Daemon stopped.".into()),

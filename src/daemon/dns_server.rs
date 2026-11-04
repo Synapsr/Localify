@@ -13,32 +13,54 @@ use crate::infrastructure::network::get_lan_ip;
 
 type LanIpProvider = Arc<dyn Fn() -> Ipv4Addr + Send + Sync>;
 
+/// The addresses a query for a local name resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Answer {
+    ipv4: Ipv4Addr,
+    /// Only this machine reaches Localify on IPv6, through `::1`. For another
+    /// device that address would be itself, so it gets no IPv6 answer at all.
+    ipv6: Option<Ipv6Addr>,
+}
+
 /// Resolves the configured local suffix to the best host address for the caller.
 #[derive(Clone)]
 pub struct IpResolver {
     lan_ip: LanIpProvider,
+    lan_access: bool,
 }
 
 impl IpResolver {
-    pub fn new() -> Self {
+    pub fn new(lan_access: bool) -> Self {
         Self {
             lan_ip: Arc::new(get_lan_ip),
+            lan_access,
         }
     }
 
     #[cfg(test)]
-    fn with_lan_ip(lan_ip: Ipv4Addr) -> Self {
+    fn with_lan_ip(lan_ip: Ipv4Addr, lan_access: bool) -> Self {
         Self {
             lan_ip: Arc::new(move || lan_ip),
+            lan_access,
         }
     }
 
-    /// Local callers should never depend on the current network interface.
-    pub fn resolve(&self, client_ip: IpAddr) -> Ipv4Addr {
+    /// Local callers should never depend on the current network interface, and
+    /// no caller gets the LAN address while the proxy does not listen on it.
+    fn resolve(&self, client_ip: IpAddr) -> Answer {
         if client_ip.is_loopback() {
-            Ipv4Addr::LOCALHOST
-        } else {
-            (self.lan_ip)()
+            return Answer {
+                ipv4: Ipv4Addr::LOCALHOST,
+                ipv6: Some(Ipv6Addr::LOCALHOST),
+            };
+        }
+        Answer {
+            ipv4: if self.lan_access {
+                (self.lan_ip)()
+            } else {
+                Ipv4Addr::LOCALHOST
+            },
+            ipv6: None,
         }
     }
 
@@ -49,23 +71,29 @@ impl IpResolver {
 
 pub struct DnsServer {
     port: u16,
+    lan_access: bool,
     ttl: u32,
     ip_resolver: Arc<IpResolver>,
 }
 
 impl DnsServer {
-    pub fn new(port: u16) -> Self {
+    pub fn new(port: u16, lan_access: bool) -> Self {
         Self {
             port,
+            lan_access,
             ttl: 1,
-            ip_resolver: Arc::new(IpResolver::new()),
+            ip_resolver: Arc::new(IpResolver::new(lan_access)),
         }
     }
 
     pub async fn run(&self) -> Result<()> {
-        // Bind to all interfaces so Docker containers can reach us directly
-        let ipv4_addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let ipv6_addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, self.port));
+        let (ipv4_ip, ipv6_ip) = if self.lan_access {
+            (Ipv4Addr::UNSPECIFIED, Ipv6Addr::UNSPECIFIED)
+        } else {
+            (Ipv4Addr::LOCALHOST, Ipv6Addr::LOCALHOST)
+        };
+        let ipv4_addr = SocketAddr::from((ipv4_ip, self.port));
+        let ipv6_addr = SocketAddr::from((ipv6_ip, self.port));
 
         // Bind UDP sockets
         let udp_v4 = UdpSocket::bind(ipv4_addr).await?;
@@ -112,8 +140,7 @@ async fn serve_udp(socket: UdpSocket, ttl: u32, resolver: Arc<IpResolver>) -> Re
 
     loop {
         let (len, addr) = socket.recv_from(&mut buf).await?;
-        let response_ip = resolver.resolve(addr.ip());
-        let response = handle_query(&buf[..len], ttl, response_ip);
+        let response = handle_query(&buf[..len], ttl, resolver.resolve(addr.ip()));
         let _ = socket.send_to(&response, addr).await;
     }
 }
@@ -139,8 +166,7 @@ async fn handle_tcp_connection(
     let mut query_buf = vec![0u8; len];
     stream.read_exact(&mut query_buf).await?;
 
-    let response_ip = resolver.resolve(addr.ip());
-    let response = handle_query(&query_buf, ttl, response_ip);
+    let response = handle_query(&query_buf, ttl, resolver.resolve(addr.ip()));
 
     // Send response with length prefix
     let resp_len = (response.len() as u16).to_be_bytes();
@@ -150,7 +176,7 @@ async fn handle_tcp_connection(
     Ok(())
 }
 
-fn handle_query(query: &[u8], ttl: u32, response_ip: Ipv4Addr) -> Vec<u8> {
+fn handle_query(query: &[u8], ttl: u32, answer: Answer) -> Vec<u8> {
     // Parse incoming query
     let packet = match Packet::parse(query) {
         Ok(p) => p,
@@ -179,15 +205,18 @@ fn handle_query(query: &[u8], ttl: u32, response_ip: Ipv4Addr) -> Vec<u8> {
     info!(
         domain = %domain,
         qtype = ?question.qtype,
-        response = %response_ip,
+        response = %answer.ipv4,
         "DNS query"
     );
 
     // Build response based on query type
     match question.qtype {
-        QTYPE::TYPE(TYPE::A) => build_a_response(&packet, question, ttl, response_ip),
-        QTYPE::TYPE(TYPE::AAAA) => build_aaaa_response(&packet, question, ttl),
-        QTYPE::ANY => build_any_response(&packet, question, ttl, response_ip),
+        QTYPE::TYPE(TYPE::A) => build_a_response(&packet, question, ttl, answer.ipv4),
+        QTYPE::TYPE(TYPE::AAAA) => match answer.ipv6 {
+            Some(ipv6) => build_aaaa_response(&packet, question, ttl, ipv6),
+            None => build_empty_response(&packet),
+        },
+        QTYPE::ANY => build_any_response(&packet, question, ttl, answer),
         _ => build_empty_response(&packet),
     }
 }
@@ -250,7 +279,7 @@ fn build_a_response(packet: &Packet, question: &Question, ttl: u32, ip: Ipv4Addr
     response.build_bytes_vec().unwrap_or_default()
 }
 
-fn build_aaaa_response(packet: &Packet, question: &Question, ttl: u32) -> Vec<u8> {
+fn build_aaaa_response(packet: &Packet, question: &Question, ttl: u32, ip: Ipv6Addr) -> Vec<u8> {
     let mut response = Packet::new_reply(packet.id());
     response.set_flags(
         PacketFlag::RESPONSE | PacketFlag::AUTHORITATIVE_ANSWER | PacketFlag::RECURSION_DESIRED,
@@ -260,17 +289,17 @@ fn build_aaaa_response(packet: &Packet, question: &Question, ttl: u32) -> Vec<u8
     // Add the question
     response.questions.push(question.clone());
 
-    // Add AAAA record: ::1
+    // Add AAAA record
     let name_str = question.qname.to_string();
     let name = Name::new_unchecked(&name_str);
-    let aaaa_record = AAAA::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+    let aaaa_record = AAAA::from(ip);
     let record = ResourceRecord::new(name, CLASS::IN, ttl, RData::AAAA(aaaa_record));
     response.answers.push(record);
 
     response.build_bytes_vec().unwrap_or_default()
 }
 
-fn build_any_response(packet: &Packet, question: &Question, ttl: u32, ip: Ipv4Addr) -> Vec<u8> {
+fn build_any_response(packet: &Packet, question: &Question, ttl: u32, answer: Answer) -> Vec<u8> {
     let mut response = Packet::new_reply(packet.id());
     response.set_flags(
         PacketFlag::RESPONSE | PacketFlag::AUTHORITATIVE_ANSWER | PacketFlag::RECURSION_DESIRED,
@@ -283,7 +312,7 @@ fn build_any_response(packet: &Packet, question: &Question, ttl: u32, ip: Ipv4Ad
     // Add A record
     let name_str = question.qname.to_string();
     let name_a = Name::new_unchecked(&name_str);
-    let a_record = A::from(ip);
+    let a_record = A::from(answer.ipv4);
     response.answers.push(ResourceRecord::new(
         name_a,
         CLASS::IN,
@@ -292,14 +321,16 @@ fn build_any_response(packet: &Packet, question: &Question, ttl: u32, ip: Ipv4Ad
     ));
 
     // Add AAAA record
-    let name_aaaa = Name::new_unchecked(&name_str);
-    let aaaa_record = AAAA::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
-    response.answers.push(ResourceRecord::new(
-        name_aaaa,
-        CLASS::IN,
-        ttl,
-        RData::AAAA(aaaa_record),
-    ));
+    if let Some(ipv6) = answer.ipv6 {
+        let name_aaaa = Name::new_unchecked(&name_str);
+        let aaaa_record = AAAA::from(ipv6);
+        response.answers.push(ResourceRecord::new(
+            name_aaaa,
+            CLASS::IN,
+            ttl,
+            RData::AAAA(aaaa_record),
+        ));
+    }
 
     response.build_bytes_vec().unwrap_or_default()
 }
@@ -309,31 +340,74 @@ mod tests {
     use super::*;
 
     const TEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 100);
+    const REMOTE: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
 
     fn test_resolver() -> IpResolver {
-        IpResolver::with_lan_ip(TEST_IP)
+        IpResolver::with_lan_ip(TEST_IP, true)
+    }
+
+    fn answer() -> Answer {
+        Answer {
+            ipv4: TEST_IP,
+            ipv6: Some(Ipv6Addr::LOCALHOST),
+        }
+    }
+
+    fn query(name: &str, record: TYPE) -> Vec<u8> {
+        let mut packet = Packet::new_query(1234);
+        let question = Question::new(
+            Name::new_unchecked(name),
+            record.into(),
+            CLASS::IN.into(),
+            false,
+        );
+        packet.questions.push(question);
+        packet.build_bytes_vec().unwrap()
     }
 
     #[test]
     fn test_ip_resolver_returns_loopback_for_local_clients() {
         let resolver = test_resolver();
         assert_eq!(
-            resolver.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            resolver.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)).ipv4,
             Ipv4Addr::LOCALHOST
         );
         assert_eq!(
-            resolver.resolve(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            resolver.resolve(IpAddr::V6(Ipv6Addr::LOCALHOST)).ipv4,
             Ipv4Addr::LOCALHOST
+        );
+        assert_eq!(
+            resolver.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)).ipv6,
+            Some(Ipv6Addr::LOCALHOST)
         );
     }
 
     #[test]
     fn test_ip_resolver_returns_lan_ip_for_remote_clients() {
         let resolver = test_resolver();
-        assert_eq!(
-            resolver.resolve(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))),
-            TEST_IP
+        assert_eq!(resolver.resolve(REMOTE).ipv4, TEST_IP);
+    }
+
+    #[test]
+    fn remote_clients_get_no_ipv6_address_because_loopback_would_be_themselves() {
+        assert_eq!(test_resolver().resolve(REMOTE).ipv6, None);
+
+        let response = handle_query(
+            &query("test.localify", TYPE::AAAA),
+            1,
+            test_resolver().resolve(REMOTE),
         );
+        let parsed = Packet::parse(&response).unwrap();
+        assert_eq!(parsed.rcode(), RCODE::NoError);
+        assert_eq!(parsed.answers.len(), 0);
+    }
+
+    #[test]
+    fn no_client_learns_the_lan_address_without_the_opt_in() {
+        let resolver = IpResolver::with_lan_ip(TEST_IP, false);
+
+        assert_eq!(resolver.resolve(REMOTE).ipv4, Ipv4Addr::LOCALHOST);
+        assert_eq!(resolver.resolve(REMOTE).ipv6, None);
     }
 
     #[test]
@@ -345,7 +419,7 @@ mod tests {
         packet.questions.push(question);
 
         let query = packet.build_bytes_vec().unwrap();
-        let response = handle_query(&query, 1, TEST_IP);
+        let response = handle_query(&query, 1, answer());
 
         let parsed = Packet::parse(&response).unwrap();
         assert_eq!(parsed.rcode(), RCODE::NoError);
@@ -361,7 +435,7 @@ mod tests {
         packet.questions.push(question);
 
         let query = packet.build_bytes_vec().unwrap();
-        let response = handle_query(&query, 1, TEST_IP);
+        let response = handle_query(&query, 1, answer());
 
         let parsed = Packet::parse(&response).unwrap();
         assert_eq!(parsed.rcode(), RCODE::Refused);
@@ -376,7 +450,7 @@ mod tests {
         packet.questions.push(question);
 
         let query = packet.build_bytes_vec().unwrap();
-        let response = handle_query(&query, 1, TEST_IP);
+        let response = handle_query(&query, 1, answer());
 
         let parsed = Packet::parse(&response).unwrap();
         assert_eq!(parsed.rcode(), RCODE::NoError);
@@ -392,7 +466,7 @@ mod tests {
         packet.questions.push(question);
 
         let query = packet.build_bytes_vec().unwrap();
-        let response = handle_query(&query, 1, TEST_IP);
+        let response = handle_query(&query, 1, answer());
 
         let parsed = Packet::parse(&response).unwrap();
         assert_eq!(parsed.rcode(), RCODE::NoError);
@@ -408,7 +482,14 @@ mod tests {
 
         let query = packet.build_bytes_vec().unwrap();
         let custom_ip = Ipv4Addr::new(10, 0, 0, 50);
-        let response = handle_query(&query, 1, custom_ip);
+        let response = handle_query(
+            &query,
+            1,
+            Answer {
+                ipv4: custom_ip,
+                ipv6: None,
+            },
+        );
 
         let parsed = Packet::parse(&response).unwrap();
         assert_eq!(parsed.rcode(), RCODE::NoError);

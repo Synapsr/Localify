@@ -303,42 +303,29 @@ enum Commands {
     /// Reload daemon configuration
     Reload,
 
+    /// Let other devices reach Localify, or keep it on this machine (the default)
+    Lan {
+        #[command(subcommand)]
+        command: LanCommands,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
         shell: Shell,
     },
-
-    /// Internal privileged helper used by the desktop app.
-    #[command(hide = true)]
-    Helper {
-        #[command(subcommand)]
-        command: HelperCommands,
-    },
 }
 
 #[derive(Subcommand)]
-enum HelperCommands {
-    EnsureRunning {
-        #[arg(long)]
-        socket: PathBuf,
+enum LanCommands {
+    /// Listen on every network interface. macOS asks for one approval.
+    Enable,
 
-        #[arg(long)]
-        uid: u32,
-    },
+    /// Listen on this machine only. macOS asks for one approval.
+    Disable,
 
-    Serve {
-        #[arg(long)]
-        socket: PathBuf,
-
-        #[arg(long)]
-        uid: u32,
-    },
-
-    UninstallService {
-        #[arg(long)]
-        uid: u32,
-    },
+    /// Show who can reach Localify
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -580,6 +567,24 @@ fn ensure_rustls_crypto_provider() -> Result<()> {
     }
 }
 
+/// Files created as root would land in the user's folder, and nothing on macOS
+/// needs it: the commands that do ask for their own approval.
+#[cfg(target_os = "macos")]
+fn refuse_root_on_macos() -> Result<()> {
+    if infrastructure::process::is_root() {
+        anyhow::bail!(
+            "{0} does not run as root on macOS. Run it without sudo: it asks for an administrator's approval when it needs one.",
+            BRANDING.app_name
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refuse_root_on_macos() -> Result<()> {
+    Ok(())
+}
+
 fn main() -> Result<()> {
     ensure_rustls_crypto_provider()?;
 
@@ -596,6 +601,8 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+
+    refuse_root_on_macos()?;
 
     let (config, paths) = load_config_and_paths(config_path)?;
     let ctx = AppContext::new(config_path, &paths);
@@ -861,23 +868,26 @@ fn main() -> Result<()> {
         Commands::Start { foreground } => {
             cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
         }
-        Commands::Stop => cli::stop::execute(&ctx),
-        Commands::Restart => cli::restart::execute(cli.verbose, config_path, &ctx),
-        Commands::Status => cli::status::execute(&ctx, &config.daemon),
+        Commands::Stop => cli::stop::execute(&ctx, &paths, &config.daemon),
+        Commands::Restart => {
+            cli::restart::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon)
+        }
+        Commands::Status => cli::status::execute(&ctx, &paths, &config.daemon),
         Commands::Logs {
             lines,
             clear,
             follow,
         } => cli::logs::execute(lines, clear, follow, &paths),
-        Commands::Reload => cli::reload::execute(cli.verbose, config_path, &ctx),
-        Commands::Helper { command } => match command {
-            HelperCommands::EnsureRunning { socket, uid } => {
-                cli::helper::ensure_running(config_path, socket, uid)
+        Commands::Reload => {
+            cli::reload::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon)
+        }
+        Commands::Lan { command } => match command {
+            LanCommands::Enable => cli::lan::set(true, config_path, &paths, &config.daemon),
+            LanCommands::Disable => cli::lan::set(false, config_path, &paths, &config.daemon),
+            LanCommands::Status => {
+                cli::lan::print_status(&config.daemon);
+                Ok(())
             }
-            HelperCommands::Serve { socket, uid } => {
-                cli::helper::serve_forever(config_path, uid, socket)
-            }
-            HelperCommands::UninstallService { uid } => cli::helper::uninstall_service(uid),
         },
         Commands::Completions { .. } => unreachable!(),
     }

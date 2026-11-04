@@ -41,16 +41,24 @@ application code.
 The desktop shell assumes the existing CLI binary is still the process used to
 launch the daemon. Production defaults are:
 
-- config at `/etc/localify/config.toml`
+- config at `~/Library/Application Support/Localify Desktop/config.toml`
 - CLI binary at `target/debug/localify` in debug builds
+- a launchd service, `dev.localify.daemon`, that runs that binary as the installing
+  user and holds ports 80 and 443 for it
+
+The Root CA is trusted in your login keychain, for your account only. That needs no
+administrator, and macOS confirms it in its own window. Both profiles work this way.
 
 `pnpm tauri:dev` runs with `LOCALIFY_PROFILE=dev`. That profile is isolated
 from the installed app:
 
 - config at `~/Library/Application Support/Localify Dev/config.toml`
 - data and certificates under `~/Library/Application Support/Localify Dev/data`
-- pid, socket, logs, resolver, and helper names based on `localify-dev`
+- pid, socket, logs and resolver names based on `localify-dev`
 - domains under `.localify.test` instead of `.localify`
+- ports 8080, 8443 and 1054, so no launchd service: the app starts the daemon itself
+
+One approval writes `/etc/resolver/localify.test` and the `localify-dev` link.
 
 You can override both when running the desktop app:
 
@@ -74,8 +82,8 @@ pnpm tauri:dev
 uses the explicit "Localify (Dev)" name and the dev-only icon asset.
 The dev script also forces `LOCALIFY_PROFILE=dev` and
 `LOCALIFY_CLI_PATH=$PWD/target/debug/localify`, so daemon start/restart actions
-from the dev shell use the repo's debug CLI, separate runtime files, and the
-dev helper instead of the installed production app.
+from the dev shell use the repo's debug CLI and separate runtime files instead of
+the installed production app.
 
 When the dev app enables command line access, it installs `localify-dev`.
 Invoking the CLI under that name automatically uses the dev profile, so test
@@ -88,20 +96,20 @@ localify-dev run web
 
 ## Updates
 
-- **In-app update:** it records whether the daemon was running and restarts it after the relaunch.
-- **Any other replacement** (DMG, manual copy): the system helper restarts on the new build and
-  compares the daemon's binary with the installed one. The daemon reports its canonical path, inode,
-  size and modification time in its management `status`. The helper restarts a daemon running an older
-  build of the same install, and leaves a daemon started from another binary (a dev build) alone.
-- **Process group:** the helper starts the daemon in its own process group, so launchd does not stop
-  the daemon when the helper recycles itself after an update.
+The daemon runs from the app's normal path under launchd, so replacing the binary needs
+no prompt, whichever way it is replaced: in-app update, DMG, or a manual copy.
+
+Every 2 seconds the daemon compares its binary with what is on disk. Once the file has
+changed and stayed the same on two checks, the daemon exits with code 75, and launchd
+starts the new build. `ThrottleInterval` is 1 second, so launchd adds at most that. A
+daemon started another way, such as a dev build, is left alone.
 
 ## Launch at Login
 
 Successful desktop activation registers Localify with the official Tauri
 autostart plugin. The login item passes `--autostart`; that launch path keeps
-the main window hidden, creates the tray icon, and starts the daemon only when
-Localify is already installed and the daemon is not running.
+the main window hidden and creates the tray icon. launchd starts the daemon, at
+boot, whether or not the app ever opens.
 
 The production Settings screen exposes the same login item as a "Launch at
 login" toggle so users can verify, disable, or re-enable it without

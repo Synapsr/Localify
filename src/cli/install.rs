@@ -1,38 +1,19 @@
 use anyhow::Result;
 
-use super::backend::WriteBackend;
-use super::context::AppContext;
+use super::context::{AppContext, direct_api};
 use crate::application::StepOutcome;
 use crate::application::install::Install;
-#[cfg(target_os = "macos")]
-use crate::application::ports::IosSimulatorTrust;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
-#[cfg(target_os = "macos")]
-use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::network::get_network_info;
 use crate::infrastructure::paths::LocalifyPaths;
 
 pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Result<()> {
     println!("Setting up Localify...\n");
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        let result = client.install_localify()?;
-        println!("  Using IP address: {}", result.lan_ip);
-        for step in &result.steps {
-            let label = step.label.as_deref().unwrap_or("");
-            if step.status == "warning" {
-                eprintln!("  {} {}", label, step.message);
-            } else {
-                println!("  {} {}", label, step.message);
-            }
-        }
-        print_ios_simulator_trust_step(paths);
-        println!("\nLocalify installation complete!");
-        println!();
-        println!("Register domains with: localify register <domain> --route \"/=3000\"");
-        return Ok(());
+    if cfg!(target_os = "macos") {
+        return install_with_one_approval(ctx, paths);
     }
 
     let dns_service = get_dns_service()?;
@@ -58,7 +39,9 @@ pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Resu
         match outcome {
             StepOutcome::Success(msg) => println!("  {} {}", label, msg),
             StepOutcome::Warning(msg) => eprintln!("  {} {}", label, msg),
-            StepOutcome::Skipped(msg) => println!("  {} {}", label, msg),
+            StepOutcome::Skipped(msg) | StepOutcome::Pending(msg) => {
+                println!("  {} {}", label, msg)
+            }
         }
     }
 
@@ -69,59 +52,31 @@ pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Resu
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn print_ios_simulator_trust_step(paths: &LocalifyPaths) {
-    let Some(outcome) = ios_simulator_trust_outcome(&paths.data_dir.join("ca.crt")) else {
-        return;
-    };
+/// On macOS the shared API does the work, in one approval, as this user. Node trust
+/// and iOS Simulators are set up here too: over SSH they may be all that works.
+fn install_with_one_approval(ctx: &AppContext, paths: &LocalifyPaths) -> Result<()> {
+    let result = direct_api(&ctx.config_path)?.install()?;
 
-    match outcome {
-        StepOutcome::Success(message) | StepOutcome::Skipped(message) => {
-            println!("  iOS Simulator trust {}", message);
+    println!("  Using IP address: {}", result.lan_ip);
+    let mut pending = false;
+    for step in &result.steps {
+        let label = step.label.as_deref().unwrap_or("");
+        match step.status.as_str() {
+            "warning" => eprintln!("  {} {}", label, step.message),
+            "pending" => {
+                pending = true;
+                eprintln!("  {} {}", label, step.message);
+            }
+            _ => println!("  {} {}", label, step.message),
         }
-        StepOutcome::Warning(message) => {
-            eprintln!("  iOS Simulator trust {}", message);
-        }
     }
-}
 
-#[cfg(not(target_os = "macos"))]
-fn print_ios_simulator_trust_step(_paths: &LocalifyPaths) {}
-
-#[cfg(target_os = "macos")]
-fn ios_simulator_trust_outcome(cert_path: &std::path::Path) -> Option<StepOutcome> {
-    match trust_booted_ios_simulators(cert_path) {
-        Ok(IosSimulatorTrust::Trusted { device_names }) => Some(StepOutcome::Success(format!(
-            "Root CA trusted in {}.",
-            format_ios_simulator_names(&device_names)
-        ))),
-        Ok(IosSimulatorTrust::NoBootedDevices) => Some(StepOutcome::Skipped(
-            "No booted iOS Simulator found. Boot one and rerun 'localify install' before testing .localify HTTPS there.".into(),
-        )),
-        Ok(IosSimulatorTrust::CertificateMissing { path }) => Some(StepOutcome::Warning(format!(
-            "Root CA file was not found at {}; iOS Simulator HTTPS trust was not configured.",
-            path.display()
-        ))),
-        Ok(IosSimulatorTrust::ToolUnavailable { reason }) => Some(StepOutcome::Skipped(format!(
-            "Xcode simctl is not available; iOS Simulator HTTPS trust was not configured. {}",
-            reason
-        ))),
-        Ok(IosSimulatorTrust::CurrentUserUnavailable) => None,
-        Err(error) => Some(StepOutcome::Warning(format!(
-            "Failed to trust the Root CA in booted iOS Simulators: {error}"
-        ))),
+    println!("\nLocalify installation complete!");
+    println!("  Data and logs: {}", paths.data_dir.display());
+    if pending {
+        println!("  HTTP works now. HTTPS needs the step above to be trusted by browsers.");
     }
-}
-
-#[cfg(target_os = "macos")]
-fn format_ios_simulator_names(device_names: &[String]) -> String {
-    match device_names {
-        [] => "booted iOS Simulator".into(),
-        [name] => format!("booted iOS Simulator '{name}'"),
-        names => format!(
-            "{} booted iOS Simulators ({})",
-            names.len(),
-            names.join(", ")
-        ),
-    }
+    println!();
+    println!("Register domains with: localify register <domain> --route \"/=3000\"");
+    Ok(())
 }

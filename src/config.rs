@@ -31,6 +31,12 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+/// macOS listens on loopback unless the user opts in. Linux keeps listening on
+/// all interfaces: Docker containers reach the host through its bridge address.
+fn default_lan_access() -> bool {
+    !cfg!(target_os = "macos")
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_http_port")]
@@ -44,6 +50,11 @@ pub struct DaemonConfig {
 
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Answer other devices on the network, not only this machine. On macOS
+    /// changing it rewrites the launchd plist, which takes one approval.
+    #[serde(default = "default_lan_access")]
+    pub lan_access: bool,
 }
 
 impl Default for DaemonConfig {
@@ -53,6 +64,7 @@ impl Default for DaemonConfig {
             https_port: default_https_port(),
             dns_port: default_dns_port(),
             log_level: default_log_level(),
+            lan_access: default_lan_access(),
         }
     }
 }
@@ -178,5 +190,14 @@ impl Default for LocalifyPaths {
             certs_dir: default_certs_dir(),
             socket_path: default_socket_path(),
         }
+    }
+}
+
+impl LocalifyPaths {
+    /// Present while the user wants the launchd service stopped. launchd would
+    /// start the job again on the next connection, so the daemon checks this
+    /// and goes back to sleep.
+    pub fn stop_marker(&self) -> PathBuf {
+        self.pid_file.with_extension("stopped")
     }
 }
