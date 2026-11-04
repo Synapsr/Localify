@@ -367,8 +367,12 @@ const sanitizeErrorField = (value: string) => {
     .replace(DOUBLE_QUOTED_NAME, "$1[name]")
     .replace(/https?:\/\/[^\s)]+/g, "[url]")
     .replace(/file:\/\/[^\s)]+/g, "[path]")
-    .replace(/(?:\/(?:Users|Volumes|private|tmp|var|etc)\/[^\s)]+)/g, "[path]")
-    .replace(/[A-Za-z]:\\[^\s)]+/g, "[path]")
+    // Paths can contain spaces, so each one runs to the next delimiter, not the next space.
+    .replace(
+      /(?:~|\/(?:Users|Volumes|private|tmp|var|etc|home|opt|Library|Applications))\/[^\n:;,)]*/g,
+      "[path]",
+    )
+    .replace(/[A-Za-z]:\\[^\n:;,)]*/g, "[path]")
     .replace(LOCALIFY_HOSTNAME, "$1[domain]")
     .slice(0, MAX_ERROR_FIELD_LENGTH);
 };
