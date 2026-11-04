@@ -29,35 +29,33 @@ use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
-    ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
-    AgentSkillAgentDto, AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto,
-    AssignDomainProjectRequest, AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto,
-    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
-    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
-    DetectProjectInitPlanDto, DetectProjectInitPlanRequest, DiscoverProjectWorktreesRequest,
-    DnsResolutionDto, DomainInfoDto, DomainPatternRequest, EnsureProjectEnvironmentRequest,
-    EnsureProjectEnvironmentResultDto, EnvironmentDto, EnvironmentFileCandidateDto,
-    EnvironmentFileCopyItemDto, EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest,
-    EnvironmentFileCopyStatusDto, EnvironmentFileDto, EnvironmentFileListDto,
-    EnvironmentFileRequest, FolderInitServiceDto, ImportOfflineLicenseRequest,
+    AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest, AgentSkillAgentDto,
+    AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
+    AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
+    CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
+    CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
+    DetectProjectInitPlanRequest, DiscoverProjectWorktreesRequest, DnsResolutionDto, DomainInfoDto,
+    DomainPatternRequest, EnsureProjectEnvironmentRequest, EnsureProjectEnvironmentResultDto,
+    EnvironmentDto, EnvironmentFileCandidateDto, EnvironmentFileCopyItemDto,
+    EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
+    EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest, FolderInitServiceDto,
     InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
-    InitProjectResultDto, InstallResultDto, KeygenSettingsUpdateRequest, KillPortConflictRequest,
-    LauncherAvailabilityDto, LogsDto, LogsRequest, MaterializeProjectServicesRequest,
-    MaterializeProjectServicesResultDto, NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest,
-    OpenProjectUrlRequest, PortConflictDto, ProjectEnvironmentInfoDto,
-    ProjectEnvironmentServiceInfoDto, ProjectInfoDto, ProjectServiceInfoDto,
-    ProjectWorktreeDiscoveryDto, ProjectWorktreeDto, ProjectWorktreeServiceCandidateDto,
-    ProjectWorktreeStatusDto, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
-    RegistrationMutationDto, RelinkProjectRootRequest, RemoveProjectEnvironmentRequest,
-    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
-    RemoveRouteRequest, RouteDto, RunLocalDevServerRequest, SaveEnvironmentFileRequest,
-    SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto, SettingsExportRequest,
-    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewProjectDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSettingsDto,
-    SettingsTransferSnapshotDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
-    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LauncherAvailabilityDto,
+    LogsDto, LogsRequest, MaterializeProjectServicesRequest, MaterializeProjectServicesResultDto,
+    NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
+    PortConflictDto, ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto, ProjectInfoDto,
+    ProjectServiceInfoDto, ProjectWorktreeDiscoveryDto, ProjectWorktreeDto,
+    ProjectWorktreeServiceCandidateDto, ProjectWorktreeStatusDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RelinkProjectRootRequest,
+    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
+    SaveEnvironmentFileRequest, SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto,
+    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewProjectDto, SettingsImportPreviewRequest, SettingsImportRequest,
+    SettingsImportResultDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
+    SettingsTransferSettingsDto, SettingsTransferSnapshotDto, StartDaemonRequest, StepDto,
+    StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
+    UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 #[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 use crate::desktop::home_dir::user_home_dir;
@@ -81,10 +79,6 @@ use crate::infrastructure::filesystem::FileSystemSetup;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
-use crate::infrastructure::licensing::{
-    FREE_MAX_PROJECTS, KeygenClient, ResolvedLicenseStatus, build_offline_imported_license,
-    current_machine_fingerprint, mask_license_key, resolve_license_state,
-};
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::LocalifyPaths;
@@ -183,7 +177,6 @@ impl DesktopApi {
             environment: self.environment(),
             config: self.read_config()?,
             daemon: self.daemon_status()?,
-            licensing: self.licensing_status()?,
             launcher_preferences: self.effective_launcher_preferences()?.into(),
             launcher_availability: self.launcher_availability(),
             domains: self.list_domains()?,
@@ -329,228 +322,6 @@ impl DesktopApi {
         config.validate()?;
         self.config_store().save(&config)?;
         Ok(map_config(self.config_path.as_path(), config))
-    }
-
-    pub fn licensing_status(&self) -> Result<crate::desktop::dto::LicensingDto> {
-        if let Some(helper) = self.connected_helper_client()? {
-            return helper.get_licensing_status();
-        }
-
-        let config = self.config_store().load()?;
-        let project_count = config.configured_projects().len();
-        let domain_count = config.configured_domains().len();
-        let current_machine = current_machine_fingerprint().ok();
-
-        Ok(map_licensing_status(
-            &config.licensing,
-            project_count,
-            domain_count,
-            None,
-            current_machine.as_ref(),
-        ))
-    }
-
-    pub fn update_keygen_settings(
-        &self,
-        request: KeygenSettingsUpdateRequest,
-    ) -> Result<crate::desktop::dto::LicensingDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .update_keygen_settings(request);
-        }
-
-        self.ensure_config_writable()?;
-        let licensing = self
-            .config_store()
-            .update_keygen_config(crate::config::KeygenConfig {
-                api_url: request.api_url.trim().to_string(),
-                account: request.account.trim().to_string(),
-                product: request
-                    .product
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty()),
-                public_key: request
-                    .public_key
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty()),
-            })?;
-        let config = self.config_store().load()?;
-        let current_machine = current_machine_fingerprint().ok();
-
-        Ok(map_licensing_status(
-            &licensing,
-            config.configured_projects().len(),
-            config.configured_domains().len(),
-            None,
-            current_machine.as_ref(),
-        ))
-    }
-
-    pub fn activate_license(
-        &self,
-        request: ActivateLicenseRequest,
-    ) -> Result<crate::desktop::dto::LicensingDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.activate_license(request);
-        }
-
-        self.ensure_config_writable()?;
-        let key = request.key.trim();
-        if key.is_empty() {
-            bail!("License key is required.");
-        }
-
-        let config_store = self.config_store();
-        let current = config_store.load()?;
-        let client = KeygenClient::new()?;
-        let machine = current_machine_fingerprint()
-            .context("Failed to identify this machine for Keygen activation")?;
-        let validation =
-            client.validate_and_activate_license_key(&current.licensing.keygen, key, &machine)?;
-
-        if !validation.valid {
-            bail!(validation.detail);
-        }
-
-        let licensing =
-            config_store.store_licensing(Some(validation.license), validation.offline_license)?;
-        let updated = config_store.load()?;
-
-        Ok(map_licensing_status(
-            &licensing,
-            updated.configured_projects().len(),
-            updated.configured_domains().len(),
-            None,
-            Some(&machine),
-        ))
-    }
-
-    pub fn clear_license(&self) -> Result<crate::desktop::dto::LicensingDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.clear_license();
-        }
-
-        self.ensure_config_writable()?;
-        let licensing = self.config_store().store_licensing(None, None)?;
-        let config = self.config_store().load()?;
-        let current_machine = current_machine_fingerprint().ok();
-
-        Ok(map_licensing_status(
-            &licensing,
-            config.configured_projects().len(),
-            config.configured_domains().len(),
-            None,
-            current_machine.as_ref(),
-        ))
-    }
-
-    pub fn refresh_license(&self) -> Result<crate::desktop::dto::LicensingDto> {
-        if self.should_use_system_helper() {
-            return self.ensure_helper_running()?.refresh_license();
-        }
-
-        self.ensure_config_writable()?;
-        let config_store = self.config_store();
-        let current = config_store.load()?;
-        let Some(existing_license) = current.licensing.license.clone() else {
-            let project_count = current.configured_projects().len();
-            let domain_count = current.configured_domains().len();
-            let current_machine = current_machine_fingerprint().ok();
-
-            return Ok(map_licensing_status(
-                &current.licensing,
-                project_count,
-                domain_count,
-                None,
-                current_machine.as_ref(),
-            ));
-        };
-
-        let client = KeygenClient::new()?;
-        let machine = current_machine_fingerprint()
-            .context("Failed to identify this machine for Keygen refresh")?;
-        let validation = client.validate_and_activate_license_key(
-            &current.licensing.keygen,
-            &existing_license.key,
-            &machine,
-        )?;
-
-        let mut stored = validation.license;
-        if stored.machine_id.is_none()
-            && existing_license.machine_fingerprint == stored.machine_fingerprint
-        {
-            stored.machine_id = existing_license.machine_id.clone();
-        }
-        if !validation.valid {
-            stored.validation_code = Some(validation.code.clone());
-            stored.validation_detail = Some(validation.detail.clone());
-        }
-
-        let offline_license = validation
-            .offline_license
-            .or(current.licensing.offline_license.clone());
-        let licensing = config_store.store_licensing(Some(stored), offline_license)?;
-        let updated = config_store.load()?;
-        let last_error = (!validation.valid).then_some(validation.detail);
-
-        Ok(map_licensing_status(
-            &licensing,
-            updated.configured_projects().len(),
-            updated.configured_domains().len(),
-            last_error,
-            Some(&machine),
-        ))
-    }
-
-    pub fn import_offline_license(
-        &self,
-        request: ImportOfflineLicenseRequest,
-    ) -> Result<crate::desktop::dto::LicensingDto> {
-        if self.should_use_system_helper() {
-            return self
-                .ensure_helper_running()?
-                .import_offline_license(request);
-        }
-
-        self.ensure_config_writable()?;
-        let certificate = request.certificate.trim();
-        if certificate.is_empty() {
-            bail!("Offline license certificate is required.");
-        }
-
-        let config_store = self.config_store();
-        let current = config_store.load()?;
-        let key = request
-            .key
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                current
-                    .licensing
-                    .license
-                    .as_ref()
-                    .map(|license| license.key.clone())
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "A license key is required to import an offline Keygen license file."
-                )
-            })?;
-
-        let (license, offline_license) =
-            build_offline_imported_license(&current.licensing.keygen, certificate, &key)?;
-        let licensing = config_store.store_licensing(Some(license), Some(offline_license))?;
-        let updated = config_store.load()?;
-        let current_machine = current_machine_fingerprint().ok();
-
-        Ok(map_licensing_status(
-            &licensing,
-            updated.configured_projects().len(),
-            updated.configured_domains().len(),
-            None,
-            current_machine.as_ref(),
-        ))
     }
 
     pub fn daemon_status(&self) -> Result<DaemonStatusDto> {
@@ -1878,12 +1649,10 @@ impl DesktopApi {
         let snapshot = read_settings_snapshot(&path)?;
         validate_settings_snapshot(&snapshot)?;
         validate_settings_import_request(&request, &snapshot)?;
-        let licensing = self.licensing_status()?;
 
         match request.mode.as_str() {
             SETTINGS_IMPORT_MODE_REPLACE_ALL => {
                 validate_settings_snapshot_targets(&snapshot)?;
-                ensure_snapshot_within_license_limits(&licensing, &snapshot)?;
                 self.import_settings_replace_all(snapshot)
             }
             SETTINGS_IMPORT_MODE_PROJECTS => {
@@ -1896,7 +1665,6 @@ impl DesktopApi {
                     projects: selected_projects.clone(),
                 };
                 validate_settings_snapshot_targets(&selected_snapshot)?;
-                ensure_project_import_within_license_limits(self, &licensing, &selected_projects)?;
                 self.import_settings_projects(selected_projects)
             }
             other => bail!("Unsupported import mode '{other}'."),
@@ -1977,12 +1745,6 @@ impl DesktopApi {
             daemon: bootstrap.config.daemon,
             docker: bootstrap.config.docker,
             agent: bootstrap.config.agent,
-            keygen: KeygenSettingsUpdateRequest {
-                api_url: bootstrap.licensing.api_url,
-                account: bootstrap.licensing.account,
-                product: bootstrap.licensing.product,
-                public_key: bootstrap.licensing.public_key,
-            },
             launcher_preferences: bootstrap.launcher_preferences,
         });
 
@@ -2027,7 +1789,6 @@ impl DesktopApi {
                 docker: Some(settings.docker),
                 agent: Some(settings.agent),
             })?;
-            self.apply_imported_keygen_settings(settings.keygen)?;
             self.update_launcher_preferences(UpdateLauncherPreferencesRequest {
                 editor: settings.launcher_preferences.editor,
                 terminal: settings.launcher_preferences.terminal,
@@ -2145,16 +1906,6 @@ impl DesktopApi {
             Err(error) if is_missing_home_error(&error) => Ok(HashMap::new()),
             Err(error) => Err(error),
         }
-    }
-
-    fn apply_imported_keygen_settings(&self, request: KeygenSettingsUpdateRequest) -> Result<()> {
-        let licensing = self.licensing_status()?;
-        if licensing.active_license.is_some() || licensing.offline_license.is_some() {
-            return Ok(());
-        }
-
-        self.update_keygen_settings(request)?;
-        Ok(())
     }
 
     pub fn remove_project(&self, request: RemoveProjectRequest) -> Result<RemoveProjectResultDto> {
@@ -4056,86 +3807,6 @@ fn validate_import_route(route: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_snapshot_within_license_limits(
-    licensing: &crate::desktop::dto::LicensingDto,
-    snapshot: &SettingsTransferSnapshotDto,
-) -> Result<()> {
-    if let Some(max_projects) = licensing.limits.max_projects
-        && snapshot.projects.len() > max_projects
-    {
-        bail!(
-            "This import contains {} projects, but the current {} plan allows up to {}.",
-            snapshot.projects.len(),
-            licensing.limits.plan,
-            max_projects
-        );
-    }
-
-    if let Some(max_domains_per_project) = licensing.limits.max_domains_per_project {
-        for project in &snapshot.projects {
-            if project.domains.len() > max_domains_per_project {
-                bail!(
-                    "Project '{}' contains {} domains, but the current {} plan allows up to {} domains per project.",
-                    project.name,
-                    project.domains.len(),
-                    licensing.limits.plan,
-                    max_domains_per_project
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn ensure_project_import_within_license_limits(
-    api: &DesktopApi,
-    licensing: &crate::desktop::dto::LicensingDto,
-    projects: &[SettingsTransferProjectDto],
-) -> Result<()> {
-    if let Some(max_projects) = licensing.limits.max_projects {
-        let existing_project_ids = api
-            .list_projects()?
-            .into_iter()
-            .map(|project| project.id)
-            .collect::<HashSet<_>>();
-        let replacing_project_ids = projects
-            .iter()
-            .map(|project| project.id.as_str())
-            .collect::<HashSet<_>>();
-        let retained_project_count = existing_project_ids
-            .iter()
-            .filter(|project_id| !replacing_project_ids.contains(project_id.as_str()))
-            .count();
-        let final_project_count = retained_project_count + projects.len();
-
-        if final_project_count > max_projects {
-            bail!(
-                "This import would leave {} projects configured, but the current {} plan allows up to {}.",
-                final_project_count,
-                licensing.limits.plan,
-                max_projects
-            );
-        }
-    }
-
-    if let Some(max_domains_per_project) = licensing.limits.max_domains_per_project {
-        for project in projects {
-            if project.domains.len() > max_domains_per_project {
-                bail!(
-                    "Project '{}' contains {} domains, but the current {} plan allows up to {} domains per project.",
-                    project.name,
-                    project.domains.len(),
-                    licensing.limits.plan,
-                    max_domains_per_project
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn transfer_file_path(file_path: &str) -> Result<PathBuf> {
     let trimmed = file_path.trim();
     if trimmed.is_empty() {
@@ -5237,93 +4908,6 @@ fn is_missing_home_error(error: &anyhow::Error) -> bool {
     error
         .to_string()
         .contains("HOME is not set for the current user.")
-}
-
-fn map_licensing_status(
-    licensing: &crate::config::LicensingConfig,
-    project_count: usize,
-    domain_count: usize,
-    last_error: Option<String>,
-    current_machine: Option<&crate::infrastructure::licensing::MachineFingerprint>,
-) -> crate::desktop::dto::LicensingDto {
-    let resolved = resolve_license_state(licensing);
-    let active_license =
-        resolved
-            .active_license
-            .as_ref()
-            .map(|license| crate::desktop::dto::ActiveLicenseDto {
-                key_masked: mask_license_key(&license.key),
-                license_id: license.license_id.clone(),
-                name: license.name.clone(),
-                expiry: license.expiry.clone(),
-                last_validated_at: license.last_validated_at.clone(),
-                validation_code: license.validation_code.clone(),
-                validation_detail: license.validation_detail.clone(),
-                machine_id: license.machine_id.clone(),
-                machine_fingerprint: license.machine_fingerprint.clone(),
-                machine_name: license.machine_name.clone(),
-                machine_hostname: license.machine_hostname.clone(),
-                machine_platform: license.machine_platform.clone(),
-                response_signature_verified: license.response_signature_verified,
-                response_signature_date: license.response_signature_date.clone(),
-            });
-    let offline_license =
-        resolved
-            .offline_license
-            .as_ref()
-            .map(|license| crate::desktop::dto::OfflineLicenseDto {
-                algorithm: license.algorithm.clone(),
-                issued: licensing
-                    .offline_license
-                    .as_ref()
-                    .and_then(|value| value.issued.clone()),
-                file_expiry: license.file_expiry.clone(),
-                license_id: Some(license.license_id.clone()),
-                name: license.name.clone(),
-                license_expiry: license.license_expiry.clone(),
-                plan: license.plan.clone(),
-                max_projects: license.max_projects,
-                max_domains_per_project: license.max_domains_per_project,
-            });
-    let configured = licensing.keygen.is_configured();
-    let status = match resolved.status {
-        ResolvedLicenseStatus::NotConfigured => "notConfigured",
-        ResolvedLicenseStatus::Unlicensed => "unlicensed",
-        ResolvedLicenseStatus::Licensed => "licensed",
-        ResolvedLicenseStatus::LicensedOffline => "licensedOffline",
-        ResolvedLicenseStatus::Invalid => "invalid",
-    };
-
-    crate::desktop::dto::LicensingDto {
-        status: status.into(),
-        configured,
-        api_url: licensing.keygen.effective_api_url().to_string(),
-        account: licensing.keygen.effective_account().to_string(),
-        product: licensing.keygen.effective_product().map(str::to_owned),
-        public_key: licensing.keygen.effective_public_key().map(str::to_owned),
-        limits: crate::desktop::dto::LicenseLimitsDto {
-            plan: resolved.limits.plan,
-            max_projects: resolved.limits.max_projects,
-            max_domains_per_project: resolved.limits.max_domains_per_project,
-        },
-        free_limits: crate::desktop::dto::LicenseLimitsDto {
-            plan: "Free".into(),
-            max_projects: Some(FREE_MAX_PROJECTS),
-            max_domains_per_project: None,
-        },
-        project_count,
-        domain_count,
-        last_error: resolved.last_error.or(last_error),
-        current_machine: current_machine.map(|machine| crate::desktop::dto::MachineDto {
-            fingerprint: machine.fingerprint.clone(),
-            name: machine.name.clone(),
-            hostname: machine.hostname.clone(),
-            platform: machine.platform.clone(),
-        }),
-        active_license,
-        offline_cache_present: licensing.offline_license.is_some(),
-        offline_license,
-    }
 }
 
 fn map_config(config_path: &Path, config: Config) -> AppConfigDto {
@@ -7490,14 +7074,14 @@ mod tests {
         service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
         unique_environment_slug, validate_settings_snapshot,
     };
-    use crate::config::{LocalifyPaths, StoredLicense};
+    use crate::config::LocalifyPaths;
     use crate::desktop::dto::{
         AttachProjectWorktreeRequest, CreateProjectDomainRequest, CreateProjectWithDomainsRequest,
-        EnvironmentFileRequest, InitProjectRequest, InitProjectServiceRequest,
-        KeygenSettingsUpdateRequest, LogsRequest, ProjectInfoDto, ProjectServiceInfoDto,
-        RelinkProjectRootRequest, RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
-        SaveEnvironmentFileRequest, SettingsTransferDomainDto, SettingsTransferProjectDto,
-        SettingsTransferSnapshotDto,
+        EnvironmentFileRequest, InitProjectRequest, InitProjectServiceRequest, LogsRequest,
+        ProjectInfoDto, ProjectServiceInfoDto, RelinkProjectRootRequest,
+        RemoveProjectEnvironmentRequest, RemoveProjectRequest, RouteDto,
+        SaveEnvironmentFileRequest, SettingsImportPreviewRequest, SettingsImportRequest,
+        SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSnapshotDto,
     };
     use crate::domain::{DomainPattern, DomainRegistration, Route, RouteTarget};
     use crate::infrastructure::config::{
@@ -8610,68 +8194,82 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
         assert!(!config_path.exists());
     }
 
+    /// A settings export written by a release that sold licenses: a `keygen`
+    /// block in the settings, plus more projects than the old free limit allowed.
+    fn write_export_from_licensed_release(dir: &Path) -> PathBuf {
+        let projects = (1..=6)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("project-{index}"),
+                    "name": format!("Project {index}"),
+                    "enabled": true,
+                    "domains": [],
+                })
+            })
+            .collect::<Vec<_>>();
+        let export = serde_json::json!({
+            "version": 1,
+            "scope": "all",
+            "settings": {
+                "daemon": {
+                    "httpPort": 8080,
+                    "httpsPort": 8443,
+                    "dnsPort": 1054,
+                    "logLevel": "info",
+                },
+                "docker": { "enabled": false },
+                "agent": { "installSkill": false, "promoteDevScript": false },
+                "keygen": {
+                    "apiUrl": "https://licences.localify.dev",
+                    "account": "account_123",
+                    "product": "product_123",
+                    "publicKey": "public_key_123",
+                },
+                "launcherPreferences": {},
+            },
+            "standaloneDomains": [],
+            "projects": projects,
+        });
+        let path = dir.join("export-from-licensed-release.json");
+        fs::write(&path, serde_json::to_string_pretty(&export).unwrap()).unwrap();
+        path
+    }
+
+    // Previewed rather than imported with "replaceAll": a full import saves
+    // launcher preferences under the real home directory.
     #[test]
-    fn imported_keygen_settings_apply_when_unlicensed() {
-        let (_temp_dir, api, store) = temp_api();
+    fn settings_export_with_keygen_block_is_still_readable() {
+        let (temp_dir, api, _store) = temp_api();
+        let path = write_export_from_licensed_release(temp_dir.path());
 
-        api.apply_imported_keygen_settings(KeygenSettingsUpdateRequest {
-            api_url: "https://keygen.example.test".into(),
-            account: "account_123".into(),
-            product: Some("product_123".into()),
-            public_key: Some("public_key_123".into()),
-        })
-        .unwrap();
+        let preview = api
+            .preview_settings_import(SettingsImportPreviewRequest {
+                file_path: path.display().to_string(),
+            })
+            .unwrap();
 
-        let config = store.load().unwrap();
-        assert_eq!(
-            config.licensing.keygen.api_url,
-            "https://keygen.example.test"
-        );
-        assert_eq!(config.licensing.keygen.account, "account_123");
-        assert_eq!(
-            config.licensing.keygen.product.as_deref(),
-            Some("product_123")
-        );
-        assert_eq!(
-            config.licensing.keygen.public_key.as_deref(),
-            Some("public_key_123")
-        );
-        assert!(config.licensing.license.is_none());
+        assert!(preview.includes_settings);
+        assert_eq!(preview.project_count, 6);
     }
 
     #[test]
-    fn imported_keygen_settings_preserve_active_license() {
-        let (_temp_dir, api, store) = temp_api();
+    fn selected_project_import_ignores_the_old_project_limit() {
+        let (temp_dir, api, store) = temp_api();
+        for index in 1..=5 {
+            store.create_project(&format!("Existing {index}")).unwrap();
+        }
+        let path = write_export_from_licensed_release(temp_dir.path());
 
-        store
-            .store_license(Some(StoredLicense {
-                key: "TEST-KEY-1234".into(),
-                license_id: "lic_123".into(),
-                name: Some("Pro".into()),
-                max_projects: Some(10),
-                validation_code: Some("VALID".into()),
-                ..StoredLicense::default()
-            }))
+        let result = api
+            .import_settings(SettingsImportRequest {
+                file_path: path.display().to_string(),
+                mode: "projects".into(),
+                project_ids: vec!["project-1".into(), "project-2".into()],
+            })
             .unwrap();
 
-        api.apply_imported_keygen_settings(KeygenSettingsUpdateRequest {
-            api_url: "https://keygen.example.test".into(),
-            account: "account_123".into(),
-            product: Some("product_123".into()),
-            public_key: Some("public_key_123".into()),
-        })
-        .unwrap();
-
-        let config = store.load().unwrap();
-        assert!(config.licensing.license.is_some());
-        assert_ne!(
-            config.licensing.keygen.api_url,
-            "https://keygen.example.test"
-        );
-
-        for index in 1..=6 {
-            store.create_project(&format!("Project {index}")).unwrap();
-        }
+        assert_eq!(result.imported_projects, 2);
+        assert_eq!(store.list_projects().unwrap().len(), 7);
     }
 
     #[test]

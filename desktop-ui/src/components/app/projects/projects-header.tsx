@@ -1,7 +1,6 @@
 "use client";
 
 import { formatForDisplay } from "@tanstack/react-hotkeys";
-import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import { PlusIcon, SearchIcon, XIcon } from "@/components/icons";
@@ -17,7 +16,6 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useScroll } from "@/hooks/use-scroll";
-import { bootstrapQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useAppHotkeys } from "@/providers/hotkeys-provider";
 
@@ -36,11 +34,6 @@ export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) =>
   const { hotkeys } = useAppHotkeys();
   const { scrolled } = useScroll(4);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { data } = useQuery(bootstrapQueries.read());
-
-  const maxProjects = data?.licensing.limits.maxProjects ?? null;
-  const projectLimitReached =
-    maxProjects !== null && (data?.licensing.projectCount ?? 0) >= maxProjects;
 
   useEffect(() => {
     const focusSearch = () => {
@@ -82,12 +75,7 @@ export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) =>
                         className={cn("border-dashed")}
                         variant="outline"
                         size="icon"
-                        disabled={projectLimitReached}
-                        title={
-                          projectLimitReached
-                            ? "Project limit reached. Activate a Keygen license in Settings."
-                            : "Create project"
-                        }
+                        title="Create project"
                       >
                         <PlusIcon className="size-4 text-muted-foreground" />
                       </Button>

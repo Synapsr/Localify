@@ -10,7 +10,6 @@ pub mod filesystem;
 pub mod ios_simulator_trust;
 pub mod launch_profiles;
 pub mod launch_sessions;
-pub mod licensing;
 pub mod local_dev;
 pub mod mgmt_client;
 pub mod network;

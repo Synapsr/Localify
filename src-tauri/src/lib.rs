@@ -221,7 +221,6 @@ pub(crate) fn disable_autostart<R: Runtime>(_app: &AppHandle<R>) -> Result<(), S
 #[derive(Debug)]
 enum DeepLinkAction {
     Projects,
-    SettingsLicensing,
     Logs { domain: String },
     InEditor { domain: String },
     RunLocalDevServer { domain: String },
@@ -284,8 +283,8 @@ fn parse_deep_link_action(url: &tauri::Url) -> Result<DeepLinkAction, String> {
         .ok_or_else(|| "Deep link is missing an action namespace.".to_string())?;
 
     match (host, url.path()) {
-        ("open", "/projects") => Ok(DeepLinkAction::Projects),
-        ("open", "/settings/licensing") => Ok(DeepLinkAction::SettingsLicensing),
+        // License emails already sent link to the settings screen that no longer exists.
+        ("open", "/projects" | "/settings/licensing") => Ok(DeepLinkAction::Projects),
         ("open", "/logs") => Ok(DeepLinkAction::Logs {
             domain: query_param(url, "domain")?,
         }),
@@ -322,15 +321,6 @@ fn execute_deep_link_action<R: Runtime>(
             app,
             DeepLinkPayloadDto {
                 route: DeepLinkRouteDto::Projects,
-                project_id: None,
-                view: None,
-            },
-            delivery,
-        ),
-        DeepLinkAction::SettingsLicensing => deliver_deep_link_payload(
-            app,
-            DeepLinkPayloadDto {
-                route: DeepLinkRouteDto::SettingsLicensing,
                 project_id: None,
                 view: None,
             },
@@ -1196,15 +1186,9 @@ pub fn run() {
             commands::read_install_attribution_clipboard,
             commands::get_config,
             commands::update_config,
-            commands::get_licensing_status,
             commands::export_settings,
             commands::preview_settings_import,
             commands::import_settings,
-            commands::update_keygen_settings,
-            commands::activate_license,
-            commands::import_offline_license,
-            commands::clear_license,
-            commands::refresh_license,
             commands::get_daemon_status,
             commands::list_domains,
             commands::list_projects,
@@ -1265,4 +1249,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn license_email_deep_link_opens_projects() {
+        let url = tauri::Url::parse("localify://open/settings/licensing").unwrap();
+
+        assert!(matches!(
+            parse_deep_link_action(&url),
+            Ok(DeepLinkAction::Projects)
+        ));
+    }
 }

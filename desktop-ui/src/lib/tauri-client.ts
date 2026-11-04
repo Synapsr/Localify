@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
-  ActivateLicenseRequest,
   AddProjectServiceRequest,
   AddProjectServiceResultDto,
   AddRouteRequest,
@@ -32,14 +31,11 @@ import type {
   EnvironmentFileDto,
   EnvironmentFileListDto,
   EnvironmentFileRequest,
-  ImportOfflineLicenseRequest,
   InitProjectFromFolderRequest,
   InitProjectFromFolderResultDto,
   InstallResultDto,
-  KeygenSettingsUpdateRequest,
   KillPortConflictRequest,
   LauncherPreferencesDto,
-  LicensingDto,
   LogsDto,
   LogsRequest,
   NodeTrustDto,
@@ -102,11 +98,6 @@ import {
   initProjectFromFolderRequestSchema,
 } from "./validators/validator.init-project-from-folder";
 import { launcherPreferencesSchema } from "./validators/validator.launcher-preferences";
-import {
-  activateLicenseRequestSchema,
-  importOfflineLicenseRequestSchema,
-  keygenSettingsUpdateRequestSchema,
-} from "./validators/validator.license";
 import { openEnvInEditorRequestSchema } from "./validators/validator.open-env-in-editor";
 import { openInEditorRequestSchema } from "./validators/validator.open-in-editor";
 import { openProjectUrlRequestSchema } from "./validators/validator.open-project-url";
@@ -183,15 +174,9 @@ export interface DesktopClient {
   consumePendingDeepLink(): Promise<DeepLinkPayloadDto | null>;
   getConfig(): Promise<AppConfigDto>;
   updateConfig(request: ConfigUpdateRequest): Promise<AppConfigDto>;
-  getLicensingStatus(): Promise<LicensingDto>;
   exportSettings(request: SettingsExportRequest): Promise<SettingsExportResultDto>;
   previewSettingsImport(request: SettingsImportPreviewRequest): Promise<SettingsImportPreviewDto>;
   importSettings(request: SettingsImportRequest): Promise<SettingsImportResultDto>;
-  updateKeygenSettings(request: KeygenSettingsUpdateRequest): Promise<LicensingDto>;
-  activateLicense(request: ActivateLicenseRequest): Promise<LicensingDto>;
-  importOfflineLicense(request: ImportOfflineLicenseRequest): Promise<LicensingDto>;
-  clearLicense(): Promise<LicensingDto>;
-  refreshLicense(): Promise<LicensingDto>;
   getDaemonStatus(): Promise<DaemonStatusDto>;
   listDomains(): Promise<DomainInfoDto[]>;
   listProjects(): Promise<ProjectInfoDto[]>;
@@ -278,7 +263,6 @@ export function createDesktopClient(): DesktopClient {
     consumePendingDeepLink: () => tauriInvoke("consume_pending_deep_link"),
     getConfig: () => tauriInvoke("get_config"),
     updateConfig: (request) => tauriInvoke("update_config", { request }),
-    getLicensingStatus: () => tauriInvoke("get_licensing_status"),
     exportSettings: (request) =>
       tauriInvoke("export_settings", {
         request: settingsExportRequestSchema.parse(request),
@@ -291,20 +275,6 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("import_settings", {
         request: settingsImportRequestSchema.parse(request),
       }),
-    updateKeygenSettings: (request) =>
-      tauriInvoke("update_keygen_settings", {
-        request: keygenSettingsUpdateRequestSchema.parse(request),
-      }),
-    activateLicense: (request) =>
-      tauriInvoke("activate_license", {
-        request: activateLicenseRequestSchema.parse(request),
-      }),
-    importOfflineLicense: (request) =>
-      tauriInvoke("import_offline_license", {
-        request: importOfflineLicenseRequestSchema.parse(request),
-      }),
-    clearLicense: () => tauriInvoke("clear_license"),
-    refreshLicense: () => tauriInvoke("refresh_license"),
     getDaemonStatus: () => tauriInvoke("get_daemon_status"),
     listDomains: () => tauriInvoke("list_domains"),
     listProjects: () => tauriInvoke("list_projects"),

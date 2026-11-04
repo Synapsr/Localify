@@ -5,7 +5,6 @@ pub mod helper;
 pub mod init_project;
 pub mod install;
 pub mod launch_profile;
-pub mod license;
 pub mod list;
 pub mod list_projects;
 pub mod logs;

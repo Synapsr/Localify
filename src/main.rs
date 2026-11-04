@@ -300,12 +300,6 @@ enum Commands {
         follow: bool,
     },
 
-    /// Manage the stored Keygen license
-    License {
-        #[command(subcommand)]
-        command: LicenseCommands,
-    },
-
     /// Reload daemon configuration
     Reload,
 
@@ -556,40 +550,6 @@ enum AgentCommands {
 
     /// Show Localify skill installation status
     SkillStatus,
-}
-
-#[derive(Subcommand)]
-enum LicenseCommands {
-    /// Show the current licensing status and limits
-    Status,
-
-    /// Activate a license key for this machine
-    Activate {
-        /// Keygen license key
-        key: String,
-    },
-
-    /// Revalidate the stored license for the current machine
-    Refresh,
-
-    /// Import a Keygen offline license certificate from disk
-    ImportOffline {
-        /// Path to the certificate file
-        path: PathBuf,
-
-        /// License key used to decrypt the file (defaults to the stored key)
-        #[arg(long)]
-        key: Option<String>,
-    },
-
-    /// Export the cached offline license certificate to disk
-    ExportOffline {
-        /// Destination path for the certificate file
-        path: PathBuf,
-    },
-
-    /// Remove the stored license from local config
-    Clear,
 }
 
 /// Load config from file, or return defaults if the file doesn't exist.
@@ -909,16 +869,6 @@ fn main() -> Result<()> {
             clear,
             follow,
         } => cli::logs::execute(lines, clear, follow, &paths),
-        Commands::License { command } => match command {
-            LicenseCommands::Status => cli::license::status(&ctx),
-            LicenseCommands::Activate { key } => cli::license::activate(key, &ctx),
-            LicenseCommands::Refresh => cli::license::refresh(&ctx),
-            LicenseCommands::ImportOffline { path, key } => {
-                cli::license::import_offline(path, key, &ctx)
-            }
-            LicenseCommands::ExportOffline { path } => cli::license::export_offline(path, &ctx),
-            LicenseCommands::Clear => cli::license::clear(&ctx),
-        },
         Commands::Reload => cli::reload::execute(cli.verbose, config_path, &ctx),
         Commands::Helper { command } => match command {
             HelperCommands::EnsureRunning { socket, uid } => {

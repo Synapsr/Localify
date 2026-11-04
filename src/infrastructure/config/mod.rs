@@ -2,17 +2,12 @@ mod dto;
 pub mod watcher;
 
 // Re-export shared config types so existing CLI/daemon code keeps compiling.
-pub use crate::config::{
-    AgentConfig, DaemonConfig, DockerConfig, KeygenConfig, LocalifyPaths, OfflineLicenseFile,
-    StoredLicense,
-};
+pub use crate::config::{AgentConfig, DaemonConfig, DockerConfig, LocalifyPaths};
 
 use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository, RepositoryError};
 use crate::branding::BRANDING;
-use crate::config::LicensingConfig as RootLicensingConfig;
 use crate::domain::value_objects::{RouteTarget, RouteTargetError};
 use crate::domain::{DomainPattern, DomainRegistration};
-use crate::infrastructure::licensing::plan_limits_for_license;
 use dto::{
     ProjectDto, ProjectEnvironmentDto, ProjectEnvironmentServiceDto, ProjectServiceDto,
     RegistrationDto,
@@ -60,9 +55,6 @@ pub enum ConfigError {
 
     #[error("Invalid project '{0}': {1}")]
     InvalidProject(String, String),
-
-    #[error("{0}")]
-    LicenseLimitExceeded(String),
 }
 
 #[allow(dead_code)]
@@ -177,9 +169,6 @@ pub struct Config {
 
     #[serde(default)]
     pub agent: AgentConfig,
-
-    #[serde(default)]
-    pub licensing: RootLicensingConfig,
 
     #[serde(default)]
     domains: HashMap<String, RegistrationDto>,
@@ -465,20 +454,6 @@ impl Config {
             .map(|project| project.enabled)
             .unwrap_or(true)
     }
-
-    fn license_limits(&self) -> LicenseLimits {
-        let derived = plan_limits_for_license(&self.licensing);
-        LicenseLimits {
-            max_projects: derived.max_projects,
-            max_domains_per_project: derived.max_domains_per_project,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct LicenseLimits {
-    max_projects: Option<usize>,
-    max_domains_per_project: Option<usize>,
 }
 
 /// Validate that a static files target points to an existing directory.
@@ -1000,49 +975,6 @@ impl ConfigStore {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn licensing_config(&self) -> Result<RootLicensingConfig, ConfigError> {
-        Ok(self.load()?.licensing)
-    }
-
-    #[allow(dead_code)]
-    pub fn update_keygen_config(
-        &self,
-        keygen: KeygenConfig,
-    ) -> Result<RootLicensingConfig, ConfigError> {
-        let mut config = self.load()?;
-        config.licensing.keygen = keygen;
-        config.licensing.license = None;
-        config.licensing.offline_license = None;
-        self.save(&config)?;
-        Ok(config.licensing)
-    }
-
-    pub fn store_licensing(
-        &self,
-        license: Option<StoredLicense>,
-        offline_license: Option<OfflineLicenseFile>,
-    ) -> Result<RootLicensingConfig, ConfigError> {
-        let mut config = self.load()?;
-        config.licensing.license = license;
-        config.licensing.offline_license = offline_license;
-        self.save(&config)?;
-        Ok(config.licensing)
-    }
-
-    #[allow(dead_code)]
-    pub fn store_license(
-        &self,
-        license: Option<StoredLicense>,
-    ) -> Result<RootLicensingConfig, ConfigError> {
-        let offline_license = if license.is_some() {
-            self.load()?.licensing.offline_license
-        } else {
-            None
-        };
-        self.store_licensing(license, offline_license)
-    }
-
     pub fn add_domain(&self, registration: DomainRegistration) -> Result<(), ConfigError> {
         self.add_domain_with_project(registration, None)
     }
@@ -1064,8 +996,6 @@ impl ConfigStore {
         {
             return Err(ConfigError::ProjectNotFound(project_id.clone()));
         }
-
-        enforce_domain_limits(&config, project_id.as_deref(), None)?;
 
         let mut dto = RegistrationDto::from(registration);
         dto.project = project_id;
@@ -1148,8 +1078,6 @@ impl ConfigStore {
             return Err(ConfigError::ProjectNotFound(project_id.clone()));
         }
 
-        enforce_domain_limits(&config, project_id.as_deref(), Some(&key))?;
-
         let mut dto = RegistrationDto::from(registration);
         dto.project = project_id;
         config.domains.insert(key, dto);
@@ -1183,8 +1111,6 @@ impl ConfigStore {
         {
             return Err(ConfigError::ProjectNotFound(project_id.clone()));
         }
-
-        enforce_domain_limits(&config, project_id.as_deref(), Some(&current_key))?;
 
         let mut dto = RegistrationDto::from(registration);
         dto.project = project_id;
@@ -1335,8 +1261,6 @@ impl ConfigStore {
             return Err(ConfigError::DomainExists(new_key));
         }
 
-        enforce_domain_limits(&config, Some(project_id), Some(&current_key))?;
-
         let project = config
             .projects
             .get_mut(project_id)
@@ -1470,8 +1394,6 @@ impl ConfigStore {
             return Err(ConfigError::DomainExists(new_key));
         }
 
-        enforce_domain_limits(&config, Some(project_id), Some(&current_key))?;
-
         let mut services = {
             let project = config
                 .projects
@@ -1555,8 +1477,6 @@ impl ConfigStore {
         if config.projects.contains_key(&project_id) {
             return Err(ConfigError::ProjectExists(project_id));
         }
-
-        enforce_project_limit(&config)?;
 
         config.projects.insert(
             project_id.clone(),
@@ -1658,21 +1578,6 @@ fn apply_runtime_profile_defaults(config: &mut Config) -> bool {
     false
 }
 
-fn enforce_project_limit(config: &Config) -> Result<(), ConfigError> {
-    let limits = config.license_limits();
-    let Some(max_projects) = limits.max_projects else {
-        return Ok(());
-    };
-
-    if config.projects.len() < max_projects {
-        return Ok(());
-    }
-
-    Err(ConfigError::LicenseLimitExceeded(format!(
-        "Free plan limit reached: up to {max_projects} projects are included. Activate a Keygen license to add more."
-    )))
-}
-
 /// Rewrites project references to a renamed domain key so services and
 /// environment mappings keep pointing at the registration after a rename
 /// (including wildcard toggles, which change the key).
@@ -1696,65 +1601,6 @@ fn rename_project_domain_references(config: &mut Config, current_key: &str, new_
             }
         }
     }
-}
-
-fn enforce_domain_limits(
-    config: &Config,
-    project_id: Option<&str>,
-    excluding_domain_key: Option<&str>,
-) -> Result<(), ConfigError> {
-    let limits = config.license_limits();
-
-    if let Some(project_id) = project_id
-        && let Some(max_domains_per_project) = limits.max_domains_per_project
-    {
-        let current = config
-            .domains
-            .values()
-            .filter(|domain| domain.project.as_deref() == Some(project_id))
-            .filter(|domain| {
-                excluding_domain_key
-                    .map(|key| domain.pattern.display_pattern() != key)
-                    .unwrap_or(true)
-            })
-            .count();
-
-        if current >= max_domains_per_project {
-            return Err(ConfigError::LicenseLimitExceeded(format!(
-                "Plan limit reached: project '{project_id}' already has {max_domains_per_project} domains. Activate a Keygen license to add more."
-            )));
-        }
-    }
-
-    if project_id.is_none() {
-        let Some(max_projects) = limits.max_projects else {
-            return Ok(());
-        };
-        let Some(max_domains_per_project) = limits.max_domains_per_project else {
-            return Ok(());
-        };
-        let Some(max_total_domains) = max_projects.checked_mul(max_domains_per_project) else {
-            return Ok(());
-        };
-
-        let existing_domain_count = config
-            .domains
-            .keys()
-            .filter(|key| {
-                excluding_domain_key
-                    .map(|excluded| excluded != key.as_str())
-                    .unwrap_or(true)
-            })
-            .count();
-
-        if existing_domain_count >= max_total_domains {
-            return Err(ConfigError::LicenseLimitExceeded(format!(
-                "Free plan limit reached: up to {max_projects} projects with {max_domains_per_project} domains each are included. Activate a Keygen license to add more."
-            )));
-        }
-    }
-
-    Ok(())
 }
 
 #[allow(dead_code)]
@@ -2891,96 +2737,89 @@ mod tests {
     }
 
     #[test]
-    fn free_plan_limits_projects() {
-        let (_dir, store) = temp_store();
-
-        store.create_project("One").unwrap();
-        store.create_project("Two").unwrap();
-        store.create_project("Three").unwrap();
-        store.create_project("Four").unwrap();
-        store.create_project("Five").unwrap();
-
-        let error = store.create_project("Six").unwrap_err();
-
-        assert!(matches!(error, ConfigError::LicenseLimitExceeded(_)));
-    }
-
-    #[test]
-    fn free_plan_allows_unlimited_domains_per_project() {
+    fn domains_per_project_are_unlimited() {
         let (_dir, store) = temp_store();
         let project = store.create_project("Demo").unwrap();
 
-        store
-            .add_domain_with_project(
-                proxy_registration("one.localify", 3000),
-                Some(project.id.clone()),
-            )
-            .unwrap();
-        store
-            .add_domain_with_project(
-                proxy_registration("two.localify", 3001),
-                Some(project.id.clone()),
-            )
-            .unwrap();
+        for index in 0..10 {
+            store
+                .add_domain_with_project(
+                    proxy_registration(&format!("app{index}.localify"), 3000 + index),
+                    Some(project.id.clone()),
+                )
+                .unwrap();
+        }
 
-        store
-            .add_domain_with_project(
-                proxy_registration("three.localify", 3002),
-                Some(project.id.clone()),
-            )
-            .unwrap();
+        assert_eq!(store.load().unwrap().domains.len(), 10);
+    }
+
+    /// `config.toml` as written by a release that sold licenses: six projects
+    /// (over the old free limit of five) and a full licensing section.
+    fn write_config_from_licensed_release(dir: &tempfile::TempDir) {
+        let projects = (1..=6)
+            .map(|index| format!("[projects.project-{index}]\nname = \"Project {index}\"\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!(
+                r#"[daemon]
+http_port = 8080
+
+[licensing.keygen]
+apiUrl = "https://licences.localify.dev"
+account = "account_123"
+product = "product_123"
+publicKey = "public_key_123"
+
+[licensing.license]
+key = "TEST-KEY-1234"
+licenseId = "lic_123"
+plan = "Free"
+maxProjects = 5
+
+[licensing.offlineLicense]
+certificate = "-----BEGIN LICENSE FILE-----"
+algorithm = "aes-256-gcm+ed25519"
+
+{projects}"#
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
-    fn valid_keygen_license_overrides_free_limits() {
-        let (_dir, store) = temp_store();
+    fn config_with_licensing_section_keeps_every_project() {
+        let (dir, store) = temp_store();
+        write_config_from_licensed_release(&dir);
 
-        store
-            .store_license(Some(StoredLicense {
-                key: "TEST-KEY-1234".into(),
-                license_id: "lic_123".into(),
-                name: Some("Pro".into()),
-                expiry: None,
-                plan: Some("Pro".into()),
-                max_projects: Some(5),
-                max_domains_per_project: Some(4),
-                validation_code: Some("VALID".into()),
-                validation_detail: Some("ok".into()),
-                last_validated_at: Some("now".into()),
-                machine_id: None,
-                machine_fingerprint: None,
-                machine_name: None,
-                machine_hostname: None,
-                machine_platform: None,
-                response_signature_verified: false,
-                response_signature_date: None,
-            }))
-            .unwrap();
+        let config = store.load().unwrap();
 
-        store.create_project("One").unwrap();
-        store.create_project("Two").unwrap();
-        store.create_project("Three").unwrap();
-        store.create_project("Four").unwrap();
-
-        assert_eq!(store.list_projects().unwrap().len(), 4);
+        assert_eq!(config.daemon.http_port, 8080);
+        assert_eq!(store.list_projects().unwrap().len(), 6);
     }
 
     #[test]
-    fn license_save_omits_raw_json_metadata() {
-        let (_dir, store) = temp_store();
+    fn config_with_licensing_section_accepts_more_projects() {
+        let (dir, store) = temp_store();
+        write_config_from_licensed_release(&dir);
 
-        store
-            .store_license(Some(StoredLicense {
-                key: "TEST-KEY-1234".into(),
-                license_id: "lic_123".into(),
-                ..StoredLicense::default()
-            }))
-            .unwrap();
+        store.create_project("Seven").unwrap();
+        store.create_project("Eight").unwrap();
 
-        let content = std::fs::read_to_string(&store.path).unwrap();
+        assert_eq!(store.list_projects().unwrap().len(), 8);
+    }
 
-        assert!(!content.contains("metadata"));
-        assert!(store.load().unwrap().licensing.license.is_some());
+    #[test]
+    fn saving_config_drops_the_stale_licensing_section() {
+        let (dir, store) = temp_store();
+        write_config_from_licensed_release(&dir);
+
+        store.create_project("Seven").unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!content.contains("licensing"));
+        assert!(!content.contains("TEST-KEY-1234"));
     }
 
     #[test]

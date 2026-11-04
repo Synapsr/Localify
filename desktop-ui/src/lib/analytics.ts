@@ -268,10 +268,6 @@ const buildDesktopUsageProperties = (bootstrap: BootstrapDto): AnalyticsEventDat
     usage_cli_helper_ready: bootstrap.environment.cliHelperReady,
     usage_cli_access_ready: bootstrap.environment.cliAccessReady,
     usage_node_trust_ready: bootstrap.environment.nodeTrust.ready,
-    usage_license_status: bootstrap.licensing.status,
-    usage_license_plan: bootstrap.licensing.limits.plan,
-    usage_license_configured: bootstrap.licensing.configured,
-    usage_license_offline_cache_present: bootstrap.licensing.offlineCachePresent,
   };
 };
 

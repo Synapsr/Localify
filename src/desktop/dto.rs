@@ -2,10 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::infrastructure::launch_sessions::LaunchSessionDto;
 
-use crate::config::{
-    AgentConfig, DaemonConfig, DockerConfig, KEYGEN_ACCOUNT_ID, KEYGEN_API_URL, KEYGEN_PRODUCT_ID,
-    KEYGEN_PUBLIC_KEY, LocalifyPaths,
-};
+use crate::config::{AgentConfig, DaemonConfig, DockerConfig, LocalifyPaths};
 use crate::desktop::{
     BrowserPreference, EditorPreference, LauncherPreferences, RunActionPreference,
     TerminalPreference,
@@ -469,8 +466,6 @@ pub struct BootstrapDto {
     pub config: AppConfigDto,
     pub daemon: DaemonStatusDto,
     #[serde(default)]
-    pub licensing: LicensingDto,
-    #[serde(default)]
     pub launcher_preferences: LauncherPreferencesDto,
     #[serde(default)]
     pub launcher_availability: LauncherAvailabilityDto,
@@ -530,7 +525,6 @@ pub struct SettingsTransferSettingsDto {
     pub docker: DockerConfigDto,
     #[serde(default)]
     pub agent: AgentConfigDto,
-    pub keygen: KeygenSettingsUpdateRequest,
     pub launcher_preferences: LauncherPreferencesDto,
 }
 
@@ -673,135 +667,6 @@ impl From<UpdateLauncherPreferencesRequest> for LauncherPreferences {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LicenseLimitsDto {
-    pub plan: String,
-    pub max_projects: Option<usize>,
-    pub max_domains_per_project: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineDto {
-    pub fingerprint: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub hostname: Option<String>,
-    pub platform: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActiveLicenseDto {
-    pub key_masked: String,
-    pub license_id: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub expiry: Option<String>,
-    #[serde(default)]
-    pub last_validated_at: Option<String>,
-    #[serde(default)]
-    pub validation_code: Option<String>,
-    #[serde(default)]
-    pub validation_detail: Option<String>,
-    #[serde(default)]
-    pub machine_id: Option<String>,
-    #[serde(default)]
-    pub machine_fingerprint: Option<String>,
-    #[serde(default)]
-    pub machine_name: Option<String>,
-    #[serde(default)]
-    pub machine_hostname: Option<String>,
-    #[serde(default)]
-    pub machine_platform: Option<String>,
-    #[serde(default)]
-    pub response_signature_verified: bool,
-    #[serde(default)]
-    pub response_signature_date: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OfflineLicenseDto {
-    pub algorithm: String,
-    #[serde(default)]
-    pub issued: Option<String>,
-    #[serde(default)]
-    pub file_expiry: Option<String>,
-    #[serde(default)]
-    pub license_id: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub license_expiry: Option<String>,
-    #[serde(default)]
-    pub plan: Option<String>,
-    #[serde(default)]
-    pub max_projects: Option<usize>,
-    #[serde(default)]
-    pub max_domains_per_project: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LicensingDto {
-    pub status: String,
-    pub configured: bool,
-    pub api_url: String,
-    pub account: String,
-    #[serde(default)]
-    pub product: Option<String>,
-    #[serde(default)]
-    pub public_key: Option<String>,
-    pub limits: LicenseLimitsDto,
-    pub free_limits: LicenseLimitsDto,
-    pub project_count: usize,
-    pub domain_count: usize,
-    #[serde(default)]
-    pub last_error: Option<String>,
-    #[serde(default)]
-    pub current_machine: Option<MachineDto>,
-    #[serde(default)]
-    pub active_license: Option<ActiveLicenseDto>,
-    #[serde(default)]
-    pub offline_cache_present: bool,
-    #[serde(default)]
-    pub offline_license: Option<OfflineLicenseDto>,
-}
-
-impl Default for LicensingDto {
-    fn default() -> Self {
-        Self {
-            status: "unlicensed".into(),
-            configured: true,
-            api_url: KEYGEN_API_URL.into(),
-            account: KEYGEN_ACCOUNT_ID.into(),
-            product: Some(KEYGEN_PRODUCT_ID.into()),
-            public_key: Some(KEYGEN_PUBLIC_KEY.into()),
-            limits: LicenseLimitsDto {
-                plan: "Free".into(),
-                max_projects: Some(5),
-                max_domains_per_project: None,
-            },
-            free_limits: LicenseLimitsDto {
-                plan: "Free".into(),
-                max_projects: Some(5),
-                max_domains_per_project: None,
-            },
-            project_count: 0,
-            domain_count: 0,
-            last_error: None,
-            current_machine: None,
-            active_license: None,
-            offline_cache_present: false,
-            offline_license: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepDto {
@@ -882,28 +747,6 @@ pub struct UpdateDomainRequest {
     pub wildcard: bool,
     pub routes: Vec<String>,
     pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeygenSettingsUpdateRequest {
-    pub api_url: String,
-    pub account: String,
-    pub product: Option<String>,
-    pub public_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivateLicenseRequest {
-    pub key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportOfflineLicenseRequest {
-    pub certificate: String,
-    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

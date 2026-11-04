@@ -11,7 +11,6 @@ export const ProjectsScreen = () => {
   return (
     <div id="projects-screen" className="screen-wrapper space-y-6">
       <ProjectsHeader query={query} onQueryChange={setQuery} />
-      {/* <ProjectsLicenseBanner /> */}
       <ProjectsList query={query} />
     </div>
   );

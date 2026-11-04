@@ -1,10 +1,12 @@
 # Public URLs
 
+> **Design note for a feature that is not built.** Nothing described here ships in Localify today.
+
 Planning reference for native Localify public URLs. This document summarizes the v1 product and architecture decisions captured in `CONTEXT.md` and `docs/adr/`.
 
 ## Intent
 
-Public URLs let a licensed Localify user expose a project-owned local domain to the internet without changing the local routing model. The public feature should feel as simple as copying a stable URL, while the implementation keeps ownership, DNS, access protection, and connector state explicit.
+Public URLs let a Localify user expose a project-owned local domain to the internet without changing the local routing model. The public feature should feel as simple as copying a stable URL, while the implementation keeps ownership, DNS, access protection, and connector state explicit.
 
 LocalCan is a useful UX reference for persistent URLs, pause/resume, custom domains, access protection, and traffic visibility. Localify should not integrate LocalCan or copy its daemon/project model; public URLs are native Localify Cloud functionality.
 
@@ -19,7 +21,6 @@ Use the terms from `CONTEXT.md` consistently:
 - `Custom Public URL`: a user-owned hostname attached to a public endpoint.
 - `Access Protection`: one shared password for one public URL.
 - `Access Exception`: a path prefix that bypasses access protection.
-- `License Identity`: the cloud identity derived from the active Localify license.
 
 Avoid using `tunnel` as the product term. It can describe internal transport, but the user-facing model is public endpoints and public URLs.
 
@@ -119,7 +120,7 @@ Rules:
 - Generated at creation time.
 - Editable with availability validation.
 - Changing it is explicit because the old URL may break.
-- Deleted Localify-owned public URLs stay reserved for the same license identity for 30 days.
+- Deleted Localify-owned public URLs stay reserved for the same cloud identity for 30 days.
 - A wildcard public URL counts as one public URL reservation.
 
 ## Custom Public URLs
@@ -222,28 +223,20 @@ Rules:
 - Cloud-aware mutations must write through Cloud first, then sync locally.
 - If a domain is removed outside the cloud-aware flow, the next cloud sync can surface the endpoint as orphaned.
 
-## License Identity
+## Cloud Identity
 
-V1 does not add a separate user account or login flow.
+Cloud identity will be defined when Localify Cloud is built. It must cover endpoint ownership, contact email, quotas, and the machines that may serve an endpoint.
 
-The active Localify license is the cloud identity:
-
-- Ownership is keyed by the validated license.
-- Email may come from Keygen metadata or owner data.
-- Quotas come from the license plan.
-- Machines are associated with the license.
-- Localify Cloud revalidates the license server-side before cloud mutations.
-
-The desktop app must not rely on local license cache alone for URL reservation or endpoint mutations.
+Localify Cloud checks the identity server-side before cloud mutations. The desktop app must not rely on local cached state alone for URL reservation or endpoint mutations.
 
 ## Machine Ownership
 
-Endpoints are owned by the license, but served by one selected local machine at a time.
+Endpoints are owned by the cloud identity, but served by one selected local machine at a time.
 
 Rules:
 
-- A connector authenticates with a short-lived token scoped to endpoint, machine, and license identity.
-- The license key is not sent on every long-lived connector session.
+- A connector authenticates with a short-lived token scoped to endpoint, machine, and cloud identity.
+- A long-lived credential is not sent on every connector session.
 - Automatic daemon startup may reconnect endpoints selected for that machine.
 - It must not silently take over endpoints currently served by another machine.
 - Switching machines is an explicit claim.
@@ -255,7 +248,7 @@ V1 runs on Cloudflare.
 
 Responsibilities:
 
-- License-backed ownership.
+- Ownership by cloud identity.
 - Endpoint and URL reservation.
 - DNS verification.
 - TLS readiness.
@@ -374,7 +367,7 @@ Rules:
 - Wildcard public endpoint counts as one endpoint.
 - Wildcard public URL counts as one URL.
 
-Exact quota values are plan policy, not fixed in this document.
+Exact quota values are not fixed in this document.
 
 ## Open Implementation Decisions
 

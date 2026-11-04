@@ -1,6 +1,6 @@
 # Localify
 
-Localify gives local development projects stable local domains and can expose selected local entrypoints for outside access.
+Localify gives local development projects stable local domains. Public URLs, which would expose selected local entrypoints for outside access, are designed but not built yet.
 
 ## Language
 
@@ -91,7 +91,3 @@ _Avoid_: Temporary URL, random URL
 **Custom Public URL**:
 A public URL on a domain name owned by the user.
 _Avoid_: Custom domain, local domain
-
-**License Identity**:
-The cloud identity derived from an active Localify license.
-_Avoid_: User account, login

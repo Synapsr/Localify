@@ -225,7 +225,6 @@ export const ProjectsListItem = ({
           domains={primaryDomains}
           environments={environments}
           services={services}
-          totalDomainCount={domains.length}
         />
         <ProjectsListItemDevDx
           domains={domains}

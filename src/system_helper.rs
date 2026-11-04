@@ -16,22 +16,21 @@ use serde::{Deserialize, Serialize};
 use crate::branding::BRANDING;
 use crate::desktop::DesktopApi;
 use crate::desktop::dto::{
-    ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
-    AppConfigDto, AssignDomainProjectRequest, AttachProjectWorktreeRequest,
-    AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto, CertificateRefreshDto,
-    CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
-    DaemonLaunchDto, DaemonStatusDto, DomainInfoDto, DomainPatternRequest,
-    EnsureProjectEnvironmentRequest, EnsureProjectEnvironmentResultDto,
-    ImportOfflineLicenseRequest, InitProjectRequest, InitProjectResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LicensingDto, LogsDto, LogsRequest,
-    MaterializeProjectServicesRequest, MaterializeProjectServicesResultDto, PortConflictDto,
-    ProjectInfoDto, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
-    RegistrationMutationDto, RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest,
-    SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto, SettingsExportRequest,
-    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewRequest,
-    SettingsImportRequest, SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto,
-    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
+    AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest, AppConfigDto,
+    AssignDomainProjectRequest, AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto,
+    AvailablePortDto, BootstrapDto, CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest,
+    CreateProjectRequest, CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto,
+    DomainInfoDto, DomainPatternRequest, EnsureProjectEnvironmentRequest,
+    EnsureProjectEnvironmentResultDto, InitProjectRequest, InitProjectResultDto, InstallResultDto,
+    KillPortConflictRequest, LogsDto, LogsRequest, MaterializeProjectServicesRequest,
+    MaterializeProjectServicesResultDto, PortConflictDto, ProjectInfoDto, RegisterDomainRequest,
+    RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
+    RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
+    RemoveProjectResultDto, RemoveRouteRequest, SetProjectServiceDomainRequest,
+    SetProjectServiceDomainResultDto, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
+    SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
 };
 use crate::infrastructure::binary_identity::{BinaryIdentity, DaemonBinaryCheck};
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
@@ -77,18 +76,6 @@ pub enum HelperCommand {
     ImportSettings {
         request: SettingsImportRequest,
     },
-    GetLicensingStatus,
-    UpdateKeygenSettings {
-        request: KeygenSettingsUpdateRequest,
-    },
-    ActivateLicense {
-        request: ActivateLicenseRequest,
-    },
-    ImportOfflineLicense {
-        request: ImportOfflineLicenseRequest,
-    },
-    ClearLicense,
-    RefreshLicense,
     InitProject {
         request: InitProjectRequest,
     },
@@ -171,7 +158,6 @@ impl HelperCommand {
             | Self::GetDaemonStatus
             | Self::ListDomains
             | Self::ListProjects
-            | Self::GetLicensingStatus
             | Self::GetUninstallPreview
             | Self::ListPortConflicts
             | Self::ListRoutes { .. }
@@ -187,11 +173,6 @@ impl HelperCommand {
             | Self::CreateProjectWithDomains { .. }
             | Self::ExportSettings { .. }
             | Self::PreviewSettingsImport { .. }
-            | Self::UpdateKeygenSettings { .. }
-            | Self::ActivateLicense { .. }
-            | Self::ImportOfflineLicense { .. }
-            | Self::ClearLicense
-            | Self::RefreshLicense
             | Self::InitProject { .. }
             | Self::AddProjectService { .. }
             | Self::SetProjectServiceDomain { .. }
@@ -229,7 +210,6 @@ impl HelperCommand {
             Self::GetUninstallPreview => "read uninstall preview",
             Self::UninstallLocalify => "uninstall Localify",
             Self::ImportSettings { .. } => "import settings",
-            Self::GetLicensingStatus => "read licensing status",
             Self::ListPortConflicts => "list port conflicts",
             Self::ListRoutes { .. } => "list routes",
             Self::ReadLogs { .. } => "read logs",
@@ -247,11 +227,6 @@ impl HelperCommand {
                 | Self::CreateProject { .. }
                 | Self::CreateProjectWithDomains { .. }
                 | Self::ImportSettings { .. }
-                | Self::UpdateKeygenSettings { .. }
-                | Self::ActivateLicense { .. }
-                | Self::ImportOfflineLicense { .. }
-                | Self::ClearLicense
-                | Self::RefreshLicense
                 | Self::InitProject { .. }
                 | Self::AddProjectService { .. }
                 | Self::SetProjectServiceDomain { .. }
@@ -371,36 +346,6 @@ impl SystemHelperClient {
         request: SettingsImportRequest,
     ) -> Result<SettingsImportResultDto> {
         self.send(HelperCommand::ImportSettings { request })
-    }
-
-    pub fn get_licensing_status(&self) -> Result<LicensingDto> {
-        self.send(HelperCommand::GetLicensingStatus)
-    }
-
-    pub fn update_keygen_settings(
-        &self,
-        request: KeygenSettingsUpdateRequest,
-    ) -> Result<LicensingDto> {
-        self.send(HelperCommand::UpdateKeygenSettings { request })
-    }
-
-    pub fn activate_license(&self, request: ActivateLicenseRequest) -> Result<LicensingDto> {
-        self.send(HelperCommand::ActivateLicense { request })
-    }
-
-    pub fn import_offline_license(
-        &self,
-        request: ImportOfflineLicenseRequest,
-    ) -> Result<LicensingDto> {
-        self.send(HelperCommand::ImportOfflineLicense { request })
-    }
-
-    pub fn clear_license(&self) -> Result<LicensingDto> {
-        self.send(HelperCommand::ClearLicense)
-    }
-
-    pub fn refresh_license(&self) -> Result<LicensingDto> {
-        self.send(HelperCommand::RefreshLicense)
     }
 
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
@@ -980,24 +925,6 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         HelperCommand::ImportSettings { request } => {
             serde_json::to_value(api.import_settings(request)?).map_err(Into::into)
         }
-        HelperCommand::GetLicensingStatus => {
-            serde_json::to_value(api.licensing_status()?).map_err(Into::into)
-        }
-        HelperCommand::UpdateKeygenSettings { request } => {
-            serde_json::to_value(api.update_keygen_settings(request)?).map_err(Into::into)
-        }
-        HelperCommand::ActivateLicense { request } => {
-            serde_json::to_value(api.activate_license(request)?).map_err(Into::into)
-        }
-        HelperCommand::ImportOfflineLicense { request } => {
-            serde_json::to_value(api.import_offline_license(request)?).map_err(Into::into)
-        }
-        HelperCommand::ClearLicense => {
-            serde_json::to_value(api.clear_license()?).map_err(Into::into)
-        }
-        HelperCommand::RefreshLicense => {
-            serde_json::to_value(api.refresh_license()?).map_err(Into::into)
-        }
         HelperCommand::InitProject { request } => {
             serde_json::to_value(api.init_project(request)?).map_err(Into::into)
         }
@@ -1160,7 +1087,6 @@ mod tests {
     #[test]
     fn config_mutations_restore_config_ownership() {
         assert!(HelperCommand::InstallLocalify.may_write_config());
-        assert!(HelperCommand::ClearLicense.may_write_config());
         assert!(
             HelperCommand::UnregisterDomain {
                 request: DomainPatternRequest {

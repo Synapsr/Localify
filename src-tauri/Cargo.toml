@@ -3,6 +3,7 @@ name = "localify-desktop"
 version = "0.2.20"
 description = "Desktop shell for Localify"
 authors = ["Localify contributors"]
+license = "AGPL-3.0-only"
 edition = "2024"
 
 [lib]

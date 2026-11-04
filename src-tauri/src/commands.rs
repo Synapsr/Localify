@@ -1,24 +1,24 @@
 use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
-    ActivateLicenseRequest, AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
+    AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
     AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
     AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
     CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
     DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
     DiscoverProjectWorktreesRequest, DomainInfoDto, DomainPatternRequest,
     EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest, EnvironmentFileDto,
-    EnvironmentFileListDto, EnvironmentFileRequest, ImportOfflineLicenseRequest,
-    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InstallResultDto,
-    KeygenSettingsUpdateRequest, KillPortConflictRequest, LauncherPreferencesDto, LicensingDto,
-    LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest,
-    OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto, ProjectWorktreeDiscoveryDto,
-    RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
-    RelinkProjectRootRequest, RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto,
-    RemoveProjectRequest, RemoveProjectResultDto, RemoveRouteRequest, RunLocalDevServerRequest,
-    SaveEnvironmentFileRequest, SettingsExportRequest, SettingsExportResultDto,
-    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    EnvironmentFileListDto, EnvironmentFileRequest, InitProjectFromFolderRequest,
+    InitProjectFromFolderResultDto, InstallResultDto, KillPortConflictRequest,
+    LauncherPreferencesDto, LogsDto, LogsRequest, NodeTrustDto, OpenEnvInEditorRequest,
+    OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto, ProjectInfoDto,
+    ProjectWorktreeDiscoveryDto, RegisterDomainRequest, RegisterDomainResultDto, RegistrationDto,
+    RegistrationMutationDto, RelinkProjectRootRequest, RemoveProjectEnvironmentRequest,
+    RemoveProjectEnvironmentResultDto, RemoveProjectRequest, RemoveProjectResultDto,
+    RemoveRouteRequest, RunLocalDevServerRequest, SaveEnvironmentFileRequest,
+    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,6 @@ pub struct DeepLinkPayloadDto {
 pub enum DeepLinkRouteDto {
     Projects,
     Logs,
-    SettingsLicensing,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -492,11 +491,6 @@ pub fn update_config(
 }
 
 #[tauri::command]
-pub fn get_licensing_status(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
-    state.api.licensing_status().map_err(map_error)
-}
-
-#[tauri::command]
 pub fn export_settings(
     state: tauri::State<'_, AppState>,
     request: SettingsExportRequest,
@@ -521,40 +515,6 @@ pub fn import_settings(
     request: SettingsImportRequest,
 ) -> Result<SettingsImportResultDto, String> {
     state.api.import_settings(request).map_err(map_error)
-}
-
-#[tauri::command]
-pub fn update_keygen_settings(
-    state: tauri::State<'_, AppState>,
-    request: KeygenSettingsUpdateRequest,
-) -> Result<LicensingDto, String> {
-    state.api.update_keygen_settings(request).map_err(map_error)
-}
-
-#[tauri::command]
-pub fn activate_license(
-    state: tauri::State<'_, AppState>,
-    request: ActivateLicenseRequest,
-) -> Result<LicensingDto, String> {
-    state.api.activate_license(request).map_err(map_error)
-}
-
-#[tauri::command]
-pub fn import_offline_license(
-    state: tauri::State<'_, AppState>,
-    request: ImportOfflineLicenseRequest,
-) -> Result<LicensingDto, String> {
-    state.api.import_offline_license(request).map_err(map_error)
-}
-
-#[tauri::command]
-pub fn clear_license(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
-    state.api.clear_license().map_err(map_error)
-}
-
-#[tauri::command]
-pub fn refresh_license(state: tauri::State<'_, AppState>) -> Result<LicensingDto, String> {
-    state.api.refresh_license().map_err(map_error)
 }
 
 #[tauri::command]

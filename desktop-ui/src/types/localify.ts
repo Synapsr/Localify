@@ -324,7 +324,6 @@ export interface BootstrapDto {
   environment: EnvironmentDto;
   config: AppConfigDto;
   daemon: DaemonStatusDto;
-  licensing: LicensingDto;
   launcherPreferences: LauncherPreferencesDto;
   launcherAvailability: LauncherAvailabilityDto;
   domains: DomainInfoDto[];
@@ -384,7 +383,6 @@ export interface SettingsTransferSettingsDto {
   daemon: DaemonConfigDto;
   docker: DockerConfigDto;
   agent: AgentConfigDto;
-  keygen: KeygenSettingsUpdateRequest;
   launcherPreferences: LauncherPreferencesDto;
 }
 
@@ -463,66 +461,6 @@ export interface SettingsImportResultDto {
   daemonReloadError: string | null;
 }
 
-export interface LicenseLimitsDto {
-  plan: string;
-  maxProjects: number | null;
-  maxDomainsPerProject: number | null;
-}
-
-export interface MachineDto {
-  fingerprint: string;
-  name: string | null;
-  hostname: string | null;
-  platform: string;
-}
-
-export interface ActiveLicenseDto {
-  keyMasked: string;
-  licenseId: string;
-  name: string | null;
-  expiry: string | null;
-  lastValidatedAt: string | null;
-  validationCode: string | null;
-  validationDetail: string | null;
-  machineId: string | null;
-  machineFingerprint: string | null;
-  machineName: string | null;
-  machineHostname: string | null;
-  machinePlatform: string | null;
-  responseSignatureVerified: boolean;
-  responseSignatureDate: string | null;
-}
-
-export interface OfflineLicenseDto {
-  algorithm: string;
-  issued: string | null;
-  fileExpiry: string | null;
-  licenseId: string | null;
-  name: string | null;
-  licenseExpiry: string | null;
-  plan: string | null;
-  maxProjects: number | null;
-  maxDomainsPerProject: number | null;
-}
-
-export interface LicensingDto {
-  status: "notConfigured" | "unlicensed" | "licensed" | "licensedOffline" | "invalid" | string;
-  configured: boolean;
-  apiUrl: string;
-  account: string;
-  product: string | null;
-  publicKey: string | null;
-  limits: LicenseLimitsDto;
-  freeLimits: LicenseLimitsDto;
-  projectCount: number;
-  domainCount: number;
-  lastError: string | null;
-  currentMachine: MachineDto | null;
-  activeLicense: ActiveLicenseDto | null;
-  offlineCachePresent: boolean;
-  offlineLicense: OfflineLicenseDto | null;
-}
-
 export interface AppUpdateInfoDto {
   version: string;
   notes: string | null;
@@ -534,7 +472,7 @@ export interface AppUpdateCheckDto {
   update: AppUpdateInfoDto | null;
 }
 
-export type DeepLinkRouteDto = "projects" | "logs" | "settingsLicensing";
+export type DeepLinkRouteDto = "projects" | "logs";
 
 export interface DeepLinkPayloadDto {
   route: DeepLinkRouteDto;
@@ -593,22 +531,6 @@ export interface RegisterDomainRequest {
 export interface UpdateDomainRequest extends RegisterDomainRequest {
   currentDomain: string;
   currentWildcard: boolean;
-}
-
-export interface KeygenSettingsUpdateRequest {
-  apiUrl: string;
-  account: string;
-  product?: string | null;
-  publicKey?: string | null;
-}
-
-export interface ActivateLicenseRequest {
-  key: string;
-}
-
-export interface ImportOfflineLicenseRequest {
-  certificate: string;
-  key?: string | null;
 }
 
 export interface CreateProjectRequest {

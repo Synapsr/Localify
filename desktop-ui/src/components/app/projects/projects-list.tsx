@@ -14,7 +14,6 @@ import {
   ProjectListItemSkeleton,
   ProjectsListItem,
 } from "./projects-list-item";
-import { ProjectsListUpsell } from "./projects-list-upsell";
 import { filterProjectGroups } from "./util.project-search";
 
 interface ProjectsListProps {
@@ -27,14 +26,6 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
     error,
     isPending,
   } = useQuery(bootstrapQueries.read());
-
-  const licensing = bootstrap?.licensing;
-  const atProjectLimit =
-    licensing !== undefined &&
-    licensing.status !== "licensed" &&
-    licensing.status !== "licensedOffline" &&
-    licensing.limits.maxProjects !== null &&
-    licensing.projectCount >= licensing.limits.maxProjects;
 
   const groups = useMemo(
     () =>
@@ -164,7 +155,6 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
           );
         })}
       </Reorder.Group>
-      {atProjectLimit ? <ProjectsListUpsell /> : null}
     </div>
   );
 };

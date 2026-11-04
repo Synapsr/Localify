@@ -1,7 +1,6 @@
 "use client";
 
 import { RiAddLine } from "@remixicon/react";
-import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
 
 import type {
@@ -14,7 +13,6 @@ import type {
 
 import { DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { bootstrapQueries } from "@/lib/queries";
 
 import { ProjectAddDomainDialog } from "./projects-list-item-add-domain-dialog";
 import { ProjectDomainChip } from "./projects-list-item-domain-chip";
@@ -24,7 +22,6 @@ interface ProjectDomainListProps {
   domains: DomainInfoDto[];
   environments: ProjectEnvironmentInfoDto[];
   services: ProjectServiceInfoDto[];
-  totalDomainCount?: number;
 }
 
 const chipTransition = { type: "spring", stiffness: 500, damping: 35, mass: 0.6 } as const;
@@ -40,12 +37,7 @@ export const ProjectDomainList = ({
   domains,
   environments,
   services,
-  totalDomainCount = domains.length,
 }: ProjectDomainListProps) => {
-  const { data } = useQuery(bootstrapQueries.read());
-  const maxDomainsPerProject = data?.licensing.limits.maxDomainsPerProject ?? null;
-  const addDisabled = maxDomainsPerProject !== null && totalDomainCount >= maxDomainsPerProject;
-
   return (
     <motion.div layout className="flex flex-wrap items-center gap-1.5">
       <AnimatePresence initial={false} mode="popLayout">
@@ -96,17 +88,12 @@ export const ProjectDomainList = ({
                 aria-label={`Add domain to ${project.name}`}
                 className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-border text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-muted hover:text-foreground"
                 onPointerDown={(event) => event.stopPropagation()}
-                disabled={addDisabled}
               />
             }
           >
             <RiAddLine className="size-3.5" />
           </TooltipTrigger>
-          <TooltipContent>
-            {addDisabled
-              ? "Domain limit reached for this project. Activate a Keygen license in Settings."
-              : "Add domain"}
-          </TooltipContent>
+          <TooltipContent>Add domain</TooltipContent>
         </Tooltip>
       </ProjectAddDomainDialog>
     </motion.div>

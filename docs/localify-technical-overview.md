@@ -288,7 +288,6 @@ Les termes importants:
 | Public URL | URL internet attachée au Public Endpoint |
 | Persistent Public URL | URL Localify-owned, par exemple `journal-a8f3.localify.dev` |
 | Custom Public URL | Hostname utilisateur, par exemple `preview.example.com` |
-| License Identity | Identité cloud dérivée de la licence active |
 
 Un endpoint cible un domaine local:
 
@@ -335,7 +334,7 @@ La vérification DNS, le certificat public et l'état du connector doivent être
 - L'access protection se fait côté cloud, avant d'atteindre le connector local.
 - Les exceptions d'access protection doivent rester des préfixes de chemin, comme les routes locales.
 - Les opérations desktop doivent aussi exister en CLI, sous `localify public-url`.
-- Le connector utilise des tokens courts liés à l'endpoint, la machine et la licence. Il ne doit pas envoyer la licence brute sur une session longue.
+- Le connector utilise des tokens courts liés à l'endpoint, la machine et l'identité cloud. Il ne doit pas envoyer d'identifiant de longue durée sur une session longue.
 
 ## Résumé
 
