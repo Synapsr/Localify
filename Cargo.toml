@@ -73,7 +73,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # DNS
-simple-dns = "0.11"
+simple-dns = "0.13"
 base64 = "0.22.1"
 sha2 = "0.10"
 
