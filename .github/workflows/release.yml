@@ -75,7 +75,7 @@ jobs:
           cd target/release
           # Copy raw binary with versioned name for direct downloads
           cp localify localify-${{ steps.version.outputs.version }}-macos-arm64
-          # Create tarball with binary named "localify" for Homebrew
+          # Create tarball with binary named "localify"
           tar -czf localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz localify
 
       - name: Generate SHA256 checksums

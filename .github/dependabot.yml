@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # The root crate and the Tauri shell each have their own Cargo.lock.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /src-tauri
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
