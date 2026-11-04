@@ -61,7 +61,7 @@ export const SettingsSystem = () => {
           <SettingsRow
             label="CA trusted"
             value={
-              data.daemon.caInstalled ? "Yes" : data.daemon.caTrustPending ? "Pending" : "No"
+              data.daemon.caInstalled ? "Yes" : data.daemon.caTrustPending ? "Not yet" : "No"
             }
           />
           <SettingsRow
@@ -77,15 +77,6 @@ export const SettingsSystem = () => {
           <SettingsRow label="CLI command" value={data.environment.cliCommandPath} mono />
           <SettingsRow label="Log file" value={data.config.paths.logFile} mono />
         </dl>
-        {data.daemon.caTrustCommand ? (
-          <div className="space-y-1 rounded-lg border border-[--color-border] p-3">
-            <p className="text-xs text-[--color-muted]">
-              HTTP and Node.js work now. Browsers warn about HTTPS until macOS trusts the
-              certificate, which takes a confirmation on screen. On this Mac, with a screen, run:
-            </p>
-            <code className="block break-all font-mono text-xs">{data.daemon.caTrustCommand}</code>
-          </div>
-        ) : null}
         <div className="flex justify-end">
           <Button
             variant="secondary"

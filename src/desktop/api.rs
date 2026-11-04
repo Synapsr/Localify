@@ -331,6 +331,31 @@ impl DesktopApi {
         self.system_request(&config, None).setup_required()
     }
 
+    /// Trusts the CA for this account, when someone asks for it. macOS shows its own
+    /// confirmation, so this waits for an answer.
+    pub fn trust_ca(&self) -> Result<()> {
+        anyhow::ensure!(
+            cfg!(target_os = "macos"),
+            "On this system the install trusts the CA. Run: {}",
+            BRANDING.admin_command("install")
+        );
+
+        let (_, paths) = self.load_config_and_paths()?;
+        let certs = CertificateService::new(&paths);
+        anyhow::ensure!(
+            certs.ca_exists(),
+            "There is no certificate to trust yet. Run: {}",
+            BRANDING.admin_command("install")
+        );
+
+        macos_system::trust_in_login_keychain(&paths.data_dir.join("ca.crt"))?;
+        anyhow::ensure!(
+            certs.is_ca_installed()?,
+            "macOS accepted the request, but it still does not trust the certificate."
+        );
+        Ok(())
+    }
+
     pub fn daemon_status(&self) -> Result<DaemonStatusDto> {
         let config = self.config_store().load()?;
         let paths = config.paths.clone();
@@ -339,8 +364,6 @@ impl DesktopApi {
         let certs = CertificateService::new(&paths);
         let network = get_network_info();
         let status = QueryDaemonStatus::new(&daemon, &certs, &network).execute()?;
-        let ca_trust_command = (cfg!(target_os = "macos") && status.ca_trust_pending)
-            .then(|| macos_system::trust_command(&paths.data_dir.join("ca.crt")));
 
         Ok(DaemonStatusDto {
             running: status.pid.is_some(),
@@ -348,7 +371,6 @@ impl DesktopApi {
             lan_ip: status.lan_ip.to_string(),
             ca_installed: status.ca_installed,
             ca_trust_pending: status.ca_trust_pending,
-            ca_trust_command,
             http_port: config.daemon.http_port,
             https_port: config.daemon.https_port,
             dns_port: config.daemon.dns_port,
@@ -7598,6 +7620,15 @@ mod tests {
             DomainPattern::from_name(domain, false).unwrap(),
             vec![Route::parse(&format!("/={port}")).unwrap()],
         )
+    }
+
+    #[test]
+    fn trusting_before_any_certificate_exists_points_at_the_install() {
+        let (_temp, api, _store) = temp_api();
+
+        let error = api.trust_ca().unwrap_err().to_string();
+
+        assert!(error.contains("install"), "{error}");
     }
 
     fn temp_api() -> (TempDir, DesktopApi, ConfigStore) {

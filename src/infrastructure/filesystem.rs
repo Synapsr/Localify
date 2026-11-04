@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::application::StepOutcome;
 use crate::application::ports::{IosSimulatorTrust, SystemSetup};
-use crate::infrastructure::certs::CertificateService;
+use crate::branding::BRANDING;
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::macos_system::{
     self, Approval, SystemRemoval, SystemRequest, run_with_approval,
@@ -91,34 +91,21 @@ impl SystemSetup for FileSystemSetup<'_> {
             return Ok(Vec::new());
         };
 
-        let trusted = CertificateService::new(self.paths)
-            .is_ca_installed()
-            .unwrap_or(false);
         let changes = request.changes()?;
         let label = "System setup".to_string();
 
-        let mut steps = if changes.is_empty() {
-            vec![(label, StepOutcome::Skipped("Already in place.".into()))]
-        } else {
-            run_with_approval(&changes.script(), *approval)?;
-            vec![(
+        if changes.is_empty() {
+            return Ok(vec![(
                 label,
-                StepOutcome::Success("Applied with one administrator approval.".into()),
-            )]
-        };
-
-        // Trust lives in the login keychain, which needs no administrator and reaches
-        // no other account. macOS confirms it on screen. With no screen this fails,
-        // and the install reports trust as pending.
-        if !trusted {
-            let outcome = match macos_system::trust_in_login_keychain(&self.ca_cert()) {
-                Ok(()) => StepOutcome::Success("Trusted in your login keychain.".into()),
-                Err(error) => StepOutcome::Warning(error.to_string()),
-            };
-            steps.push(("Trust CA in your macOS account".into(), outcome));
+                StepOutcome::Skipped("Already in place.".into()),
+            )]);
         }
 
-        Ok(steps)
+        run_with_approval(&changes.script(), *approval)?;
+        Ok(vec![(
+            label,
+            StepOutcome::Success("Applied with one administrator approval.".into()),
+        )])
     }
 
     fn remove_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>> {
@@ -139,7 +126,7 @@ impl SystemSetup for FileSystemSetup<'_> {
     }
 
     fn ca_trust_command(&self) -> Option<String> {
-        cfg!(target_os = "macos").then(|| macos_system::trust_command(&self.ca_cert()))
+        cfg!(target_os = "macos").then(|| BRANDING.admin_command("trust"))
     }
 
     fn trust_ios_simulators(&self) -> anyhow::Result<IosSimulatorTrust> {

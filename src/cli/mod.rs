@@ -20,5 +20,6 @@ pub mod services;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod trust;
 pub mod uninstall;
 pub mod unregister;

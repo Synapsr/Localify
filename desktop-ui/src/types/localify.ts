@@ -316,7 +316,6 @@ export interface DaemonStatusDto {
   lanIp: string;
   caInstalled: boolean;
   caTrustPending: boolean;
-  caTrustCommand: string | null;
   httpPort: number;
   httpsPort: number;
   dnsPort: number;

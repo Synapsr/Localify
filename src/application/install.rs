@@ -101,16 +101,16 @@ impl<'a> Install<'a> {
         steps.push(("Root CA".into(), ca_outcome));
     }
 
-    /// A CA the system does not trust yet does not fail the install: macOS needs an
-    /// on-screen confirmation, which a machine with no screen cannot give. Everything
-    /// else keeps working, and the user gets the exact command to finish it.
+    /// The install leaves trust for later. macOS asks for its own confirmation, and
+    /// a second prompt right after the password is one too many for something only
+    /// browsers need. Everything else works without it.
     fn report_ca_trust(&self, steps: &mut Vec<(String, StepOutcome)>) {
         let outcome = match self.certs.is_ca_installed() {
             Ok(true) => StepOutcome::Success("The system trusts the Root CA.".into()),
             _ if !self.certs.ca_exists() => return,
             _ => match self.system.ca_trust_command() {
                 Some(command) => StepOutcome::Pending(format!(
-                    "Trust is pending: macOS needs a confirmation on screen. HTTP and Node.js work now. To finish, run this on a Mac with a screen:\n    {command}"
+                    "HTTP and Node.js work now. Browsers will warn about HTTPS until you confirm the certificate. Run `{command}`, or use Trust HTTPS in the app."
                 )),
                 None => StepOutcome::Warning(
                     "The system does not trust the Root CA yet. HTTPS certificates will not work until it does.".into(),
@@ -343,12 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn trust_that_needs_a_screen_is_pending_and_the_install_still_finishes() {
+    fn an_untrusted_ca_is_pending_and_the_install_still_finishes() {
         let certs = InMemoryCertificateManager::created_but_untrusted();
         let config = InMemoryConfigLoader::new();
         let dns = InMemoryDnsManager::new();
         let network = InMemoryNetworkInfo::with_ip(Ipv4Addr::LOCALHOST);
-        let system = InMemorySystemSetup::with_trust_command("security add-trusted-cert x");
+        let system = InMemorySystemSetup::with_trust_command("localify trust");
         let svc = make_install(&certs, &config, &dns, &network, &system);
 
         let result = svc.execute().unwrap();
@@ -361,7 +361,7 @@ mod tests {
         let StepOutcome::Pending(message) = &trust_step.1 else {
             panic!("expected a pending step, got {:?}", trust_step.1);
         };
-        assert!(message.contains("security add-trusted-cert x"));
+        assert!(message.contains("localify trust"));
         // Nothing after the trust step was skipped.
         assert!(dns.is_configured());
         assert!(config.exists());

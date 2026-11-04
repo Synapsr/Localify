@@ -36,7 +36,8 @@ and removed by `sudo localify uninstall`.
 
 ### Certificate Trust
 
-On macOS, the Root CA is trusted in your login keychain, for your account only.
+On macOS, the Root CA is trusted in your login keychain, for your account only, when
+you run `localify trust`.
 On Linux, Localify copies the Root CA to the system
 certificate store and runs `update-ca-certificates`:
 

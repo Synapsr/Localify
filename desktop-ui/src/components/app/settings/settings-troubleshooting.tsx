@@ -48,6 +48,7 @@ export const SettingsTroubleshooting = () => {
   const install = useMutation(systemMutations.install(queryClient));
   const setupCliAccess = useMutation(systemMutations.setupCliAccess(queryClient));
   const setupNodeTrust = useMutation(systemMutations.setupNodeTrust(queryClient));
+  const trustCa = useMutation(systemMutations.trustCa(queryClient));
   const trustIosSimulators = useMutation(systemMutations.trustIosSimulators());
   const startDaemon = useMutation(daemonMutations.start(queryClient));
   const [open, setOpen] = useState(false);
@@ -64,6 +65,12 @@ export const SettingsTroubleshooting = () => {
     setActionError(null);
 
     try {
+      if (action === "trustCa") {
+        await trustCa.mutateAsync();
+        toast.success("HTTPS is trusted");
+        return;
+      }
+
       if (action === "install") {
         const result = await install.mutateAsync();
         const warning = getInstallWarningMessage(result);
@@ -119,6 +126,7 @@ export const SettingsTroubleshooting = () => {
     (install.isPending && "install") ||
     (setupCliAccess.isPending && "setupCliAccess") ||
     (setupNodeTrust.isPending && "setupNodeTrust") ||
+    (trustCa.isPending && "trustCa") ||
     (trustIosSimulators.isPending && "trustIosSimulators") ||
     (startDaemon.isPending && "startDaemon") ||
     null;

@@ -303,6 +303,9 @@ enum Commands {
     /// Reload daemon configuration
     Reload,
 
+    /// Trust HTTPS in browsers on this Mac, with one macOS confirmation
+    Trust,
+
     /// Let other devices reach Localify, or keep it on this machine (the default)
     Lan {
         #[command(subcommand)]
@@ -872,7 +875,7 @@ fn main() -> Result<()> {
         Commands::Restart => {
             cli::restart::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon)
         }
-        Commands::Status => cli::status::execute(&ctx, &paths, &config.daemon),
+        Commands::Status => cli::status::execute(&ctx, &config.daemon),
         Commands::Logs {
             lines,
             clear,
@@ -881,6 +884,7 @@ fn main() -> Result<()> {
         Commands::Reload => {
             cli::reload::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon)
         }
+        Commands::Trust => cli::trust::execute(config_path),
         Commands::Lan { command } => match command {
             LanCommands::Enable => cli::lan::set(true, config_path, &paths, &config.daemon),
             LanCommands::Disable => cli::lan::set(false, config_path, &paths, &config.daemon),

@@ -783,10 +783,6 @@ function ActivateStep({
       await waitForNextPaint();
       const installResult = await install.mutateAsync();
       assertInstallCompleted(installResult);
-      const pendingStep = installResult.steps.find((step) => step.status === "pending");
-      if (pendingStep) {
-        toast.warning("HTTPS needs one more step", { description: pendingStep.message });
-      }
       activationPhase = "start";
       setPhase("start");
       await startDaemon.mutateAsync({ verbose: false });
@@ -822,7 +818,7 @@ function ActivateStep({
       icon: <CheckIcon className="size-4" />,
       title: "Create a local certificate authority",
       description:
-        "A private CA is generated on your machine and trusted by macOS so browsers, Node.js, and local dev tools can trust Localify domains.",
+        "A private CA is generated on your machine. Node.js trusts it right away, and browsers trust it once you confirm in macOS.",
     },
     {
       icon: <ZapIcon className="size-4" />,
@@ -847,8 +843,8 @@ function ActivateStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Activate {appName}</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Localify needs an administrator's password once to set up secure local HTTPS. After that,
-          nothing of Localify's runs as root.
+          Localify needs an administrator's password once to set up its domains and background
+          service. After that, nothing of Localify's runs as root.
         </p>
       </motion.div>
 

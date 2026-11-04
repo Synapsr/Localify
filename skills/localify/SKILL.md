@@ -381,7 +381,7 @@ localify restart
 Common failures:
 
 - Domain does not resolve: setup/DNS resolver may be missing, daemon may be stopped, or the wrong Localify profile is active. `localify stop` keeps the daemon stopped until `localify start`.
-- HTTPS warning: local CA may not be installed or trusted by the current browser/runtime. On a machine with no screen, trust stays pending after install: HTTP and Node.js work, and `localify status` prints the exact command to finish it. Do not run that command for the user; it needs their password and a confirmation on screen.
+- HTTPS warning: local CA may not be installed or trusted by the current browser/runtime. The install leaves trust pending on macOS: HTTP and Node.js work. `localify status` says so. A person at the Mac finishes it with `localify trust` or the Trust HTTPS button. Do not run that for them unless they ask; it opens a macOS window that needs their password.
 - Another device cannot connect: on macOS only this Mac can reach Localify by default. Run `localify lan enable` only when the user asks for it, because it exposes their dev servers to the network.
 - Browser works but Node.js fails: Node may need Localify's CA via its trust integration or `NODE_EXTRA_CA_CERTS`.
 - Localify page shows target unavailable: the upstream dev server is not listening on the configured target.

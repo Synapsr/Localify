@@ -23,7 +23,7 @@ impl CertificateService {
 
     /// Initialize the Root CA (called during `localify install`).
     ///
-    /// On macOS this only creates the CA: the install then trusts it in the login
+    /// On macOS this only creates the CA: `localify trust` then trusts it in the login
     /// keychain. A CA from an older build has no name constraint, so it is replaced
     /// along with the leaf certificates it signed.
     pub fn init_ca(&self) -> Result<(), CertError> {

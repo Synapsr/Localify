@@ -459,12 +459,10 @@ pub struct DaemonStatusDto {
     pub pid: Option<u32>,
     pub lan_ip: String,
     pub ca_installed: bool,
-    /// The CA exists but macOS does not trust it yet, for lack of a screen to
-    /// confirm on. `ca_trust_command` finishes it.
+    /// The CA exists but macOS does not trust it yet: the install leaves that for
+    /// later, and `trust_ca` finishes it.
     #[serde(default)]
     pub ca_trust_pending: bool,
-    #[serde(default)]
-    pub ca_trust_command: Option<String>,
     pub http_port: u16,
     pub https_port: u16,
     pub dns_port: u16,

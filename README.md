@@ -49,6 +49,9 @@ Localify's runs as root: the daemon runs as you, starts at boot, and only this M
 can reach it unless you run `localify lan enable`. `localify uninstall --force`
 removes all of it, with one more approval.
 
+HTTP and Node.js work right away. For HTTPS in browsers, run `localify trust` once
+and confirm in the macOS window.
+
 On Linux, run `sudo localify install` and `sudo localify start`, and use `sudo` for
 the commands below.
 

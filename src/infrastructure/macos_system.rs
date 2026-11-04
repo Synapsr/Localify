@@ -60,17 +60,6 @@ pub fn resolver_content(port: u16) -> String {
     )
 }
 
-/// The command that finishes CA trust, for a machine where the on-screen
-/// confirmation could not happen during install.
-pub fn trust_command(ca_cert: &Path) -> String {
-    let keychain = login_keychain_path().unwrap_or_else(|_| "login.keychain-db".into());
-    format!(
-        "security add-trusted-cert -r trustRoot -k {} {}",
-        shell_quote(&keychain.to_string_lossy()),
-        shell_quote(&ca_cert.to_string_lossy())
-    )
-}
-
 // ---------- launchd service ----------
 
 /// Everything the daemon's launchd job depends on.
@@ -808,8 +797,8 @@ pub fn delete_login_keychain_cas(keep: Option<&str>) -> Result<usize> {
     Ok(removed)
 }
 
-/// How long the install waits for someone to answer macOS's trust confirmation. An
-/// agent on a machine nobody is watching gets "pending" instead of hanging.
+/// How long to wait for someone to answer macOS's trust confirmation, so a command
+/// on a machine nobody is watching fails instead of hanging.
 const TRUST_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Trusts the CA for this account only: no administrator, no other account, and
@@ -845,7 +834,7 @@ pub fn trust_in_login_keychain(ca_cert: &Path) -> Result<()> {
         if started.elapsed() > TRUST_CONFIRMATION_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("Nobody confirmed trust for the CA on screen in time.");
+            bail!("Nobody confirmed the macOS window in time. Run it again and confirm.");
         }
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -855,7 +844,7 @@ pub fn trust_in_login_keychain(ca_cert: &Path) -> Result<()> {
             let _ = pipe.read_to_string(&mut stderr);
         }
         bail!(
-            "macOS did not trust the CA for this account: {}",
+            "macOS did not trust the CA for this account: {}. Run this on the Mac itself, with someone at the screen.",
             stderr.trim()
         );
     }
@@ -1612,20 +1601,6 @@ mod tests {
 
         assert!(ROOT_DAEMON_PATTERN.ends_with("$"));
         assert!(!script.ends_with(" start --foreground"));
-    }
-
-    #[test]
-    fn trust_pending_gives_the_exact_command_with_a_quoted_path() {
-        let command = trust_command(Path::new(
-            "/Users/dev/Library/Application Support/Localify Desktop/data/ca.crt",
-        ));
-
-        assert!(command.starts_with("security add-trusted-cert -r trustRoot -k "));
-        assert!(!command.contains("sudo"), "{command}");
-        assert!(
-            command
-                .ends_with("'/Users/dev/Library/Application Support/Localify Desktop/data/ca.crt'")
-        );
     }
 
     #[test]

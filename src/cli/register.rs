@@ -61,6 +61,15 @@ pub fn execute(
             "disabled"
         }
     );
+    if cfg!(target_os = "macos")
+        && result.registration.is_https_enabled()
+        && !ctx.cert_service.is_ca_installed().unwrap_or(true)
+    {
+        println!(
+            "  Browsers will warn about HTTPS until you run: {}",
+            BRANDING.admin_command("trust")
+        );
+    }
     println!("\nStart the proxy with: localify start");
 
     Ok(())
