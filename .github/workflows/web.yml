@@ -8,6 +8,7 @@ on:
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
+      - "scripts/web-cloudflare.mjs"
       - ".github/workflows/web.yml"
   pull_request:
     types: [opened, synchronize, reopened]
@@ -16,6 +17,7 @@ on:
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
+      - "scripts/web-cloudflare.mjs"
       - ".github/workflows/web.yml"
 
 permissions:
@@ -46,5 +48,5 @@ jobs:
       - name: Typecheck website
         run: pnpm --filter @localify/web typecheck
 
-      - name: Build website
-        run: pnpm web:build
+      - name: Build website for Cloudflare
+        run: pnpm web:build:cloudflare
