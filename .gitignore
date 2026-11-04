@@ -4,8 +4,6 @@
 demo-recording
 .DS_Store
 node_modules
-.next
-.open-next
 .wrangler
 desktop-ui/dist
 /dist
@@ -23,5 +21,3 @@ assets/localify_file_browser_small.png
 .env*
 !.env.example
 .tmp
-
-apps/web/.env

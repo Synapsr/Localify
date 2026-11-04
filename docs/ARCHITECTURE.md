@@ -10,7 +10,7 @@ This document is the entry point for all architecture and convention decisions f
 2. **Desktop UI stays local-only** — The desktop UI talks to the Rust core through Tauri commands only. There is no HTTP client, no SQL driver, no ORM, no auth in `desktop-ui/`.
 3. **Type-safe end-to-end** — TypeScript strict mode in the desktop UI. DTOs in [desktop-ui/src/types/localify.ts](../desktop-ui/src/types/localify.ts) mirror the serializable types returned by `DesktopApi` (see [src/desktop/](../src/desktop/)).
 4. **Minimal abstraction** — No premature helpers or wrappers. Three similar lines beats one clever abstraction.
-5. **Minimal workspace, separate apps** — The repo can host multiple app entry points when needed. Today that means the Tauri desktop shell plus a standalone marketing web app under `apps/web`. There are still no shared packages or internal frontend libraries.
+5. **Minimal workspace** — The repo holds one app: the Tauri desktop shell and its React UI. The website lives in its own repository.
 6. **Convention over configuration** — File naming, folder structure, and patterns are standardized so any contributor (or agent) can navigate the code instantly.
 
 ## Imposed Stack
@@ -44,15 +44,6 @@ Rust conventions (DDD layer rules, module layout, YAGNI, testing strategy) live 
 | UI primitives | shadcn/ui on top of Base UI (`@base-ui-components/react`) | Yes |
 | Native bridge | `@tauri-apps/api` via typed wrappers in `lib/tauri-client.ts` | Yes |
 
-### Marketing web app (`apps/web`)
-
-| Concern | Technology | Non-negotiable |
-|---------|-----------|----------------|
-| Framework | Next.js App Router | Yes |
-| Language | TypeScript (strict) | Yes |
-| Styling | App-local CSS / CSS Modules | Yes |
-| Runtime | Static-first marketing pages | Yes |
-
 ### Explicitly excluded
 
 - No database, no ORM, no SQL driver in the UI — persistence belongs to Rust
@@ -81,7 +72,6 @@ When asked to commit or review code:
 1. Run `git diff --staged` (or `git diff` if nothing staged) to see what changed.
 2. Categorize changed files:
    - `desktop-ui/**/*.{ts,tsx,css}` → follow the desktop UI rules in this document.
-   - `apps/web/**/*.{ts,tsx,css}` → treat as standalone Next.js marketing code; keep it isolated from desktop concerns.
    - `src/**/*.rs`, `src-tauri/**/*.rs`, `Cargo.toml` → follow [../CLAUDE.md](../CLAUDE.md).
 3. Flag violations of the rules in this document. Don't flag what's clean.
 4. If everything passes, proceed with the commit. No summary needed.
