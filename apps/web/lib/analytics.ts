@@ -93,6 +93,9 @@ export const initWebAnalytics = () => {
     // Without this, init fetches remote config and feature flags whatever the consent status.
     // The site uses neither.
     advanced_disable_flags: true,
+    // Batched events wait up to 3 seconds and withdrawing consent doesn't clear them, so an
+    // event from just before a decline would still go out afterwards.
+    request_batching: false,
     loaded: (client) => {
       client.register({ surface: "web" });
       if (isPostHogDebugEnabled()) {

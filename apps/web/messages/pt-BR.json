@@ -221,7 +221,7 @@
       {
         "title": "1. A versão curta",
         "body": [
-          "O Localify não coleta logs de requisição, caminhos locais nem nada sobre o tráfego dos serviços que você roda. O proxy funciona localmente depois da instalação. Dados chegam até nós em quatro casos: você visita o site, o app desktop oficial envia analytics de produto e relatórios de erro, o app procura atualizações ou você nos escreve."
+          "O Localify não coleta logs de requisição nem nada sobre o tráfego dos serviços que você roda. Os analytics não incluem caminhos locais, e um filtro os remove dos relatórios de erro. O proxy funciona localmente depois da instalação. Dados chegam até nós em quatro casos: você visita o site, o app desktop oficial envia analytics de produto e relatórios de erro, o app procura atualizações ou você nos escreve."
         ]
       },
       {
@@ -233,7 +233,7 @@
       {
         "title": "3. O app desktop e o CLI",
         "body": [
-          "O daemon, o app desktop e o CLI do Localify rodam na sua máquina. DNS, certificados TLS, roteamento, configuração de projetos e logs de requisição são tratados lá. Não coletamos os hostnames que você cria, e eles são removidos dos relatórios de erro antes do envio. Nunca recebemos as requisições que passam pelo proxy nem os logs mostrados no app. O CLI e o daemon não enviam analytics.",
+          "O daemon, o app desktop e o CLI do Localify rodam na sua máquina. DNS, certificados TLS, roteamento, configuração de projetos e logs de requisição são tratados lá. Nossos analytics não incluem os hostnames que você cria, e o filtro descrito abaixo remove os domínios .localify dos relatórios de erro. Nunca recebemos as requisições que passam pelo proxy nem os logs mostrados no app. O CLI e o daemon não enviam analytics.",
           "Os builds oficiais do app desktop enviam analytics de produto para o PostHog: telas vistas, etapas de onboarding, ações como criar um projeto ou adicionar um domínio, e contadores como quantos projetos e domínios você tem. Esses eventos não incluem nomes de projeto, domínios, caminhos locais, URLs proxificadas nem tráfego. O autocapture fica desligado. Um build compilado a partir do código-fonte sem token do PostHog não envia nada.",
           "O app também reporta erros ao PostHog: o nome e a mensagem do erro, mais hashes que agrupam erros idênticos. Antes do envio, um filtro remove URLs, caminhos de arquivo, domínios .localify e nomes entre aspas. Ele funciona por padrões, então pode deixar passar algo em uma mensagem incomum.",
           "O session replay fica desligado por padrão e só começa se você o ativar nas configurações do app. Ele mascara textos e campos de entrada, e não grava logs de console nem tempos de rede.",
@@ -252,7 +252,7 @@
         "body": [
           "Em produção, o site usa duas ferramentas de analytics, Umami e PostHog. Elas registram visualizações de página e cliques em botões como o de download. Não usamos rastreadores de publicidade nem retargeting entre sites.",
           "O Umami roda para todos os visitantes. Ele é carregado de analytics.teogoulois.com e não usa cookies.",
-          "O PostHog só roda se você aceitar no aviso de cookies. Ele então guarda um identificador de visitante em um cookie e no armazenamento local, e registra que você aceitou. O autocapture e a gravação de sessão dele ficam desligados. Se você recusar, o PostHog não envia nem guarda nada. Nos dois casos, uma entrada no armazenamento local lembra sua escolha, e você pode mudá-la pelo link Cookies no rodapé.",
+          "O PostHog só roda se você aceitar no aviso de cookies. Ele então guarda um identificador de visitante em um cookie e no armazenamento local, e registra que você aceitou. O autocapture e a gravação de sessão dele ficam desligados. Se você recusar, o PostHog não envia nem guarda nada. Se você tinha aceitado e mudar de ideia, ele para de registrar e apaga o que guardou no seu navegador. Nos dois casos, uma entrada no armazenamento local lembra sua escolha, e você pode mudá-la pelo link Cookies no rodapé.",
           "Se você aceitou, clicar em um botão de download pode copiar um pequeno token de atribuição do Localify para a sua área de transferência, substituindo o que havia lá. Caso contrário, o site não mexe na sua área de transferência. Ao iniciar, o app desktop lê a área de transferência e ignora tudo o que não for esse token. Se encontrar um, ele liga sua visita ao site ao app nas nossas analytics. O token contém um identificador de visitante do PostHog, um identificador de atribuição, um rótulo de origem e um carimbo de data e hora. Ele não contém dados de projeto, domínios, caminhos locais nem tráfego."
         ]
       },

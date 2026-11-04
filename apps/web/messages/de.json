@@ -221,7 +221,7 @@
       {
         "title": "1. Kurzfassung",
         "body": [
-          "Localify erfasst keine Request-Logs, keine lokalen Pfade und nichts über den Traffic der Services, die du betreibst. Der Proxy arbeitet nach der Einrichtung lokal. Daten erreichen uns in vier Fällen: Du besuchst die Website, die offizielle Desktop-App sendet Produkt-Analytics und Fehlerberichte, die App sucht nach Updates, oder du schreibst uns eine E-Mail."
+          "Localify erfasst keine Request-Logs und nichts über den Traffic der Services, die du betreibst. Die Analytics enthalten keine lokalen Pfade, und ein Filter entfernt sie aus Fehlerberichten. Der Proxy arbeitet nach der Einrichtung lokal. Daten erreichen uns in vier Fällen: Du besuchst die Website, die offizielle Desktop-App sendet Produkt-Analytics und Fehlerberichte, die App sucht nach Updates, oder du schreibst uns eine E-Mail."
         ]
       },
       {
@@ -233,7 +233,7 @@
       {
         "title": "3. Desktop-App und CLI",
         "body": [
-          "Der Localify-Daemon, die Desktop-App und die CLI laufen auf deinem Rechner. DNS, TLS-Zertifikate, Routing, Projektkonfiguration und Request-Logs werden dort verarbeitet. Die von dir angelegten Hostnamen erfassen wir nicht, und aus Fehlerberichten werden sie vor dem Senden entfernt. Die Requests, die du über den Proxy leitest, und die Logs in der App erhalten wir nie. CLI und Daemon senden keine Analytics.",
+          "Der Localify-Daemon, die Desktop-App und die CLI laufen auf deinem Rechner. DNS, TLS-Zertifikate, Routing, Projektkonfiguration und Request-Logs werden dort verarbeitet. Unsere Analytics enthalten die von dir angelegten Hostnamen nicht, und der unten beschriebene Filter entfernt .localify-Domains aus Fehlerberichten. Die Requests, die du über den Proxy leitest, und die Logs in der App erhalten wir nie. CLI und Daemon senden keine Analytics.",
           "Offizielle Desktop-Builds senden Produkt-Analytics an PostHog: aufgerufene Ansichten, Onboarding-Schritte, Aktionen wie das Anlegen eines Projekts oder das Hinzufügen einer Domain sowie Zähler wie die Anzahl deiner Projekte und Domains. Diese Events enthalten keine Projektnamen, Domains, lokalen Pfade, weitergeleiteten URLs oder Traffic. Autocapture ist aus. Ein aus dem Quellcode gebauter Build ohne PostHog-Token sendet nichts.",
           "Die App meldet außerdem Fehler an PostHog: Name und Meldung des Fehlers, dazu Hashes, die gleiche Fehler gruppieren. Vor dem Senden entfernt ein Filter URLs, Dateipfade, .localify-Domains und Namen in Anführungszeichen. Er arbeitet mit Mustern und kann deshalb in einer ungewöhnlichen Meldung etwas übersehen.",
           "Session Replay ist standardmäßig aus und startet nur, wenn du es in den Einstellungen der App einschaltest. Replay maskiert Texte und Eingaben und zeichnet weder Konsolen-Logs noch Netzwerk-Timings auf.",
@@ -252,7 +252,7 @@
         "body": [
           "Im Produktivbetrieb nutzt die Website zwei Analytics-Tools, Umami und PostHog. Sie erfassen Seitenaufrufe und Klicks auf Buttons wie den Download. Wir setzen keine Werbe-Tracker und kein seitenübergreifendes Retargeting ein.",
           "Umami läuft für alle Besucher. Es wird von analytics.teogoulois.com geladen und verwendet keine Cookies.",
-          "PostHog läuft nur, wenn du im Cookie-Banner akzeptierst. Dann speichert es eine Besucherkennung in einem Cookie und im lokalen Speicher und erfasst, dass du akzeptiert hast. Autocapture und Session-Aufzeichnung sind aus. Wenn du ablehnst, sendet und speichert PostHog nichts. In beiden Fällen merkt sich ein Eintrag im lokalen Speicher deine Wahl, und du kannst sie über den Cookies-Link in der Fußzeile ändern.",
+          "PostHog läuft nur, wenn du im Cookie-Banner akzeptierst. Dann speichert es eine Besucherkennung in einem Cookie und im lokalen Speicher und erfasst, dass du akzeptiert hast. Autocapture und Session-Aufzeichnung sind aus. Wenn du ablehnst, sendet und speichert PostHog nichts. Wenn du zugestimmt hattest und es dir anders überlegst, zeichnet es nichts mehr auf und löscht, was es in deinem Browser gespeichert hat. In beiden Fällen merkt sich ein Eintrag im lokalen Speicher deine Wahl, und du kannst sie über den Cookies-Link in der Fußzeile ändern.",
           "Wenn du akzeptiert hast, kann ein Klick auf einen Download-Button ein kurzes Localify-Attributionstoken in deine Zwischenablage kopieren und damit deren Inhalt ersetzen. Andernfalls lässt die Website deine Zwischenablage in Ruhe. Beim Start liest die Desktop-App die Zwischenablage und ignoriert alles, was kein solches Token ist. Findet sie eines, verknüpft sie deinen Website-Besuch in unseren Analytics mit der App. Das Token enthält eine PostHog-Besucherkennung, eine Attributions-ID, eine Quellenbezeichnung und einen Zeitstempel. Es enthält keine Projektdaten, Domains, lokalen Pfade oder Traffic."
         ]
       },
