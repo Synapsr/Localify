@@ -221,7 +221,7 @@
       {
         "title": "1. Version courte",
         "body": [
-          "Localify ne collecte ni logs de requêtes, ni chemins locaux, ni rien sur le trafic des services que tu fais tourner. Le proxy fonctionne en local après l'installation. Des données nous parviennent dans quatre cas : tu visites le site, l'app desktop officielle envoie des analytics produit et des rapports d'erreur, l'app vérifie les mises à jour, ou tu nous écris."
+          "Localify ne collecte ni logs de requêtes, ni rien sur le trafic des services que tu fais tourner. Ses analytics n'incluent pas les chemins locaux, et un filtre les retire des rapports d'erreur. Le proxy fonctionne en local après l'installation. Des données nous parviennent dans quatre cas : tu visites le site, l'app desktop officielle envoie des analytics produit et des rapports d'erreur, l'app vérifie les mises à jour, ou tu nous écris."
         ]
       },
       {
@@ -233,7 +233,7 @@
       {
         "title": "3. L'app desktop et le CLI",
         "body": [
-          "Le daemon, l'app desktop et le CLI Localify tournent sur ta machine. DNS, certificats TLS, routage, configuration des projets et logs de requêtes y sont gérés. Nous ne collectons pas les hostnames que tu crées, et ils sont retirés des rapports d'erreur avant l'envoi. Nous ne recevons jamais les requêtes que tu proxifies ni les logs affichés dans l'app. Le CLI et le daemon n'envoient aucune analytics.",
+          "Le daemon, l'app desktop et le CLI Localify tournent sur ta machine. DNS, certificats TLS, routage, configuration des projets et logs de requêtes y sont gérés. Nos analytics n'incluent pas les hostnames que tu crées, et le filtre décrit plus bas retire les domaines .localify des rapports d'erreur. Nous ne recevons jamais les requêtes que tu proxifies ni les logs affichés dans l'app. Le CLI et le daemon n'envoient aucune analytics.",
           "Les builds officiels de l'app desktop envoient des analytics produit à PostHog : écrans consultés, étapes d'onboarding, actions comme créer un projet ou ajouter un domaine, et compteurs comme le nombre de projets et de domaines. Ces événements n'incluent ni noms de projets, ni domaines, ni chemins locaux, ni URLs proxifiées, ni trafic. L'autocapture est désactivée. Un build compilé depuis les sources sans token PostHog n'envoie rien.",
           "L'app signale aussi les erreurs à PostHog : le nom et le message de l'erreur, plus des empreintes qui regroupent les erreurs identiques. Avant l'envoi, un filtre retire les URLs, les chemins de fichiers, les domaines .localify et les noms entre guillemets. Il repère des motifs, donc il peut laisser passer quelque chose dans un message inhabituel.",
           "Le session replay est désactivé par défaut et ne démarre que si tu l'actives dans les réglages de l'app. Il masque les textes et les champs de saisie, et n'enregistre ni les logs de la console ni les temps réseau.",
@@ -252,7 +252,7 @@
         "body": [
           "En production, le site utilise deux outils d'analytics, Umami et PostHog. Ils enregistrent les pages vues et les clics sur des boutons comme le téléchargement. Nous n'utilisons ni traceurs publicitaires ni reciblage inter-sites.",
           "Umami tourne pour tous les visiteurs. Il est chargé depuis analytics.teogoulois.com et n'utilise aucun cookie.",
-          "PostHog ne tourne que si tu acceptes dans le bandeau cookies. Il garde alors un identifiant de visiteur dans un cookie et dans le stockage local, et enregistre que tu as accepté. Son autocapture et son enregistrement de session sont désactivés. Si tu refuses, PostHog n'envoie et ne stocke rien. Dans les deux cas, une entrée du stockage local retient ton choix, et tu peux le changer depuis le lien Cookies du pied de page.",
+          "PostHog ne tourne que si tu acceptes dans le bandeau cookies. Il garde alors un identifiant de visiteur dans un cookie et dans le stockage local, et enregistre que tu as accepté. Son autocapture et son enregistrement de session sont désactivés. Si tu refuses, PostHog n'envoie et ne stocke rien. Si tu avais accepté et que tu changes d'avis, il arrête d'enregistrer et efface ce qu'il avait stocké dans ton navigateur. Dans les deux cas, une entrée du stockage local retient ton choix, et tu peux le changer depuis le lien Cookies du pied de page.",
           "Si tu as accepté, cliquer sur un bouton de téléchargement peut copier un court jeton d'attribution Localify dans ton presse-papiers, à la place de ce qui s'y trouvait. Sinon, le site ne touche pas à ton presse-papiers. Au démarrage, l'app desktop lit le presse-papiers et ignore tout ce qui n'est pas un tel jeton. Si elle en trouve un, elle relie ta visite du site à l'app dans nos analytics. Le jeton contient un identifiant de visiteur PostHog, un identifiant d'attribution, un libellé de source et un horodatage. Il ne contient ni données de projet, ni domaines, ni chemins locaux, ni trafic."
         ]
       },

@@ -221,7 +221,7 @@
       {
         "title": "1. La versión corta",
         "body": [
-          "Localify no recoge logs de peticiones, rutas locales ni nada sobre el tráfico de los servicios que ejecutas. El proxy funciona en local después de la instalación. Nos llegan datos en cuatro casos: visitas el sitio, la app de escritorio oficial envía analytics de producto e informes de errores, la app busca actualizaciones o nos escribes."
+          "Localify no recoge logs de peticiones ni nada sobre el tráfico de los servicios que ejecutas. Sus analytics no incluyen rutas locales, y un filtro las elimina de los informes de errores. El proxy funciona en local después de la instalación. Nos llegan datos en cuatro casos: visitas el sitio, la app de escritorio oficial envía analytics de producto e informes de errores, la app busca actualizaciones o nos escribes."
         ]
       },
       {
@@ -233,7 +233,7 @@
       {
         "title": "3. La app de escritorio y el CLI",
         "body": [
-          "El daemon, la app de escritorio y el CLI de Localify se ejecutan en tu máquina. DNS, certificados TLS, enrutamiento, configuración de proyectos y logs de peticiones se gestionan allí. No recogemos los hostnames que creas, y se eliminan de los informes de errores antes de enviarlos. Nunca recibimos las peticiones que pasan por el proxy ni los logs que muestra la app. El CLI y el daemon no envían analytics.",
+          "El daemon, la app de escritorio y el CLI de Localify se ejecutan en tu máquina. DNS, certificados TLS, enrutamiento, configuración de proyectos y logs de peticiones se gestionan allí. Nuestros analytics no incluyen los hostnames que creas, y el filtro descrito más abajo elimina los dominios .localify de los informes de errores. Nunca recibimos las peticiones que pasan por el proxy ni los logs que muestra la app. El CLI y el daemon no envían analytics.",
           "Las builds oficiales de la app de escritorio envían analytics de producto a PostHog: pantallas vistas, pasos de onboarding, acciones como crear un proyecto o añadir un dominio, y contadores como cuántos proyectos y dominios tienes. Estos eventos no incluyen nombres de proyecto, dominios, rutas locales, URLs proxificadas ni tráfico. El autocapture está desactivado. Una build compilada desde el código fuente sin token de PostHog no envía nada.",
           "La app también informa de errores a PostHog: el nombre y el mensaje del error, más hashes que agrupan errores idénticos. Antes de enviarlos, un filtro elimina URLs, rutas de archivo, dominios .localify y nombres entre comillas. Funciona por patrones, así que puede dejar pasar algo en un mensaje poco habitual.",
           "El session replay está desactivado por defecto y solo empieza si lo activas en los ajustes de la app. Enmascara textos y campos de entrada, y no graba logs de consola ni tiempos de red.",
@@ -252,7 +252,7 @@
         "body": [
           "En producción, el sitio usa dos herramientas de analytics, Umami y PostHog. Registran visitas a páginas y clics en botones como el de descarga. No usamos rastreadores publicitarios ni retargeting entre sitios.",
           "Umami funciona para todos los visitantes. Se carga desde analytics.teogoulois.com y no usa cookies.",
-          "PostHog solo funciona si aceptas en el aviso de cookies. Entonces guarda un identificador de visitante en una cookie y en el almacenamiento local, y registra que aceptaste. Su autocapture y su grabación de sesiones están desactivados. Si rechazas, PostHog no envía ni guarda nada. En ambos casos, una entrada del almacenamiento local recuerda tu elección, y puedes cambiarla desde el enlace Cookies del pie de página.",
+          "PostHog solo funciona si aceptas en el aviso de cookies. Entonces guarda un identificador de visitante en una cookie y en el almacenamiento local, y registra que aceptaste. Su autocapture y su grabación de sesiones están desactivados. Si rechazas, PostHog no envía ni guarda nada. Si habías aceptado y cambias de opinión, deja de registrar y borra lo que había guardado en tu navegador. En ambos casos, una entrada del almacenamiento local recuerda tu elección, y puedes cambiarla desde el enlace Cookies del pie de página.",
           "Si aceptaste, hacer clic en un botón de descarga puede copiar un breve token de atribución de Localify en tu portapapeles, reemplazando lo que hubiera. Si no, el sitio no toca tu portapapeles. Al arrancar, la app de escritorio lee el portapapeles e ignora todo lo que no sea ese token. Si encuentra uno, vincula tu visita al sitio con la app en nuestras analytics. El token contiene un identificador de visitante de PostHog, un identificador de atribución, una etiqueta de origen y una marca de tiempo. No contiene datos de proyectos, dominios, rutas locales ni tráfico."
         ]
       },
