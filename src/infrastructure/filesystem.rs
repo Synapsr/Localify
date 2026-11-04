@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use crate::application::StepOutcome;
 use crate::application::ports::{IosSimulatorTrust, SystemSetup};
-use crate::branding::BRANDING;
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::macos_system::{
@@ -95,7 +94,7 @@ impl SystemSetup for FileSystemSetup<'_> {
         let trusted = CertificateService::new(self.paths)
             .is_ca_installed()
             .unwrap_or(false);
-        let changes = request.changes(trusted)?;
+        let changes = request.changes()?;
         let label = "System setup".to_string();
 
         let mut steps = if changes.is_empty() {
@@ -108,9 +107,10 @@ impl SystemSetup for FileSystemSetup<'_> {
             )]
         };
 
-        // The dev profile keeps its trust in the login keychain, which needs no
-        // administrator and reaches no other account.
-        if BRANDING.is_dev_profile() && !trusted {
+        // Trust lives in the login keychain, which needs no administrator and reaches
+        // no other account. macOS confirms it on screen. With no screen this fails,
+        // and the install reports trust as pending.
+        if !trusted {
             let outcome = match macos_system::trust_in_login_keychain(&self.ca_cert()) {
                 Ok(()) => StepOutcome::Success("Trusted in your login keychain.".into()),
                 Err(error) => StepOutcome::Warning(error.to_string()),

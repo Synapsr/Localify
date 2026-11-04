@@ -46,6 +46,9 @@ launch the daemon. Production defaults are:
 - a launchd service, `dev.localify.daemon`, that runs that binary as the installing
   user and holds ports 80 and 443 for it
 
+The Root CA is trusted in your login keychain, for your account only. That needs no
+administrator, and macOS confirms it in its own window. Both profiles work this way.
+
 `pnpm tauri:dev` runs with `LOCALIFY_PROFILE=dev`. That profile is isolated
 from the installed app:
 
@@ -54,7 +57,6 @@ from the installed app:
 - pid, socket, logs and resolver names based on `localify-dev`
 - domains under `.localify.test` instead of `.localify`
 - ports 8080, 8443 and 1054, so no launchd service: the app starts the daemon itself
-- the CA trusted in your login keychain only, with no system-wide trust
 
 One approval writes `/etc/resolver/localify.test` and the `localify-dev` link.
 

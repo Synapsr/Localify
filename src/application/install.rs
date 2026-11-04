@@ -348,7 +348,7 @@ mod tests {
         let config = InMemoryConfigLoader::new();
         let dns = InMemoryDnsManager::new();
         let network = InMemoryNetworkInfo::with_ip(Ipv4Addr::LOCALHOST);
-        let system = InMemorySystemSetup::with_trust_command("sudo security add-trusted-cert x");
+        let system = InMemorySystemSetup::with_trust_command("security add-trusted-cert x");
         let svc = make_install(&certs, &config, &dns, &network, &system);
 
         let result = svc.execute().unwrap();
@@ -361,7 +361,7 @@ mod tests {
         let StepOutcome::Pending(message) = &trust_step.1 else {
             panic!("expected a pending step, got {:?}", trust_step.1);
         };
-        assert!(message.contains("sudo security add-trusted-cert x"));
+        assert!(message.contains("security add-trusted-cert x"));
         // Nothing after the trust step was skipped.
         assert!(dns.is_configured());
         assert!(config.exists());

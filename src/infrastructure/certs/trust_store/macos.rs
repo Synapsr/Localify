@@ -3,7 +3,6 @@ use std::process::Command;
 
 use super::super::CertError;
 use super::TrustStore;
-use crate::branding::BRANDING;
 use crate::infrastructure::macos_system;
 
 const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
@@ -18,8 +17,8 @@ impl MacOsTrustStore {
 }
 
 impl TrustStore for MacOsTrustStore {
-    /// Trusting a CA takes an administrator, so it happens in the install's one
-    /// approval. See `macos_system`. This process never has the rights.
+    /// Trust is set by the install, which can ask macOS to confirm it on screen. See
+    /// `macos_system::trust_in_login_keychain`.
     fn add_ca(&self, _cert_path: &Path) -> Result<(), CertError> {
         Err(CertError::PermissionDenied)
     }
@@ -53,20 +52,9 @@ impl TrustStore for MacOsTrustStore {
     }
 
     fn is_ca_trusted(&self, cert_path: &Path) -> Result<bool, CertError> {
-        // The dev profile trusts its CA in the user's own keychain instead.
-        if BRANDING.is_dev_profile() {
-            let keychain = macos_system::login_keychain_path()
-                .map_err(|e| CertError::TrustStoreError(e.to_string()))?;
-            return verify_certificate_trust(cert_path, &keychain.to_string_lossy());
-        }
-
-        let local_hash = macos_system::certificate_sha1(cert_path)
+        let keychain = macos_system::login_keychain_path()
             .map_err(|e| CertError::TrustStoreError(e.to_string()))?;
-        if !keychain_hashes()?.iter().any(|hash| hash == &local_hash) {
-            return Ok(false);
-        }
-
-        verify_certificate_trust(cert_path, SYSTEM_KEYCHAIN)
+        verify_certificate_trust(cert_path, &keychain.to_string_lossy())
     }
 }
 

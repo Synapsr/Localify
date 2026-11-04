@@ -1,8 +1,14 @@
 use anyhow::Result;
 use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::time::Duration;
 
+use crate::application::ports::NetworkInfo;
 use crate::branding::BRANDING;
+use crate::infrastructure::network::get_network_info;
+
+/// A free port on this machine refuses in well under a millisecond.
+const LISTENER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The address a daemon started outside launchd listens on.
 pub fn listen_address(lan_access: bool) -> IpAddr {
@@ -75,18 +81,33 @@ pub fn ensure_daemon_ports_available(
     Ok(())
 }
 
-/// Checks that launchd could open every interface on these ports before asking
-/// for an approval to try. Unlike loopback, a normal user may bind them. A second
-/// wildcard socket on a port always fails, for example while Tailscale holds 443.
+/// Looks for another listener on these ports before asking for an approval to open
+/// them on every interface. A test bind can't tell, because our own service holds
+/// them on loopback, and macOS hides the socket table from some programs. A miss only
+/// costs the approval: launchd then refuses, and the script puts the old service back.
 #[allow(dead_code)] // Used by the desktop through the library crate.
 pub fn ensure_lan_ports_available(http_port: u16, https_port: u16) -> Result<()> {
+    match get_network_info().lan_ip() {
+        Some(address) => ensure_no_listener_at(address, http_port, https_port),
+        None => Ok(()),
+    }
+}
+
+/// Our service is not on this address yet, so a free port refuses at once. Anything
+/// else belongs to someone else, including a listener that lets the connection hang.
+fn ensure_no_listener_at(address: Ipv4Addr, http_port: u16, https_port: u16) -> Result<()> {
     for (protocol, port) in [("HTTP", http_port), ("HTTPS", https_port)] {
-        TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).map_err(|error| {
-            anyhow::anyhow!(
+        let taken =
+            match TcpStream::connect_timeout(&(address, port).into(), LISTENER_PROBE_TIMEOUT) {
+                Ok(_) => true,
+                Err(error) => error.kind() == ErrorKind::TimedOut,
+            };
+        if taken {
+            anyhow::bail!(
                 "Localify cannot listen on the network: {}",
-                map_port_error(protocol, port, error)
-            )
-        })?;
+                map_port_error(protocol, port, ErrorKind::AddrInUse.into())
+            );
+        }
     }
     Ok(())
 }
@@ -109,14 +130,25 @@ mod tests {
     }
 
     #[test]
-    fn a_taken_wildcard_port_blocks_the_lan_opt_in_before_any_prompt() {
-        let listener = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+    fn a_listener_blocks_the_lan_opt_in_before_any_prompt() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let error = ensure_lan_ports_available(port, 0).err().unwrap();
+        let error = ensure_no_listener_at(Ipv4Addr::LOCALHOST, port, port)
+            .err()
+            .unwrap();
 
         assert!(error.to_string().contains("cannot listen on the network"));
         assert!(error.to_string().contains("already in use"));
+    }
+
+    #[test]
+    fn a_port_that_refuses_connections_is_free_for_the_lan_opt_in() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        ensure_no_listener_at(Ipv4Addr::LOCALHOST, port, port).unwrap();
     }
 
     #[test]

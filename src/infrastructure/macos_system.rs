@@ -4,18 +4,20 @@
 //! what the system should look like, compares it with what is there, and asks
 //! for one approval to run a short shell script made of system tools. Everything
 //! root writes is inside that script, so nothing changes between the approval and
-//! the write. What the script writes: the resolver file, the launchd plist, trust
-//! for the CA and the terminal command link. It never changes anything in the
+//! the write. What the script writes: the resolver file, the launchd plist and the
+//! terminal command link. CA trust is not in it: that lives in the user's own
+//! keychain and needs no administrator. It never changes anything in the
 //! user's folder: a process running as the user could plant a link there and steer
 //! root through it.
 // Both crates compile this module and each uses a part of it.
 #![allow(dead_code)]
 
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -61,15 +63,12 @@ pub fn resolver_content(port: u16) -> String {
 /// The command that finishes CA trust, for a machine where the on-screen
 /// confirmation could not happen during install.
 pub fn trust_command(ca_cert: &Path) -> String {
-    let ca_cert = shell_quote(&ca_cert.to_string_lossy());
-    if BRANDING.is_dev_profile() {
-        let keychain = login_keychain_path().unwrap_or_else(|_| "login.keychain-db".into());
-        return format!(
-            "security add-trusted-cert -r trustRoot -k {} {ca_cert}",
-            shell_quote(&keychain.to_string_lossy())
-        );
-    }
-    format!("sudo security add-trusted-cert -d -r trustRoot -k {SYSTEM_KEYCHAIN} {ca_cert}")
+    let keychain = login_keychain_path().unwrap_or_else(|_| "login.keychain-db".into());
+    format!(
+        "security add-trusted-cert -r trustRoot -k {} {}",
+        shell_quote(&keychain.to_string_lossy()),
+        shell_quote(&ca_cert.to_string_lossy())
+    )
 }
 
 // ---------- launchd service ----------
@@ -496,7 +495,6 @@ pub struct SystemChanges {
     pub stale_keychain_hashes: Vec<String>,
     pub resolver_content: Option<String>,
     pub service_plist: Option<String>,
-    pub trust_ca_pem: Option<String>,
     pub cli_link: Option<CliLink>,
 }
 
@@ -519,7 +517,6 @@ impl SystemChanges {
         script.extend(self.resolver_commands());
         script.extend(self.cli_link_commands());
         script.extend(self.service_commands());
-        script.extend(self.trust_commands());
         script.push("exit 0".to_string());
         script.join("\n")
     }
@@ -609,25 +606,6 @@ fi"#
             format!("/bin/rm -f {previous}"),
         ]
     }
-
-    /// Runs last, and its result is ignored on purpose. macOS wants an on-screen
-    /// confirmation, even as root, so this fails on a machine with no screen. The
-    /// install then finishes and reports trust as pending. The certificate comes
-    /// from the script rather than from the user's folder, so what gets trusted
-    /// is the constrained CA that was checked when this script was built.
-    fn trust_commands(&self) -> Vec<String> {
-        let Some(pem) = &self.trust_ca_pem else {
-            return Vec::new();
-        };
-        vec![
-            "ca_file=$(/usr/bin/mktemp /tmp/localify-ca.XXXXXX) || fail 'Could not create a temporary file.'".to_string(),
-            format!("/usr/bin/printf '%s' {} > \"$ca_file\"", shell_quote(pem)),
-            format!(
-                "/usr/bin/security add-trusted-cert -d -r trustRoot -k {SYSTEM_KEYCHAIN} \"$ca_file\" 2>/dev/null"
-            ),
-            "/bin/rm -f \"$ca_file\"".to_string(),
-        ]
-    }
 }
 
 /// Everything from the old install goes first, so the ports are free before
@@ -701,7 +679,6 @@ fn keychain_commands(hashes: &[String]) -> Vec<String> {
 pub struct SystemRemoval {
     pub legacy: LegacyInstall,
     pub keychain_hashes: Vec<String>,
-    pub ca_cert: Option<PathBuf>,
     pub cli_link: Option<PathBuf>,
     pub service: bool,
 }
@@ -719,9 +696,6 @@ impl SystemRemoval {
                 "/bin/rm -f {}",
                 shell_quote(&service_plist_path().to_string_lossy())
             ));
-        }
-        if let Some(cert) = &self.ca_cert {
-            script.extend(remove_trust_command(cert));
         }
         script.extend(keychain_commands(&self.keychain_hashes));
         script.push(format!(
@@ -809,31 +783,64 @@ pub fn delete_login_keychain_cas(keep: Option<&str>) -> Result<usize> {
     Ok(removed)
 }
 
-/// The dev profile's trust: no administrator, no other account, and macOS shows its
-/// usual confirmation for this account.
+/// How long the install waits for someone to answer macOS's trust confirmation. An
+/// agent on a machine nobody is watching gets "pending" instead of hanging.
+const TRUST_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Trusts the CA for this account only: no administrator, no other account, and
+/// macOS shows its usual confirmation. Refuses a CA that could sign for other sites.
 pub fn trust_in_login_keychain(ca_cert: &Path) -> Result<()> {
+    let pem = fs::read_to_string(ca_cert)
+        .with_context(|| format!("Failed to read the CA certificate at {}", ca_cert.display()))?;
+    if !pem_is_limited_to_local_domains(&pem).map_err(anyhow::Error::from)? {
+        bail!(
+            "The CA at {} can sign for any site, so {} will not trust it.",
+            ca_cert.display(),
+            BRANDING.app_name
+        );
+    }
+
     let current = certificate_sha1(ca_cert)?;
     delete_login_keychain_cas(Some(&current))?;
 
-    let output = Command::new("/usr/bin/security")
+    let mut child = Command::new("/usr/bin/security")
         .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
         .arg(login_keychain_path()?)
         .arg(ca_cert)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("Failed to ask macOS to trust the CA for this account")?;
-    if !output.status.success() {
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().context("Failed to wait for macOS")? {
+            break status;
+        }
+        if started.elapsed() > TRUST_CONFIRMATION_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Nobody confirmed trust for the CA on screen in time.");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
         bail!(
             "macOS did not trust the CA for this account: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
         );
     }
     Ok(())
 }
 
-/// Takes the CA out of the login keychain, for the dev profile's uninstall and for
-/// what older builds left there.
+/// Takes the CA out of the login keychain, for uninstall and for what older builds
+/// left there.
 pub fn remove_login_keychain_trust(ca_cert: &Path) -> Option<(String, StepOutcome)> {
-    if BRANDING.is_dev_profile() && ca_cert.exists() {
+    if ca_cert.exists() {
         let _ = Command::new("/usr/bin/security")
             .arg("remove-trusted-cert")
             .arg(ca_cert)
@@ -985,44 +992,20 @@ impl SystemRequest<'_> {
         BRANDING.uses_launchd_service() && !self.service_matches()
     }
 
-    /// Compares the machine with this request. `ca_trusted` comes from the caller.
-    /// The certificate root will trust is read here, once, and checked for its name
-    /// constraint before it goes in the script.
-    pub fn changes(&self, ca_trusted: bool) -> Result<SystemChanges> {
+    /// Compares the machine with this request. Any CA with our name in the system
+    /// keychain comes from an older build, since trust now lives in the user's own.
+    pub fn changes(&self) -> Result<SystemChanges> {
         let legacy = LegacyInstall::on_this_machine();
         let mut changes = SystemChanges {
             resolver_content: (!self.resolver_matches())
                 .then(|| resolver_content(self.daemon.dns_port)),
             cli_link: self.cli_link.clone(),
+            stale_keychain_hashes: system_keychain_ca_hashes()?,
             ..SystemChanges::default()
         };
 
-        if BRANDING.uses_launchd_service() {
-            let ca_cert = self.paths.data_dir.join("ca.crt");
-            let current = certificate_sha1(&ca_cert)?;
-            changes.stale_keychain_hashes = system_keychain_ca_hashes()?
-                .into_iter()
-                .filter(|hash| *hash != current)
-                .collect();
-            if !self.service_matches() || !service_is_loaded() {
-                changes.service_plist = Some(plist_contents(&self.service_spec()?));
-            }
-            if !ca_trusted {
-                let pem = fs::read_to_string(&ca_cert).with_context(|| {
-                    format!("Failed to read the CA certificate at {}", ca_cert.display())
-                })?;
-                if !pem_is_limited_to_local_domains(&pem).map_err(anyhow::Error::from)? {
-                    bail!(
-                        "The CA at {} can sign for any site, so {} will not trust it.\nRun: {}",
-                        ca_cert.display(),
-                        BRANDING.app_name,
-                        BRANDING.admin_command("install")
-                    );
-                }
-                changes.trust_ca_pem = Some(pem);
-            }
-        } else {
-            changes.stale_keychain_hashes = system_keychain_ca_hashes()?;
+        if BRANDING.uses_launchd_service() && (!self.service_matches() || !service_is_loaded()) {
+            changes.service_plist = Some(plist_contents(&self.service_spec()?));
         }
 
         changes.legacy = legacy;
@@ -1110,14 +1093,10 @@ pub fn system_setup_done() -> bool {
 }
 
 /// Everything uninstall has to take back out on this machine, old install included.
-pub fn removal_for_this_machine(
-    ca_cert: Option<&Path>,
-    cli_link: Option<&Path>,
-) -> Result<SystemRemoval> {
+pub fn removal_for_this_machine(cli_link: Option<&Path>) -> Result<SystemRemoval> {
     Ok(SystemRemoval {
         legacy: LegacyInstall::on_this_machine(),
         keychain_hashes: system_keychain_ca_hashes().unwrap_or_default(),
-        ca_cert: ca_cert.map(Path::to_path_buf),
         cli_link: cli_link.map(Path::to_path_buf),
         service: BRANDING.uses_launchd_service() && service_plist_path().exists(),
     })
@@ -1439,9 +1418,6 @@ mod tests {
             stale_keychain_hashes: vec!["AABB".into()],
             resolver_content: Some(resolver_content(1053)),
             service_plist: Some(plist_contents(&spec())),
-            trust_ca_pem: Some(
-                "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n".into(),
-            ),
             cli_link: Some(CliLink {
                 link: "/usr/local/bin/localify".into(),
                 target: "/Applications/Localify.app/Contents/MacOS/localify".into(),
@@ -1475,7 +1451,6 @@ mod tests {
         SystemRemoval {
             legacy: all_changes().legacy,
             keychain_hashes: vec!["AABB".into()],
-            ca_cert: Some("/Users/dev/Library/ca.crt".into()),
             cli_link: Some("/usr/local/bin/localify".into()),
             service: true,
         }
@@ -1492,7 +1467,6 @@ mod tests {
             format!("rm -f '{}'", resolver_file().display()),
             "rm -f '/usr/local/bin/localify'".to_string(),
             "delete-certificate -Z 'AABB'".to_string(),
-            "remove-trusted-cert -d '/Users/dev/Library/ca.crt'".to_string(),
             "rm -rf '/etc/localify'".to_string(),
         ] {
             assert!(script.contains(&expected), "missing: {expected}");
@@ -1532,9 +1506,8 @@ mod tests {
             .unwrap();
         let daemon = script.find("pkill -u 0 -f").unwrap();
         let bootstrap = script.find("launchctl bootstrap system").unwrap();
-        let trust = script.find("add-trusted-cert").unwrap();
 
-        assert!(helper < daemon && daemon < bootstrap && bootstrap < trust);
+        assert!(helper < daemon && daemon < bootstrap);
     }
 
     #[test]
@@ -1570,15 +1543,10 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_trust_does_not_fail_the_install() {
+    fn root_never_touches_ca_trust_for_the_current_ca() {
         let script = all_changes().script();
-        let trust_line = script
-            .lines()
-            .find(|line| line.contains("add-trusted-cert"))
-            .unwrap();
 
-        assert!(!trust_line.contains("fail"));
-        assert!(script.contains("rm -f \"$ca_file\"\nexit 0"));
+        assert!(!script.contains("add-trusted-cert"), "{script}");
     }
 
     #[test]
@@ -1597,9 +1565,11 @@ mod tests {
             "/Users/dev/Library/Application Support/Localify Desktop/data/ca.crt",
         ));
 
-        assert_eq!(
-            command,
-            "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '/Users/dev/Library/Application Support/Localify Desktop/data/ca.crt'"
+        assert!(command.starts_with("security add-trusted-cert -r trustRoot -k "));
+        assert!(!command.contains("sudo"), "{command}");
+        assert!(
+            command
+                .ends_with("'/Users/dev/Library/Application Support/Localify Desktop/data/ca.crt'")
         );
     }
 

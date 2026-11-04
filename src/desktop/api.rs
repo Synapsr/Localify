@@ -289,10 +289,7 @@ impl DesktopApi {
     /// the launchd plist. Asks for one approval, then waits for the daemon to answer.
     fn apply_system_changes_for(&self, config: &Config) -> Result<()> {
         let paths = &config.paths;
-        let trusted = CertificateService::new(paths)
-            .is_ca_installed()
-            .unwrap_or(false);
-        let changes = self.system_request(config, None).changes(trusted)?;
+        let changes = self.system_request(config, None).changes()?;
         if !changes.is_empty() {
             macos_system::run_with_approval(&changes.script(), self.approval())?;
         }
@@ -2189,10 +2186,8 @@ impl DesktopApi {
         let daemon = DaemonHandle::new(&paths);
         let mut system = FileSystemSetup::new(&paths);
         if cfg!(target_os = "macos") {
-            let removal = macos_system::removal_for_this_machine(
-                Some(&paths.data_dir.join("ca.crt")),
-                self.managed_cli_link().as_deref(),
-            )?;
+            let removal =
+                macos_system::removal_for_this_machine(self.managed_cli_link().as_deref())?;
             let state_dir = BRANDING.config_dir();
             system = system.with_system_removal(
                 removal,

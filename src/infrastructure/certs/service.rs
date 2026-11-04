@@ -23,10 +23,9 @@ impl CertificateService {
 
     /// Initialize the Root CA (called during `localify install`).
     ///
-    /// On macOS this only creates the CA: trust goes through the one administrator
-    /// approval (production) or the login keychain (dev profile). A CA from an
-    /// older build has no name constraint, so it is replaced along with the leaf
-    /// certificates it signed.
+    /// On macOS this only creates the CA: the install then trusts it in the login
+    /// keychain. A CA from an older build has no name constraint, so it is replaced
+    /// along with the leaf certificates it signed.
     pub fn init_ca(&self) -> Result<(), CertError> {
         if cfg!(target_os = "macos")
             && self.ca.exists()
