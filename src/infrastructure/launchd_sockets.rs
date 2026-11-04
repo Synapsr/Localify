@@ -12,8 +12,20 @@ pub const HTTPS_SOCKETS: &str = "HTTPS";
 ///
 /// `Ok(None)` means this process is not a launchd job with that socket, which is
 /// how a foreground or dev daemon learns it has to bind for itself.
+///
+/// When a port is taken, launchd still hands over a socket for it, never bound.
+/// Accepting on one fails at once and forever, so those are dropped here.
 pub fn activate(name: &str) -> io::Result<Option<Vec<TcpListener>>> {
-    Ok(activate_fds(name)?.map(|fds| fds.into_iter().map(TcpListener::from).collect()))
+    Ok(activate_fds(name)?.map(|fds| {
+        fds.into_iter()
+            .map(TcpListener::from)
+            .filter(|listener| {
+                listener
+                    .local_addr()
+                    .is_ok_and(|address| address.port() != 0)
+            })
+            .collect()
+    }))
 }
 
 #[cfg(target_os = "macos")]

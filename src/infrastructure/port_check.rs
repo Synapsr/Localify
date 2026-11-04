@@ -84,7 +84,8 @@ pub fn ensure_daemon_ports_available(
 /// Looks for another listener on these ports before asking for an approval to open
 /// them on every interface. A test bind can't tell, because our own service holds
 /// them on loopback, and macOS hides the socket table from some programs. A miss only
-/// costs the approval: launchd then refuses, and the script puts the old service back.
+/// costs the approval: the script finds the port launchd could not open and puts the
+/// old service back.
 #[allow(dead_code)] // Used by the desktop through the library crate.
 pub fn ensure_lan_ports_available(http_port: u16, https_port: u16) -> Result<()> {
     match get_network_info().lan_ip() {

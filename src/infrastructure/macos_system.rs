@@ -495,6 +495,7 @@ pub struct SystemChanges {
     pub stale_keychain_hashes: Vec<String>,
     pub resolver_content: Option<String>,
     pub service_plist: Option<String>,
+    pub service_ports: Vec<u16>,
     pub cli_link: Option<CliLink>,
 }
 
@@ -572,8 +573,9 @@ impl SystemChanges {
         ]
     }
 
-    /// Writes the plist and loads it. If launchd refuses, a port is usually taken,
-    /// so the error says how to check, and the previous plist goes back.
+    /// Writes the plist and loads it. launchd loads a job even when it could not open
+    /// a port, so the script also checks that launchd holds each one on IPv4. If not,
+    /// the previous plist goes back and the error says how to check.
     fn service_commands(&self) -> Vec<String> {
         let Some(plist) = &self.service_plist else {
             return Vec::new();
@@ -584,6 +586,12 @@ impl SystemChanges {
             service_plist_path().to_string_lossy()
         ));
         let target = shell_quote(&service_target());
+        let ports = self
+            .service_ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
         vec![
             format!("/bin/launchctl bootout {target} 2>/dev/null"),
             format!("[ -f {path} ] && /bin/mv {path} {previous}"),
@@ -597,10 +605,18 @@ impl SystemChanges {
                 "n=0; until error=$(/bin/launchctl bootstrap system {path} 2>&1); do n=$((n+1)); [ $n -lt 5 ] || break; /bin/sleep 1; done"
             ),
             format!(
-                r#"if [ $n -ge 5 ]; then
+                r#"taken=""; if [ $n -lt 5 ]; then for port in {ports}; do /usr/sbin/lsof -nP -a -p 1 -iTCP:$port -sTCP:LISTEN 2>/dev/null | /usr/bin/grep -q IPv4 || taken="$taken $port"; done; fi"#
+            ),
+            format!(
+                r#"if [ $n -ge 5 ] || [ -n "$taken" ]; then
+  /bin/launchctl bootout {target} 2>/dev/null
   /bin/rm -f {path}
-  if [ -f {previous} ]; then /bin/mv {previous} {path}; /bin/launchctl bootstrap system {path} 2>/dev/null; fi
-  fail "launchd could not load the service: $error. If a port is taken, check with: sudo lsof -nP -iTCP -sTCP:LISTEN"
+  if [ -f {previous} ]; then
+    /bin/mv {previous} {path}
+    m=0; until /bin/launchctl bootstrap system {path} 2>/dev/null; do m=$((m+1)); [ $m -lt 5 ] || break; /bin/sleep 1; done
+  fi
+  [ -z "$taken" ] || fail "Another program holds port$taken, so launchd could not open it. Check with: sudo lsof -nP -iTCP -sTCP:LISTEN"
+  fail "launchd could not load the service: $error"
 fi"#
             ),
             format!("/bin/rm -f {previous}"),
@@ -1014,6 +1030,7 @@ impl SystemRequest<'_> {
 
         if BRANDING.uses_launchd_service() && (!self.service_matches() || !service_is_loaded()) {
             changes.service_plist = Some(plist_contents(&self.service_spec()?));
+            changes.service_ports = vec![self.daemon.http_port, self.daemon.https_port];
         }
 
         changes.legacy = legacy;
@@ -1426,6 +1443,7 @@ mod tests {
             stale_keychain_hashes: vec!["AABB".into()],
             resolver_content: Some(resolver_content(1053)),
             service_plist: Some(plist_contents(&spec())),
+            service_ports: vec![80, 443],
             cli_link: Some(CliLink {
                 link: "/usr/local/bin/localify".into(),
                 target: "/Applications/Localify.app/Contents/MacOS/localify".into(),
@@ -1548,6 +1566,28 @@ mod tests {
     #[test]
     fn a_clean_machine_kills_nothing() {
         assert!(legacy_commands(&LegacyInstall::default()).is_empty());
+    }
+
+    #[test]
+    fn a_port_launchd_could_not_open_restores_the_previous_service() {
+        let script = SystemChanges {
+            service_plist: Some("PLIST".into()),
+            service_ports: vec![80, 443],
+            ..SystemChanges::default()
+        }
+        .script();
+
+        let bootstrap = script.find("launchctl bootstrap system").unwrap();
+        let check = script.find("for port in 80 443; do").unwrap();
+        let rollback = script.find(r#"[ -n "$taken" ]; then"#).unwrap();
+        let unload = script[rollback..].find("launchctl bootout").unwrap();
+        let restore = script[rollback..].find("/bin/mv ").unwrap();
+        let error = script[rollback..]
+            .find("Another program holds port")
+            .unwrap();
+
+        assert!(bootstrap < check && check < rollback);
+        assert!(unload < restore && restore < error);
     }
 
     #[test]

@@ -29,6 +29,11 @@ impl DaemonListeners {
             .context("launchd could not hand over the HTTPS sockets")?
             .context("The launchd service has no HTTPS sockets. Reinstall it.")?;
 
+        anyhow::ensure!(
+            !http.is_empty() && !https.is_empty(),
+            "launchd could not open the HTTP or HTTPS port, because another program holds it."
+        );
+
         let lan_access = http.iter().chain(&https).any(|listener| {
             listener
                 .local_addr()
