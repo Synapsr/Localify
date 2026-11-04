@@ -1,13 +1,16 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::PathBuf;
 use std::process;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
+use super::mgmt_client::{MgmtSocketClient, ShutdownKind};
 use super::process::PlatformProcessControl;
 use super::process::ProcessControl;
 use super::process::get_process_control;
-use crate::application::ports::DaemonControl;
+use crate::application::ports::{DaemonConnectionError, DaemonControl};
+use crate::config::LocalifyPaths;
 
 pub struct PidFile {
     path: PathBuf,
@@ -65,32 +68,67 @@ impl PidFile {
             _ => Ok(None),
         }
     }
+}
 
-    /// Stop the running daemon gracefully.
-    ///
-    /// Sends SIGTERM, waits for the given timeout, then sends SIGKILL
-    /// if the process is still running. Removes the PID file on success.
+/// The daemon as a process. Its PID file only says whether one seems to be running;
+/// anything that acts on the daemon goes through its management socket, which only
+/// the same user can open. A PID in a file the user can edit may by now belong to
+/// any other process, so this never signals one.
+pub struct DaemonHandle {
+    pid_file: PidFile,
+    mgmt: MgmtSocketClient,
+}
+
+impl DaemonHandle {
+    pub fn new(paths: &LocalifyPaths) -> Self {
+        Self {
+            pid_file: PidFile::new(paths.pid_file.clone()),
+            mgmt: MgmtSocketClient::new(&paths.socket_path),
+        }
+    }
+
+    /// Asks the daemon to exit and waits until it has. A daemon that no longer
+    /// answers on its socket has gone, so a leftover PID file is simply removed.
     pub fn stop_gracefully(&self, timeout: Duration) -> Result<()> {
-        let pid = match self.get_running_pid()? {
-            Some(pid) => pid,
-            None => return Ok(()),
+        let Some(pid) = self.pid_file.get_running_pid()? else {
+            return Ok(());
         };
 
-        self.process.terminate(pid, timeout)?;
-        self.remove()
+        match self.mgmt.shutdown(ShutdownKind::Stop) {
+            Ok(()) => {}
+            Err(DaemonConnectionError::NotRunning) => return self.pid_file.remove(),
+            Err(error) => bail!(
+                "Could not ask the daemon (PID {pid}) to stop: {error}\n\
+                 If a build older than this one is running, stop it with: sudo kill {pid}"
+            ),
+        }
+
+        let deadline = Instant::now() + timeout;
+        while self.pid_file.process.process_exists(pid) {
+            if Instant::now() >= deadline {
+                bail!(
+                    "The daemon (PID {pid}) did not stop within {} seconds.\n\
+                     Check what it is doing, and stop it with: kill {pid}",
+                    timeout.as_secs()
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        self.pid_file.remove()
     }
 }
 
-impl DaemonControl for PidFile {
+impl DaemonControl for DaemonHandle {
     fn is_running(&self) -> Result<bool> {
-        PidFile::is_running(self)
+        self.pid_file.is_running()
     }
 
     fn get_running_pid(&self) -> Result<Option<u32>> {
-        PidFile::get_running_pid(self)
+        self.pid_file.get_running_pid()
     }
 
     fn stop_gracefully(&self, timeout: Duration) -> Result<()> {
-        PidFile::stop_gracefully(self, timeout)
+        DaemonHandle::stop_gracefully(self, timeout)
     }
 }

@@ -54,29 +54,38 @@ export const SettingsSystem = () => {
         <div>
           <h2 className="text-sm font-semibold">System</h2>
           <p className="text-xs text-[--color-muted]">
-            Certificate authority trust for this macOS account, DNS resolver, and desktop helper
-            integration.
+            Certificate authority trust, DNS resolver, and the background service.
           </p>
         </div>
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <SettingsRow
-            label="CA trusted in this account"
-            value={data.daemon.caInstalled ? "Yes" : "No"}
-          />
-          <SettingsRow
-            label="CLI helper ready"
-            value={data.environment.cliHelperReady ? "Yes" : "No"}
+            label="CA trusted"
+            value={
+              data.daemon.caInstalled ? "Yes" : data.daemon.caTrustPending ? "Pending" : "No"
+            }
           />
           <SettingsRow
             label="CLI command installed"
             value={data.environment.cliAccessReady ? "Yes" : "No"}
           />
           <SettingsRow label="DNS resolution" value={dnsResolutionValue} />
-          <SettingsRow label="LAN IP" value={data.daemon.lanIp} />
+          <SettingsRow
+            label="Who can connect"
+            value={data.config.daemon.lanAccess ? `Network (${data.daemon.lanIp})` : "This Mac only"}
+          />
           <SettingsRow label="Config" value={data.environment.configPath} mono />
           <SettingsRow label="CLI command" value={data.environment.cliCommandPath} mono />
           <SettingsRow label="Log file" value={data.config.paths.logFile} mono />
         </dl>
+        {data.daemon.caTrustCommand ? (
+          <div className="space-y-1 rounded-lg border border-[--color-border] p-3">
+            <p className="text-xs text-[--color-muted]">
+              HTTP and Node.js work now. Browsers warn about HTTPS until macOS trusts the
+              certificate, which takes a confirmation on screen. On this Mac, with a screen, run:
+            </p>
+            <code className="block break-all font-mono text-xs">{data.daemon.caTrustCommand}</code>
+          </div>
+        ) : null}
         <div className="flex justify-end">
           <Button
             variant="secondary"

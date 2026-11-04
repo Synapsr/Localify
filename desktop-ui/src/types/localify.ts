@@ -15,7 +15,7 @@ export interface EnvironmentDto {
   binaryPath: string;
   binaryExists: boolean;
   fixedDomainSuffix: string;
-  cliHelperReady: boolean;
+  systemSetupRequired: boolean;
   cliAccessReady: boolean;
   cliCommandPath: string;
   nodeTrust: NodeTrustDto;
@@ -48,6 +48,7 @@ export interface DaemonConfigDto {
   httpsPort: number;
   dnsPort: number;
   logLevel: string;
+  lanAccess: boolean;
 }
 
 export interface LocalifyPathsDto {
@@ -314,6 +315,8 @@ export interface DaemonStatusDto {
   pid: number | null;
   lanIp: string;
   caInstalled: boolean;
+  caTrustPending: boolean;
+  caTrustCommand: string | null;
   httpPort: number;
   httpsPort: number;
   dnsPort: number;

@@ -1,10 +1,9 @@
 import type { ReactNode } from "react";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { toast } from "sonner";
 
-import { bootstrapQueries, systemMutations } from "@/lib/queries";
+import { bootstrapQueries } from "@/lib/queries";
 import {
   loadStoredOnboardingCompleted,
   markStoredOnboardingCompleted,
@@ -20,9 +19,7 @@ interface AppShellProps {
 }
 
 export const AppShell = ({ children }: AppShellProps) => {
-  const queryClient = useQueryClient();
-  const { data, isPending, error } = useQuery(bootstrapQueries.read());
-  const restartHelper = useMutation(systemMutations.restartHelper(queryClient));
+  const { data, isPending, error, refetch, isFetching } = useQuery(bootstrapQueries.read());
   const [onboardingCompleted, setOnboardingCompleted] = useState(loadStoredOnboardingCompleted);
 
   useEffect(() => {
@@ -32,19 +29,6 @@ export const AppShell = ({ children }: AppShellProps) => {
     }
   }, [data?.daemon.caInstalled]);
 
-  const handleRestartHelper = () => {
-    restartHelper.mutate(undefined, {
-      onSuccess: () => {
-        toast.success("Background helper restarted");
-      },
-      onError: (restartError) => {
-        toast.error("Could not restart the background helper", {
-          description: restartError.message,
-        });
-      },
-    });
-  };
-
   if (error && !data) {
     return (
       <AppStartupScreen
@@ -52,11 +36,9 @@ export const AppShell = ({ children }: AppShellProps) => {
         title="Cannot reach the desktop backend"
         message="Localify could not finish booting the desktop shell."
         error={error.message}
-        primaryActionLabel={
-          restartHelper.isPending ? "Repairing background helper..." : "Repair background helper"
-        }
-        primaryActionLoading={restartHelper.isPending}
-        onPrimaryAction={handleRestartHelper}
+        primaryActionLabel={isFetching ? "Trying again..." : "Try again"}
+        primaryActionLoading={isFetching}
+        onPrimaryAction={() => void refetch()}
       />
     );
   }
@@ -85,6 +67,11 @@ export const AppShell = ({ children }: AppShellProps) => {
     );
   }
 
+  // After an update the first run is long past, but the old root helper may still
+  // need replacing, so that takes the same one approval.
+  const needsSetup =
+    data.environment.systemSetupRequired || (!data.daemon.caInstalled && !onboardingCompleted);
+
   const handleOnboardingActivated = () => {
     setOnboardingCompleted(true);
     markStoredOnboardingCompleted();
@@ -95,8 +82,12 @@ export const AppShell = ({ children }: AppShellProps) => {
       desktopName={data.environment.desktopName}
       enabled={data.daemon.caInstalled || onboardingCompleted}
     >
-      {!data.daemon.caInstalled && !onboardingCompleted ? (
-        <Onboarding bootstrap={data} onActivated={handleOnboardingActivated} />
+      {needsSetup ? (
+        <Onboarding
+          bootstrap={data}
+          onActivated={handleOnboardingActivated}
+          startAtActivation={onboardingCompleted}
+        />
       ) : (
         <>{children}</>
       )}

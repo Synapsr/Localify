@@ -184,7 +184,6 @@ export interface DesktopClient {
   detectProjectInitPlan(request: DetectProjectInitPlanRequest): Promise<DetectProjectInitPlanDto>;
   installLocalify(): Promise<InstallResultDto>;
   setupCliAccess(): Promise<CliAccessDto>;
-  restartSystemHelper(): Promise<void>;
   setupNodeTrust(): Promise<NodeTrustDto>;
   trustIosSimulators(): Promise<StepDto>;
   getAgentSkillStatus(): Promise<AgentSkillStatusDto>;
@@ -285,7 +284,6 @@ export function createDesktopClient(): DesktopClient {
       }),
     installLocalify: () => tauriInvoke("install_localify"),
     setupCliAccess: () => tauriInvoke("setup_cli_access"),
-    restartSystemHelper: () => tauriInvoke("restart_system_helper"),
     setupNodeTrust: () => tauriInvoke("setup_node_trust"),
     trustIosSimulators: () => tauriInvoke<StepDto>("trust_ios_simulators"),
     getAgentSkillStatus: () => tauriInvoke("get_agent_skill_status"),

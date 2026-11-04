@@ -1,6 +1,6 @@
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
+    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, KeyPair,
+    KeyUsagePurpose, NameConstraints, PKCS_ECDSA_P256_SHA256, SanType,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -64,6 +64,21 @@ pub(crate) fn build_ca_cert_params() -> CertificateParams {
     params
 }
 
+/// Limits the CA to the names Localify serves, so its key can never sign for
+/// another site.
+pub(crate) fn local_domains_only() -> NameConstraints {
+    NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName(BRANDING.domain_label().to_string())],
+        excluded_subtrees: Vec::new(),
+    }
+}
+
+/// Whether Localify may sign for this name. The CA is trusted system-wide, so
+/// it signs only for the local suffix, whoever asks.
+pub(crate) fn is_local_domain(name: &str) -> bool {
+    name.ends_with(BRANDING.domain_suffix())
+}
+
 pub struct CertificateGenerator {
     base_dir: PathBuf,
     certs_dir: PathBuf,
@@ -83,12 +98,21 @@ impl CertificateGenerator {
     /// For exact patterns, generates a single-domain cert.
     /// For wildcard patterns, generates a cert with SANs for base + *.base.
     pub fn generate(&self, pattern: &DomainPattern) -> Result<Certificate, CertError> {
+        if !is_local_domain(pattern.base_domain().as_str()) {
+            return Err(CertError::GenerationError(format!(
+                "{} is not under {}, so {} will not issue a certificate for it.",
+                pattern.base_domain(),
+                BRANDING.domain_suffix(),
+                BRANDING.app_name
+            )));
+        }
+
         let ca = RootCA::new(self.base_dir.clone());
 
         if !ca.exists() {
             return Err(CertError::GenerationError(format!(
-                "Root CA not found. Run 'sudo {} install' first.",
-                BRANDING.cli_command()
+                "Root CA not found. Run '{}' first.",
+                BRANDING.admin_command("install")
             )));
         }
 
@@ -126,21 +150,29 @@ impl CertificateGenerator {
             source: e,
         })?;
 
-        // Write private key with restricted permissions
-        fs::write(&key_path, &cert.key_pem).map_err(|e| CertError::WriteError {
+        // Owner read/write only, from the moment the file exists
+        crate::infrastructure::file_security::write_private_file(
+            &key_path,
+            cert.key_pem.as_bytes(),
+        )
+        .map_err(|e| CertError::WriteError {
             path: key_path.clone(),
             source: e,
         })?;
 
-        // Set key file permissions to 0600 (owner read/write only)
-        crate::infrastructure::file_security::restrict_key_permissions(&key_path).map_err(|e| {
-            CertError::WriteError {
-                path: key_path.clone(),
-                source: e,
-            }
-        })?;
-
         Ok(())
+    }
+
+    /// Removes every leaf certificate, when the CA that signed them is replaced.
+    pub fn delete_all(&self) -> Result<(), CertError> {
+        match fs::remove_dir_all(&self.certs_dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CertError::DeleteError {
+                path: self.certs_dir.clone(),
+                source: e,
+            }),
+        }
     }
 
     /// Delete certificate files for a domain pattern
@@ -212,15 +244,55 @@ mod tests {
         let ca = RootCA::new(base_dir.clone());
         ca.generate().expect("Failed to generate test CA");
 
-        let domain = DomainName::new("test.localify").unwrap();
+        let name = format!("test{}", BRANDING.domain_suffix());
+        let domain = DomainName::new(name.as_str()).unwrap();
         let pattern = DomainPattern::Exact(domain);
         let generator = CertificateGenerator::new(base_dir, certs_dir);
 
         let cert = generator.generate(&pattern).unwrap();
 
-        assert_eq!(cert.file_stem, "test.localify");
+        assert_eq!(cert.file_stem, name);
         assert!(cert.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(cert.key_pem.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn it_refuses_to_sign_outside_the_local_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+        RootCA::new(base_dir.clone()).generate().unwrap();
+        let generator = CertificateGenerator::new(base_dir.clone(), base_dir.join("certs"));
+
+        for name in [
+            "bank.example.com",
+            "evil.localify.example.com",
+            "notlocalify",
+        ] {
+            let pattern = DomainPattern::from_name(name, false);
+            let Ok(pattern) = pattern else { continue };
+            let error = generator.generate(&pattern).err().unwrap();
+            assert!(error.to_string().contains("will not issue"));
+        }
+    }
+
+    #[test]
+    fn saved_leaf_keys_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+        RootCA::new(base_dir.clone()).generate().unwrap();
+        let generator = CertificateGenerator::new(base_dir.clone(), base_dir.join("certs"));
+        let name = format!("test{}", BRANDING.domain_suffix());
+        let pattern = DomainPattern::Exact(DomainName::new(name.as_str()).unwrap());
+
+        generator
+            .save(&generator.generate(&pattern).unwrap())
+            .unwrap();
+
+        let key = base_dir.join("certs").join(format!("{name}.key"));
+        let mode = fs::metadata(key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o600);
     }
 
     #[test]

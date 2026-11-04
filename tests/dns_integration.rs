@@ -1,6 +1,9 @@
 // Integration tests require root privileges
 // Run with: sudo cargo test --test dns_integration
+//
+// Linux only: on macOS the resolver file is written by the install's one approval.
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore] // Run manually with sudo
 fn test_dns_setup_and_cleanup() {

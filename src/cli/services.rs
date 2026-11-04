@@ -17,6 +17,7 @@ use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::project_env::ensure_implicit_worktree_environment;
 use super::service_supervisor::{self, LaunchOutcome, SessionReporter, SupervisedLaunch};
+use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
 use crate::domain::DomainRegistration;
 use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
@@ -1872,7 +1873,7 @@ fn service_workdir(service: &ConfiguredService) -> Result<PathBuf> {
 }
 
 fn warn_if_daemon_is_stopped(ctx: &AppContext) {
-    if matches!(ctx.pid_file.is_running(), Ok(false)) {
+    if matches!(ctx.daemon.is_running(), Ok(false)) {
         eprintln!(
             "Localify daemon does not appear to be running. Start it separately with '{} start'.",
             BRANDING.cli_command()

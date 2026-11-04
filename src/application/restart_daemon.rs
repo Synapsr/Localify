@@ -45,11 +45,14 @@ impl<'a> RestartDaemon<'a> {
         let is_running = self.daemon.is_running()?;
 
         if require_running && !is_running {
-            bail!("Localify daemon is not running.\nStart it with: sudo localify start");
+            bail!(
+                "Localify daemon is not running.\nStart it with: {}",
+                crate::branding::BRANDING.admin_command("start")
+            );
         }
 
         if is_running {
-            self.daemon.stop_gracefully(Duration::from_millis(500))?;
+            self.daemon.stop_gracefully(Duration::from_secs(5))?;
         }
 
         // Re-load config from disk to pick up changes

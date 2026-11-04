@@ -1,7 +1,6 @@
 use anyhow::Result;
 
-use super::backend::WriteBackend;
-use super::context::AppContext;
+use super::context::{AppContext, direct_api, require_config_writable};
 use crate::application::StepOutcome;
 use crate::application::uninstall::Uninstall;
 use crate::infrastructure::dns::get_dns_service;
@@ -15,7 +14,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
     let use_case = Uninstall::new(
         &ctx.config_store,
         &ctx.cert_service,
-        &ctx.pid_file,
+        &ctx.daemon,
         &dns_service,
         &system,
         paths.data_dir.display().to_string(),
@@ -28,14 +27,17 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         println!("  - DNS configuration for *.localify domains");
         println!("  - All registered domains ({})", preview.domain_count);
         println!("  - All SSL certificates from system trust store");
+        if cfg!(target_os = "macos") {
+            println!("  - The background service, and the terminal command it installed");
+        }
         println!("  - All data in {}/", preview.data_dir);
         println!("\nRun with --force to confirm, or press Ctrl+C to cancel.");
         return Ok(());
     }
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
+    if cfg!(target_os = "macos") {
         println!("Uninstalling Localify...\n");
-        let result = client.uninstall_localify()?;
+        let result = direct_api(&ctx.config_path)?.uninstall()?;
         for step in &result.steps {
             let label = step.label.as_deref().unwrap_or("");
             if step.status == "warning" {
@@ -49,6 +51,8 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         return Ok(());
     }
 
+    require_config_writable(&ctx.config_path)?;
+
     println!("Uninstalling Localify...\n");
 
     let result = use_case.execute()?;
@@ -57,7 +61,9 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         match outcome {
             StepOutcome::Success(msg) => println!("  {}: {}", label, msg),
             StepOutcome::Warning(msg) => eprintln!("  {}: {}", label, msg),
-            StepOutcome::Skipped(msg) => println!("  {}: {}", label, msg),
+            StepOutcome::Skipped(msg) | StepOutcome::Pending(msg) => {
+                println!("  {}: {}", label, msg)
+            }
         }
     }
 

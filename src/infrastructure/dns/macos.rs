@@ -2,43 +2,15 @@ use super::{DnsError, DnsService, map_dns_error};
 use crate::application::ports::{DnsConfigError, DnsManager};
 use crate::branding::BRANDING;
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
-
-const RESOLVER_DIR: &str = "/etc/resolver";
 
 pub struct MacOsDnsService;
 
 impl MacOsDnsService {
     pub fn new() -> Self {
         Self
-    }
-
-    fn resolver_content(port: u16) -> String {
-        format!(
-            "domain {}\nnameserver 127.0.0.1\nnameserver ::1\nport {}\nsearch_order 1\ntimeout 1\noptions attempts:1\n",
-            BRANDING.domain_label(),
-            port
-        )
-    }
-
-    fn ensure_resolver_dir(&self) -> Result<(), DnsError> {
-        let path = Path::new(RESOLVER_DIR);
-        if !path.exists() {
-            fs::create_dir_all(path).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    DnsError::PermissionDenied
-                } else {
-                    DnsError::WriteError {
-                        path: path.to_path_buf(),
-                        source: e,
-                    }
-                }
-            })?;
-        }
-        Ok(())
     }
 }
 
@@ -49,40 +21,15 @@ impl Default for MacOsDnsService {
 }
 
 impl DnsService for MacOsDnsService {
-    fn setup(&self, port: u16) -> Result<(), DnsError> {
-        self.ensure_resolver_dir()?;
-        let resolver_file = BRANDING.resolver_file();
-
-        let content = Self::resolver_content(port);
-
-        fs::write(&resolver_file, content).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                DnsError::PermissionDenied
-            } else {
-                DnsError::WriteError {
-                    path: resolver_file.clone(),
-                    source: e,
-                }
-            }
-        })?;
-
-        Ok(())
+    /// Writing the resolver file takes root, so it happens in the install's one
+    /// approval. See `macos_system`. This process never has the rights.
+    fn setup(&self, _port: u16) -> Result<(), DnsError> {
+        Err(DnsError::PermissionDenied)
     }
 
     fn cleanup(&self) -> Result<(), DnsError> {
-        let resolver_file = BRANDING.resolver_file();
-        let path = resolver_file.as_path();
-        if path.exists() {
-            fs::remove_file(path).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    DnsError::PermissionDenied
-                } else {
-                    DnsError::RemoveError {
-                        path: path.to_path_buf(),
-                        source: e,
-                    }
-                }
-            })?;
+        if BRANDING.resolver_file().exists() {
+            return Err(DnsError::PermissionDenied);
         }
         Ok(())
     }
@@ -163,26 +110,5 @@ impl DnsManager for MacOsDnsService {
 
     fn is_configured(&self) -> bool {
         DnsService::is_configured(self)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::branding::BRANDING;
-
-    use super::MacOsDnsService;
-
-    #[test]
-    fn test_resolver_content_format() {
-        let content = MacOsDnsService::resolver_content(1053);
-        assert!(content.ends_with('\n'));
-        assert!(content.contains(&format!("domain {}", BRANDING.domain_label())));
-        assert!(content.contains("nameserver"));
-        assert!(content.contains("127.0.0.1"));
-        assert!(content.contains("::1"));
-        assert!(content.contains("port 1053"));
-        assert!(content.contains("search_order 1"));
-        assert!(content.contains("timeout 1"));
-        assert!(content.contains("options attempts:1"));
     }
 }

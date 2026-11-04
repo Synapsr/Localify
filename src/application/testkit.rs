@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use crate::application::StepOutcome;
 use crate::branding::BRANDING;
 use crate::config::{DaemonConfig, LocalifyPaths};
 use crate::domain::{
@@ -123,6 +124,9 @@ impl DomainRepository for InMemoryDomainRepository {
 
 pub struct InMemoryCertificateManager {
     ca_installed: RefCell<bool>,
+    ca_exists: RefCell<bool>,
+    /// When true, `init_ca` creates the CA but the system does not trust it.
+    trust_stays_pending: bool,
     certs: RefCell<Vec<String>>,
     /// When true, all cert operations fail.
     fail_operations: bool,
@@ -132,6 +136,8 @@ impl InMemoryCertificateManager {
     pub fn new() -> Self {
         Self {
             ca_installed: RefCell::new(false),
+            ca_exists: RefCell::new(false),
+            trust_stays_pending: false,
             certs: RefCell::new(Vec::new()),
             fail_operations: false,
         }
@@ -139,17 +145,24 @@ impl InMemoryCertificateManager {
 
     pub fn always_failing() -> Self {
         Self {
-            ca_installed: RefCell::new(false),
-            certs: RefCell::new(Vec::new()),
             fail_operations: true,
+            ..Self::new()
         }
     }
 
     pub fn with_ca_installed() -> Self {
         Self {
             ca_installed: RefCell::new(true),
-            certs: RefCell::new(Vec::new()),
-            fail_operations: false,
+            ca_exists: RefCell::new(true),
+            ..Self::new()
+        }
+    }
+
+    pub fn created_but_untrusted() -> Self {
+        Self {
+            ca_exists: RefCell::new(true),
+            trust_stays_pending: true,
+            ..Self::new()
         }
     }
 }
@@ -161,12 +174,17 @@ impl CertificateManager for InMemoryCertificateManager {
                 "simulated CA failure"
             )));
         }
-        *self.ca_installed.borrow_mut() = true;
+        *self.ca_exists.borrow_mut() = true;
+        *self.ca_installed.borrow_mut() = !self.trust_stays_pending;
         Ok(())
     }
 
     fn is_ca_installed(&self) -> Result<bool, CertificateError> {
         Ok(*self.ca_installed.borrow())
+    }
+
+    fn ca_exists(&self) -> bool {
+        *self.ca_exists.borrow()
     }
 
     fn create_and_install(&self, pattern: &DomainPattern) -> Result<(), CertificateError> {
@@ -383,6 +401,8 @@ pub struct InMemorySystemSetup {
     data_exists: RefCell<bool>,
     pid_exists: RefCell<bool>,
     log_exists: RefCell<bool>,
+    decline_approval: bool,
+    trust_command: Option<String>,
 }
 
 impl InMemorySystemSetup {
@@ -395,6 +415,22 @@ impl InMemorySystemSetup {
             data_exists: RefCell::new(false),
             pid_exists: RefCell::new(false),
             log_exists: RefCell::new(false),
+            decline_approval: false,
+            trust_command: None,
+        }
+    }
+
+    pub fn declining_approval() -> Self {
+        Self {
+            decline_approval: true,
+            ..Self::new()
+        }
+    }
+
+    pub fn with_trust_command(command: &str) -> Self {
+        Self {
+            trust_command: Some(command.into()),
+            ..Self::new()
         }
     }
 
@@ -407,6 +443,8 @@ impl InMemorySystemSetup {
             data_exists: RefCell::new(true),
             pid_exists: RefCell::new(true),
             log_exists: RefCell::new(true),
+            decline_approval: false,
+            trust_command: None,
         }
     }
 
@@ -417,6 +455,24 @@ impl InMemorySystemSetup {
 }
 
 impl SystemSetup for InMemorySystemSetup {
+    fn apply_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>> {
+        if self.decline_approval {
+            anyhow::bail!("The administrator approval was declined.");
+        }
+        Ok(Vec::new())
+    }
+
+    fn remove_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>> {
+        if self.decline_approval {
+            anyhow::bail!("The administrator approval was declined.");
+        }
+        Ok(Vec::new())
+    }
+
+    fn ca_trust_command(&self) -> Option<String> {
+        self.trust_command.clone()
+    }
+
     fn create_directories(&self) -> anyhow::Result<()> {
         *self.directories_created.borrow_mut() = true;
         Ok(())

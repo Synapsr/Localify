@@ -9,8 +9,16 @@ use crate::application::ports::{
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
 };
-use crate::infrastructure::binary_identity::BinaryIdentity;
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
+
+/// What the daemon should do after it stops serving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownKind {
+    /// Exit cleanly. launchd does not bring it back until a connection arrives.
+    Stop,
+    /// Exit with the restart code, so launchd starts the binary at its path again.
+    Restart,
+}
 
 /// Concrete infrastructure adapter implementing `DaemonConnection`
 /// via a synchronous Unix socket client to the daemon's management socket.
@@ -27,8 +35,13 @@ impl MgmtSocketClient {
 
     /// Send a command to the management socket and return the parsed JSON response.
     fn send_command(&self, cmd: &str) -> Result<serde_json::Value, DaemonConnectionError> {
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|_| DaemonConnectionError::NotRunning)?;
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                DaemonConnectionError::ConnectionFailed(error.into())
+            } else {
+                DaemonConnectionError::NotRunning
+            }
+        })?;
 
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -72,17 +85,23 @@ impl MgmtSocketClient {
         self.send_command(&command.to_string()).map(|_| ())
     }
 
-    /// Process id and binary of the running daemon. Daemons older than this
-    /// check report no binary.
-    #[allow(dead_code)] // Used by the system helper through the library crate.
-    pub fn daemon_binary(
-        &self,
-    ) -> Result<(Option<u32>, Option<BinaryIdentity>), DaemonConnectionError> {
+    /// Asks the daemon to exit. It replies before it stops serving.
+    pub fn shutdown(&self, kind: ShutdownKind) -> Result<(), DaemonConnectionError> {
+        let command = match kind {
+            ShutdownKind::Stop => "shutdown",
+            ShutdownKind::Restart => "restart",
+        };
+        self.send_command(command).map(|_| ())
+    }
+
+    /// PID of the daemon answering on the socket. Unlike the PID file, this cannot
+    /// be stale.
+    pub fn running_pid(&self) -> Result<u32, DaemonConnectionError> {
         let response = self.send_command("status")?;
-        let data = &response["data"];
-        let pid = data["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok());
-        let binary = serde_json::from_value(data["binary"].clone()).ok();
-        Ok((pid, binary))
+        response["data"]["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or_else(|| DaemonConnectionError::ProtocolError("status has no pid".into()))
     }
 
     /// Services currently running with a launch profile.

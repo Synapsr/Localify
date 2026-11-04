@@ -1,8 +1,6 @@
 use anyhow::Result;
-use localify::desktop::dto::DomainPatternRequest;
 
-use super::backend::WriteBackend;
-use super::context::AppContext;
+use super::context::{AppContext, require_config_writable};
 use crate::application::StepOutcome;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::domain::DomainPattern;
@@ -27,23 +25,14 @@ pub fn execute(domain: String, wildcard: bool, force: bool, ctx: &AppContext) ->
         return Ok(());
     }
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        let result = client.unregister_domain(DomainPatternRequest { domain, wildcard })?;
-        if result.cert_outcome.status == "warning" {
-            eprintln!("{}", result.cert_outcome.message);
-        } else if result.cert_outcome.status == "success" {
-            println!("{}", result.cert_outcome.message);
-        }
-        println!("Unregistered domain: {}", result.registration.pattern);
-        return Ok(());
-    }
+    require_config_writable(&ctx.config_path)?;
 
     let result = use_case.execute(&pattern)?;
 
     match &result.cert_outcome {
         StepOutcome::Success(msg) => println!("{}", msg),
         StepOutcome::Warning(msg) => eprintln!("{}", msg),
-        StepOutcome::Skipped(_) => {}
+        StepOutcome::Skipped(_) | StepOutcome::Pending(_) => {}
     }
 
     println!(

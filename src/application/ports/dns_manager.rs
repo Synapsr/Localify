@@ -1,8 +1,8 @@
 #[derive(Debug, thiserror::Error)]
 pub enum DnsConfigError {
     #[error(
-        "Permission denied. DNS configuration requires root privileges.\n\
-         Run with: sudo localify install"
+        "Permission denied. DNS configuration requires an administrator.\nRun: {}",
+        crate::branding::BRANDING.admin_command("install")
     )]
     PermissionDenied,
 

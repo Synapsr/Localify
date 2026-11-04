@@ -1,8 +1,6 @@
 use anyhow::{Result, anyhow, bail};
-use localify::desktop::dto::RemoveProjectRequest;
 
-use super::backend::WriteBackend;
-use super::context::AppContext;
+use super::context::{AppContext, require_config_writable};
 use crate::application::ports::DaemonConnection;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
@@ -66,27 +64,7 @@ pub fn execute(
         );
     }
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        let result = client.remove_project(RemoveProjectRequest {
-            id: project.id.clone(),
-            delete_domains,
-        })?;
-        if result.daemon_reloaded {
-            println!("Reloaded the running daemon.");
-        }
-        println!("Removed project: {} [{}]", project.name, project.id);
-        if !result.removed_domains.is_empty() {
-            println!(
-                "Removed {} attached domain(s).",
-                result.removed_domains.len()
-            );
-        }
-        println!(
-            "Create a new one with: {} init-project my-app",
-            BRANDING.cli_command()
-        );
-        return Ok(());
-    }
+    require_config_writable(&ctx.config_path)?;
 
     if delete_domains {
         let unregister_domain = UnregisterDomain::new(&ctx.config_store, &ctx.cert_service);

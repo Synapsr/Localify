@@ -2625,6 +2625,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "libc",
  "rcgen",
  "rustls",
  "serde",
@@ -2641,6 +2642,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]

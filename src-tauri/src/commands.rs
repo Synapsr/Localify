@@ -30,7 +30,7 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::terminal::{
@@ -111,7 +111,6 @@ pub struct UpdateAutostartRequest {
 }
 
 const INSTALL_ATTRIBUTION_PREFIX: &str = "localify:install-attribution:v1:";
-const POST_UPDATE_DAEMON_RESTART_MARKER: &str = "post-update-daemon-restart";
 const UPDATE_DOWNLOAD_ATTEMPTS: usize = 3;
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -126,6 +125,8 @@ fn map_updater_error<E: std::fmt::Display>(stage: &str, error: E) -> String {
     message
 }
 
+/// Trust that is still pending does not count against the install: the machine
+/// has no screen to confirm on, and everything else works.
 fn install_completed(result: &InstallResultDto) -> bool {
     result.steps.iter().all(|step| step.status != "warning")
 }
@@ -136,7 +137,7 @@ fn autostart_install_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
             label: Some("Launch at login".into()),
             status: "success".into(),
             message: format!(
-                "{} will open at login and restart the background daemon automatically.",
+                "{} will open at login.",
                 localify::branding::BRANDING.app_name
             ),
         },
@@ -201,67 +202,6 @@ fn append_updater_log(message: &str) {
         return;
     };
     let _ = writeln!(file, "{timestamp} {message}");
-}
-
-fn post_update_daemon_restart_marker_path() -> Result<PathBuf, String> {
-    Ok(desktop_state_dir()?.join(POST_UPDATE_DAEMON_RESTART_MARKER))
-}
-
-fn write_post_update_daemon_restart_marker() -> Result<(), String> {
-    let path = post_update_daemon_restart_marker_path()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Failed to resolve the update marker directory.".to_string())?;
-    std::fs::create_dir_all(parent).map_err(map_error)?;
-    std::fs::write(path, "restart\n").map_err(map_error)
-}
-
-fn remove_post_update_daemon_restart_marker() -> Result<(), String> {
-    let path = post_update_daemon_restart_marker_path()?;
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(map_error(error)),
-    }
-}
-
-fn post_update_daemon_restart_marker_exists() -> Result<bool, String> {
-    Ok(post_update_daemon_restart_marker_path()?.exists())
-}
-
-fn mark_daemon_restart_after_update_if_running<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let status = state.api.daemon_status().map_err(map_error)?;
-
-    if status.running {
-        write_post_update_daemon_restart_marker()?;
-    } else {
-        remove_post_update_daemon_restart_marker()?;
-    }
-
-    Ok(())
-}
-
-pub(crate) fn consume_post_update_daemon_restart<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<bool, String> {
-    if !post_update_daemon_restart_marker_exists()? {
-        return Ok(false);
-    }
-
-    remove_post_update_daemon_restart_marker()?;
-
-    let state = app.state::<AppState>();
-    state
-        .api
-        .restart_daemon(StartDaemonRequest { verbose: false })
-        .map_err(map_error)?;
-
-    super::sync_tray_menu(app).map_err(map_error)?;
-
-    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -363,7 +303,6 @@ pub(crate) async fn install_app_update_with_handle<R: Runtime>(
         update.version, update.download_url
     ));
     update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
-    mark_daemon_restart_after_update_if_running(&app)?;
 
     let mut downloaded_update = None;
     let mut last_download_error = None;
@@ -414,18 +353,12 @@ pub(crate) async fn install_app_update_with_handle<R: Runtime>(
 
     let Some(downloaded_update) = downloaded_update else {
         let message = last_download_error.unwrap_or_else(|| "unknown download error".into());
-        let _ = remove_post_update_daemon_restart_marker();
         return Err(map_updater_error("download update", message));
     };
 
-    let install_result = update
+    update
         .install(&downloaded_update)
-        .map_err(|error| map_updater_error("install downloaded update", error));
-
-    if let Err(error) = install_result {
-        let _ = remove_post_update_daemon_restart_marker();
-        return Err(error);
-    }
+        .map_err(|error| map_updater_error("install downloaded update", error))?;
 
     append_updater_log("install finished restarting");
     app.restart()
@@ -569,15 +502,6 @@ pub async fn install_localify(
 #[tauri::command]
 pub fn setup_cli_access(state: tauri::State<'_, AppState>) -> Result<CliAccessDto, String> {
     state.api.setup_cli_access().map_err(map_error)
-}
-
-#[tauri::command]
-pub async fn restart_system_helper(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let api = state.api.clone();
-
-    async_runtime::spawn_blocking(move || api.restart_system_helper().map_err(map_error))
-        .await
-        .map_err(map_error)?
 }
 
 #[tauri::command]

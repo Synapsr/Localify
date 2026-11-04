@@ -3,8 +3,6 @@ use std::path::Path;
 #[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
-use std::ffi::{OsStr, OsString};
-#[cfg(target_os = "macos")]
 use std::process::{Command, Output};
 
 #[cfg(any(target_os = "macos", test))]
@@ -16,6 +14,9 @@ use anyhow::anyhow;
 use serde::Deserialize;
 
 use crate::application::ports::IosSimulatorTrust;
+
+#[cfg(target_os = "macos")]
+const XCRUN: &str = "xcrun";
 
 pub fn trust_booted_ios_simulators(cert_path: &Path) -> Result<IosSimulatorTrust> {
     #[cfg(target_os = "macos")]
@@ -38,15 +39,14 @@ fn trust_booted_ios_simulators_macos(cert_path: &Path) -> Result<IosSimulatorTru
         });
     }
 
-    let Some(runner) = SimctlRunner::for_current_user()? else {
-        return Ok(IosSimulatorTrust::CurrentUserUnavailable);
-    };
-
-    let list_output = match runner.run(["simctl", "list", "devices", "booted", "--json"]) {
+    let list_output = match Command::new(XCRUN)
+        .args(["simctl", "list", "devices", "booted", "--json"])
+        .output()
+    {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(IosSimulatorTrust::ToolUnavailable {
-                reason: format!("{} is not available.", runner.command_name()),
+                reason: format!("{XCRUN} is not available."),
             });
         }
         Err(error) => return Err(error).context("Failed to run xcrun simctl"),
@@ -70,14 +70,15 @@ fn trust_booted_ios_simulators_macos(cert_path: &Path) -> Result<IosSimulatorTru
     }
 
     for device in &devices {
-        let output = match runner.run_with_cert_path(
-            ["simctl", "keychain", &device.udid, "add-root-cert"],
-            cert_path,
-        ) {
+        let output = match Command::new(XCRUN)
+            .args(["simctl", "keychain", &device.udid, "add-root-cert"])
+            .arg(cert_path)
+            .output()
+        {
             Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(IosSimulatorTrust::ToolUnavailable {
-                    reason: format!("{} is not available.", runner.command_name()),
+                    reason: format!("{XCRUN} is not available."),
                 });
             }
             Err(error) => {
@@ -98,89 +99,6 @@ fn trust_booted_ios_simulators_macos(cert_path: &Path) -> Result<IosSimulatorTru
     Ok(IosSimulatorTrust::Trusted {
         device_names: devices.into_iter().map(|device| device.name).collect(),
     })
-}
-
-#[cfg(target_os = "macos")]
-struct SimctlRunner {
-    command: OsString,
-    prefix_args: Vec<OsString>,
-}
-
-#[cfg(target_os = "macos")]
-impl SimctlRunner {
-    fn for_current_user() -> Result<Option<Self>> {
-        if current_uid()? != 0 {
-            return Ok(Some(Self {
-                command: "xcrun".into(),
-                prefix_args: Vec::new(),
-            }));
-        }
-
-        let Some(user) = std::env::var_os("SUDO_USER")
-            .filter(|value| !value.is_empty() && value != OsStr::new("root"))
-        else {
-            return Ok(None);
-        };
-
-        if let Some(uid) = std::env::var_os("SUDO_UID").filter(|value| !value.is_empty()) {
-            return Ok(Some(Self {
-                command: "launchctl".into(),
-                prefix_args: vec![
-                    "asuser".into(),
-                    uid,
-                    "sudo".into(),
-                    "-u".into(),
-                    user,
-                    "xcrun".into(),
-                ],
-            }));
-        }
-
-        Ok(Some(Self {
-            command: "sudo".into(),
-            prefix_args: vec!["-u".into(), user, "xcrun".into()],
-        }))
-    }
-
-    fn command_name(&self) -> String {
-        self.command.to_string_lossy().into_owned()
-    }
-
-    fn run<const N: usize>(&self, args: [&str; N]) -> std::io::Result<Output> {
-        let mut command = Command::new(&self.command);
-        command.args(&self.prefix_args).args(args);
-        command.output()
-    }
-
-    fn run_with_cert_path<const N: usize>(
-        &self,
-        args: [&str; N],
-        cert_path: &Path,
-    ) -> std::io::Result<Output> {
-        let mut command = Command::new(&self.command);
-        command.args(&self.prefix_args).args(args).arg(cert_path);
-        command.output()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn current_uid() -> Result<u32> {
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .context("Failed to determine the current user ID")?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Failed to determine the current user ID: {}",
-            command_output_message(&output)
-        ));
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .context("Failed to parse the current user ID")
 }
 
 #[cfg(any(target_os = "macos", test))]

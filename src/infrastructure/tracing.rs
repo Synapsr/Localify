@@ -14,10 +14,11 @@ pub enum TracingOutput {
 }
 
 /// Initialize tracing based on configuration
-/// Priority: LOCALIFY_LOG env > verbose flag > default (info)
-pub fn init_tracing(verbose: bool, output: TracingOutput) {
+/// Priority: LOCALIFY_LOG env > verbose flag > the config's level. Under launchd the
+/// config is the only one of these the user can reach.
+pub fn init_tracing(verbose: bool, config_level: &str, output: TracingOutput) {
     let filter = EnvFilter::try_from_env(BRANDING.env_var("LOG")).unwrap_or_else(|_| {
-        let level = if verbose { "debug" } else { "info" };
+        let level = if verbose { "debug" } else { config_level };
         EnvFilter::new(level)
     });
 

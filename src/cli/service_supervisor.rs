@@ -20,7 +20,6 @@ use localify::infrastructure::launch_sessions::{
     LAUNCH_SESSION_HEARTBEAT, LaunchSessionDto, LaunchSessionUpdate,
 };
 use localify::infrastructure::mgmt_client::MgmtSocketClient;
-use localify::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
 
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
@@ -270,51 +269,24 @@ fn describe_exit(status: ExitStatus) -> String {
     }
 }
 
-/// Reports a launch session to the daemon: directly on its socket when this
-/// process may open it, otherwise through the desktop app's system helper.
+/// Reports a launch session to the daemon, on its management socket.
 pub struct SessionReporter {
-    channel: SessionChannel,
+    daemon: MgmtSocketClient,
     session: LaunchSessionDto,
 }
 
-enum SessionChannel {
-    Daemon(MgmtSocketClient),
-    Helper(SystemHelperClient),
-}
-
 impl SessionReporter {
-    /// Registers the session. Fails when neither the daemon socket nor the
-    /// system helper accepts it.
+    /// Registers the session. Fails when the daemon socket does not accept it.
     pub fn start(session: LaunchSessionDto, socket_path: &Path) -> Result<Self> {
         let update = LaunchSessionUpdate::Running {
             session: session.clone(),
         };
 
         let daemon = MgmtSocketClient::new(socket_path);
-        let daemon_error = match daemon.report_launch_session(&update) {
-            Ok(()) => {
-                return Ok(Self {
-                    channel: SessionChannel::Daemon(daemon),
-                    session,
-                });
-            }
-            Err(error) => error,
-        };
-
-        let helper = current_uid()
-            .ok()
-            .map(|uid| SystemHelperClient::new(helper_socket_path(uid)))
-            .filter(|helper| helper.ping().is_ok());
-        let Some(helper) = helper else {
-            bail!(
-                "the daemon socket is not reachable ({daemon_error}) and no system helper is running"
-            );
-        };
-        helper.report_launch_session(update)?;
-        Ok(Self {
-            channel: SessionChannel::Helper(helper),
-            session,
-        })
+        if let Err(error) = daemon.report_launch_session(&update) {
+            bail!("the daemon socket is not reachable ({error})");
+        }
+        Ok(Self { daemon, session })
     }
 
     fn heartbeat(&self) -> Result<()> {
@@ -331,12 +303,9 @@ impl SessionReporter {
     }
 
     fn send(&self, update: LaunchSessionUpdate) -> Result<()> {
-        match &self.channel {
-            SessionChannel::Daemon(daemon) => daemon
-                .report_launch_session(&update)
-                .map_err(|error| anyhow::anyhow!("{error}")),
-            SessionChannel::Helper(helper) => helper.report_launch_session(update),
-        }
+        self.daemon
+            .report_launch_session(&update)
+            .map_err(|error| anyhow::anyhow!("{error}"))
     }
 }
 

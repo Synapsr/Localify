@@ -30,6 +30,8 @@ import { cn } from "@/lib/utils";
 interface OnboardingProps {
   bootstrap: BootstrapDto;
   onActivated: () => void;
+  /** Someone who has already been through onboarding only needs the approval. */
+  startAtActivation?: boolean;
 }
 
 type StepId = "welcome" | "why" | "how" | "activate";
@@ -42,8 +44,8 @@ const FLOW_VIDEOS = [
 ] as const;
 const warmedFlowVideos = new Map<string, HTMLVideoElement>();
 
-export function Onboarding({ bootstrap, onActivated }: OnboardingProps) {
-  const [stepIndex, setStepIndex] = useState(0);
+export function Onboarding({ bootstrap, onActivated, startAtActivation }: OnboardingProps) {
+  const [stepIndex, setStepIndex] = useState(startAtActivation ? STEPS.length - 1 : 0);
   const [direction, setDirection] = useState<0 | 1 | -1>(0);
   const reduceMotion = useReducedMotion();
 
@@ -781,6 +783,10 @@ function ActivateStep({
       await waitForNextPaint();
       const installResult = await install.mutateAsync();
       assertInstallCompleted(installResult);
+      const pendingStep = installResult.steps.find((step) => step.status === "pending");
+      if (pendingStep) {
+        toast.warning("HTTPS needs one more step", { description: pendingStep.message });
+      }
       activationPhase = "start";
       setPhase("start");
       await startDaemon.mutateAsync({ verbose: false });
@@ -825,9 +831,9 @@ function ActivateStep({
     },
     {
       icon: <PowerIcon className="size-4" />,
-      title: `Install the ${appName} helper`,
+      title: `Run ${appName} as you, not as root`,
       description:
-        "A tiny privileged helper lets Localify bind to ports 80 and 443. macOS prompts once, then the desktop app reuses it.",
+        "macOS opens ports 80 and 443 and hands them to Localify, which runs under your account from then on. Updates need no password.",
     },
   ];
 
@@ -841,8 +847,8 @@ function ActivateStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Activate {appName}</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Localify needs your administrator password once to set up secure local HTTPS. The rest
-          stays inside the app with a visible progress state.
+          Localify needs an administrator's password once to set up secure local HTTPS. After that,
+          nothing of Localify's runs as root.
         </p>
       </motion.div>
 

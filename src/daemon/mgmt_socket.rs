@@ -4,11 +4,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use super::lifecycle::ShutdownHandle;
 use super::router::SharedState;
-use crate::infrastructure::binary_identity::BinaryIdentity;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 
 /// Management commands sent over the Unix socket.
@@ -26,6 +25,12 @@ enum MgmtCommand {
     LaunchSession { update: LaunchSessionUpdate },
     #[serde(rename = "launch_sessions")]
     LaunchSessions,
+    /// Exit cleanly.
+    #[serde(rename = "shutdown")]
+    Shutdown,
+    /// Exit so the supervisor starts the binary at its path again.
+    #[serde(rename = "restart")]
+    Restart,
 }
 
 /// Response sent back to the management client.
@@ -74,6 +79,8 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "reload" => Some(MgmtCommand::Reload),
         "list" => Some(MgmtCommand::List),
         "launch_sessions" => Some(MgmtCommand::LaunchSessions),
+        "shutdown" => Some(MgmtCommand::Shutdown),
+        "restart" => Some(MgmtCommand::Restart),
         _ => None,
     }
 }
@@ -90,20 +97,20 @@ pub struct DaemonPorts {
 /// Serve management commands on a Unix domain socket.
 ///
 /// The socket accepts one command per connection (JSON-over-lines protocol).
-/// Socket file is cleaned up when the cancellation token fires.
+/// Socket file is cleaned up when the daemon shuts down. Only its owner can open
+/// it, so stopping the daemon needs no signal and no PID.
 pub async fn serve(
     socket_path: PathBuf,
     state: SharedState,
     reload_tx: mpsc::Sender<()>,
-    cancel: CancellationToken,
+    shutdown: ShutdownHandle,
     ports: DaemonPorts,
 ) -> anyhow::Result<()> {
+    let cancel = shutdown.token();
+
     // Remove stale socket file if it exists
     let _ = std::fs::remove_file(&socket_path);
 
-    // Identity of the binary this daemon runs, so the system helper can
-    // restart it after an update replaced the file.
-    let binary = BinaryIdentity::current_executable();
     let listener = UnixListener::bind(&socket_path)?;
     crate::infrastructure::file_security::restrict_key_permissions(&socket_path)
         .map_err(|e| anyhow::anyhow!("Failed to set socket permissions: {e}"))?;
@@ -123,7 +130,7 @@ pub async fn serve(
 
         let state = state.clone();
         let reload_tx = reload_tx.clone();
-        let binary = binary.clone();
+        let shutdown = shutdown.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -135,6 +142,7 @@ pub async fn serve(
                 return;
             }
 
+            let mut exit_after_reply = None;
             let response = match parse_command(&line) {
                 Some(MgmtCommand::Status) => {
                     let snapshot = state.load();
@@ -146,7 +154,6 @@ pub async fn serve(
                         "http_port": ports.http,
                         "https_port": ports.https,
                         "dns_port": ports.dns,
-                        "binary": binary,
                     }))
                 }
                 Some(MgmtCommand::List) => {
@@ -195,12 +202,27 @@ pub async fn serve(
                         MgmtResponse::error("Reload channel closed")
                     }
                 }
+                Some(MgmtCommand::Shutdown) => {
+                    exit_after_reply = Some(false);
+                    MgmtResponse::success(serde_json::json!({ "stopping": true }))
+                }
+                Some(MgmtCommand::Restart) => {
+                    exit_after_reply = Some(true);
+                    MgmtResponse::success(serde_json::json!({ "restarting": true }))
+                }
                 None => MgmtResponse::error(format!("Unknown command: {}", line.trim())),
             };
 
             if let Ok(json) = serde_json::to_string(&response) {
                 let _ = writer.write_all(json.as_bytes()).await;
                 let _ = writer.write_all(b"\n").await;
+                let _ = writer.flush().await;
+            }
+
+            match exit_after_reply {
+                Some(true) => shutdown.restart(),
+                Some(false) => shutdown.stop(),
+                None => {}
             }
         });
     }
@@ -235,7 +257,7 @@ mod tests {
         registrations: Vec<DomainRegistration>,
     ) -> (
         PathBuf,
-        CancellationToken,
+        ShutdownHandle,
         mpsc::Receiver<()>,
         tempfile::TempDir,
     ) {
@@ -244,9 +266,9 @@ mod tests {
 
         let state: SharedState = Arc::new(ArcSwap::from_pointee(RuntimeState::new(registrations)));
         let (reload_tx, reload_rx) = mpsc::channel::<()>(4);
-        let cancel = CancellationToken::new();
+        let shutdown = ShutdownHandle::default();
 
-        let cancel_serve = cancel.clone();
+        let serve_shutdown = shutdown.clone();
         let sock_clone = sock.clone();
         let test_ports = DaemonPorts {
             http: 80,
@@ -254,13 +276,13 @@ mod tests {
             dns: 1053,
         };
         tokio::spawn(async move {
-            let _ = serve(sock_clone, state, reload_tx, cancel_serve, test_ports).await;
+            let _ = serve(sock_clone, state, reload_tx, serve_shutdown, test_ports).await;
         });
 
         // Give the listener time to bind
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        (sock, cancel, reload_rx, dir)
+        (sock, shutdown, reload_rx, dir)
     }
 
     /// Send a command to the socket, return the parsed JSON response.
@@ -273,6 +295,35 @@ mod tests {
         let mut reader = BufReader::new(stream);
         reader.read_line(&mut buf).await.unwrap();
         serde_json::from_str(&buf).unwrap()
+    }
+
+    #[tokio::test]
+    async fn shutdown_replies_then_stops_with_a_clean_exit_code() {
+        let (sock, shutdown, _reload_rx, _dir) = start_server(vec![]).await;
+
+        let resp = send_command(&sock, "shutdown").await;
+
+        assert_eq!(resp["ok"], true);
+        tokio::time::timeout(Duration::from_secs(2), shutdown.token().cancelled())
+            .await
+            .unwrap();
+        assert_eq!(shutdown.exit_code(), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_replies_then_exits_with_the_code_launchd_restarts_on() {
+        let (sock, shutdown, _reload_rx, _dir) = start_server(vec![]).await;
+
+        let resp = send_command(&sock, r#"{"cmd":"restart"}"#).await;
+
+        assert_eq!(resp["ok"], true);
+        tokio::time::timeout(Duration::from_secs(2), shutdown.token().cancelled())
+            .await
+            .unwrap();
+        assert_eq!(
+            shutdown.exit_code(),
+            crate::infrastructure::macos_system::RESTART_EXIT_CODE
+        );
     }
 
     // --- parse_command unit tests ---
@@ -325,9 +376,8 @@ mod tests {
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["data"]["registration_count"], 2);
         assert!(resp["data"]["pid"].as_u64().unwrap() > 0);
-        assert!(resp["data"]["binary"]["inode"].as_u64().unwrap() > 0);
 
-        cancel.cancel();
+        cancel.stop();
     }
 
     #[tokio::test]
@@ -346,7 +396,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["path"], "/");
 
-        cancel.cancel();
+        cancel.stop();
     }
 
     #[tokio::test]
@@ -363,7 +413,7 @@ mod tests {
             .expect("timed out")
             .expect("channel closed");
 
-        cancel.cancel();
+        cancel.stop();
     }
 
     #[tokio::test]
@@ -374,7 +424,7 @@ mod tests {
         assert_eq!(resp["ok"], false);
         assert!(resp["error"].as_str().unwrap().contains("Unknown command"));
 
-        cancel.cancel();
+        cancel.stop();
     }
 
     #[tokio::test]
@@ -385,7 +435,7 @@ mod tests {
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["data"]["registration_count"], 1);
 
-        cancel.cancel();
+        cancel.stop();
     }
 
     #[tokio::test]
@@ -422,7 +472,7 @@ mod tests {
         let resp = send_command(&sock, "launch_sessions").await;
         assert_eq!(resp["data"]["sessions"], serde_json::json!([]));
 
-        cancel.cancel();
+        cancel.stop();
     }
 
     #[tokio::test]
@@ -430,7 +480,7 @@ mod tests {
         let (sock, cancel, _rx, _dir) = start_server(vec![]).await;
         assert!(sock.exists());
 
-        cancel.cancel();
+        cancel.stop();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!sock.exists());
     }

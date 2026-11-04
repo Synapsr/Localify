@@ -20,7 +20,7 @@ impl<'a> StopDaemon<'a> {
             bail!("Localify daemon is not running.");
         }
 
-        self.daemon.stop_gracefully(Duration::from_millis(500))?;
+        self.daemon.stop_gracefully(Duration::from_secs(5))?;
         Ok(())
     }
 }

@@ -49,10 +49,11 @@ export const SettingsStatus = () => {
   if (!data) return null;
 
   const appName = data.environment.appName;
+  // Trust that waits for a screen is not a broken setup: only HTTPS in browsers waits.
   const isSetup =
-    data.environment.cliHelperReady &&
+    !data.environment.systemSetupRequired &&
     data.environment.cliAccessReady &&
-    data.daemon.caInstalled;
+    (data.daemon.caInstalled || data.daemon.caTrustPending);
   const daemonRunning = data.daemon.running;
   const status: Status = !isSetup ? "setup" : daemonRunning ? "running" : "off";
 

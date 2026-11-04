@@ -1,3 +1,4 @@
+use crate::application::StepOutcome;
 use std::path::PathBuf;
 
 /// Result of attempting to trust the Root CA in booted iOS Simulators.
@@ -14,8 +15,6 @@ pub enum IosSimulatorTrust {
     ToolUnavailable {
         reason: String,
     },
-    #[cfg(target_os = "macos")]
-    CurrentUserUnavailable,
     #[cfg(not(target_os = "macos"))]
     UnsupportedPlatform,
 }
@@ -24,6 +23,17 @@ pub enum IosSimulatorTrust {
 pub trait SystemSetup {
     /// Create required data, certs, and log directories.
     fn create_directories(&self) -> anyhow::Result<()>;
+
+    /// Applies what only an administrator can change, asking for at most one
+    /// approval, and reports each result. Where the process already has the rights
+    /// there is nothing to report here.
+    fn apply_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>>;
+
+    /// Takes those changes back out, asking for at most one approval.
+    fn remove_system_changes(&self) -> anyhow::Result<Vec<(String, StepOutcome)>>;
+
+    /// The command that finishes CA trust by hand, where trusting it can wait.
+    fn ca_trust_command(&self) -> Option<String>;
 
     /// Trust the Root CA in booted iOS Simulators when the platform supports it.
     fn trust_ios_simulators(&self) -> anyhow::Result<IosSimulatorTrust>;

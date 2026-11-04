@@ -21,7 +21,7 @@ flowchart LR
 
   Browser -->|"https://app.localify/api/users"| Resolver
   Resolver -->|"*.localify"| Dns
-  Dns -->|"127.0.0.1 ou IP LAN"| Browser
+  Dns -->|"127.0.0.1, ou IP LAN après opt-in"| Browser
   Browser -->|"HTTP/HTTPS"| Daemon
   Daemon --> Router
   Router -->|"/"| App
@@ -62,11 +62,11 @@ Localify garde le frontend desktop mince. L'UI appelle Tauri, Tauri appelle `Des
 
 1. Crée les dossiers de configuration et de données.
 2. Crée un fichier `config.toml` si besoin.
-3. Génère une Root CA locale et l'installe dans le trust store système.
+3. Génère une Root CA locale, limitée au suffixe `.localify` par une name constraint critique, et l'installe dans le trust store système.
 4. Sur macOS, ajoute cette Root CA aux simulateurs iOS bootés via `xcrun simctl keychain`.
 5. Configure le DNS système pour envoyer le suffixe `.localify` vers le DNS Localify.
 
-Sur macOS, Localify écrit un résolveur dans `/etc/resolver/localify`. En mode production, les ports par défaut sont:
+Sur macOS, une seule approbation administrateur écrit le résolveur `/etc/resolver/localify`, le plist launchd et la confiance dans la CA. launchd ouvre ensuite les ports privilégiés et lance le daemon sous le compte de l'utilisateur: aucun processus Localify ne tourne en root. En mode production, les ports par défaut sont:
 
 | Service | Port |
 | --- | ---: |
@@ -129,7 +129,7 @@ sequenceDiagram
   B->>D: GET https://app.localify/
 ```
 
-Quand la requête DNS vient de la machine locale, Localify répond `127.0.0.1`. Quand elle vient d'un appareil du LAN, Localify peut répondre avec l'IP LAN de la machine. C'est ce qui permet d'ouvrir le domaine depuis un téléphone ou une tablette sur le même réseau.
+Quand la requête DNS vient de la machine locale, Localify répond `127.0.0.1`. Sur macOS, le daemon n'écoute que sur loopback par défaut. Après `localify lan enable`, une requête venant d'un appareil du LAN reçoit l'IP LAN de la machine, ce qui permet d'ouvrir le domaine depuis un téléphone ou une tablette sur le même réseau.
 
 ## HTTPS et certificats
 
@@ -238,11 +238,10 @@ flowchart LR
   Commands["Tauri commands"]
   Api["DesktopApi"]
   Core["Use cases Rust"]
-  Helper["System helper<br/>si privilèges requis"]
+  Approval["Une approbation administrateur<br/>si le système doit changer"]
 
   React --> Invoke --> Commands --> Api --> Core
-  Api --> Helper
-  Helper --> Core
+  Api --> Approval
 ```
 
 La règle d'architecture est simple: l'UI affiche et déclenche des actions, mais elle ne réimplémente pas la logique de domaines, routes, DNS, certificats ou daemon.

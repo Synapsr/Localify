@@ -38,21 +38,26 @@ cargo build --release --bin localify
 sudo install -m 755 target/release/localify /usr/local/bin/localify
 ```
 
-Set up the local certificate authority and DNS, then start the daemon:
+Set up the local certificate authority, DNS and the background service:
 
 ```bash
-sudo localify install
-sudo localify start
+localify install
 ```
 
-`sudo localify uninstall` removes this setup.
+On macOS this asks for an administrator's approval once. After that nothing of
+Localify's runs as root: the daemon runs as you, starts at boot, and only this Mac
+can reach it unless you run `localify lan enable`. `localify uninstall --force`
+removes all of it, with one more approval.
+
+On Linux, run `sudo localify install` and `sudo localify start`, and use `sudo` for
+the commands below.
 
 ## Local CLI example
 
 With the setup above done, point a domain at a service on port 3000:
 
 ```bash
-sudo localify register my-app.localify --route "/=3000"
+localify register my-app.localify --route "/=3000"
 localify status
 localify logs -f
 ```
@@ -62,8 +67,7 @@ The app is now at `https://my-app.localify`. The
 
 On macOS, `localify init-project my-app --yes` creates a project from the current
 folder instead, with `my-app.localify` as its default domain. Localify picks a
-free target port unless you provide one. The first run asks for your
-administrator password to set up the system helper.
+free target port unless you provide one.
 
 ## Telemetry
 

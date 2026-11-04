@@ -1,8 +1,6 @@
 use anyhow::Result;
-use localify::desktop::dto::{AddRouteRequest, RemoveRouteRequest};
 
-use super::backend::WriteBackend;
-use super::context::AppContext;
+use super::context::{AppContext, require_config_writable};
 use crate::application::manage_routes::ManageRoutes;
 use crate::domain::{DomainPattern, PathPrefix, RouteTarget};
 
@@ -19,19 +17,7 @@ pub fn add(
     let route_target = RouteTarget::parse(&target)
         .map_err(|e| anyhow::anyhow!("Invalid target '{}': {}", target, e))?;
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        let result = client.add_route(AddRouteRequest {
-            domain,
-            wildcard,
-            path,
-            target,
-        })?;
-        if let Some(route) = result.route {
-            println!("Added route: {} -> {}", route.path, route.target);
-        }
-        println!("\nReload the daemon to apply changes: localify reload");
-        return Ok(());
-    }
+    require_config_writable(&ctx.config_path)?;
 
     let use_case = ManageRoutes::new(&ctx.config_store);
 
@@ -48,16 +34,7 @@ pub fn remove(domain: String, wildcard: bool, path: String, ctx: &AppContext) ->
     let pattern = DomainPattern::from_name(&domain, wildcard)?;
     let path_prefix = PathPrefix::new(&path)?;
 
-    if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
-        client.remove_route(RemoveRouteRequest {
-            domain,
-            wildcard,
-            path,
-        })?;
-        println!("Removed route: {}", path_prefix);
-        println!("\nReload the daemon to apply changes: localify reload");
-        return Ok(());
-    }
+    require_config_writable(&ctx.config_path)?;
 
     let use_case = ManageRoutes::new(&ctx.config_store);
 
