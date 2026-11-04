@@ -29,11 +29,6 @@ impl DaemonListeners {
             .context("launchd could not hand over the HTTPS sockets")?
             .context("The launchd service has no HTTPS sockets. Reinstall it.")?;
 
-        anyhow::ensure!(
-            !http.is_empty() && !https.is_empty(),
-            "launchd could not open the HTTP or HTTPS port, because another program holds it."
-        );
-
         let lan_access = http.iter().chain(&https).any(|listener| {
             listener
                 .local_addr()
@@ -45,6 +40,22 @@ impl DaemonListeners {
             https,
             lan_access,
         }))
+    }
+
+    /// launchd loads a job even when a port is taken, and the job then has no IPv4
+    /// socket for it. Those connections reach the other program, so the daemon refuses
+    /// to run rather than look healthy on IPv6 alone.
+    pub fn ensure_ipv4(&self) -> Result<()> {
+        for (protocol, listeners) in [("HTTP", &self.http), ("HTTPS", &self.https)] {
+            let has_ipv4 = listeners
+                .iter()
+                .any(|listener| listener.local_addr().is_ok_and(|address| address.is_ipv4()));
+            anyhow::ensure!(
+                has_ipv4,
+                "launchd could not open the {protocol} port on IPv4, because another program holds it. Check with: sudo lsof -nP -iTCP -sTCP:LISTEN"
+            );
+        }
+        Ok(())
     }
 
     /// Binds as a normal process. The default stays on this machine: loopback,
@@ -104,6 +115,31 @@ mod tests {
             https_port,
             lan_access,
             ..DaemonConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_port_without_an_ipv4_socket_stops_the_daemon_and_is_named() {
+        let ipv4 = || TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listeners = |http, https| DaemonListeners {
+            http,
+            https,
+            lan_access: false,
+        };
+
+        listeners(vec![ipv4()], vec![ipv4()]).ensure_ipv4().unwrap();
+
+        let error = listeners(vec![ipv4()], Vec::new())
+            .ensure_ipv4()
+            .unwrap_err();
+        assert!(error.to_string().contains("HTTPS port"), "{error}");
+
+        // Not every machine has IPv6 loopback, CI containers included.
+        if let Ok(ipv6) = TcpListener::bind(("::1", 0)) {
+            let error = listeners(vec![ipv6], vec![ipv4()])
+                .ensure_ipv4()
+                .unwrap_err();
+            assert!(error.to_string().contains("HTTP port"), "{error}");
         }
     }
 

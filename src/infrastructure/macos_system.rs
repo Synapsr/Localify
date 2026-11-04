@@ -505,9 +505,11 @@ impl SystemChanges {
         ];
         script.extend(legacy_commands(&self.legacy));
         script.extend(keychain_commands(&self.stale_keychain_hashes));
+        // The service goes first: if it fails, the script stops with the old resolver
+        // and link still matching the old service.
+        script.extend(self.service_commands());
         script.extend(self.resolver_commands());
         script.extend(self.cli_link_commands());
-        script.extend(self.service_commands());
         script.push("exit 0".to_string());
         script.join("\n")
     }
@@ -565,7 +567,9 @@ impl SystemChanges {
 
     /// Writes the plist and loads it. launchd loads a job even when it could not open
     /// a port, so the script also checks that launchd holds each one on IPv4. If not,
-    /// the previous plist goes back and the error says how to check.
+    /// the previous plist goes back and the error says how to check. This can't tell
+    /// our socket from another job's on the same port. The daemon catches that case,
+    /// in `DaemonListeners::ensure_ipv4`.
     fn service_commands(&self) -> Vec<String> {
         let Some(plist) = &self.service_plist else {
             return Vec::new();
@@ -1584,6 +1588,17 @@ mod tests {
             .output()
             .unwrap();
         assert!(syntax.status.success(), "{syntax:?}");
+    }
+
+    #[test]
+    fn a_refused_port_leaves_the_resolver_and_the_link_alone() {
+        let script = all_changes().script();
+
+        let refused = script.find("Another program holds port").unwrap();
+        let resolver = script.find("Could not write the resolver file").unwrap();
+        let link = script.find("/bin/ln ").unwrap();
+
+        assert!(refused < resolver && refused < link);
     }
 
     #[test]
