@@ -87,7 +87,7 @@ jobs:
           cat localify-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-artifacts
           path: |
@@ -145,7 +145,7 @@ jobs:
           cat localify-${{ steps.version.outputs.version }}-linux-amd64.tar.gz.sha256
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-artifacts
           path: |
