@@ -1,5 +1,13 @@
+packages:
+  - apps/*
 allowBuilds:
+  # The site runs without these scripts. They only build fallbacks for next-intl's
+  # message extractor and optimize workerd's binary path. Without an entry, pnpm 11+
+  # fails `pnpm install` with ERR_PNPM_IGNORED_BUILDS.
+  '@parcel/watcher': false
+  '@swc/core': false
   core-js: true
   esbuild: true
   msw: true
   protobufjs: true
+  workerd: false

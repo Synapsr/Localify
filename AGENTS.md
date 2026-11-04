@@ -4,10 +4,11 @@
 
 - **Rust**: `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` must pass.
 - **Desktop UI**: `pnpm run typecheck` must pass for any `desktop-ui/` change.
+- **Website**: `pnpm web:typecheck` and `pnpm web:build` must pass for any `apps/web/` change, with identical keys in all 9 `apps/web/messages/` locales.
 
 ## Project Snapshot
 
-Localify is a local development proxy written in Rust. It routes custom `.localify` domains to local services with automatic HTTPS. Ships as a CLI plus a Tauri desktop app (`desktop-ui/`, React + Vite + TanStack).
+Localify is a local development proxy written in Rust. It routes custom `.localify` domains to local services with automatic HTTPS. Ships as a CLI plus a Tauri desktop app (`desktop-ui/`, React + Vite + TanStack). The website is a separate Next.js app in `apps/web/`.
 
 **Philosophy**: Pragmatic, idiomatic Rust. Build the simplest thing that works. YAGNI throughout.
 
@@ -41,6 +42,7 @@ If a tradeoff is required, choose correctness and simplicity over short-term con
 | Any Rust file | [docs/rust/conventions.md](docs/rust/conventions.md) |
 | Module structure, new layer, DDD boundary | [docs/rust/architecture.md](docs/rust/architecture.md) |
 | Any `desktop-ui/` change | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Any `apps/web/` change, or a claim about what Localify does | [apps/web/README.md](apps/web/README.md) |
 
 ## Pre-commit
 

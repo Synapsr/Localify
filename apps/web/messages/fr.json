@@ -1,0 +1,314 @@
+{
+  "Home": {
+    "description": "Localify donne à tes projets locaux des domaines .localify stables, du HTTPS fiable, du routage DNS et une app macOS native — sans mkcert, sans /etc/hosts, sans tunnel."
+  },
+  "Navigation": {
+    "howItWorks": "Fonctionnement",
+    "faq": "FAQ",
+    "source": "Code source",
+    "cta": "Télécharger"
+  },
+  "Hero": {
+    "titleLine1": "Tes projets méritent",
+    "titleLine2": "mieux que :3000",
+    "description": "Nomme tes projets au lieu de jongler avec des ports. URLs .localify, DNS local, HTTPS reconnu.",
+    "download": "Télécharger pour macOS",
+    "source": "Voir le code source",
+    "availability": "Gratuit et open source sous licence AGPL. App desktop pour macOS."
+  },
+  "DemoDialog": {
+    "title": "Envie d'essayer Localify pour de vrai ?",
+    "description": "Télécharge l'app desktop et configure ton premier domaine local.",
+    "later": "Plus tard",
+    "download": "Télécharger maintenant"
+  },
+  "AgentSkill": {
+    "title": "Laisse ton agent tout gérer.",
+    "description": "Lance /localify avec Claude Code, Codex ou Cursor. Il configure tout le projet, et il te suffit de lui parler pour corriger ce qui coince."
+  },
+  "Problem": {
+    "titleLine1": "Ce qui change",
+    "titleLine2": "vraiment.",
+    "cards": {
+      "urls": {
+        "title": "Des URLs qui veulent dire quelque chose.",
+        "body": "studio.localify, admin.localify, docs.localify. Plus de bagarre entre :3000, :3001, :5173."
+      },
+      "ui": {
+        "title": "Une app, pas un CLI.",
+        "body": "Tes projets, leurs URLs, leurs logs — tout au même endroit. Aucun fichier de config à éditer."
+      },
+      "agents": {
+        "title": "Plusieurs agents, zéro conflit.",
+        "body": "Cursor, Claude Code et tes propres dev servers tournent côte à côte. Chaque projet garde son URL stable."
+      }
+    }
+  },
+  "HowItWorks": {
+    "titleLine1": "Comment ça marche,",
+    "titleLine2": "concrètement.",
+    "description": "Une permission à l'install. Un dossier ou un localify init-project. Un domaine par app, en HTTPS. C'est tout.",
+    "steps": [
+      {
+        "title": "Un mot de passe, zéro config.",
+        "body": "Au premier lancement, Localify te demande une fois ton mot de passe administrateur. Ensuite, il installe seul l'autorité de certification, le DNS et le daemon."
+      },
+      {
+        "title": "Choisis un dossier. Localify autocomplete.",
+        "body": "Localify scanne le dossier, détecte ses apps et propose un hostname pour chacune. Tu vérifies et tu valides."
+      },
+      {
+        "title": "localify init-project, depuis ton éditeur.",
+        "body": "Déjà dans ton éditeur ? Lance localify init-project depuis le terminal. Même flow d'autocomplete, même validation. Le projet apparaît dans l'app."
+      },
+      {
+        "title": "Des projets par nom, pas par port.",
+        "body": "Chaque projet a ses hostnames .localify avec HTTPS fiable. Des onglets qui parlent, des démos qui ressemblent au produit, des envs qui ne cassent plus quand un port change."
+      },
+      {
+        "title": "Lance, supervise, sans éditeur.",
+        "body": "Localify devient ton tableau de bord local : un clic pour démarrer n'importe quel projet, un coup d'œil pour voir ceux qui répondent. Idéal pour vibecoder sans jamais ouvrir ton IDE."
+      }
+    ]
+  },
+  "Faq": {
+    "titleLine1": "Questions,",
+    "titleLine2": "réponses.",
+    "description": "Les réponses courtes. S'il en manque une, écris-nous.",
+    "supportPrefix": "Encore bloqué ?",
+    "items": [
+      {
+        "question": "C'est quoi Localify ?",
+        "answer": "Localify donne à chaque projet local une URL stable en .localify avec du HTTPS fiable. Au lieu de jongler avec localhost:3000, localhost:5173 et localhost:8080, tu ouvres app.localify ou admin.localify directement dans ton navigateur."
+      },
+      {
+        "question": "C'est gratuit ?",
+        "answer": "Oui. Localify est gratuit et open source sous licence AGPL, sans compte et sans limite de projets ou de domaines. Le code source est sur GitHub."
+      },
+      {
+        "question": "C'est pour qui ?",
+        "answer": "Pour les développeurs qui font tourner plusieurs apps en local, alternent entre stacks, ou laissent des agents IA travailler en parallèle — sans gérer les conflits de port."
+      },
+      {
+        "question": "Est-ce que ça met mon travail en ligne ?",
+        "answer": "Non. Localify n'est pas un tunnel public. Tes services locaux restent sur ta machine — aucun trafic applicatif, nom de projet ou log de requête n'est envoyé à Localify."
+      },
+      {
+        "question": "Est-ce que Localify collecte des analytics ?",
+        "answer": "L'app desktop officielle, oui : flux produit (onboarding, navigation, création de projet), compteurs d'usage et rapports d'erreur. Ces événements n'incluent ni logs de requêtes, ni noms de projets, ni domaines, ni chemins locaux, ni contenu de trafic. Les rapports d'erreur sont expurgés des URLs et des chemins de fichiers, mais un message peut quand même citer le projet ou le domaine concerné. Le CLI et le daemon n'envoient rien."
+      },
+      {
+        "question": "Sur quelles plateformes ça tourne ?",
+        "answer": "L'app desktop tourne sur macOS, sur Apple Silicon. Le CLI et le daemon se compilent aussi depuis les sources sur Linux. Windows n'est pas pris en charge."
+      },
+      {
+        "question": "Je dois modifier /etc/hosts ou installer mkcert ?",
+        "answer": "Non. Localify gère le resolver local, l'autorité de certification locale et la confiance Node pendant l'onboarding. Ensuite, les nouveaux hostnames .localify fonctionnent sans configuration par projet."
+      },
+      {
+        "question": "Ça marche avec Docker, Next.js ou mon framework ?",
+        "answer": "Oui. Localify route par hostname, donc tout ce qui écoute sur un port local fonctionne. Docker, Next.js, Vite, Rails, ton propre serveur — peu importe la stack."
+      },
+      {
+        "question": "Quelle différence avec ngrok ou Cloudflare Tunnel ?",
+        "answer": "ngrok et Cloudflare Tunnel exposent tes services sur internet. Localify reste local : pas de cloud, pas de tunnel public, juste des URLs propres pour le dev quotidien."
+      },
+      {
+        "question": "Ça marche avec Cursor, Claude Code, ou plusieurs agents IA en parallèle ?",
+        "answer": "Oui, c'est même un cas d'usage central. Lance /localify dans n'importe quel projet et ton agent configure tout : un domaine par app, du HTTPS fiable et tes scripts de dev. Plusieurs agents peuvent ensuite travailler sur des apps différentes en parallèle, sans aucun conflit de port."
+      }
+    ]
+  },
+  "FinalCta": {
+    "description": "Arrête de te battre avec localhost. Localify est gratuit et open source sous licence AGPL.",
+    "download": "Télécharger pour macOS",
+    "source": "Voir le code source",
+    "requirements": "macOS sur Apple Silicon · CLI à compiler depuis les sources sur Linux"
+  },
+  "Footer": {
+    "resources": "Ressources",
+    "project": "Projet",
+    "legal": "Légal",
+    "download": "Télécharger",
+    "source": "Code source",
+    "changelog": "Changelog",
+    "docs": "Docs",
+    "blog": "Blog",
+    "contact": "Contact",
+    "terms": "Conditions d'utilisation",
+    "privacy": "Politique de confidentialité",
+    "copyright": "© 2026 Téo Goulois · Open source sous licence AGPL · Fait discrètement en Rust.",
+    "language": "Langue",
+    "switchLanguage": "Passer en {locale}"
+  },
+  "Legal": {
+    "lastUpdated": "Dernière mise à jour"
+  },
+  "Soon": {
+    "eyebrow": "Bientôt",
+    "title": "Cette page n'est pas encore prête.",
+    "description": "On se concentre d'abord sur le cœur du produit. La doc, le changelog et le reste arriveront ici au fur et à mesure.",
+    "backHome": "Retour à l'accueil"
+  },
+  "Terms": {
+    "title": "Conditions d'utilisation",
+    "updatedAt": "4 novembre 2026",
+    "intro": "Localify est gratuit et open source. Ces conditions sont courtes parce que la licence fait l'essentiel du travail. Si quelque chose n'est pas clair, écris à support@localify.dev.",
+    "sections": [
+      {
+        "title": "1. Qui nous sommes",
+        "body": [
+          "Localify est créé par Téo Goulois (« nous »). C'est un proxy de développement local : un daemon Rust, un CLI et une app desktop qui routent des domaines .localify vers des services sur ta propre machine, avec un HTTPS reconnu."
+        ]
+      },
+      {
+        "title": "2. La licence du logiciel",
+        "body": [
+          "Le logiciel Localify est distribué sous la GNU Affero General Public License, version 3 uniquement (AGPL-3.0-only). Cette licence régit la façon dont tu peux utiliser, modifier et redistribuer le logiciel. Rien sur cette page ne retire un droit qu'elle te donne."
+        ],
+        "link": {
+          "label": "Lire l'AGPL-3.0",
+          "href": "https://www.gnu.org/licenses/agpl-3.0.html"
+        }
+      },
+      {
+        "title": "3. Rien à acheter",
+        "body": [
+          "Il n'y a ni achat, ni clé de licence, ni limite d'activation. Tu n'as pas besoin de compte pour utiliser Localify."
+        ]
+      },
+      {
+        "title": "4. Nom, logo et médias",
+        "body": [
+          "L'AGPL ne couvre pas le nom et le logo Localify, et ils ne te sont pas concédés sous licence. Si tu distribues une version modifiée, donne-lui ton propre nom et ton propre logo. Les images et les vidéos de ce site et de l'app ne sont pas non plus sous licence AGPL."
+        ]
+      },
+      {
+        "title": "5. Aucune garantie",
+        "body": [
+          "Localify est fourni « tel quel », sans aucune garantie, dans la limite permise par la loi. Les sections 15 et 16 de la licence précisent l'exclusion de garantie et la limitation de responsabilité. Localify est un outil de développement. Il n'est pas prévu pour du trafic de production, de l'hébergement public ou pour servir de barrière de sécurité face à des services non fiables."
+        ]
+      },
+      {
+        "title": "6. Utilisation du site",
+        "body": [
+          "Ces conditions couvrent aussi le site localify.dev. Ne l'utilise pas pour quoi que ce soit d'illégal, et n'essaie pas de le casser, de le surcharger ou d'accéder à ses parties non publiques."
+        ]
+      },
+      {
+        "title": "7. Modifications de ces conditions",
+        "body": [
+          "Nous pouvons mettre à jour cette page quand le projet évolue. Dans ce cas, nous changeons la date en haut de page."
+        ]
+      }
+    ],
+    "contact": {
+      "title": "8. Contact",
+      "prefix": "Des questions sur ces conditions ? Écris à"
+    }
+  },
+  "Privacy": {
+    "title": "Politique de confidentialité",
+    "updatedAt": "4 novembre 2026",
+    "intro": "Ton environnement de développement local reste sur ta machine. L'app desktop et le CLI y gardent DNS, TLS, routage, projets et logs de requêtes. Cette page couvre les cas où des données quittent ton appareil, et ce que le site collecte.",
+    "sections": [
+      {
+        "title": "1. Version courte",
+        "body": [
+          "Localify ne collecte ni logs de requêtes, ni chemins locaux, ni rien sur le trafic des services que tu fais tourner. Le proxy fonctionne en local après l'installation. Des données nous parviennent dans quatre cas : tu visites le site, l'app desktop officielle envoie des analytics produit et des rapports d'erreur, l'app vérifie les mises à jour, ou tu nous écris."
+        ]
+      },
+      {
+        "title": "2. Qui nous sommes",
+        "body": [
+          "Téo Goulois (« nous ») est le responsable du traitement des données décrites sur cette page. Tu peux nous joindre à support@localify.dev."
+        ]
+      },
+      {
+        "title": "3. L'app desktop et le CLI",
+        "body": [
+          "Le daemon, l'app desktop et le CLI Localify tournent sur ta machine. DNS, certificats TLS, routage, configuration des projets et logs de requêtes y sont gérés. Hors rapports d'erreur décrits plus bas, nous ne recevons pas les hostnames que tu crées. Nous ne recevons jamais les requêtes que tu proxifies ni les logs affichés dans l'app. Le CLI et le daemon n'envoient aucune analytics.",
+          "Les builds officiels de l'app desktop envoient des analytics produit à PostHog : écrans consultés, étapes d'onboarding, actions comme créer un projet ou ajouter un domaine, et compteurs comme le nombre de projets et de domaines. Ces événements n'incluent ni noms de projets, ni domaines, ni chemins locaux, ni URLs proxifiées, ni trafic. L'autocapture est désactivée. Un build compilé depuis les sources sans token PostHog n'envoie rien.",
+          "L'app signale aussi les erreurs à PostHog : le nom et le message de l'erreur, sans URLs ni chemins de fichiers, plus des empreintes qui regroupent les erreurs identiques. Un message d'erreur peut quand même citer le projet ou le domaine concerné.",
+          "Le session replay est désactivé par défaut et ne démarre que si tu l'actives dans les réglages de l'app. Il masque les textes et les champs de saisie, et n'enregistre ni les logs de la console ni les temps réseau.",
+          "Au démarrage, l'app packagée vérifie les mises à jour en récupérant les métadonnées de version sur notre serveur de téléchargement. Cette requête peut laisser des logs serveur standards : adresse IP, user agent, heure et fichier demandé. Nous les utilisons pour livrer les mises à jour et diagnostiquer les problèmes de livraison, pas pour établir un profil d'usage."
+        ]
+      },
+      {
+        "title": "4. Anciennes versions de l'app",
+        "body": [
+          "Les anciennes versions de l'app utilisaient des clés de licence. Si tu as activé une clé sur l'une d'elles, cette version peut encore contacter licences.localify.dev pour la valider, en envoyant la clé et une empreinte de la machine. Cette empreinte est un identifiant non réversible dérivé d'un identifiant stable de la machine. La version actuelle n'a pas de vérification de licence et n'envoie pas cette requête.",
+          "Keygen, le fournisseur de licences, conserve les enregistrements de ces activations, y compris la plateforme, le nom d'hôte et le nom de l'appareil envoyés à l'activation quand ils étaient disponibles. Ils y restent jusqu'à leur suppression sur demande. Pour la demander, écris à support@localify.dev."
+        ]
+      },
+      {
+        "title": "5. Le site",
+        "body": [
+          "En production, le site utilise Umami, chargé depuis analytics.teogoulois.com, et PostHog. Ils enregistrent les pages vues et les clics sur des boutons comme le téléchargement. L'autocapture et l'enregistrement de session de PostHog sont désactivés. Nous n'utilisons ni traceurs publicitaires ni reciblage inter-sites.",
+          "PostHog garde un identifiant de visiteur dans ton navigateur, dans un cookie et dans le stockage local.",
+          "Quand tu cliques sur un bouton de téléchargement, le site peut copier un court jeton d'attribution Localify dans ton presse-papiers, à la place de ce qui s'y trouvait. Au démarrage, l'app desktop lit le presse-papiers et ignore tout ce qui n'est pas un tel jeton. Si elle en trouve un, elle relie ta visite du site à l'app dans nos analytics. Le jeton contient un identifiant de visiteur PostHog, un identifiant d'attribution, un libellé de source et un horodatage. Il ne contient ni données de projet, ni domaines, ni chemins locaux, ni trafic."
+        ]
+      },
+      {
+        "title": "6. Prestataires",
+        "body": [
+          "Nous faisons appel à ces prestataires :"
+        ],
+        "list": [
+          {
+            "name": "Cloudflare",
+            "description": "hébergement du site, des téléchargements et des fichiers de mise à jour."
+          },
+          {
+            "name": "PostHog",
+            "description": "analytics du site, analytics produit et rapports d'erreur de l'app desktop."
+          },
+          {
+            "name": "Umami",
+            "description": "analytics du site."
+          },
+          {
+            "name": "Fournisseur d'e-mail",
+            "description": "messages d'assistance que tu nous envoies."
+          }
+        ]
+      },
+      {
+        "title": "7. Pourquoi nous traitons ces données",
+        "body": [
+          "Nous traitons les analytics et les rapports d'erreur parce que nous avons un intérêt légitime à comprendre comment Localify est utilisé et à corriger ce qui casse. Nous traitons les requêtes de mise à jour pour livrer les mises à jour, et les e-mails d'assistance pour te répondre."
+        ]
+      },
+      {
+        "title": "8. Conservation",
+        "body": [
+          "Nous gardons les e-mails d'assistance tant qu'ils sont utiles à l'assistance, puis nous les supprimons. Les données d'analytics et les logs serveur restent chez les prestataires ci-dessus, selon les réglages de conservation de chaque service. Les enregistrements de licence existants restent chez le fournisseur jusqu'à leur suppression sur demande."
+        ]
+      },
+      {
+        "title": "9. Tes droits",
+        "body": [
+          "Tu peux nous demander une copie des données que nous détenons sur toi, les faire corriger ou demander leur suppression. Lorsque le RGPD ou une loi similaire s'applique, tu peux aussi t'opposer à certains traitements, les limiter, demander la portabilité ou saisir ton autorité locale de protection des données. Écris à support@localify.dev et nous répondrons dans un délai raisonnable."
+        ]
+      },
+      {
+        "title": "10. Transferts internationaux",
+        "body": [
+          "Nous et nos prestataires pouvons traiter des données hors de ton pays, notamment aux États-Unis. Lorsque c'est requis, nous nous appuyons sur des mécanismes de transfert comme les décisions d'adéquation ou les clauses contractuelles types."
+        ]
+      },
+      {
+        "title": "11. Enfants",
+        "body": [
+          "Localify est un outil de développement destiné aux adultes. Il n'est pas prévu pour les enfants de moins de 16 ans, et nous ne collectons pas sciemment de données personnelles les concernant."
+        ]
+      },
+      {
+        "title": "12. Modifications de cette politique",
+        "body": [
+          "Si nous changeons notre façon de traiter les données, nous mettrons à jour cette page et la date en haut. Si le changement est important, nous le signalerons sur le site."
+        ]
+      }
+    ]
+  }
+}

@@ -36,10 +36,18 @@ Desktop UI changes must also pass:
 pnpm run typecheck
 ```
 
+Website changes must pass:
+
+```bash
+pnpm web:typecheck
+pnpm web:build
+```
+
 Please also read:
 
 - [docs/rust/conventions.md](docs/rust/conventions.md) for Rust changes
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for `desktop-ui/` changes
+- [apps/web/README.md](apps/web/README.md) for `apps/web/` changes
 
 ## Pull requests
 

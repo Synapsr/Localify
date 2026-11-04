@@ -5,6 +5,8 @@ demo-recording
 .DS_Store
 node_modules
 .wrangler
+.next
+.open-next
 desktop-ui/dist
 /dist
 src-tauri/gen
@@ -21,3 +23,6 @@ assets/localify_file_browser_small.png
 .env*
 !.env.example
 .tmp
+
+apps/web/.env
+apps/web/tsconfig.tsbuildinfo

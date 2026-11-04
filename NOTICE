@@ -7,3 +7,16 @@ only (AGPL-3.0-only). See the LICENSE file.
 Localify derives from Roxy (https://github.com/rbas/roxy) by Martin Voldřich.
 Roxy's code remains under the MIT license. See the LICENSE-MIT file, which
 contains its copyright notice and license text.
+
+The Localify name and logo are not licensed under the AGPL or under any other
+license.
+
+Media in apps/web/public/ and desktop-ui/public/videos/ is not licensed under
+the AGPL.
+
+progresive-blur.tsx, in desktop-ui/src/components/ and apps/web/components/, is
+adapted from Skiper 41 Canvas_Landing_004 by Skiper UI. Author: gurvinder-singh02
+(https://gxuri.in, https://x.com/Gur__vi). Skiper's version is inspired by and
+adapted from https://devouringdetails.com/, and it is not associated with that
+site. Skiper UI's terms for the free version allow use and modification in
+personal and commercial projects and require attribution to Skiper UI.
