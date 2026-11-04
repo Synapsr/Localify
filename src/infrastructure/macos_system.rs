@@ -856,14 +856,11 @@ pub fn trust_in_login_keychain(ca_cert: &Path) -> Result<()> {
 }
 
 /// Takes the CA out of the login keychain, for uninstall and for what older builds
-/// left there.
-pub fn remove_login_keychain_trust(ca_cert: &Path) -> Option<(String, StepOutcome)> {
-    if ca_cert.exists() {
-        let _ = Command::new("/usr/bin/security")
-            .arg("remove-trusted-cert")
-            .arg(ca_cert)
-            .output();
-    }
+/// left there. macOS keeps its record of having trusted that certificate, because
+/// removing the record takes one more confirmation on screen. The uninstall deletes
+/// the key as well, so only a copy of the key made before that could use the record,
+/// and the name constraint limits it to our suffix.
+pub fn remove_login_keychain_ca() -> Option<(String, StepOutcome)> {
     match delete_login_keychain_cas(None) {
         Ok(0) => None,
         Ok(_) => Some((

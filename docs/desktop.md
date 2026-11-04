@@ -52,6 +52,10 @@ administrator, and macOS confirms it in its own window. The install leaves this 
 later so that it asks for one password: `localify trust` or the app's Trust HTTPS
 button does it. Both profiles work this way.
 
+Uninstalling also asks for one approval. It deletes the certificate and its key. macOS
+keeps its record of having trusted that certificate, because removing the record takes
+another confirmation. The record stays limited to the local suffix.
+
 `pnpm tauri:dev` runs with `LOCALIFY_PROFILE=dev`. That profile is isolated
 from the installed app:
 
