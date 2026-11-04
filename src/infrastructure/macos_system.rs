@@ -409,7 +409,8 @@ impl Approval {
     }
 }
 
-const APPROVAL_REASON: &str = "Localify needs an administrator's approval to change its DNS and background service.";
+const APPROVAL_REASON: &str =
+    "Localify needs an administrator's approval to change its DNS and background service.";
 
 /// Runs the script as root, once. Fails if the user declines.
 pub fn run_with_approval(script: &str, approval: Approval) -> Result<()> {
