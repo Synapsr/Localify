@@ -1,4 +1,8 @@
+import type { Metadata } from "next";
+
+import { hasLocale } from "next-intl";
 import { getTranslations, setRequestLocale } from "next-intl/server";
+import { notFound } from "next/navigation";
 
 import { Faq } from "@/app/_sections/faq";
 import { FinalCta } from "@/app/_sections/final-cta";
@@ -6,9 +10,11 @@ import { HeroSection } from "@/app/_sections/hero";
 import { HowItWorks } from "@/app/_sections/how-it-works";
 import { Problem } from "@/app/_sections/problem";
 import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
+import { buildPageMetadata } from "@/app/page-metadata";
 import { SiteFooter } from "@/app/site-footer";
 import { siteAuthor, siteName, siteUrl, sourceUrl } from "@/app/site-metadata";
 import { SiteHeader } from "@/app/site-ui";
+import { routing } from "@/i18n/routing";
 
 const buildSoftwareJsonLd = (description: string) => ({
   "@context": "https://schema.org",
@@ -44,6 +50,17 @@ const buildFaqJsonLd = (
 
 type HomePageProps = Readonly<{ params?: Promise<{ locale: string }> }>;
 
+export const generateMetadata = async ({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}): Promise<Metadata> => {
+  const { locale } = await params;
+  if (!hasLocale(routing.locales, locale)) notFound();
+
+  return buildPageMetadata(locale, "");
+};
+
 const HomePage = async ({ params }: HomePageProps) => {
   // Next.js can render a page before its layout, so the page sets the locale too.
   // app/page.tsx sets the default locale itself and passes no params.
@@ -51,7 +68,7 @@ const HomePage = async ({ params }: HomePageProps) => {
     setRequestLocale((await params).locale);
   }
 
-  const t = await getTranslations("Home");
+  const t = await getTranslations("Metadata");
   const nav = await getTranslations("Navigation");
   const faq = await getTranslations("Faq");
 

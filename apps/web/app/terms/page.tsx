@@ -3,11 +3,11 @@ import type { Metadata } from "next";
 import { getTranslations } from "next-intl/server";
 
 import { LegalPage, LegalSection } from "@/app/_components/legal-page";
+import { buildPageMetadata } from "@/app/page-metadata";
+import { routing } from "@/i18n/routing";
 
-export const metadata: Metadata = {
-  title: "Terms of Service",
-  description:
-    "Localify is licensed under AGPL-3.0-only. These terms cover what the license does not: the name and logo, the warranty, and the website.",
+export const generateMetadata = (): Promise<Metadata> => {
+  return buildPageMetadata(routing.defaultLocale, "/terms");
 };
 
 const TermsPage = async () => {
@@ -51,6 +51,20 @@ const TermsPage = async () => {
           </a>
           .
         </p>
+      </LegalSection>
+
+      <LegalSection id="legal-notice" title={t("legalNotice.title")}>
+        <p>{t("legalNotice.publisher")}</p>
+        <p>
+          {t("legalNotice.contact")}{" "}
+          <a
+            href="mailto:support@localify.dev"
+            className="text-ink underline underline-offset-4 hover:opacity-70"
+          >
+            support@localify.dev
+          </a>
+        </p>
+        <p>{t("legalNotice.host")}</p>
       </LegalSection>
     </LegalPage>
   );

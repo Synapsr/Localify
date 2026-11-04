@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
-import { Agentation } from "agentation";
 import Script from "next/script";
 import { NextIntlClientProvider } from "next-intl";
 import { getMessages } from "next-intl/server";
@@ -10,30 +9,16 @@ import { pickClientMessages } from "@/i18n/client-messages";
 import { routing } from "@/i18n/routing";
 
 import "./globals.css";
+import { DevTools } from "./_components/dev-tools";
 import { PageLogoReveal } from "./_components/page-logo-reveal";
-import { siteAuthor, siteDescription, siteName, siteTitle, siteUrl } from "./site-metadata";
+import { siteAuthor, siteName, siteUrl } from "./site-metadata";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   applicationName: siteName,
   title: {
-    default: siteTitle,
+    default: siteName,
     template: `%s - ${siteName}`,
-  },
-  description: siteDescription,
-  alternates: {
-    canonical: "/",
-    languages: {
-      en: "/",
-      fr: "/fr",
-      es: "/es",
-      de: "/de",
-      "pt-BR": "/pt-BR",
-      ja: "/ja",
-      ko: "/ko",
-      "zh-CN": "/zh-CN",
-      ru: "/ru",
-    },
   },
   keywords: [
     "local development domains",
@@ -47,29 +32,6 @@ export const metadata: Metadata = {
   creator: siteAuthor,
   publisher: siteAuthor,
   category: "developer tools",
-  openGraph: {
-    type: "website",
-    locale: "en_US",
-    url: "/",
-    siteName,
-    title: siteTitle,
-    description: siteDescription,
-    images: [
-      {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
-        alt: "Localify macOS app showing local projects with .localify domains",
-      },
-    ],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: siteTitle,
-    description: siteDescription,
-    images: ["/og-image.png"],
-    creator: "@Teo_Goulois",
-  },
   icons: {
     icon: [
       { url: "/favicon.ico" },
@@ -109,7 +71,7 @@ const RootLayout = async ({ children }: RootLayoutProps) => {
         <NextIntlClientProvider messages={pickClientMessages(messages)}>
           <PageLogoReveal>{children}</PageLogoReveal>
         </NextIntlClientProvider>
-        {process.env.NODE_ENV === "development" && <Agentation />}
+        <DevTools />
         {process.env.NODE_ENV === "production" && (
           <Script
             defer

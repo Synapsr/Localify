@@ -1,13 +1,16 @@
+import type { ReactNode } from "react";
+
 import { useTranslations } from "next-intl";
 
 import { Link } from "@/i18n/navigation";
 
+import { CookieBanner, CookieSettingsItem } from "./_components/cookie-banner";
 import { FooterLanguageSelect } from "./footer-language-select";
 import { BrandMark } from "./site-header";
 import { sourceUrl } from "./site-metadata";
 
 type FooterItem = { label: string; href: string };
-type FooterColumn = { head: string; items: readonly FooterItem[] };
+type FooterColumn = { head: string; items: readonly FooterItem[]; extra?: ReactNode };
 
 const socialLinks = [{ href: "https://x.com/Teo_Goulois", label: "X (Twitter)" }] as const;
 
@@ -19,14 +22,7 @@ export const SiteFooter = () => {
       items: [
         { label: t("download"), href: "/#download" },
         { label: t("source"), href: sourceUrl },
-        { label: t("changelog"), href: "/soon" },
-        { label: t("docs"), href: "/soon" },
-      ],
-    },
-    {
-      head: t("project"),
-      items: [
-        { label: t("blog"), href: "/soon" },
+        { label: t("docs"), href: `${sourceUrl}/tree/main/docs` },
         { label: t("contact"), href: "mailto:support@localify.dev" },
       ],
     },
@@ -35,13 +31,15 @@ export const SiteFooter = () => {
       items: [
         { label: t("terms"), href: "/terms" },
         { label: t("privacy"), href: "/privacy" },
+        { label: t("legalNotice"), href: "/terms#legal-notice" },
       ],
+      extra: <CookieSettingsItem />,
     },
   ] as const;
 
   return (
     <footer className="site-width relative z-10 mt-10 border-t border-border pt-12 pb-10">
-      <div className="grid gap-10 md:grid-cols-[minmax(0,1.4fr)_repeat(3,minmax(0,1fr))]">
+      <div className="grid gap-10 md:grid-cols-[minmax(0,1.4fr)_repeat(2,minmax(0,1fr))]">
         <Link
           href="/"
           className="inline-flex h-fit w-fit items-center gap-1.5 pr-3 pl-2.5 text-[16px] font-semibold tracking-[-0.015em] transition-opacity duration-200 ease-[cubic-bezier(0.25,0.46,0.45,0.94)] hover:opacity-70"
@@ -110,6 +108,7 @@ export const SiteFooter = () => {
                   </Link>
                 </li>
               ))}
+              {col.extra}
             </ul>
           </div>
         ))}
@@ -132,6 +131,7 @@ export const SiteFooter = () => {
           ))}
         </div>
       </div>
+      <CookieBanner />
     </footer>
   );
 };

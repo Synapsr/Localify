@@ -1,6 +1,7 @@
 {
-  "Home": {
-    "description": "Localify gives your local projects stable .localify domains, trusted HTTPS, DNS routing, and a native macOS app — no mkcert, no /etc/hosts, no tunnel."
+  "Metadata": {
+    "title": "Localify - Local domains and trusted HTTPS for developers",
+    "description": "Localify is a free, open source app that gives local projects stable .localify domains, trusted HTTPS, DNS routing, and a native macOS control app, without mkcert, /etc/hosts edits, or tunnel setup."
   },
   "Navigation": {
     "howItWorks": "How it works",
@@ -91,15 +92,15 @@
       },
       {
         "question": "Does it put my work online?",
-        "answer": "No. Localify is not a public tunnel. Your local services stay on your machine — no app traffic, project name, or request log is sent to Localify."
+        "answer": "No. Localify is not a public tunnel. Your local services stay on your machine — no app traffic or request log is sent to Localify."
       },
       {
         "question": "Does Localify collect analytics?",
-        "answer": "The official desktop app does: product flows (onboarding, navigation, project creation), usage counts, and error reports. These events don't include request logs, project names, domains, local paths, or traffic content. Error reports have URLs and file paths removed, though a message can still name the project or domain it's about. The CLI and daemon send nothing."
+        "answer": "The official desktop app does: product flows (onboarding, navigation, project creation), usage counts, and error reports. These events don't include request logs, project names, domains, local paths, or traffic content. A filter removes URLs, file paths, .localify domains, and quoted names from error reports before they're sent, though it can't catch everything. The CLI and daemon send nothing."
       },
       {
         "question": "Which platforms does it run on?",
-        "answer": "The desktop app runs on macOS, on Apple Silicon. The CLI and daemon also build from source on Linux. Windows isn't supported."
+        "answer": "The desktop app runs on macOS on Apple Silicon for now. The CLI and daemon also build from source on Linux. Windows and a Linux desktop app are planned for later."
       },
       {
         "question": "Do I need to edit /etc/hosts or install mkcert?",
@@ -127,28 +128,27 @@
   },
   "Footer": {
     "resources": "Resources",
-    "project": "Project",
     "legal": "Legal",
     "download": "Download",
     "source": "Source code",
-    "changelog": "Changelog",
     "docs": "Docs",
-    "blog": "Blog",
     "contact": "Contact",
     "terms": "Terms of Service",
     "privacy": "Privacy Policy",
+    "legalNotice": "Legal notice",
+    "cookies": "Cookies",
     "copyright": "© 2026 Téo Goulois · Open source under the AGPL · Made quietly in Rust.",
     "language": "Language",
     "switchLanguage": "Switch to {locale}"
   },
+  "CookieBanner": {
+    "label": "Cookie consent",
+    "message": "We'd like to use a PostHog cookie to measure visits and downloads.",
+    "accept": "Accept",
+    "decline": "Decline"
+  },
   "Legal": {
     "lastUpdated": "Last updated"
-  },
-  "Soon": {
-    "eyebrow": "Coming soon",
-    "title": "This page isn't ready yet.",
-    "description": "We're focused on shipping the core product first. Docs, changelog and the rest will show up here as they come online.",
-    "backHome": "Back to home"
   },
   "Terms": {
     "title": "Terms of Service",
@@ -205,6 +205,12 @@
     "contact": {
       "title": "8. Contact",
       "prefix": "Questions about these terms? Email"
+    },
+    "legalNotice": {
+      "title": "9. Legal notice",
+      "publisher": "Publisher and publication director: Téo Goulois",
+      "contact": "Contact:",
+      "host": "Host: Cloudflare, Inc., 101 Townsend Street, San Francisco, CA 94107, USA, +1 888-993-5273"
     }
   },
   "Privacy": {
@@ -227,9 +233,9 @@
       {
         "title": "3. The desktop app and CLI",
         "body": [
-          "The Localify daemon, desktop app, and CLI run on your machine. DNS, TLS certificates, routing, project configuration, and request logs are handled there. Apart from the error reports described below, we don't receive the hostnames you create. We never receive the requests you proxy or the logs shown in the app. The CLI and the daemon send no analytics.",
+          "The Localify daemon, desktop app, and CLI run on your machine. DNS, TLS certificates, routing, project configuration, and request logs are handled there. We don't collect the hostnames you create, and error reports have them removed before sending. We never receive the requests you proxy or the logs shown in the app. The CLI and the daemon send no analytics.",
           "Official desktop builds send product analytics to PostHog: screens viewed, onboarding steps, actions such as creating a project or adding a domain, and counts such as how many projects and domains you have. These events don't include project names, domains, local paths, proxied URLs, or traffic. Autocapture is off. A build made from source without a PostHog token sends nothing.",
-          "The app also reports errors to PostHog: the error's name and message, with URLs and file paths removed, plus hashes that group identical errors. An error message can still name the project or domain it's about.",
+          "The app also reports errors to PostHog: the error's name and message, plus hashes that group identical errors. Before sending, a filter removes URLs, file paths, .localify domains, and quoted names. It matches patterns, so it can miss something in an unusual message.",
           "Session replay is off by default and only starts if you turn it on in the app's settings. Replay masks text and inputs, and it doesn't record console logs or network timing.",
           "When the packaged app starts, it checks for updates by fetching release metadata from our download host. That request can leave standard server logs: IP address, user agent, time, and requested file. We use them to deliver updates and troubleshoot delivery, not to build a usage profile."
         ]
@@ -244,9 +250,10 @@
       {
         "title": "5. The website",
         "body": [
-          "In production the website uses Umami, loaded from analytics.teogoulois.com, and PostHog. They record page views and clicks on buttons such as download. PostHog autocapture and session recording are off. We don't run advertising trackers or cross-site retargeting.",
-          "PostHog keeps a visitor identifier in your browser, in a cookie and in local storage.",
-          "When you click a download button, the website may copy a short Localify attribution token to your clipboard, replacing what was there. When the desktop app starts, it reads the clipboard and ignores anything that isn't such a token. If it finds one, it links your website visit to the app in our analytics. The token contains a PostHog visitor identifier, an attribution ID, a source label, and a timestamp. It doesn't contain project data, domains, local paths, or traffic."
+          "In production the website uses two analytics tools, Umami and PostHog. They record page views and clicks on buttons such as download. We don't run advertising trackers or cross-site retargeting.",
+          "Umami runs for every visitor. It's loaded from analytics.teogoulois.com and uses no cookies.",
+          "PostHog runs only if you accept in the cookie banner. It then keeps a visitor identifier in a cookie and in local storage, and records that you accepted. Its autocapture and session recording are off. If you decline, PostHog sends and stores nothing. Either way, a local storage entry remembers your choice, and you can change it from the Cookies link in the footer.",
+          "If you accepted, clicking a download button may copy a short Localify attribution token to your clipboard, replacing what was there. If you didn't, the website leaves your clipboard alone. When the desktop app starts, it reads the clipboard and ignores anything that isn't such a token. If it finds one, it links your website visit to the app in our analytics. The token contains a PostHog visitor identifier, an attribution ID, a source label, and a timestamp. It doesn't contain project data, domains, local paths, or traffic."
         ]
       },
       {
@@ -261,7 +268,7 @@
           },
           {
             "name": "PostHog",
-            "description": "website analytics, plus product analytics and error reports from the desktop app."
+            "description": "website analytics if you accept, plus product analytics and error reports from the desktop app."
           },
           {
             "name": "Umami",
@@ -276,7 +283,7 @@
       {
         "title": "7. Why we process this data",
         "body": [
-          "We process analytics and error reports because we have a legitimate interest in understanding how Localify is used and fixing what breaks. We process update requests to deliver updates, and support emails to answer you."
+          "We rely on your consent for PostHog on the website, and you can withdraw it at any time from the Cookies link in the footer. We process Umami analytics, desktop app analytics, and error reports because we have a legitimate interest in understanding how Localify is used and fixing what breaks. We process update requests to deliver updates, and support emails to answer you."
         ]
       },
       {

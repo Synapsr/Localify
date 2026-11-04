@@ -1,12 +1,10 @@
 import type { MetadataRoute } from "next";
 
+import { localizedPath } from "@/app/page-metadata";
 import { siteUrl } from "@/app/site-metadata";
-import { routing, type Locale } from "@/i18n/routing";
+import { routing } from "@/i18n/routing";
 
 const routes = ["", "/privacy", "/terms"] as const;
-
-const localizedPath = (locale: Locale, route: string) =>
-  locale === routing.defaultLocale ? route || "/" : `/${locale}${route}`;
 
 const sitemap = (): MetadataRoute.Sitemap => {
   const lastModified = new Date("2026-11-04");
