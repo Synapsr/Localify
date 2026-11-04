@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use localify::desktop::{DesktopApi, ProjectRootStore};
 
+use crate::application::ports::{DaemonConnection, DaemonConnectionError};
 use crate::branding::BRANDING;
 use crate::infrastructure::{
     certs::CertificateService, config::ConfigStore, mgmt_client::MgmtSocketClient,
@@ -29,6 +30,16 @@ impl AppContext {
             cert_service: CertificateService::new(paths),
             daemon: DaemonHandle::new(paths),
             mgmt_client: MgmtSocketClient::new(&paths.socket_path),
+        }
+    }
+
+    /// Tells a running daemon to read the config now. It would notice by itself within
+    /// two seconds, but a request in between gets a 404, which trips up an agent that
+    /// registers a domain and calls it straight away.
+    pub fn apply_config_to_daemon(&self) {
+        match self.mgmt_client.reload() {
+            Ok(()) | Err(DaemonConnectionError::NotRunning) => {}
+            Err(error) => eprintln!("Warning: failed to reload daemon: {error}"),
         }
     }
 }

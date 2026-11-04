@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 
 use super::context::{AppContext, require_config_writable};
-use crate::application::ports::DaemonConnection;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 
@@ -75,11 +74,7 @@ pub fn execute(
 
     ctx.config_store.remove_project(&project.id)?;
 
-    match ctx.mgmt_client.reload() {
-        Ok(()) => println!("Reloaded the running daemon."),
-        Err(crate::application::ports::DaemonConnectionError::NotRunning) => {}
-        Err(error) => eprintln!("Warning: failed to reload daemon: {error}"),
-    }
+    ctx.apply_config_to_daemon();
 
     println!("Removed project: {} [{}]", project.name, project.id);
 

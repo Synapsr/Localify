@@ -588,7 +588,32 @@ fn refuse_root_on_macos() -> Result<()> {
     Ok(())
 }
 
+/// The status a Unix tool ends with when its output is closed: 128 + SIGPIPE.
+const CLOSED_STDOUT_EXIT_CODE: i32 = 141;
+
+/// `println!` panics when stdout is closed, and `panic = "abort"` turns that into a
+/// crash report. `localify status | head -1` is normal use, so it ends quietly instead.
+fn exit_quietly_when_stdout_closes() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        if is_closed_stdout(message) {
+            std::process::exit(CLOSED_STDOUT_EXIT_CODE);
+        }
+        default_hook(info);
+    }));
+}
+
+fn is_closed_stdout(message: &str) -> bool {
+    message.starts_with("failed printing to stdout") && message.contains("Broken pipe")
+}
+
 fn main() -> Result<()> {
+    exit_quietly_when_stdout_closes();
     ensure_rustls_crypto_provider()?;
 
     let cli = Cli::parse();

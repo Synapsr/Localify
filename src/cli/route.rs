@@ -22,9 +22,9 @@ pub fn add(
     let use_case = ManageRoutes::new(&ctx.config_store);
 
     let route = use_case.add_route(&pattern, path_prefix, route_target)?;
+    ctx.apply_config_to_daemon();
 
     println!("Added route: {} -> {}", route.path(), route.target());
-    println!("\nReload the daemon to apply changes: localify reload");
 
     Ok(())
 }
@@ -39,9 +39,9 @@ pub fn remove(domain: String, wildcard: bool, path: String, ctx: &AppContext) ->
     let use_case = ManageRoutes::new(&ctx.config_store);
 
     use_case.remove_route(&pattern, &path_prefix)?;
+    ctx.apply_config_to_daemon();
 
     println!("Removed route: {}", path_prefix);
-    println!("\nReload the daemon to apply changes: localify reload");
 
     Ok(())
 }

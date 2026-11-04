@@ -30,6 +30,7 @@ pub fn execute(
     );
 
     let result = use_case.execute(pattern, parsed_routes)?;
+    ctx.apply_config_to_daemon();
 
     match &result.cert_outcome {
         StepOutcome::Success(msg) => println!("  {}", msg),
@@ -70,7 +71,12 @@ pub fn execute(
             BRANDING.admin_command("trust")
         );
     }
-    println!("\nStart the proxy with: localify start");
+    if ctx.mgmt_client.running_pid().is_err() {
+        println!(
+            "\nStart the proxy with: {}",
+            BRANDING.admin_command("start")
+        );
+    }
 
     Ok(())
 }

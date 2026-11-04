@@ -28,6 +28,7 @@ pub fn execute(domain: String, wildcard: bool, force: bool, ctx: &AppContext) ->
     require_config_writable(&ctx.config_path)?;
 
     let result = use_case.execute(&pattern)?;
+    ctx.apply_config_to_daemon();
 
     match &result.cert_outcome {
         StepOutcome::Success(msg) => println!("{}", msg),
