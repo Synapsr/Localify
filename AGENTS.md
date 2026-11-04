@@ -15,13 +15,13 @@ Localify is a local development proxy written in Rust. It routes custom `.locali
 
 1. **Correctness** — no panics in library code, errors handled explicitly, inputs validated at boundaries.
 2. **Simplicity** — three similar lines beats one clever abstraction.
-3. **YAGNI** — don't build what isn't in REQUIREMENTS.md.
+3. **YAGNI** — don't build what isn't needed yet.
 
 If a tradeoff is required, choose correctness and simplicity over short-term convenience.
 
 ## Rust Skills (AI)
 
-This repo vendors `rust-skills` at `.rust-skills/skills/`. When working on Rust:
+`.rust-skills/skills/` is a gitignored local install, so fresh clones lack it. When it exists and you're working on Rust:
 
 - Invoke `rust-router` first for Rust questions, errors, or design.
 - Follow the routed skill (`m01-*`..`m15-*`, `domain-*`).

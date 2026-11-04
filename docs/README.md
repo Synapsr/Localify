@@ -304,21 +304,11 @@ All paths are configurable via the `[paths]` section in
 
 ## Auto-Start on Boot
 
-### macOS (Homebrew)
+### macOS
 
-If you installed Localify via Homebrew, use `brew services`
-to start it automatically at boot:
-
-```bash
-# Start now and auto-start at boot
-sudo brew services start localify
-
-# Stop auto-start
-sudo brew services stop localify
-```
-
-When managed by `brew services`, Localify runs in foreground
-mode and launchd handles process supervision.
+The desktop app can start Localify when you sign in: turn on
+**Startup** in Settings. Without the desktop app, run
+`sudo localify start` after each boot.
 
 ### Linux (systemd)
 

@@ -32,7 +32,7 @@ return Err(anyhow!(
 
 ### [RS-03] YAGNI
 
-- Don't build features that aren't in REQUIREMENTS.md
+- Don't build features that aren't needed yet
 - Don't create abstractions until you need them in multiple places
 - Don't add configuration options until someone asks for them
 - Don't add plugins, hooks, or extensibility mechanisms
@@ -62,7 +62,7 @@ pub fn register(domain: DomainName, target: Target) -> Result<()>
 - No generics for a single use case
 - No trait hierarchies more than 2 levels deep
 - No `async` where blocking I/O works fine (config files, cert generation)
-- No `unsafe` without an explicit review (use the `unsafe-checker` skill)
+- No `unsafe` without an explicit review (use the `unsafe-checker` skill if your checkout has `.rust-skills/`)
 
 ### [RS-07] Function size
 
