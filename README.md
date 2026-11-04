@@ -69,11 +69,12 @@ administrator password to set up the system helper.
 
 Official desktop builds send product analytics and error reports to PostHog.
 They send explicit events only, with no autocapture, and analytics events never
-include project names, domains, request logs, or local paths. Error reports have
-URLs and file paths removed, but a message can still name the project or domain
-it's about. Session replay is off by default, and you can turn it on in Settings.
-Builds without `VITE_PUBLIC_POSTHOG_TOKEN` send nothing, and the CLI and daemon
-have no telemetry.
+include project names, domains, request logs, or local paths. Before an error
+report is sent, a filter removes URLs, file paths, `.localify` domains, and quoted
+names. It matches patterns, so it can miss something in an unusual message.
+Session replay is off by default, and you can turn it on in Settings. Builds
+without `VITE_PUBLIC_POSTHOG_TOKEN` send nothing, and the CLI and daemon have no
+telemetry.
 
 ## Repository layout
 

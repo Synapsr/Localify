@@ -350,12 +350,26 @@ const isErrorLike = (error: unknown): error is Record<"name" | "message", string
   );
 };
 
+// An opening quote follows whitespace, an opening bracket, or the start of the string, so the
+// apostrophe in "doesn't" never opens one. An apostrophe inside a word doesn't close one either.
+const SINGLE_QUOTED_NAME = /(^|[\s([{<])'(?:[^'\n]|'(?=\w))+'(?!\w)/g;
+const DOUBLE_QUOTED_NAME = /(^|[\s([{<])"(?:[^"\\\n]|\\.)+"/g;
+// Matches my-app.localify and my-app.localify.test, but not localify.dev or file.localify.ts.
+// The leading group keeps long runs of word characters linear, and a lookbehind would be a
+// syntax error in older WebKit.
+const LOCALIFY_HOSTNAME = /(^|[^a-z0-9_-])(?:[a-z0-9_-]+\.)+localify(?:\.test)?(?![\w-]|\.\w)/gi;
+
 const sanitizeErrorField = (value: string) => {
+  // Quoted names go first, because the URL and path patterns below would swallow a closing quote
+  // and leave the next quoted name unpaired.
   return value
+    .replace(SINGLE_QUOTED_NAME, "$1[name]")
+    .replace(DOUBLE_QUOTED_NAME, "$1[name]")
     .replace(/https?:\/\/[^\s)]+/g, "[url]")
     .replace(/file:\/\/[^\s)]+/g, "[path]")
     .replace(/(?:\/(?:Users|Volumes|private|tmp|var|etc)\/[^\s)]+)/g, "[path]")
     .replace(/[A-Za-z]:\\[^\s)]+/g, "[path]")
+    .replace(LOCALIFY_HOSTNAME, "$1[domain]")
     .slice(0, MAX_ERROR_FIELD_LENGTH);
 };
 
