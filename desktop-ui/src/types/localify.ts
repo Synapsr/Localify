@@ -77,7 +77,6 @@ export interface AppConfigDto {
 
 export interface ConfigUpdateRequest {
   daemon?: DaemonConfigDto;
-  paths?: LocalifyPathsDto;
   docker?: DockerConfigDto;
   agent?: AgentConfigDto;
 }

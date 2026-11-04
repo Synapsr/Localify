@@ -2,10 +2,9 @@ use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -27,12 +26,10 @@ use crate::desktop::dto::{
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto,
     RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, SetProjectServiceDomainRequest,
-    SetProjectServiceDomainResultDto, SettingsExportRequest, SettingsExportResultDto,
-    SettingsImportPreviewDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
+    SetProjectServiceDomainResultDto, StartDaemonRequest, UninstallPreviewDto, UninstallResultDto,
     UnregisterDomainResultDto, UpdateDomainRequest, UpdateProjectRequest,
 };
-use crate::infrastructure::binary_identity::{BinaryIdentity, DaemonBinaryCheck};
+use crate::infrastructure::binary_identity::DaemonBinaryCheck;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 
 const HELPER_PING_TIMEOUT: Duration = Duration::from_secs(1);
@@ -47,8 +44,11 @@ const HELPER_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum HelperCommand {
     Ping,
     /// Ask the helper to exit after replying so its supervisor (launchd
-    /// `KeepAlive`) respawns it from the binary currently at the service path.
+    /// `KeepAlive`) respawns it, which recovers a helper that stopped answering.
     RelaunchHelper,
+    /// Ask the helper to remove its own service and root-owned binary, so
+    /// `localify uninstall` works without sudo.
+    RemoveService,
     GetBootstrap,
     GetConfig,
     UpdateConfig {
@@ -66,15 +66,6 @@ pub enum HelperCommand {
     },
     CreateProjectWithDomains {
         request: CreateProjectWithDomainsRequest,
-    },
-    ExportSettings {
-        request: SettingsExportRequest,
-    },
-    PreviewSettingsImport {
-        request: SettingsImportPreviewRequest,
-    },
-    ImportSettings {
-        request: SettingsImportRequest,
     },
     InitProject {
         request: InitProjectRequest,
@@ -152,7 +143,7 @@ pub enum HelperCommand {
 impl HelperCommand {
     fn response_timeout(&self) -> Duration {
         match self {
-            Self::Ping | Self::RelaunchHelper => HELPER_PING_TIMEOUT,
+            Self::Ping | Self::RelaunchHelper | Self::RemoveService => HELPER_PING_TIMEOUT,
             Self::GetBootstrap
             | Self::GetConfig
             | Self::GetDaemonStatus
@@ -164,15 +155,11 @@ impl HelperCommand {
             | Self::ReadLogs { .. }
             | Self::GetAvailablePort
             | Self::ReportLaunchSession { .. } => HELPER_READ_TIMEOUT,
-            Self::InstallLocalify | Self::UninstallLocalify | Self::ImportSettings { .. } => {
-                HELPER_INSTALL_TIMEOUT
-            }
+            Self::InstallLocalify | Self::UninstallLocalify => HELPER_INSTALL_TIMEOUT,
             Self::UpdateConfig { .. }
             | Self::RefreshDomainCertificates
             | Self::CreateProject { .. }
             | Self::CreateProjectWithDomains { .. }
-            | Self::ExportSettings { .. }
-            | Self::PreviewSettingsImport { .. }
             | Self::InitProject { .. }
             | Self::AddProjectService { .. }
             | Self::SetProjectServiceDomain { .. }
@@ -201,6 +188,7 @@ impl HelperCommand {
         match self {
             Self::Ping => "ping",
             Self::RelaunchHelper => "relaunch the system helper",
+            Self::RemoveService => "remove the system helper",
             Self::GetBootstrap => "read desktop configuration",
             Self::GetConfig => "read config",
             Self::GetDaemonStatus => "read daemon status",
@@ -209,7 +197,6 @@ impl HelperCommand {
             Self::InstallLocalify => "install Localify",
             Self::GetUninstallPreview => "read uninstall preview",
             Self::UninstallLocalify => "uninstall Localify",
-            Self::ImportSettings { .. } => "import settings",
             Self::ListPortConflicts => "list port conflicts",
             Self::ListRoutes { .. } => "list routes",
             Self::ReadLogs { .. } => "read logs",
@@ -226,7 +213,6 @@ impl HelperCommand {
                 | Self::UpdateConfig { .. }
                 | Self::CreateProject { .. }
                 | Self::CreateProjectWithDomains { .. }
-                | Self::ImportSettings { .. }
                 | Self::InitProject { .. }
                 | Self::AddProjectService { .. }
                 | Self::SetProjectServiceDomain { .. }
@@ -269,10 +255,17 @@ impl SystemHelperClient {
         Ok(())
     }
 
-    /// Asks the running helper to exit so its supervisor respawns it from the
-    /// current service binary. The helper acknowledges before exiting.
+    /// Asks the running helper to exit so its supervisor respawns it. The helper
+    /// acknowledges before exiting.
     pub fn relaunch_helper(&self) -> Result<()> {
         let _: bool = self.send(HelperCommand::RelaunchHelper)?;
+        Ok(())
+    }
+
+    /// Asks the running helper to remove its service. The helper acknowledges
+    /// before it stops, so a reply does not mean the removal finished.
+    pub fn remove_service(&self) -> Result<()> {
+        let _: bool = self.send(HelperCommand::RemoveService)?;
         Ok(())
     }
 
@@ -325,27 +318,6 @@ impl SystemHelperClient {
         request: CreateProjectWithDomainsRequest,
     ) -> Result<ProjectInfoDto> {
         self.send(HelperCommand::CreateProjectWithDomains { request })
-    }
-
-    pub fn export_settings(
-        &self,
-        request: SettingsExportRequest,
-    ) -> Result<SettingsExportResultDto> {
-        self.send(HelperCommand::ExportSettings { request })
-    }
-
-    pub fn preview_settings_import(
-        &self,
-        request: SettingsImportPreviewRequest,
-    ) -> Result<SettingsImportPreviewDto> {
-        self.send(HelperCommand::PreviewSettingsImport { request })
-    }
-
-    pub fn import_settings(
-        &self,
-        request: SettingsImportRequest,
-    ) -> Result<SettingsImportResultDto> {
-        self.send(HelperCommand::ImportSettings { request })
     }
 
     pub fn init_project(&self, request: InitProjectRequest) -> Result<InitProjectResultDto> {
@@ -631,23 +603,16 @@ pub fn serve(
     let _ = fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     set_socket_owner(socket_path, allowed_uid)?;
-    let startup_binary = startup_binary_identity();
-    let in_flight = Arc::new(AtomicUsize::new(0));
     spawn_outdated_daemon_check(api.clone());
 
     loop {
         let (stream, _) = listener.accept()?;
         let api = api.clone();
         let config_path = config_path.to_path_buf();
-        let startup_binary = startup_binary.clone();
-        let in_flight = Arc::clone(&in_flight);
-        in_flight.fetch_add(1, Ordering::SeqCst);
         thread::spawn(move || {
             if let Err(error) = handle_connection(stream, &api, allowed_uid, &config_path) {
                 eprintln!("{} helper connection failed: {error}", BRANDING.app_name);
             }
-            let remaining = in_flight.fetch_sub(1, Ordering::SeqCst) - 1;
-            recycle_when_binary_updated(&startup_binary, remaining);
         });
     }
 }
@@ -664,9 +629,9 @@ fn daemon_lifecycle_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// A new helper usually means a new build (launchd respawns it after an app
-/// update or reinstall). Restart a daemon still running the previous build,
-/// whichever way the app was replaced.
+/// A new helper usually means a new build (an administrator approved copying it
+/// into place). Restart a daemon still running the previous build, or one that
+/// runs from a file other users could change.
 fn spawn_outdated_daemon_check(api: DesktopApi) {
     thread::spawn(move || {
         // Let the desktop app finish its own post-update restart first.
@@ -685,42 +650,6 @@ fn spawn_outdated_daemon_check(api: DesktopApi) {
         }
     });
 }
-
-/// Identity of the helper executable captured at startup, used to notice
-/// in-place app updates while the helper keeps running the old code.
-fn startup_binary_identity() -> Option<BinaryIdentity> {
-    BinaryIdentity::current_executable()
-}
-
-/// Exits the helper once its on-disk binary was replaced (app update) and no
-/// request is in flight, so the launchd `KeepAlive` supervisor respawns it on
-/// the new build without any user action.
-#[cfg(target_os = "macos")]
-fn recycle_when_binary_updated(startup_binary: &Option<BinaryIdentity>, in_flight: usize) {
-    let Some(startup) = startup_binary else {
-        return;
-    };
-    if in_flight > 0 {
-        return;
-    }
-
-    // A missing or unreadable binary is not an update in progress we can
-    // recover from by exiting; stay alive and keep serving.
-    let Some(current) = BinaryIdentity::of(&startup.path) else {
-        return;
-    };
-
-    if current != *startup {
-        eprintln!(
-            "{} helper binary was updated on disk; exiting so launchd restarts it on the new build.",
-            BRANDING.app_name
-        );
-        std::process::exit(0);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn recycle_when_binary_updated(_startup_binary: &Option<BinaryIdentity>, _in_flight: usize) {}
 
 fn handle_connection(
     stream: UnixStream,
@@ -754,7 +683,10 @@ fn handle_connection(
         BRANDING.app_name
     ))?;
 
-    if matches!(command, HelperCommand::RelaunchHelper) {
+    if matches!(
+        command,
+        HelperCommand::RelaunchHelper | HelperCommand::RemoveService
+    ) {
         let response = HelperResponse {
             ok: true,
             error: None,
@@ -764,8 +696,15 @@ fn handle_connection(
         writer.write_all(serde_json::to_string(&response)?.as_bytes())?;
         writer.write_all(b"\n")?;
         writer.flush()?;
-        // The supervisor (launchd KeepAlive) respawns the helper from the
-        // binary at the service path, picking up in-place updates.
+        if matches!(command, HelperCommand::RemoveService) {
+            spawn_service_removal(config_path, allowed_uid)?;
+            // launchd stops this process during the removal, and exiting first
+            // would only make KeepAlive respawn it.
+            if cfg!(target_os = "macos") {
+                return Ok(());
+            }
+        }
+        // The supervisor (launchd KeepAlive) respawns the helper.
         std::process::exit(0);
     }
 
@@ -795,6 +734,27 @@ fn handle_connection(
     writer.write_all(serde_json::to_string(&response)?.as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()?;
+    Ok(())
+}
+
+/// Runs the removal in its own process group, because launchd kills the
+/// helper's group when it stops the service.
+fn spawn_service_removal(config_path: &Path, allowed_uid: u32) -> Result<()> {
+    let executable = std::env::current_exe().context(format!(
+        "Failed to resolve the {} executable path",
+        BRANDING.slug()
+    ))?;
+    let _child = Command::new(executable)
+        .arg("--config")
+        .arg(config_path)
+        .args(["helper", "uninstall-service", "--uid"])
+        .arg(allowed_uid.to_string())
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to start the system helper removal")?;
     Ok(())
 }
 
@@ -884,8 +844,9 @@ fn chown_path_to_uid(path: &Path, uid: u32) -> Result<()> {
 
 fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_json::Value> {
     match command {
-        // Handled in handle_connection so the reply is flushed before exiting.
-        HelperCommand::Ping | HelperCommand::RelaunchHelper => {
+        // The last two are handled in handle_connection so the reply is flushed
+        // before the helper stops.
+        HelperCommand::Ping | HelperCommand::RelaunchHelper | HelperCommand::RemoveService => {
             serde_json::to_value(true).map_err(Into::into)
         }
         HelperCommand::GetBootstrap => serde_json::to_value(api.bootstrap()?).map_err(Into::into),
@@ -915,15 +876,6 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
         }
         HelperCommand::CreateProjectWithDomains { request } => {
             serde_json::to_value(api.create_project_with_domains(request)?).map_err(Into::into)
-        }
-        HelperCommand::ExportSettings { request } => {
-            serde_json::to_value(api.export_settings(request)?).map_err(Into::into)
-        }
-        HelperCommand::PreviewSettingsImport { request } => {
-            serde_json::to_value(api.preview_settings_import(request)?).map_err(Into::into)
-        }
-        HelperCommand::ImportSettings { request } => {
-            serde_json::to_value(api.import_settings(request)?).map_err(Into::into)
         }
         HelperCommand::InitProject { request } => {
             serde_json::to_value(api.init_project(request)?).map_err(Into::into)
@@ -1053,27 +1005,25 @@ mod tests {
     use super::*;
     use crate::desktop::dto::DomainPatternRequest;
 
+    /// These took a file path and made root read or write it, for any caller
+    /// holding the socket. The app does this work in its own process instead.
     #[test]
-    fn binary_identity_changes_when_file_is_replaced() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("localify");
-        fs::write(&path, b"build-1").unwrap();
-        let before = BinaryIdentity::of(&path).unwrap();
-
-        assert_eq!(BinaryIdentity::of(&path).unwrap(), before);
-
-        fs::remove_file(&path).unwrap();
-        fs::write(&path, b"build-2-longer").unwrap();
-        let after = BinaryIdentity::of(&path).unwrap();
-
-        assert_ne!(after, before);
+    fn the_socket_does_not_accept_root_file_transfer_commands() {
+        for command in [
+            r#"{"cmd":"exportSettings","request":{"filePath":"/etc/zshenv","mode":"all"}}"#,
+            r#"{"cmd":"previewSettingsImport","request":{"filePath":"/etc/master.passwd"}}"#,
+            r#"{"cmd":"importSettings","request":{"filePath":"/tmp/x","mode":"replaceAll"}}"#,
+        ] {
+            assert!(serde_json::from_str::<HelperCommand>(command).is_err());
+        }
     }
 
     #[test]
-    fn binary_identity_is_none_for_missing_files() {
-        let dir = tempfile::tempdir().unwrap();
+    fn the_socket_accepts_the_remove_service_command() {
+        let command = serde_json::from_str::<HelperCommand>(r#"{"cmd":"removeService"}"#).unwrap();
 
-        assert!(BinaryIdentity::of(&dir.path().join("missing")).is_none());
+        assert!(matches!(command, HelperCommand::RemoveService));
+        assert!(!command.may_write_config());
     }
 
     #[test]

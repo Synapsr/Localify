@@ -138,18 +138,6 @@ impl From<LocalifyPaths> for LocalifyPathsDto {
     }
 }
 
-impl From<LocalifyPathsDto> for LocalifyPaths {
-    fn from(value: LocalifyPathsDto) -> Self {
-        Self {
-            data_dir: value.data_dir.into(),
-            pid_file: value.pid_file.into(),
-            log_file: value.log_file.into(),
-            certs_dir: value.certs_dir.into(),
-            socket_path: value.socket_path.into(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerConfigDto {
@@ -217,7 +205,6 @@ pub struct AppConfigDto {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigUpdateRequest {
     pub daemon: Option<DaemonConfigDto>,
-    pub paths: Option<LocalifyPathsDto>,
     pub docker: Option<DockerConfigDto>,
     pub agent: Option<AgentConfigDto>,
 }

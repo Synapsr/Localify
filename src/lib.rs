@@ -7,3 +7,4 @@ pub mod domain;
 pub mod infrastructure;
 pub mod project_init;
 pub mod system_helper;
+pub mod system_helper_binary;

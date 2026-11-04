@@ -86,15 +86,41 @@ localify-dev services list
 localify-dev run web
 ```
 
+## System Helper
+
+On macOS, launchd runs the helper as root from a copy of the CLI at
+`/Library/PrivilegedHelperTools/dev.localify.helper.<uid>`, owned by `root:wheel` with mode `0755`.
+The helper starts the daemon from that same file. The service never points at the app bundle or a
+CLI install, because those usually belong to the user and any process of that user could replace
+them.
+
+Only `helper ensure-running`, run as administrator, writes the copy. The file is written next to its
+destination and renamed into place, and the command refuses a destination that is a link or that
+another user could change. `helper uninstall-service` and `localify uninstall` remove it.
+
+The helper does not update itself. A root process copying a binary from a user-writable path would
+reopen the hole, so each new binary needs the administrator's approval. The approval covers whatever
+is at the app's path when it is given: replacing the app before the prompt still gets that file
+installed.
+
+The dev profile has its own copy, `dev.localify-dev.helper.<uid>`, and a debug build refuses to
+install the production helper. Rebuilding the CLI makes the dev helper stale, so the next launch of
+the dev app asks for the password once.
+
 ## Updates
 
-- **In-app update:** it records whether the daemon was running and restarts it after the relaunch.
-- **Any other replacement** (DMG, manual copy): the system helper restarts on the new build and
-  compares the daemon's binary with the installed one. The daemon reports its canonical path, inode,
-  size and modification time in its management `status`. The helper restarts a daemon running an older
-  build of the same install, and leaves a daemon started from another binary (a dev build) alone.
+- **Any new binary** (in-app update, DMG, manual copy): on its next launch the app compares its
+  binary with the helper's copy. If they differ, or the service was installed by an older version and
+  still runs the app's path, it asks once for the administrator password and runs
+  `helper ensure-running`. If that is declined, the helper keeps its build and the app asks again on
+  the next launch.
+- **In-app update:** it also records whether the daemon was running and restarts it after the relaunch.
+- **Daemon:** when the helper starts, it compares the daemon's binary with its own. The daemon reports
+  its canonical path, inode, size and modification time in its management `status`. The helper
+  restarts a daemon running an older build of the same file, or running from a file other users could
+  change, and leaves a daemon started from another root-protected binary alone.
 - **Process group:** the helper starts the daemon in its own process group, so launchd does not stop
-  the daemon when the helper recycles itself after an update.
+  the daemon when the helper is replaced.
 
 ## Launch at Login
 

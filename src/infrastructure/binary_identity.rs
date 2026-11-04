@@ -105,6 +105,13 @@ mod tests {
     }
 
     #[test]
+    fn missing_files_have_no_identity() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(BinaryIdentity::of(&dir.path().join("missing")).is_none());
+    }
+
+    #[test]
     fn symlinks_resolve_to_the_same_identity() {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("localify");

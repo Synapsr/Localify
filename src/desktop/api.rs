@@ -92,8 +92,10 @@ use crate::project_init::{
     resolve_folder_init_selection,
 };
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
+use crate::system_helper_binary::{binary_is_root_protected, helper_binary_path};
+#[cfg(target_os = "macos")]
+use crate::system_helper_binary::{helper_service_is_current, helper_service_uses_root_copy};
 
-const CLI_INSTALL_DIR: &str = "/usr/local/bin";
 const SETTINGS_TRANSFER_VERSION: u32 = 1;
 const SETTINGS_TRANSFER_SCOPE_ALL: &str = "all";
 const SETTINGS_TRANSFER_SCOPE_PROJECTS: &str = "projects";
@@ -308,9 +310,6 @@ impl DesktopApi {
 
         if let Some(daemon) = request.daemon {
             config.daemon = daemon.into();
-        }
-        if let Some(paths) = request.paths {
-            config.paths = paths.into();
         }
         if let Some(docker) = request.docker {
             config.docker = docker.into();
@@ -1785,7 +1784,6 @@ impl DesktopApi {
         let applied_settings = if let Some(settings) = snapshot.settings.clone() {
             self.update_config(ConfigUpdateRequest {
                 daemon: Some(settings.daemon),
-                paths: None,
                 docker: Some(settings.docker),
                 agent: Some(settings.agent),
             })?;
@@ -2139,9 +2137,12 @@ impl DesktopApi {
             if let Some(step) = self.node_trust_step() {
                 steps.push(step);
             }
-        }
-        if let Some(step) = agent_skill_install_step(config.agent.install_skill) {
-            steps.push(step);
+            // Never in direct mode: the root helper must not run `npx` from a
+            // user-writable directory. `install_with_system_helper` runs this
+            // step as the user instead.
+            if let Some(step) = agent_skill_install_step(config.agent.install_skill) {
+                steps.push(step);
+            }
         }
 
         Ok(InstallResultDto {
@@ -2366,11 +2367,11 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
-        if !self.direct_mode {
-            steps.push(self.remove_cli_access_step());
-            if let Some(step) = self.remove_node_trust_step() {
-                steps.push(step);
-            }
+        steps.push(self.remove_cli_access_step());
+        if !self.direct_mode
+            && let Some(step) = self.remove_node_trust_step()
+        {
+            steps.push(step);
         }
 
         Ok(UninstallResultDto { steps })
@@ -2710,7 +2711,20 @@ impl DesktopApi {
             None => pid.and_then(process_executable),
         };
 
-        let check = check_daemon_binary(&installed, reported.as_ref(), reported_path.as_deref());
+        let mut check =
+            check_daemon_binary(&installed, reported.as_ref(), reported_path.as_deref());
+        let running_path = reported
+            .as_ref()
+            .map(|identity| identity.path.as_path())
+            .or(reported_path.as_deref());
+        // A helper from before the root-owned copy started this daemon from the
+        // installed app. Move it to the copy instead of leaving it there.
+        if cfg!(target_os = "macos")
+            && check == DaemonBinaryCheck::OtherInstall
+            && running_path.is_some_and(|path| !binary_is_root_protected(path))
+        {
+            check = DaemonBinaryCheck::Outdated;
+        }
         if check == DaemonBinaryCheck::Outdated {
             self.restart_daemon(StartDaemonRequest { verbose: false })?;
         }
@@ -2799,8 +2813,8 @@ impl DesktopApi {
 
         let mut cmd = Command::new(&self.binary_path);
         // Own process group: launchd kills the helper's group when the helper
-        // exits (it recycles itself after every update), and the daemon must
-        // survive that.
+        // exits (a relaunch or a new helper binary), and the daemon must survive
+        // that.
         cmd.process_group(0);
         cmd.arg("--config")
             .arg(&self.config_path)
@@ -2997,12 +3011,18 @@ impl DesktopApi {
         self.connected_helper_client().ok().flatten().is_some()
     }
 
+    /// The root helper links the command to its own root-owned copy, which is a
+    /// different file from the app's binary.
     fn cli_access_ready(&self) -> bool {
-        cli_command_points_to_binary(&self.cli_command_path(), &self.binary_path)
+        let command_path = self.cli_command_path();
+        cli_command_points_to_binary(&command_path, &self.binary_path)
+            || current_uid().is_ok_and(|uid| {
+                cli_command_points_to_binary(&command_path, &helper_binary_path(uid))
+            })
     }
 
     fn cli_command_path(&self) -> PathBuf {
-        PathBuf::from(CLI_INSTALL_DIR).join(BRANDING.cli_command())
+        BRANDING.cli_link_path()
     }
 
     fn install_cli_access(&self) -> Result<CliAccessDto> {
@@ -3240,14 +3260,13 @@ impl DesktopApi {
 
         self.refresh_outdated_helper_once(&client);
 
-        if self.helper_matches_binary_path()? && self.helper_matches_runtime_config(&client)? {
+        if self.helper_uses_root_copy()? && self.helper_matches_runtime_config(&client)? {
             return Ok(Some(client));
         }
 
         eprintln!(
-            "ignoring running {} helper because it does not match the current runtime at {}",
-            BRANDING.app_name,
-            self.binary_path.display()
+            "ignoring running {} helper because it was installed by an older version or uses another config",
+            BRANDING.app_name
         );
         Ok(None)
     }
@@ -3255,11 +3274,12 @@ impl DesktopApi {
     fn ensure_helper_running(&self) -> Result<SystemHelperClient> {
         let socket_path = self.helper_socket_path()?;
         let client = SystemHelperClient::new(socket_path.clone());
-        if client.ping().is_ok() {
+        // A service from an older version is migrated by the prompt below.
+        if client.ping().is_ok() && self.helper_uses_root_copy()? {
             self.refresh_outdated_helper_once(&client);
         }
         if client.ping().is_ok()
-            && self.helper_matches_binary_path()?
+            && self.helper_uses_root_copy()?
             && self.helper_matches_runtime_config(&client)?
         {
             return Ok(client);
@@ -3293,12 +3313,11 @@ impl DesktopApi {
         )
     }
 
-    /// Detects, once per app process, a helper that kept running a previous
-    /// build after an in-place app update (its process predates the binary on
-    /// disk) and refreshes it: silently for helpers that support relaunching,
-    /// with a single automatic administrator prompt for legacy helpers that
-    /// predate the relaunch command. Without this, users would have to run
-    /// `launchctl kickstart` by hand after updating.
+    /// Migrates a helper installed by an older version and updates one left
+    /// behind by an app update, once per app process. Root runs a copy of the
+    /// binary that only an administrator can replace, so this asks for
+    /// administrator approval; if it is refused, the helper keeps running what
+    /// it has until the next launch.
     #[cfg(target_os = "macos")]
     fn refresh_outdated_helper_once(&self, client: &SystemHelperClient) {
         use std::sync::OnceLock;
@@ -3320,35 +3339,12 @@ impl DesktopApi {
 
     #[cfg(target_os = "macos")]
     fn refresh_outdated_helper(&self, client: &SystemHelperClient) -> Result<()> {
-        let socket_path = self.helper_socket_path()?;
-        let Some(started_at) = helper_process_started_at(&socket_path) else {
-            return Ok(());
-        };
-        let binary_path =
-            fs::canonicalize(&self.binary_path).unwrap_or_else(|_| self.binary_path.clone());
-        let Ok(modified) = fs::metadata(&binary_path).and_then(|metadata| metadata.modified())
-        else {
-            return Ok(());
-        };
-        if modified <= started_at {
-            return Ok(());
-        }
-        if !self.helper_matches_binary_path()? {
-            // The service points at another binary; the mutation paths own
-            // that case with a full reinstall.
-            return Ok(());
-        }
-
-        // Helpers that know the relaunch command recycle without credentials.
-        if client.relaunch_helper().is_ok() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            wait_for_helper_ping(client);
-            return Ok(());
-        }
-
-        // Legacy helper from before the relaunch command: refresh it with a
-        // single automatic administrator prompt.
         let uid = current_uid()?;
+        if helper_service_is_current(uid, &self.binary_path)? {
+            return Ok(());
+        }
+
+        let socket_path = self.helper_socket_path()?;
         self.run_cli_command_with_admin(&[
             "helper".into(),
             "ensure-running".into(),
@@ -3361,21 +3357,20 @@ impl DesktopApi {
         Ok(())
     }
 
-    /// Recovers a stale or unreachable helper without an administrator prompt
-    /// when the launchd service already points at the current binary: the
-    /// helper is asked to exit (or has already exited) and launchd's
-    /// `KeepAlive` respawns it from the same path, picking up in-place app
-    /// updates. Returns whether the helper became healthy.
+    /// Recovers a stuck or unreachable helper without an administrator prompt
+    /// when the launchd service already runs this build from the root-owned
+    /// copy: the helper is asked to exit (or has already exited) and launchd's
+    /// `KeepAlive` respawns it from the same file. Returns whether the helper
+    /// became healthy. A stale copy needs the administrator path instead.
     #[cfg(target_os = "macos")]
     fn recover_helper_without_admin(&self, client: &SystemHelperClient) -> Result<bool> {
-        if !self.helper_matches_binary_path()? {
+        if !helper_service_is_current(current_uid()?, &self.binary_path)? {
             return Ok(false);
         }
 
         if client.ping().is_ok() {
             if client.relaunch_helper().is_err() {
-                // A helper too old to know the relaunch command cannot recycle
-                // itself; fall back to the administrator prompt.
+                // A helper that cannot relaunch needs the administrator prompt.
                 return Ok(false);
             }
             // Give the acknowledged exit a moment so the poll below observes
@@ -3444,33 +3439,12 @@ impl DesktopApi {
     }
 
     #[cfg(target_os = "macos")]
-    fn helper_matches_binary_path(&self) -> Result<bool> {
-        let uid = current_uid()?;
-        let plist_path = PathBuf::from("/Library/LaunchDaemons").join(format!(
-            "{}.{}.plist",
-            BRANDING.helper_service_prefix(),
-            uid
-        ));
-
-        if !plist_path.exists() {
-            return Ok(false);
-        }
-
-        let plist = fs::read_to_string(&plist_path).with_context(|| {
-            format!(
-                "Failed to read the {} helper plist at {}",
-                BRANDING.app_name,
-                plist_path.display()
-            )
-        })?;
-
-        let expected_binary =
-            fs::canonicalize(&self.binary_path).unwrap_or_else(|_| self.binary_path.clone());
-        Ok(plist.contains(&escape_xml(&expected_binary.display().to_string())))
+    fn helper_uses_root_copy(&self) -> Result<bool> {
+        helper_service_uses_root_copy(current_uid()?)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn helper_matches_binary_path(&self) -> Result<bool> {
+    fn helper_uses_root_copy(&self) -> Result<bool> {
         Ok(true)
     }
 
@@ -4160,60 +4134,6 @@ fn wait_for_helper_ping(client: &SystemHelperClient) -> bool {
     false
 }
 
-/// Returns when the helper process serving the given socket started, derived
-/// from `ps` elapsed time. `None` when the process cannot be identified.
-#[cfg(target_os = "macos")]
-fn helper_process_started_at(socket_path: &Path) -> Option<SystemTime> {
-    let pattern = format!("helper serve --socket {}", socket_path.display());
-    let output = Command::new("pgrep")
-        .arg("-f")
-        .arg(&pattern)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pid = stdout.lines().next()?.trim();
-    if pid.is_empty() {
-        return None;
-    }
-
-    let output = Command::new("ps")
-        .args(["-o", "etime=", "-p", pid])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let elapsed = parse_ps_etime(String::from_utf8_lossy(&output.stdout).trim())?;
-    SystemTime::now().checked_sub(elapsed)
-}
-
-/// Parses `ps -o etime=` values shaped as `[[dd-]hh:]mm:ss`.
-#[cfg(target_os = "macos")]
-fn parse_ps_etime(value: &str) -> Option<Duration> {
-    let (days, clock) = match value.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, value),
-    };
-
-    let parts = clock.split(':').collect::<Vec<_>>();
-    let (hours, minutes, seconds): (u64, u64, u64) = match parts.as_slice() {
-        [hours, minutes, seconds] => (
-            hours.parse().ok()?,
-            minutes.parse().ok()?,
-            seconds.parse().ok()?,
-        ),
-        [minutes, seconds] => (0, minutes.parse().ok()?, seconds.parse().ok()?),
-        _ => return None,
-    };
-
-    Some(Duration::from_secs(
-        ((days * 24 + hours) * 60 + minutes) * 60 + seconds,
-    ))
-}
-
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn command_output(output: &std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -4523,16 +4443,6 @@ fn map_node_trust_dto(
         launchctl_ready: status.launchctl_ready,
         last_error,
     }
-}
-
-#[cfg(target_os = "macos")]
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 #[cfg(target_os = "macos")]
@@ -7096,6 +7006,39 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
+    /// Through the root helper this would let any process of the user choose
+    /// which files root reads, writes, truncates or deletes.
+    #[test]
+    fn update_config_cannot_change_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        let api = DesktopApi::new_direct(config_path.clone(), temp_dir.path().join("localify"));
+        let before = ConfigStore::new(config_path.clone()).load().unwrap().paths;
+        let request = serde_json::from_value(serde_json::json!({
+            "paths": {
+                "dataDir": "/",
+                "pidFile": "/etc/zshenv",
+                "logFile": "/etc/sudoers",
+                "certsDir": "/etc",
+                "socketPath": "/etc/localify.sock"
+            }
+        }))
+        .unwrap();
+
+        let updated = api.update_config(request).unwrap();
+
+        let after = ConfigStore::new(config_path).load().unwrap().paths;
+        assert_eq!(after.log_file, before.log_file);
+        assert_eq!(after.pid_file, before.pid_file);
+        assert_eq!(after.data_dir, before.data_dir);
+        assert_eq!(after.certs_dir, before.certs_dir);
+        assert_eq!(after.socket_path, before.socket_path);
+        assert_eq!(
+            updated.paths.log_file,
+            before.log_file.display().to_string()
+        );
+    }
+
     #[test]
     fn parse_desktop_route_defaults_bare_target_to_root_path() {
         let route = parse_desktop_route("3000").unwrap();
@@ -8832,27 +8775,6 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
 
         let registration = store.get_domain(&pattern).unwrap().unwrap();
         assert!(!registration.is_https_enabled());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn parse_ps_etime_handles_all_ps_formats() {
-        use super::parse_ps_etime;
-
-        assert_eq!(
-            parse_ps_etime("05:41"),
-            Some(Duration::from_secs(5 * 60 + 41))
-        );
-        assert_eq!(
-            parse_ps_etime("02:03:04"),
-            Some(Duration::from_secs((2 * 60 + 3) * 60 + 4))
-        );
-        assert_eq!(
-            parse_ps_etime("20638-15:19:49"),
-            Some(Duration::from_secs(((20638 * 24 + 15) * 60 + 19) * 60 + 49))
-        );
-        assert_eq!(parse_ps_etime(""), None);
-        assert_eq!(parse_ps_etime("garbage"), None);
     }
 
     #[test]

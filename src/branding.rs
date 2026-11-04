@@ -167,6 +167,11 @@ impl Branding {
         self.slug()
     }
 
+    /// Where the desktop app links the terminal command.
+    pub fn cli_link_path(&self) -> PathBuf {
+        PathBuf::from("/usr/local/bin").join(self.cli_command())
+    }
+
     pub fn runtime_desktop_name(&self) -> String {
         if cfg!(debug_assertions) {
             format!("{} (Dev)", self.desktop_name)

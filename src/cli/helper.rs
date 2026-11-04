@@ -13,9 +13,15 @@ use anyhow::{Context, Result, bail};
 
 use localify::branding::BRANDING;
 use localify::desktop::DesktopApi;
-use localify::system_helper::{SystemHelperClient, helper_socket_path, serve};
+use localify::system_helper::{SystemHelperClient, current_uid, helper_socket_path, serve};
+#[cfg(not(target_os = "macos"))]
+use localify::system_helper_binary::binary_is_root_protected;
 #[cfg(target_os = "macos")]
-const LAUNCHD_PLIST_DIR: &str = "/Library/LaunchDaemons";
+use localify::system_helper_binary::{
+    ensure_build_may_install_helper, helper_binary_path, helper_plist_path,
+    helper_service_is_current, helper_service_label, install_helper_binary, installed_helper_uids,
+    launchd_plist_contents, remove_if_present,
+};
 
 pub fn ensure_running(config_path: &Path, socket: PathBuf, uid: u32) -> Result<()> {
     let client = SystemHelperClient::new(socket.clone());
@@ -32,6 +38,8 @@ pub fn serve_forever(config_path: &Path, uid: u32, socket: PathBuf) -> Result<()
         "Failed to resolve the {} executable path",
         BRANDING.slug()
     ))?;
+    #[cfg(not(target_os = "macos"))]
+    ensure_root_runs_protected_binary(&binary_path)?;
     let api = DesktopApi::new_direct(config_path.to_path_buf(), binary_path);
     serve(&socket, uid, config_path, &api)
 }
@@ -48,6 +56,58 @@ pub fn uninstall_service(uid: u32) -> Result<()> {
         let _ = fs::remove_file(socket_path);
         Ok(())
     }
+}
+
+/// Removes every installed helper, for `sudo localify uninstall`. Does nothing
+/// without root, for example when uninstalling a custom user-owned config.
+pub fn uninstall_all_services() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if current_uid()? != 0 {
+            return Ok(());
+        }
+        let cli_link = BRANDING.cli_link_path();
+        let cli_target = fs::read_link(&cli_link).ok();
+        for uid in installed_helper_uids()? {
+            uninstall_launchd_service(uid)?;
+            if cli_target.as_deref() == Some(helper_binary_path(uid).as_path()) {
+                remove_if_present(&cli_link).with_context(|| {
+                    format!("Failed to remove the CLI link at {}", cli_link.display())
+                })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Asks the running helper to remove its own service, for `localify uninstall`
+/// without sudo, and waits until it is gone.
+pub fn remove_service_through_helper(client: &SystemHelperClient) -> Result<()> {
+    let uid = current_uid()?;
+    client.remove_service()?;
+    for _ in 0..50 {
+        if helper_service_is_gone(client, uid) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    bail!(
+        "The {} system helper did not remove itself. Run: sudo {} helper uninstall-service --uid {uid}",
+        BRANDING.app_name,
+        BRANDING.cli_command()
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn helper_service_is_gone(_client: &SystemHelperClient, uid: u32) -> bool {
+    !helper_plist_path(uid).exists() && !helper_binary_path(uid).exists()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn helper_service_is_gone(client: &SystemHelperClient, _uid: u32) -> bool {
+    client.ping().is_err()
 }
 
 fn wait_for_helper(client: &SystemHelperClient) -> Result<()> {
@@ -80,6 +140,7 @@ fn spawn_helper_process(config_path: &Path, socket: &Path, uid: u32) -> Result<(
         "Failed to resolve the {} executable path",
         BRANDING.slug()
     ))?;
+    ensure_root_runs_protected_binary(&executable)?;
     let child = Command::new(executable)
         .arg("--config")
         .arg(config_path)
@@ -106,15 +167,35 @@ fn spawn_helper_process(config_path: &Path, socket: &Path, uid: u32) -> Result<(
     Ok(())
 }
 
+/// Without launchd, a root helper still restarts the daemon from its own path,
+/// so it must not start from a file another user could replace.
+#[cfg(not(target_os = "macos"))]
+fn ensure_root_runs_protected_binary(executable: &Path) -> Result<()> {
+    if current_uid()? == 0 && !binary_is_root_protected(executable) {
+        bail!(
+            "Refusing to run the {} system helper as root from '{}': a non-root user could replace it.\n\
+             Install {} in a directory only root can write to, or run the helper without sudo.",
+            BRANDING.app_name,
+            executable.display(),
+            BRANDING.cli_command()
+        );
+    }
+    Ok(())
+}
+
+/// Runs only as root, from an administrator-approved command.
 #[cfg(target_os = "macos")]
 fn install_launchd_service(config_path: &Path, socket: &Path, uid: u32) -> Result<()> {
+    ensure_build_may_install_helper()?;
     let executable = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
         BRANDING.slug()
     ))?;
-    let plist_path = launchd_plist_path(uid);
+    install_helper_binary(&executable, uid)?;
+
+    let plist_path = helper_plist_path(uid);
     let label = helper_service_label(uid);
-    let plist = launchd_plist_contents(&label, &executable, config_path, socket, uid);
+    let plist = launchd_plist_contents(config_path, socket, uid);
 
     fs::write(&plist_path, plist).with_context(|| {
         format!(
@@ -139,18 +220,19 @@ fn install_launchd_service(config_path: &Path, socket: &Path, uid: u32) -> Resul
 #[cfg(target_os = "macos")]
 fn uninstall_launchd_service(uid: u32) -> Result<()> {
     let label = helper_service_label(uid);
-    let plist_path = launchd_plist_path(uid);
+    let plist_path = helper_plist_path(uid);
+    let binary_path = helper_binary_path(uid);
     let socket_path = helper_socket_path(uid);
     let service_target = format!("system/{label}");
 
     let _ = run_launchctl(&["bootout", &service_target]);
 
-    if plist_path.exists() {
-        fs::remove_file(&plist_path).with_context(|| {
+    for path in [&plist_path, &binary_path] {
+        remove_if_present(path).with_context(|| {
             format!(
-                "Failed to remove the {} helper plist at {}",
+                "Failed to remove the {} helper file at {}",
                 BRANDING.app_name,
-                plist_path.display()
+                path.display()
             )
         })?;
     }
@@ -194,172 +276,16 @@ fn command_output(output: &std::process::Output) -> Option<String> {
     }
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn helper_service_label(uid: u32) -> String {
-    format!("{}.{uid}", BRANDING.helper_service_prefix())
-}
-
-#[cfg(target_os = "macos")]
-fn launchd_plist_path(uid: u32) -> PathBuf {
-    PathBuf::from(LAUNCHD_PLIST_DIR).join(format!("{}.plist", helper_service_label(uid)))
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn launchd_plist_contents(
-    label: &str,
-    executable: &Path,
-    config_path: &Path,
-    socket: &Path,
-    uid: u32,
-) -> String {
-    let args = [
-        executable.to_string_lossy().to_string(),
-        "--config".into(),
-        config_path.to_string_lossy().to_string(),
-        "helper".into(),
-        "serve".into(),
-        "--socket".into(),
-        socket.to_string_lossy().to_string(),
-        "--uid".into(),
-        uid.to_string(),
-    ];
-
-    let program_arguments = args
-        .iter()
-        .map(|arg| format!("    <string>{}</string>", escape_xml(arg)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let environment_variables = launchd_environment_variables();
-
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>{}</string>
-  <key>ProgramArguments</key>
-  <array>
-{}
-  </array>
-{}
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>1</integer>
-</dict>
-</plist>
-"#,
-        escape_xml(label),
-        program_arguments,
-        environment_variables,
-    )
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn launchd_environment_variables() -> String {
-    let Some(profile) = BRANDING.active_profile() else {
-        return String::new();
-    };
-
-    format!(
-        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>",
-        escape_xml(BRANDING.profile_env()),
-        escape_xml(&profile)
-    )
-}
-
 #[cfg(target_os = "macos")]
 fn helper_matches_current_executable(uid: u32) -> Result<bool> {
-    let plist_path = launchd_plist_path(uid);
-    if !plist_path.exists() {
-        return Ok(false);
-    }
-
-    let plist = fs::read_to_string(&plist_path).with_context(|| {
-        format!(
-            "Failed to read the {} helper plist at {}",
-            BRANDING.app_name,
-            plist_path.display()
-        )
-    })?;
     let executable = env::current_exe().context(format!(
         "Failed to resolve the {} executable path",
         BRANDING.slug()
     ))?;
-    let expected = fs::canonicalize(&executable).unwrap_or(executable);
-
-    Ok(plist_contains_executable(&plist, &expected))
+    helper_service_is_current(uid, &executable)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn helper_matches_current_executable(_uid: u32) -> Result<bool> {
     Ok(true)
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn plist_contains_executable(plist: &str, executable: &Path) -> bool {
-    plist.contains(&escape_xml(&executable.display().to_string()))
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{helper_service_label, launchd_plist_contents, plist_contains_executable};
-    use std::path::Path;
-
-    #[test]
-    fn helper_service_label_is_uid_scoped() {
-        assert_eq!(helper_service_label(501), "dev.localify.helper.501");
-    }
-
-    #[test]
-    fn launchd_plist_contains_expected_program_arguments() {
-        let plist = launchd_plist_contents(
-            "dev.localify.helper.501",
-            Path::new("/Applications/Localify.app/Contents/MacOS/localify"),
-            Path::new("/etc/localify/config.toml"),
-            Path::new("/var/run/localify-helper-501.sock"),
-            501,
-        );
-
-        assert!(plist.contains("<string>dev.localify.helper.501</string>"));
-        assert!(
-            plist.contains("<string>/Applications/Localify.app/Contents/MacOS/localify</string>")
-        );
-        assert!(plist.contains("<string>--config</string>"));
-        assert!(plist.contains("<string>/etc/localify/config.toml</string>"));
-        assert!(plist.contains("<string>helper</string>"));
-        assert!(plist.contains("<string>serve</string>"));
-        assert!(plist.contains("<string>--socket</string>"));
-        assert!(plist.contains("<string>/var/run/localify-helper-501.sock</string>"));
-        assert!(plist.contains("<string>--uid</string>"));
-        assert!(plist.contains("<string>501</string>"));
-        assert!(plist.contains("<key>ThrottleInterval</key>"));
-    }
-
-    #[test]
-    fn plist_contains_executable_matches_xml_escaped_path() {
-        let executable = Path::new("/Applications/Localify & Dev.app/Contents/MacOS/localify");
-        let plist = launchd_plist_contents(
-            "dev.localify.helper.501",
-            executable,
-            Path::new("/etc/localify/config.toml"),
-            Path::new("/var/run/localify-helper-501.sock"),
-            501,
-        );
-
-        assert!(plist_contains_executable(&plist, executable));
-    }
 }

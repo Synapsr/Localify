@@ -29,6 +29,7 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         println!("  - All registered domains ({})", preview.domain_count);
         println!("  - All SSL certificates from system trust store");
         println!("  - All data in {}/", preview.data_dir);
+        println!("  - The system helper");
         println!("\nRun with --force to confirm, or press Ctrl+C to cancel.");
         return Ok(());
     }
@@ -43,6 +44,10 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
             } else {
                 println!("  {}: {}", label, step.message);
             }
+        }
+        match super::helper::remove_service_through_helper(&client) {
+            Ok(()) => println!("  Remove system helper: Removed the system helper."),
+            Err(error) => eprintln!("  Remove system helper: {error}"),
         }
         println!("\nLocalify uninstallation complete!");
         println!("All configuration and certificates have been removed.");
@@ -59,6 +64,9 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
             StepOutcome::Warning(msg) => eprintln!("  {}: {}", label, msg),
             StepOutcome::Skipped(msg) => println!("  {}: {}", label, msg),
         }
+    }
+    if let Err(error) = super::helper::uninstall_all_services() {
+        eprintln!("  Remove system helper: {error}");
     }
 
     println!("\nLocalify uninstallation complete!");
