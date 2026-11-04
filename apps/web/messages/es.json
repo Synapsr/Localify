@@ -289,7 +289,7 @@
       {
         "title": "8. Conservación",
         "body": [
-          "Guardamos los correos de soporte mientras sean útiles para el soporte y después los eliminamos. Los datos de analytics y los logs de servidor permanecen en los proveedores mencionados, según los ajustes de conservación de cada servicio. Los registros de licencia existentes permanecen en el proveedor hasta que se eliminen a petición."
+          "Guardamos los correos de soporte mientras sean útiles para el soporte y después los eliminamos. PostHog conserva los eventos de analytics hasta 7 años, el periodo que fija nuestro plan y que no podemos acortar, y las grabaciones de sesión, si las activas, hasta 3 meses. Los datos de Umami se conservan mientras exista el proyecto, salvo que los eliminemos antes. Los logs de servidor permanecen en los proveedores mencionados, según los ajustes de conservación de cada servicio. Los registros de licencia existentes permanecen en el proveedor hasta que se eliminen a petición."
         ]
       },
       {

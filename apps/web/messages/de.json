@@ -289,7 +289,7 @@
       {
         "title": "8. Speicherdauer",
         "body": [
-          "Support-E-Mails behalten wir, solange sie für den Support nützlich sind, und löschen sie dann. Analytics-Daten und Server-Logs bleiben bei den oben genannten Dienstleistern, gemäß den Aufbewahrungseinstellungen des jeweiligen Dienstes. Bestehende Lizenzdatensätze bleiben beim Anbieter, bis sie auf Anfrage gelöscht werden."
+          "Support-E-Mails behalten wir, solange sie für den Support nützlich sind, und löschen sie dann. PostHog speichert Analytics-Ereignisse bis zu 7 Jahre, die Dauer unseres Tarifs, die wir nicht verkürzen können, und Session-Aufzeichnungen, falls du sie aktivierst, bis zu 3 Monate. Umami-Daten bleiben gespeichert, solange das Projekt besteht, sofern wir sie nicht früher löschen. Server-Logs bleiben bei den oben genannten Dienstleistern, gemäß den Aufbewahrungseinstellungen des jeweiligen Dienstes. Bestehende Lizenzdatensätze bleiben beim Anbieter, bis sie auf Anfrage gelöscht werden."
         ]
       },
       {

@@ -289,7 +289,7 @@
       {
         "title": "8. Retenção",
         "body": [
-          "Guardamos os e-mails de suporte enquanto forem úteis para o suporte e depois os excluímos. Os dados de analytics e os logs de servidor ficam com os provedores acima, conforme as configurações de retenção de cada serviço. Os registros de licença existentes ficam com o provedor até serem excluídos mediante solicitação."
+          "Guardamos os e-mails de suporte enquanto forem úteis para o suporte e depois os excluímos. O PostHog guarda os eventos de analytics por até 7 anos, o período definido pelo nosso plano, que não podemos reduzir, e as gravações de sessão, se você as ativar, por até 3 meses. Os dados do Umami ficam guardados enquanto o projeto existir, a menos que os excluamos antes. Os logs de servidor ficam com os provedores acima, conforme as configurações de retenção de cada serviço. Os registros de licença existentes ficam com o provedor até serem excluídos mediante solicitação."
         ]
       },
       {

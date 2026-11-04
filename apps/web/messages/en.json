@@ -289,7 +289,7 @@
       {
         "title": "8. Retention",
         "body": [
-          "We keep support emails for as long as they're useful for support, then delete them. Analytics data and server logs stay with the providers above, under the retention settings of each service. Existing license records stay with the provider until deleted on request."
+          "We keep support emails for as long as they're useful for support, then delete them. PostHog keeps analytics events for up to 7 years, the period set by our plan, which we can't shorten, and session recordings, if you turn them on, for up to 3 months. Umami data is kept for as long as the project runs, unless we delete it sooner. Server logs stay with the providers above, under the retention settings of each service. Existing license records stay with the provider until deleted on request."
         ]
       },
       {
