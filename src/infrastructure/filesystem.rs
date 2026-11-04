@@ -119,7 +119,7 @@ impl SystemSetup for FileSystemSetup<'_> {
             "Remove system setup".to_string(),
             StepOutcome::Success("Removed with one administrator approval.".into()),
         )];
-        if let Some(step) = macos_system::remove_login_keychain_trust(&self.ca_cert()) {
+        if let Some(step) = macos_system::remove_login_keychain_ca() {
             steps.push(step);
         }
         Ok(steps)
