@@ -178,6 +178,25 @@ pub struct Config {
 }
 
 impl Config {
+    /// Adds the domains and projects of an older config that this one lacks, and returns
+    /// how many. This config's version wins where both have one.
+    pub fn adopt_missing_from(&mut self, older: Config) -> usize {
+        let mut added = 0;
+        for (key, registration) in older.domains {
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.domains.entry(key) {
+                entry.insert(registration);
+                added += 1;
+            }
+        }
+        for (key, project) in older.projects {
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.projects.entry(key) {
+                entry.insert(project);
+                added += 1;
+            }
+        }
+        added
+    }
+
     /// Convert all stored DTOs to domain registrations.
     pub fn registrations(&self) -> Vec<DomainRegistration> {
         self.domains

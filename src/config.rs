@@ -31,10 +31,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-/// macOS listens on loopback unless the user opts in. Linux keeps listening on
-/// all interfaces: Docker containers reach the host through its bridge address.
+/// A service for a normal user listens on loopback unless they opt in. A daemon run as
+/// root on Linux keeps listening on all interfaces, as it does in a container.
 fn default_lan_access() -> bool {
-    !cfg!(target_os = "macos")
+    !BRANDING.installs_with_one_approval()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

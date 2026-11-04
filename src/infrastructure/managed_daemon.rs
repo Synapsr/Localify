@@ -1,15 +1,15 @@
-//! Starting, stopping and restarting the daemon when launchd owns it.
+//! Starting, stopping and restarting the daemon when launchd or systemd owns it.
 //!
-//! A user cannot drive a system-domain job with `launchctl`, and launchd starts
-//! an on-demand job again on its next connection. So the job keeps running in
-//! launchd's eyes and the user steers it from the outside:
+//! A user cannot drive a system service with `launchctl` or `systemctl`, and both start
+//! an on-demand service again on its next connection. So the service keeps running in
+//! the manager's eyes and the user steers it from the outside:
 //!
 //! - **stop**: write a marker file, then ask the daemon to exit cleanly. While
-//!   the marker exists, each connection wakes the job, it closes what is waiting,
-//!   and exits. The ports stay with launchd, and nothing else keeps running.
-//! - **start**: remove the marker and open a connection, which wakes the job.
-//! - **restart**: ask the daemon to exit with the restart code. `KeepAlive` brings
-//!   it back from the binary at its path, within the 1 second `ThrottleInterval`.
+//!   the marker exists, each connection wakes the service, it closes what is waiting,
+//!   and exits. The ports stay with the manager, and nothing else keeps running.
+//! - **start**: remove the marker and open a connection, which wakes the service.
+//! - **restart**: ask the daemon to exit with the restart code. The manager brings it
+//!   back from the binary at its path, within its 1 second delay.
 // Both crates compile this module: the CLI and the desktop API each use it.
 #![allow(dead_code)]
 
@@ -24,10 +24,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::application::ports::DaemonConnectionError;
 use crate::branding::BRANDING;
 use crate::config::{DaemonConfig, LocalifyPaths};
-use crate::infrastructure::macos_system::service_runs_config;
 use crate::infrastructure::mgmt_client::{MgmtSocketClient, ShutdownKind};
+use crate::infrastructure::system_service::service_runs_config;
 
-/// launchd may hold a restart back by its 1 second throttle. This also covers a
+/// The manager may hold a restart back by its 1 second delay. This also covers a
 /// slow disk at boot and the daemon's own startup.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,9 +42,9 @@ pub struct ManagedDaemon {
 }
 
 impl ManagedDaemon {
-    /// The launchd-managed daemon for this config, if there is one. Everything else,
-    /// such as the dev profile, a custom `--config` or a daemon on Linux, starts as a
-    /// plain process.
+    /// The service-managed daemon for this config, if there is one. Everything else,
+    /// such as the dev profile, a custom `--config` or root on Linux, starts as a plain
+    /// process.
     pub fn find(config_path: &Path, paths: &LocalifyPaths, daemon: &DaemonConfig) -> Option<Self> {
         service_runs_config(config_path).then(|| Self::new(paths, daemon))
     }
@@ -114,7 +114,7 @@ impl ManagedDaemon {
     }
 
     /// Waits for a daemon other than `previous` to answer, knocking on its port so
-    /// launchd wakes a job that is waiting for a connection.
+    /// the manager wakes a service that is waiting for a connection.
     fn wait_for_new_daemon(&self, previous: Option<u32>) -> Result<u32> {
         let deadline = Instant::now() + READY_TIMEOUT;
         let mut next_wake = Instant::now();
@@ -152,10 +152,21 @@ impl ManagedDaemon {
 }
 
 fn not_ready_message(log_file: &Path) -> String {
+    let platform_hint = if cfg!(target_os = "macos") {
+        format!(
+            "If macOS shows {} as turned off under System Settings > General > Login Items & Extensions, turn it on.\n",
+            BRANDING.app_name
+        )
+    } else {
+        format!(
+            "Check the service with: systemctl status {}\n",
+            BRANDING.slug()
+        )
+    };
     format!(
         "{0} did not answer within {1} seconds.\n\
          Check the log at {2}.\n\
-         If macOS shows {0} as turned off under System Settings > General > Login Items & Extensions, allow it there.\n\
+         {platform_hint}\
          To reinstall the service, run: {3}",
         BRANDING.app_name,
         READY_TIMEOUT.as_secs(),
@@ -207,6 +218,10 @@ mod tests {
         let message = not_ready_message(Path::new("/tmp/localify.log"));
 
         assert!(message.contains("/tmp/localify.log"));
-        assert!(message.contains("Login Items"));
+        assert!(message.contains(if cfg!(target_os = "macos") {
+            "Login Items"
+        } else {
+            "systemctl status"
+        }));
     }
 }

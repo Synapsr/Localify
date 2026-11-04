@@ -10,6 +10,6 @@ The job has `KeepAlive` with `SuccessfulExit` false, on top of the `Sockets` and
 
 A user cannot drive a system-domain job with `launchctl`, so `stop` is a marker file plus a clean exit. launchd wakes the job on the next connection, which it closes and exits. `restart` is an exit with code 75, which `KeepAlive` turns into a new process on the binary at its path, so updates need no prompt. Commands reach the daemon over its management socket, never a signal to a PID from a file the user can edit.
 
-Trusting a CA needs a confirmation on screen, even as root. It runs last in the script and its result is ignored, so a machine with no screen finishes the install and reports trust as pending, with the exact command to finish it.
+Trusting a CA needs a confirmation on screen, even as root, and on macOS 27 root cannot change the rule behind it. So trust lives in the user's login keychain, for that account only, and the install leaves it for later: `localify trust` or the app's button finishes it. Asking at install meant two prompts in a row for something only browsers need.
 
-Linux keeps its root daemon for now. systemd socket activation is the equivalent and is a separate change.
+Linux with systemd works the same way: socket units hold the ports, a service runs the daemon as the user, and one `sudo` runs a script of system tools. systemd refuses a unit whose port is taken, so there is no silent failure to catch as there is with launchd. The script trusts the CA in the same `sudo`, because the Linux store has no confirmation step. Root, or a machine with no systemd such as a container, stays a plain process with system paths.

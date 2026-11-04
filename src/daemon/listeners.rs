@@ -3,31 +3,31 @@ use std::net::{Ipv6Addr, TcpListener};
 use anyhow::{Context, Result};
 
 use crate::config::DaemonConfig;
-use crate::infrastructure::launchd_sockets::{self, HTTP_SOCKETS, HTTPS_SOCKETS};
 use crate::infrastructure::port_check::{listen_address, map_port_error};
+use crate::infrastructure::service_sockets::{self, HTTP_SOCKETS, HTTPS_SOCKETS};
 
 /// The HTTP and HTTPS listeners the daemon serves on, however it got them.
 #[derive(Debug)]
 pub struct DaemonListeners {
     pub http: Vec<TcpListener>,
     pub https: Vec<TcpListener>,
-    /// Whether other devices can reach them. Under launchd the plist decides, so
-    /// this reads the real sockets rather than a config the user may have edited.
+    /// Whether other devices can reach them. Under a service manager its units decide,
+    /// so this reads the real sockets rather than a config the user may have edited.
     pub lan_access: bool,
 }
 
 impl DaemonListeners {
-    /// Takes the sockets launchd holds for this job. `None` means this process is
-    /// not that job: a foreground or dev daemon, which binds for itself instead.
-    pub fn from_launchd() -> Result<Option<Self>> {
-        let Some(http) = launchd_sockets::activate(HTTP_SOCKETS)
-            .context("launchd could not hand over the HTTP sockets")?
+    /// Takes the sockets the service manager holds for this service. `None` means this
+    /// process is not that service: a foreground or dev daemon, which binds for itself.
+    pub fn from_service_manager() -> Result<Option<Self>> {
+        let Some(http) = service_sockets::activate(HTTP_SOCKETS)
+            .context("The service manager could not hand over the HTTP sockets")?
         else {
             return Ok(None);
         };
-        let https = launchd_sockets::activate(HTTPS_SOCKETS)
-            .context("launchd could not hand over the HTTPS sockets")?
-            .context("The launchd service has no HTTPS sockets. Reinstall it.")?;
+        let https = service_sockets::activate(HTTPS_SOCKETS)
+            .context("The service manager could not hand over the HTTPS sockets")?
+            .context("The background service has no HTTPS sockets. Reinstall it.")?;
 
         let lan_access = http.iter().chain(&https).any(|listener| {
             listener
@@ -43,7 +43,7 @@ impl DaemonListeners {
     }
 
     /// launchd loads a job even when a port is taken, and the job then has no IPv4
-    /// socket for it. Those connections reach the other program, so the daemon refuses
+    /// socket for it. systemd refuses the unit instead, so this is launchd's case. Those connections reach the other program, so the daemon refuses
     /// to run rather than look healthy on IPv6 alone.
     pub fn ensure_ipv4(&self) -> Result<()> {
         for (protocol, listeners) in [("HTTP", &self.http), ("HTTPS", &self.https)] {
@@ -52,7 +52,7 @@ impl DaemonListeners {
                 .any(|listener| listener.local_addr().is_ok_and(|address| address.is_ipv4()));
             anyhow::ensure!(
                 has_ipv4,
-                "launchd could not open the {protocol} port on IPv4, because another program holds it. Check with: sudo lsof -nP -iTCP -sTCP:LISTEN"
+                "The service manager could not open the {protocol} port on IPv4, because another program holds it. Check with: sudo lsof -nP -iTCP -sTCP:LISTEN"
             );
         }
         Ok(())
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn a_process_launchd_did_not_start_binds_for_itself() {
-        assert!(DaemonListeners::from_launchd().unwrap().is_none());
+        assert!(DaemonListeners::from_service_manager().unwrap().is_none());
     }
 
     #[test]

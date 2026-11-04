@@ -25,8 +25,8 @@ open https://myapp.localify        # macOS
 xdg-open https://myapp.localify   # Linux
 ```
 
-On Linux, prefix `install`, `register`, `start` and the other commands that change
-the setup with `sudo`, and run `sudo localify start` after registering.
+These work the same on Linux with systemd. With no systemd, for example in a container,
+run them as root, and start the daemon yourself with `localify start`.
 
 ## Commands Reference
 
@@ -53,10 +53,9 @@ the setup with `sudo`, and run `sudo localify start` after registering.
 | `localify exec --profile <name> -- <cmd>` | Run a command (not a service) on a launch profile |
 | `localify completions <shell>`     | Generate completions   |
 
-On macOS none of these need `sudo`, and Localify refuses to run as root.
-`install`, `uninstall` and `lan` ask for an administrator's approval when they have
-to change the system. On Linux, commands that change the system setup or control
-the daemon need `sudo`.
+None of these need `sudo`, and Localify refuses to run under it. `install`, `uninstall`
+and `lan` ask for an administrator's approval when they have to change the system. The
+one exception is Linux with no systemd, where the system setup needs root.
 
 ## Route Targets
 
@@ -290,22 +289,29 @@ On macOS, everything of yours lives in your user folder:
 The one file outside it is `/Library/LaunchDaemons/dev.localify.daemon.plist`, which
 tells launchd to open the ports and run the daemon as you.
 
-On Linux:
+On Linux with systemd:
 
 ```text
-/etc/localify/
+~/.config/localify/
 ├── config.toml          # Main configuration
-├── ca.key               # Root CA private key
-├── ca.crt               # Root CA certificate
-└── certs/
-    ├── <domain>.key     # Per-domain private key
-    └── <domain>.crt     # Per-domain certificate
-
-/var/run/localify.pid        # PID file (when daemon runs)
-
-/var/log/localify/
-└── localify.log             # Daemon log file
+├── localify.pid         # PID file (when daemon runs)
+├── localify.sock        # Management socket
+├── data/
+│   ├── ca.key           # Root CA private key (mode 600)
+│   ├── ca.crt           # Root CA certificate
+│   └── certs/
+│       ├── <domain>.key # Per-domain private key
+│       └── <domain>.crt # Per-domain certificate
+└── logs/
+    └── localify.log     # Daemon log file
 ```
+
+The files outside it are `localify.service`, `localify-http.socket` and
+`localify-https.socket` in `/etc/systemd/system/`, which tell systemd to open the ports
+and run the daemon as you.
+
+Run as root, or on a machine with no systemd, Localify keeps its files in
+`/etc/localify/`, `/var/run/localify.pid` and `/var/log/localify/`.
 
 DNS configuration (created by `localify install`):
 
@@ -337,55 +343,37 @@ across a reboot, until `localify start`.
 
 ### Linux (systemd)
 
-Create a systemd service file:
-
-```bash
-sudo tee /etc/systemd/system/localify.service > /dev/null <<'EOF'
-[Unit]
-Description=Localify local development proxy
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/localify start --foreground
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now localify
-```
+The same. `localify install` writes the units, and systemd starts the daemon at boot as
+you and restarts it if it crashes. `localify stop` stays stopped across a reboot.
 
 ## Daemon: Foreground vs Background
 
-On macOS launchd runs the daemon, and these commands steer it without any prompt:
+launchd on macOS and systemd on Linux run the daemon, and these commands steer it
+without any prompt:
 
-- `localify stop` asks it to exit and leaves a marker file. launchd still holds the
-  ports and wakes the job on the next connection, so while the marker exists the job
-  closes that connection and exits again. Names stop resolving, and no process stays
-  behind.
-- `localify start` removes the marker and opens a connection, which wakes the job.
-- `localify restart` asks it to exit with a code launchd restarts on. An update needs
-  no command: the daemon notices its binary was replaced and does the same.
+- `localify stop` asks it to exit and leaves a marker file. The service manager still
+  holds the ports and wakes the daemon on the next connection, so while the marker
+  exists the daemon closes that connection and exits again. Names stop resolving, and
+  no process stays behind.
+- `localify start` removes the marker and opens a connection, which wakes the daemon.
+- `localify restart` asks it to exit with a code the manager restarts on. An update
+  needs no command: the daemon notices its binary was replaced and does the same.
 
-launchd holds the ports, so outside it a daemon can only use ports from 1024 up on
-loopback. macOS lets a normal user listen on a low port on all interfaces but not on
+The manager holds the ports, so outside it a daemon can only use ports from 1024 up on
 loopback.
 
-**Background** (Linux, and the macOS dev profile): forks to the background,
-writes a PID file, logs to `/var/log/localify/localify.log`:
+**Background** (no systemd, and the dev profile): forks to the background and writes a
+PID file. As root it logs to `/var/log/localify/localify.log`:
 
 ```bash
-sudo localify start
+localify start
 ```
 
 **Foreground**: stays in the terminal, logs to stdout,
 stop with Ctrl+C. Useful for debugging:
 
 ```bash
-sudo localify start --foreground
+localify start --foreground
 ```
 
 ## Logging and Verbosity
@@ -470,7 +458,8 @@ localify -c /opt/localify/config.toml start
 
 The configuration lives in
 `~/Library/Application Support/Localify Desktop/config.toml` on macOS and in
-`/etc/localify/config.toml` on Linux (override with `--config`).
+`~/.config/localify/config.toml` on Linux (`/etc/localify/config.toml` as root). Override
+it with `--config`.
 
 ### Daemon Section
 
@@ -483,10 +472,9 @@ log_level = "info"
 lan_access = false
 ```
 
-All three ports must be different. On macOS launchd opens the HTTP and HTTPS ports
-for the daemon, so changing them needs one approval: use the desktop app's settings
-or run `localify install` after editing the file. On Linux the daemon needs `sudo`
-to bind to ports below 1024.
+All three ports must be different. launchd or systemd opens the HTTP and HTTPS ports for
+the daemon, so changing them needs one approval: use the desktop app's settings or run
+`localify install` after editing the file.
 
 `lan_access` decides who can connect. See
 [Access From Other Devices](#access-from-other-devices).
@@ -520,14 +508,14 @@ Override where Localify stores its data:
 
 ```toml
 [paths]
-data_dir = "/etc/localify"
-pid_file = "/var/run/localify.pid"
-log_file = "/var/log/localify/localify.log"
-certs_dir = "/etc/localify/certs"
+data_dir = "/home/me/.config/localify/data"
+pid_file = "/home/me/.config/localify/localify.pid"
+log_file = "/home/me/.config/localify/logs/localify.log"
+certs_dir = "/home/me/.config/localify/data/certs"
 ```
 
-The values above are the Linux defaults. You only need this
-section if you want different locations.
+The values above are the defaults on Linux with systemd. You only need this section if
+you want different locations.
 
 ## Access From Other Devices
 
@@ -535,7 +523,7 @@ On macOS only your Mac can reach Localify by default: the proxy and its DNS list
 loopback, and the DNS server answers `127.0.0.1` and `::1`.
 
 To test from a phone or another computer, run `localify lan enable`, which rewrites
-the launchd plist with one approval. Localify then listens on every interface and its
+the launchd plist or systemd units with one approval. Localify then listens on every interface and its
 DNS answers other devices with this Mac's LAN address. `localify lan disable` takes
 that back, and `localify lan status` tells you where you are. Do this on networks you
 trust: anyone on the network can then reach your dev servers.
@@ -543,19 +531,17 @@ trust: anyone on the network can then reach your dev servers.
 The opt-in fails before asking for anything if another program already listens on
 every interface on that port, as Tailscale can on 443.
 
-On Linux the daemon listens on every interface as before, because Docker containers
-reach the host through its bridge address.
+Run as root on Linux, or with no systemd, the daemon listens on every interface, as it
+does in a container. Set `lan_access = false` to keep it on this machine.
 
 ## HTTPS Trust That Is Still Pending
 
-macOS needs a confirmation on screen to trust a certificate authority, even with
-`sudo`, so on a machine with no screen `localify install` finishes everything else and
-reports trust as pending. HTTP works, and so does HTTPS from Node.js through
-`NODE_EXTRA_CA_CERTS`. Browsers warn until the CA is trusted. `localify status` prints
-the exact command to run from a session with a screen.
+On macOS the install leaves certificate trust for later, so that it asks for one password.
+HTTP works right away, and so does HTTPS from Node.js through `NODE_EXTRA_CA_CERTS`.
+Browsers warn until you click Trust HTTPS in the app or run `localify trust`, and macOS
+asks you to confirm once. That confirmation needs a screen, so run it on the Mac itself.
 
-The CA only signs for the `.localify` suffix, and clients enforce that through a name
-constraint in the certificate, so its key cannot be used to impersonate another site.
+On Linux with systemd the install trusts the CA, in the same `sudo`.
 
 ## Docker Integration
 

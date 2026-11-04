@@ -82,16 +82,40 @@ impl Branding {
             .unwrap_or(self.domain_suffix())
     }
 
-    /// On macOS everything lives in the user's folder and no Localify process
-    /// runs as root. Linux keeps its system paths until it gets the same design.
+    /// On macOS, and on Linux with systemd, everything lives in the user's folder and
+    /// no Localify process runs as root. Root, or a machine with no systemd such as a
+    /// container, keeps the system paths and runs a plain process.
     fn uses_user_directories(&self) -> bool {
-        cfg!(target_os = "macos") || self.is_dev_profile()
+        cfg!(target_os = "macos") || self.is_dev_profile() || self.uses_systemd_service()
     }
 
     /// Whether launchd owns the daemon: production on macOS. The dev profile
     /// uses unprivileged ports, so the app starts its daemon directly.
     pub fn uses_launchd_service(&self) -> bool {
         cfg!(target_os = "macos") && !self.is_dev_profile()
+    }
+
+    /// Whether systemd owns the daemon: a normal user on Linux with systemd.
+    pub fn uses_systemd_service(&self) -> bool {
+        cfg!(target_os = "linux")
+            && !self.is_dev_profile()
+            && !crate::infrastructure::process::is_root()
+            && self.has_systemd()
+    }
+
+    /// Whether a service manager holds the ports for a daemon running as the user.
+    pub fn uses_system_service(&self) -> bool {
+        self.uses_launchd_service() || self.uses_systemd_service()
+    }
+
+    /// Whether system changes go through a script of system tools, with one approval.
+    pub fn installs_with_one_approval(&self) -> bool {
+        cfg!(target_os = "macos") || self.uses_systemd_service()
+    }
+
+    /// The check systemd documents for whether it runs this machine.
+    pub fn has_systemd(&self) -> bool {
+        Path::new("/run/systemd/system").is_dir()
     }
 
     pub fn config_dir(&self) -> PathBuf {
@@ -184,7 +208,7 @@ impl Branding {
     /// A command as the user should type it when it needs root. On macOS
     /// Localify asks for the approval itself and refuses to run as root.
     pub fn admin_command(&self, args: &str) -> String {
-        if cfg!(target_os = "macos") {
+        if self.installs_with_one_approval() {
             format!("{} {args}", self.cli_command())
         } else {
             format!("sudo {} {args}", self.cli_command())
@@ -214,8 +238,12 @@ impl Branding {
     fn local_application_support_dir(&self) -> PathBuf {
         user_home_dir()
             .map(|home| {
-                home.join("Library/Application Support")
-                    .join(self.desktop_state_dir_name())
+                if cfg!(target_os = "macos") {
+                    home.join("Library/Application Support")
+                        .join(self.desktop_state_dir_name())
+                } else {
+                    home.join(".config").join(self.slug())
+                }
             })
             .unwrap_or_else(|| {
                 PathBuf::from(format!("/tmp/{}-{}", self.slug(), std::process::id()))

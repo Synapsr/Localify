@@ -6,10 +6,15 @@ pub trait ProcessControl: Send {
 
 /// Whether this process has root's privileges right now. Reads the kernel's answer:
 /// the `UID` environment variable can say anything.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub fn is_root() -> bool {
     // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
     unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn is_root() -> bool {
+    false
 }
 
 #[cfg(unix)]

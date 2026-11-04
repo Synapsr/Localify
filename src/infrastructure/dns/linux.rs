@@ -33,7 +33,6 @@ impl Default for LinuxDnsService {
 impl DnsService for LinuxDnsService {
     fn setup(&self, port: u16) -> Result<(), DnsError> {
         let drop_in_file = BRANDING.resolved_drop_in_file();
-        let routing_domain = BRANDING.domain_label();
 
         // Ensure the drop-in directory exists
         let dir = Path::new(RESOLVED_DROP_IN_DIR);
@@ -52,13 +51,7 @@ impl DnsService for LinuxDnsService {
 
         // Write the drop-in config. The routing domain tells systemd-resolved
         // to send only matching suffix queries to this DNS server.
-        let content = format!(
-            "# Managed by {} — do not edit.\n\
-             [Resolve]\n\
-             DNS=127.0.0.1:{port}\n\
-             Domains=~{routing_domain}\n",
-            BRANDING.app_name
-        );
+        let content = crate::infrastructure::linux_system::resolved_drop_in(port);
 
         fs::write(&drop_in_file, content).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -101,8 +94,8 @@ impl DnsService for LinuxDnsService {
         // Verify the drop-in file exists
         if !BRANDING.resolved_drop_in_file().exists() {
             return Err(DnsError::ValidationFailed(format!(
-                "DNS drop-in file does not exist. Run 'sudo {} install' to set up DNS.",
-                BRANDING.cli_command()
+                "DNS drop-in file does not exist. Run '{}' to set up DNS.",
+                BRANDING.admin_command("install")
             )));
         }
 
@@ -138,9 +131,9 @@ impl DnsService for LinuxDnsService {
 
         Err(DnsError::ValidationFailed(format!(
             "DNS routing for {} not found in resolvectl output after multiple attempts.\n\
-                 Try running 'sudo {} install' again.",
+                 Try running '{}' again.",
             BRANDING.domain_suffix(),
-            BRANDING.cli_command()
+            BRANDING.admin_command("install")
         )))
     }
 
@@ -196,18 +189,10 @@ mod tests {
 
     #[test]
     fn test_dropin_content_format() {
-        let port = 1053;
-        let routing_domain = BRANDING.domain_label();
-        let content = format!(
-            "# Managed by {} — do not edit.\n\
-             [Resolve]\n\
-             DNS=127.0.0.1:{port}\n\
-             Domains=~{routing_domain}\n",
-            BRANDING.app_name
-        );
+        let content = crate::infrastructure::linux_system::resolved_drop_in(1053);
         assert!(content.contains("[Resolve]"));
         assert!(content.contains("DNS=127.0.0.1:1053"));
-        assert!(content.contains(&format!("Domains=~{routing_domain}")));
+        assert!(content.contains(&format!("Domains=~{}", BRANDING.domain_label())));
         assert!(content.starts_with('#'));
     }
 }

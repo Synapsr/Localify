@@ -28,8 +28,8 @@ pub fn execute(
     daemon_config: &DaemonConfig,
 ) -> Result<()> {
     if foreground {
-        // launchd started this process and already opened the ports for it.
-        if let Some(listeners) = DaemonListeners::from_launchd()? {
+        // A service manager started this process and already opened the ports for it.
+        if let Some(listeners) = DaemonListeners::from_service_manager()? {
             return crate::daemon::lifecycle::run(verbose, config_path, paths, Some(listeners));
         }
     } else if let Some(managed) = ManagedDaemon::find(config_path, paths, daemon_config) {
@@ -38,9 +38,9 @@ pub fn execute(
         return Ok(());
     }
 
-    if BRANDING.uses_launchd_service() && LegacyInstall::needs_migration() {
+    if BRANDING.uses_system_service() && LegacyInstall::needs_migration() {
         bail!(
-            "An older {0} install is still on this Mac and runs as root.\n\
+            "An older {0} install is still on this machine and runs as root.\n\
              Run '{1}' once to replace it. It asks for one approval.",
             BRANDING.app_name,
             BRANDING.admin_command("install")

@@ -86,6 +86,7 @@ use crate::infrastructure::port_check::{
     ensure_daemon_ports_available, ensure_lan_ports_available,
 };
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
+use crate::infrastructure::system_service;
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
 use crate::project_init::{
@@ -262,8 +263,8 @@ impl DesktopApi {
 
         config.validate()?;
 
-        let system_changed = cfg!(target_os = "macos")
-            && macos_system::system_setup_done()
+        let system_changed = BRANDING.installs_with_one_approval()
+            && system_service::system_setup_done()
             && (previous_daemon.http_port != config.daemon.http_port
                 || previous_daemon.https_port != config.daemon.https_port
                 || previous_daemon.dns_port != config.daemon.dns_port
@@ -289,9 +290,9 @@ impl DesktopApi {
     /// the launchd plist. Asks for one approval, then waits for the daemon to answer.
     fn apply_system_changes_for(&self, config: &Config) -> Result<()> {
         let paths = &config.paths;
-        let changes = self.system_request(config, None).changes()?;
-        if !changes.is_empty() {
-            macos_system::run_with_approval(&changes.script(), self.approval())?;
+        let request = self.system_request(config, None);
+        if let Some(script) = system_service::pending_script(&request)? {
+            macos_system::run_with_approval(&script, self.approval())?;
         }
         if let Some(managed) = ManagedDaemon::find(&self.config_path, paths, &config.daemon) {
             managed.start()?;
@@ -2035,8 +2036,8 @@ impl DesktopApi {
     }
 
     pub fn install(&self) -> Result<InstallResultDto> {
-        if cfg!(target_os = "macos") {
-            self.prepare_macos_install()?;
+        if BRANDING.installs_with_one_approval() {
+            self.prepare_install()?;
         }
 
         let (config, paths) = self.load_config_and_paths()?;
@@ -2044,7 +2045,7 @@ impl DesktopApi {
         let dns = get_dns_service()?;
         let network = get_network_info();
         let mut system = FileSystemSetup::new(&paths);
-        if cfg!(target_os = "macos") {
+        if BRANDING.installs_with_one_approval() {
             system = system.with_system_install(
                 self.system_request(&config, self.cli_link_needing_approval()),
                 self.approval(),
@@ -2098,9 +2099,11 @@ impl DesktopApi {
 
     /// What has to happen before the approval is asked for: the old config moves to
     /// the user's folder, and files an old dev helper left to root are reclaimed.
-    fn prepare_macos_install(&self) -> Result<()> {
+    fn prepare_install(&self) -> Result<()> {
         macos_system::migrate_legacy_config(&self.config_path)?;
-        macos_system::reclaim_root_owned_state();
+        if cfg!(target_os = "macos") {
+            macos_system::reclaim_root_owned_state();
+        }
         Ok(())
     }
 
@@ -2205,12 +2208,12 @@ impl DesktopApi {
         let dns = get_dns_service()?;
         let daemon = DaemonHandle::new(&paths);
         let mut system = FileSystemSetup::new(&paths);
-        if cfg!(target_os = "macos") {
-            let removal =
-                macos_system::removal_for_this_machine(self.managed_cli_link().as_deref())?;
+        if BRANDING.installs_with_one_approval() {
+            let removal_script =
+                system_service::removal_script(self.managed_cli_link().as_deref())?;
             let state_dir = BRANDING.config_dir();
             system = system.with_system_removal(
-                removal,
+                removal_script,
                 self.approval(),
                 self.config_path
                     .starts_with(&state_dir)
@@ -2428,9 +2431,9 @@ impl DesktopApi {
         if let Some(managed) = ManagedDaemon::find(&self.config_path, &paths, &config.daemon) {
             return Ok(daemon_launch(managed.start()?, &config.daemon));
         }
-        if BRANDING.uses_launchd_service() && LegacyInstall::needs_migration() {
+        if BRANDING.uses_system_service() && LegacyInstall::needs_migration() {
             bail!(
-                "An older {} install is still on this Mac and runs as root. Set up {} again to replace it.",
+                "An older {} install is still on this machine and runs as root. Set up {} again to replace it.",
                 BRANDING.app_name,
                 BRANDING.app_name
             );

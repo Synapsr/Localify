@@ -63,7 +63,7 @@ impl ShutdownHandle {
 
 /// Run the Localify daemon server.
 ///
-/// `launchd_listeners` are the sockets launchd handed over, when this process is
+/// `service_listeners` are the sockets launchd handed over, when this process is
 /// its job. Otherwise the daemon binds its own, which is what a foreground or dev
 /// daemon does. launchd restarts a job on its next connection, so when the user
 /// has stopped the daemon the job only clears what is waiting, then exits.
@@ -71,11 +71,11 @@ pub fn run(
     verbose: bool,
     config_path: &Path,
     paths: &LocalifyPaths,
-    launchd_listeners: Option<DaemonListeners>,
+    service_listeners: Option<DaemonListeners>,
 ) -> Result<()> {
-    let managed = launchd_listeners.is_some();
+    let managed = service_listeners.is_some();
 
-    if let Some(listeners) = &launchd_listeners
+    if let Some(listeners) = &service_listeners
         && paths.stop_marker().exists()
     {
         listeners.close_waiting_connections();
@@ -87,7 +87,7 @@ pub fn run(
         verbose,
         config_path,
         paths,
-        launchd_listeners,
+        service_listeners,
         shutdown.clone(),
     );
 
@@ -111,7 +111,7 @@ async fn serve(
     verbose: bool,
     config_path: &Path,
     paths: &LocalifyPaths,
-    launchd_listeners: Option<DaemonListeners>,
+    service_listeners: Option<DaemonListeners>,
     shutdown: ShutdownHandle,
 ) -> Result<()> {
     // When running interactively (stdout is a TTY), log to stdout
@@ -173,8 +173,8 @@ async fn serve(
 
     let registry = Arc::new(registry);
 
-    let managed = launchd_listeners.is_some();
-    let listeners = match launchd_listeners {
+    let managed = service_listeners.is_some();
+    let listeners = match service_listeners {
         Some(listeners) => {
             listeners.ensure_ipv4()?;
             listeners

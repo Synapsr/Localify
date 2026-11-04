@@ -3,6 +3,7 @@ use anyhow::Result;
 use super::context::{AppContext, direct_api};
 use crate::application::StepOutcome;
 use crate::application::install::Install;
+use crate::branding::BRANDING;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
@@ -12,7 +13,7 @@ use crate::infrastructure::paths::LocalifyPaths;
 pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Result<()> {
     println!("Setting up Localify...\n");
 
-    if cfg!(target_os = "macos") {
+    if BRANDING.installs_with_one_approval() {
         return install_with_one_approval(ctx, paths);
     }
 
@@ -52,7 +53,7 @@ pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Resu
     Ok(())
 }
 
-/// On macOS the shared API does the work, in one approval, as this user. Node trust
+/// The shared API does the work, in one approval, as this user. Node trust
 /// and iOS Simulators are set up here too: over SSH they may be all that works.
 fn install_with_one_approval(ctx: &AppContext, paths: &LocalifyPaths) -> Result<()> {
     let result = direct_api(&ctx.config_path)?.install()?;

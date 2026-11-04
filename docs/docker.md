@@ -8,7 +8,7 @@ compose stack instantly makes services available at
 ## Enabling Docker Integration
 
 Add the `[docker]` section to `config.toml`
-(`~/Library/Application Support/Localify Desktop/` on macOS, `/etc/localify/` on Linux):
+(`~/Library/Application Support/Localify Desktop/` on macOS, `~/.config/localify/` on Linux):
 
 ```toml
 [docker]
@@ -21,7 +21,7 @@ Then restart the daemon:
 localify restart
 ```
 
-On Linux, use `sudo`. Localify connects to the Docker socket and watches for container
+Localify connects to the Docker socket and watches for container
 lifecycle events. When a container starts or stops, Localify
 automatically updates its routing table.
 
@@ -209,18 +209,17 @@ access.
 
 ### Linux vs macOS
 
-On **Linux**, Docker containers share the host network
-namespace (or use a bridge with direct host access). DNS
-resolution and HTTP connectivity work without `extra_hosts`
-in most setups.
+On **Linux**, containers on a bridge network reach the host through its bridge address,
+which a daemon on loopback does not answer. Localify listens on loopback by default, so
+if a container cannot reach it, run `localify lan enable`, which lets Localify listen on
+every interface. Containers using the host network reach it directly.
 
 On **macOS**, Docker Desktop runs containers inside a Linux
 VM. Containers cannot reach the host via its LAN IP, but can
 reach it via `host-gateway` / `host.docker.internal`. The
 `extra_hosts` approach above is required for container-to-Localify
 communication. Localify listens on loopback by default there. If a
-container cannot reach it, run `localify lan enable`, which lets
-Localify listen on every interface.
+container cannot reach it, run `localify lan enable`.
 
 ## Monitoring
 
@@ -300,6 +299,6 @@ labels:
 ### Docker Socket Permission
 
 Localify connects to the Docker socket
-(`/var/run/docker.sock` by default). On macOS the daemon runs as you, so you need
-access to that socket, which Docker Desktop gives you. On Linux a daemon started with
-`sudo` has it. If you see connection errors, verify the socket exists and is accessible.
+(`/var/run/docker.sock` by default). The daemon runs as you, so you need access to that socket.
+Docker Desktop gives it to you. On Linux that means being in the `docker` group, which is
+equivalent to root on that machine, so it is your call. If you see connection errors, verify the socket exists and is accessible.
