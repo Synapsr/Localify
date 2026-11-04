@@ -69,7 +69,7 @@ impl LaunchSessions {
             .values()
             .map(|entry| entry.session.clone())
             .collect();
-        sessions.sort_by(|left, right| left.started_at.cmp(&right.started_at));
+        sessions.sort_by_key(|session| session.started_at);
         sessions
     }
 
