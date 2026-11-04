@@ -204,7 +204,7 @@ jobs:
           OUTPUT: release_notes.md
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Localify ${{ steps.version.outputs.version }}
