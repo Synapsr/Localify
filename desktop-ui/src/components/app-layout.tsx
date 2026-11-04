@@ -3,6 +3,7 @@ import { useTerminalHotkeys } from "@/hooks/use-terminal-hotkeys";
 import { useThemeShortcut } from "@/hooks/use-theme-shortcut";
 import { TerminalProvider, useTerminal } from "@/providers/terminal-provider";
 
+import { HttpsTrustNotice } from "./app/https-trust-notice";
 import { useProjectCreateHotkey } from "./app/projects/use-project-create-hotkey";
 import { useProjectSearchHotkey } from "./app/projects/use-project-search-hotkey";
 import { TerminalPanel } from "./app/terminal/terminal-panel";
@@ -34,6 +35,7 @@ function AppLayoutContent() {
       <div className="flex h-full flex-col rounded-lg bg-background ">
         <DesktopAnalytics />
         {!isOpen ? <SharedNavigation /> : null}
+        <HttpsTrustNotice />
         <main className="flex-1 overflow-hidden  rounded-lg">
           <PageTransition />
         </main>
