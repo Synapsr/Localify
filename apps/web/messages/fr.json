@@ -289,7 +289,7 @@
       {
         "title": "8. Conservation",
         "body": [
-          "Nous gardons les e-mails d'assistance tant qu'ils sont utiles à l'assistance, puis nous les supprimons. Les données d'analytics et les logs serveur restent chez les prestataires ci-dessus, selon les réglages de conservation de chaque service. Les enregistrements de licence existants restent chez le fournisseur jusqu'à leur suppression sur demande."
+          "Nous gardons les e-mails d'assistance tant qu'ils sont utiles à l'assistance, puis nous les supprimons. PostHog conserve les événements d'analytics jusqu'à 7 ans, la durée fixée par notre forfait, que nous ne pouvons pas raccourcir, et les enregistrements de session, si tu les actives, jusqu'à 3 mois. Les données Umami sont conservées tant que le projet existe, sauf si nous les supprimons avant. Les logs serveur restent chez les prestataires ci-dessus, selon les réglages de conservation de chaque service. Les enregistrements de licence existants restent chez le fournisseur jusqu'à leur suppression sur demande."
         ]
       },
       {
