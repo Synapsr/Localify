@@ -22,6 +22,7 @@ pub fn execute(verbose: bool, config_path: &Path, ctx: &AppContext) -> Result<()
     super::start::execute(
         false,
         verbose,
+        None,
         config_path,
         &ready.paths,
         &ready.daemon_config,

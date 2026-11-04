@@ -16,12 +16,13 @@ use tracing::{error, info, warn};
 
 use std::path::PathBuf;
 
-use super::dns_server::DnsServer;
+use super::dns_server::{DnsServer, DnsSockets};
 use super::launch_sessions::LaunchSessions;
 use super::proxy::{ClientAddr, Scheme};
 use super::router::{DomainAccessLog, RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
 use crate::application::ports::RegistrationProvider;
+use crate::infrastructure::certs::OnDemandIssuer;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::network::get_lan_ip;
@@ -38,6 +39,65 @@ async fn inject_client_addr(
     next.run(request).await
 }
 
+/// What the daemon needs root to open. Acquired before it drops root and kept
+/// open afterwards. `TlsAcceptor` holds the leaf keys in memory.
+pub struct PrivilegedResources {
+    http: std::net::TcpListener,
+    https: Option<std::net::TcpListener>,
+    dns: DnsSockets,
+    mgmt: std::os::unix::net::UnixListener,
+    tls_acceptor: Option<TlsAcceptor>,
+}
+
+impl PrivilegedResources {
+    pub fn acquire(
+        config: &Config,
+        paths: &LocalifyPaths,
+        issuer: Option<OnDemandIssuer>,
+    ) -> Result<Self> {
+        // Validate config before starting. Static routes are checked here, as
+        // root, so a route to a folder the user can't read fails when requested
+        // and doesn't stop every other domain.
+        config.validate()?;
+
+        let https_patterns: Vec<_> = config
+            .registrations()
+            .iter()
+            .filter(|d| d.is_https_enabled())
+            .map(|d| d.pattern().clone())
+            .collect();
+        let tls_acceptor = create_tls_acceptor(&https_patterns, &paths.certs_dir, issuer)?;
+
+        let https = match &tls_acceptor {
+            Some(_) => Some(bind_tcp(config.daemon.https_port)?),
+            None => None,
+        };
+
+        Ok(Self {
+            http: bind_tcp(config.daemon.http_port)?,
+            https,
+            dns: DnsSockets::bind(config.daemon.dns_port)
+                .with_context(|| format!("Failed to bind DNS port {}", config.daemon.dns_port))?,
+            mgmt: super::mgmt_socket::bind_socket(&paths.socket_path).with_context(|| {
+                format!(
+                    "Failed to bind the management socket at {}",
+                    paths.socket_path.display()
+                )
+            })?,
+            tls_acceptor,
+        })
+    }
+}
+
+fn bind_tcp(port: u16) -> Result<std::net::TcpListener> {
+    let listener =
+        std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).context(format!(
+            "Failed to bind to port {port}. Is another service using it? Try: sudo lsof -i :{port}"
+        ))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 pub struct Server {
     state: SharedState,
     reload_rx: mpsc::Receiver<()>,
@@ -45,7 +105,7 @@ pub struct Server {
     reload_provider: Arc<dyn RegistrationProvider>,
     config_path: PathBuf,
     socket_path: PathBuf,
-    tls_acceptor: Option<TlsAcceptor>,
+    resources: PrivilegedResources,
     http_port: u16,
     https_port: u16,
     dns_port: u16,
@@ -57,24 +117,15 @@ impl Server {
         config: &Config,
         config_path: PathBuf,
         paths: &LocalifyPaths,
+        resources: PrivilegedResources,
         reload_rx: mpsc::Receiver<()>,
         reload_tx: mpsc::Sender<()>,
         reload_provider: Arc<dyn RegistrationProvider>,
     ) -> Result<Self> {
-        // Validate config before starting
-        config.validate()?;
-
         let registrations = reload_provider
             .load()
             .context("Failed to load registrations for daemon startup")?;
         let project_roots = load_project_root_paths(config);
-
-        // Collect patterns for domains with HTTPS enabled
-        let https_patterns: Vec<_> = registrations
-            .iter()
-            .filter(|d| d.is_https_enabled())
-            .map(|d| d.pattern().clone())
-            .collect();
 
         let domain_accesses = DomainAccessLog::default();
         let state: SharedState = Arc::new(ArcSwap::from_pointee(
@@ -86,8 +137,6 @@ impl Server {
             .with_launch_sessions(LaunchSessions::default()),
         ));
 
-        let tls_acceptor = create_tls_acceptor(&https_patterns, &paths.certs_dir, &paths.data_dir)?;
-
         // Get LAN IP for DNS responses (DNS server handles source-based resolution)
         let lan_ip = get_lan_ip();
 
@@ -98,7 +147,7 @@ impl Server {
             reload_provider,
             config_path,
             socket_path: paths.socket_path.clone(),
-            tls_acceptor,
+            resources,
             http_port: config.daemon.http_port,
             https_port: config.daemon.https_port,
             dns_port: config.daemon.dns_port,
@@ -115,7 +164,15 @@ impl Server {
             "Localify daemon starting"
         );
 
-        let dns_handle = spawn_dns_server(self.dns_port);
+        let PrivilegedResources {
+            http,
+            https,
+            dns,
+            mgmt,
+            tls_acceptor,
+        } = self.resources;
+
+        let dns_handle = spawn_dns_server(dns);
         let domain_accesses = self.state.load().domain_access_log();
         let launch_sessions = self.state.load().launch_sessions();
         spawn_reload_listener(
@@ -128,32 +185,27 @@ impl Server {
             cancel.clone(),
         );
         spawn_mgmt_socket(
+            mgmt,
             self.state.clone(),
             self.reload_tx,
             self.socket_path,
-            self.http_port,
-            self.https_port,
-            self.dns_port,
+            super::mgmt_socket::DaemonPorts {
+                http: self.http_port,
+                https: self.https_port,
+                dns: self.dns_port,
+            },
             cancel.clone(),
         );
 
-        let http_server =
-            start_http_server(self.state.clone(), self.http_port, cancel.clone()).await?;
+        let http_server = start_http_server(self.state.clone(), http, cancel.clone())?;
+        let https = https.zip(tls_acceptor);
 
-        await_servers(
-            http_server,
-            dns_handle,
-            self.state,
-            self.tls_acceptor,
-            self.https_port,
-            cancel,
-        )
-        .await
+        await_servers(http_server, dns_handle, self.state, https, cancel).await
     }
 }
 
-fn spawn_dns_server(port: u16) -> tokio::task::JoinHandle<()> {
-    let dns_server = DnsServer::new(port);
+fn spawn_dns_server(sockets: DnsSockets) -> tokio::task::JoinHandle<()> {
+    let dns_server = DnsServer::new(sockets);
     tokio::spawn(async move {
         if let Err(e) = dns_server.run().await {
             error!(error = %e, "DNS server error");
@@ -241,44 +293,35 @@ fn load_local_project_root_paths() -> HashMap<String, String> {
 }
 
 fn spawn_mgmt_socket(
+    listener: std::os::unix::net::UnixListener,
     state: SharedState,
     reload_tx: mpsc::Sender<()>,
     socket_path: PathBuf,
-    http_port: u16,
-    https_port: u16,
-    dns_port: u16,
+    mgmt_ports: super::mgmt_socket::DaemonPorts,
     cancel: CancellationToken,
 ) {
-    let mgmt_ports = super::mgmt_socket::DaemonPorts {
-        http: http_port,
-        https: https_port,
-        dns: dns_port,
-    };
     tokio::spawn(async move {
         if let Err(e) =
-            super::mgmt_socket::serve(socket_path, state, reload_tx, cancel, mgmt_ports).await
+            super::mgmt_socket::serve(listener, socket_path, state, reload_tx, cancel, mgmt_ports)
+                .await
         {
             error!(error = %e, "Management socket error");
         }
     });
 }
 
-async fn start_http_server(
+fn start_http_server(
     state: SharedState,
-    http_port: u16,
+    listener: std::net::TcpListener,
     cancel: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
-    let http_addr = SocketAddr::from(([0, 0, 0, 0], http_port));
     let http_router = create_router(state)
         .layer(Extension(Scheme::Http))
         .layer(axum::middleware::from_fn(inject_client_addr));
 
-    let http_listener = TcpListener::bind(http_addr).await.context(format!(
-        "Failed to bind to port {}. Is another service using it? Try: sudo lsof -i :{}",
-        http_port, http_port
-    ))?;
+    let http_listener = TcpListener::from_std(listener)?;
 
-    info!(addr = %http_addr, "HTTP server listening");
+    info!(addr = %http_listener.local_addr()?, "HTTP server listening");
 
     Ok(tokio::spawn(async move {
         axum::serve(
@@ -291,20 +334,16 @@ async fn start_http_server(
     }))
 }
 
-async fn start_https_server(
+fn start_https_server(
     state: SharedState,
     tls_acceptor: TlsAcceptor,
-    https_port: u16,
+    listener: std::net::TcpListener,
     cancel: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let https_addr = SocketAddr::from(([0, 0, 0, 0], https_port));
     let https_router = create_router(state).layer(Extension(Scheme::Https));
-    let https_listener = TcpListener::bind(https_addr).await.context(format!(
-        "Failed to bind to port {}. Is another service using it? Try: sudo lsof -i :{}",
-        https_port, https_port
-    ))?;
+    let https_listener = TcpListener::from_std(listener)?;
 
-    info!(addr = %https_addr, "HTTPS server listening");
+    info!(addr = %https_listener.local_addr()?, "HTTPS server listening");
 
     Ok(tokio::spawn(async move {
         loop {
@@ -351,13 +390,11 @@ async fn await_servers(
     http_server: tokio::task::JoinHandle<Result<()>>,
     dns_handle: tokio::task::JoinHandle<()>,
     state: SharedState,
-    tls_acceptor: Option<TlsAcceptor>,
-    https_port: u16,
+    https: Option<(std::net::TcpListener, TlsAcceptor)>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    if let Some(tls_acceptor) = tls_acceptor {
-        let https_server =
-            start_https_server(state, tls_acceptor, https_port, cancel.clone()).await?;
+    if let Some((listener, tls_acceptor)) = https {
+        let https_server = start_https_server(state, tls_acceptor, listener, cancel.clone())?;
 
         tokio::select! {
             r = http_server => r??,

@@ -47,49 +47,70 @@ impl IpResolver {
     }
 }
 
+/// Sockets the DNS server answers on, bound before the daemon drops root.
+pub struct DnsSockets {
+    udp_v4: std::net::UdpSocket,
+    tcp_v4: std::net::TcpListener,
+    udp_v6: Option<std::net::UdpSocket>,
+    tcp_v6: Option<std::net::TcpListener>,
+}
+
+impl DnsSockets {
+    pub fn bind(port: u16) -> Result<Self> {
+        // Bind to all interfaces so Docker containers can reach us directly
+        let ipv4_addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let ipv6_addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, port));
+
+        let udp_v4 = std::net::UdpSocket::bind(ipv4_addr)?;
+        let tcp_v4 = std::net::TcpListener::bind(ipv4_addr)?;
+        udp_v4.set_nonblocking(true)?;
+        tcp_v4.set_nonblocking(true)?;
+
+        // IPv6 binds may fail on Linux where the IPv4 dual-stack socket already
+        // covers both protocols. This is fine — we just skip IPv6-specific listeners.
+        let udp_v6 = std::net::UdpSocket::bind(ipv6_addr)
+            .and_then(|socket| socket.set_nonblocking(true).map(|()| socket))
+            .ok();
+        let tcp_v6 = std::net::TcpListener::bind(ipv6_addr)
+            .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))
+            .ok();
+
+        Ok(Self {
+            udp_v4,
+            tcp_v4,
+            udp_v6,
+            tcp_v6,
+        })
+    }
+}
+
 pub struct DnsServer {
-    port: u16,
+    sockets: DnsSockets,
     ttl: u32,
     ip_resolver: Arc<IpResolver>,
 }
 
 impl DnsServer {
-    pub fn new(port: u16) -> Self {
+    pub fn new(sockets: DnsSockets) -> Self {
         Self {
-            port,
+            sockets,
             ttl: 1,
             ip_resolver: Arc::new(IpResolver::new()),
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
-        // Bind to all interfaces so Docker containers can reach us directly
-        let ipv4_addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let ipv6_addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, self.port));
+    pub async fn run(self) -> Result<()> {
+        let udp_v4 = UdpSocket::from_std(self.sockets.udp_v4)?;
+        let tcp_v4 = TcpListener::from_std(self.sockets.tcp_v4)?;
+        let udp_v6 = self.sockets.udp_v6.map(UdpSocket::from_std).transpose()?;
+        let tcp_v6 = self.sockets.tcp_v6.map(TcpListener::from_std).transpose()?;
 
-        // Bind UDP sockets
-        let udp_v4 = UdpSocket::bind(ipv4_addr).await?;
-        let tcp_v4 = TcpListener::bind(ipv4_addr).await?;
-
-        // IPv6 binds may fail on Linux where the IPv4 dual-stack socket already
-        // covers both protocols. This is fine — we just skip IPv6-specific listeners.
-        let udp_v6 = UdpSocket::bind(ipv6_addr).await.ok();
-        let tcp_v6 = TcpListener::bind(ipv6_addr).await.ok();
-
-        if udp_v6.is_some() {
-            info!(
-                ipv4 = %ipv4_addr,
-                ipv6 = %ipv6_addr,
-                current_lan_ip = %self.ip_resolver.current_lan_ip(),
-                "DNS server listening"
-            );
-        } else {
-            info!(
-                ipv4 = %ipv4_addr,
-                current_lan_ip = %self.ip_resolver.current_lan_ip(),
-                "DNS server listening (IPv6 unavailable, using IPv4 dual-stack)"
-            );
-        }
+        info!(
+            ipv4 = %udp_v4.local_addr()?,
+            ipv6_listener = udp_v6.is_some(),
+            current_lan_ip = %self.ip_resolver.current_lan_ip(),
+            "DNS server listening"
+        );
 
         let ttl = self.ttl;
         let resolver = self.ip_resolver.clone();

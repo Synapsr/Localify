@@ -66,10 +66,13 @@ pub fn configure_dev(
     let request = MaterializeProjectServicesRequest {
         project_id: project.id.clone(),
         root_path: current_dir.display().to_string(),
+        detected_services: Vec::new(),
     };
     let materialized = match WriteBackend::resolve(config_path)? {
         WriteBackend::Direct => direct_api(config_path)?.materialize_project_services(request)?,
-        WriteBackend::Helper(client) => client.materialize_project_services(request)?,
+        WriteBackend::Helper(client) => client.materialize_project_services(
+            direct_api(config_path)?.with_detected_project_services(request)?,
+        )?,
     }
     .materialized;
     // Best-effort: lets a moved folder be re-linked to this project later.

@@ -297,6 +297,8 @@ labels:
 ### Docker Socket Permission
 
 Localify connects to the Docker socket
-(`/var/run/docker.sock` by default). If running as root
-(via `sudo`), this works automatically. If you see connection
-errors, verify the socket exists and is accessible.
+(`/var/run/docker.sock` by default) as the user it runs as,
+even when you start it with `sudo`. That user must be able to
+open the socket: on Linux, add them to the `docker` group. If
+you see connection errors, verify the socket exists and that
+`docker ps` works without `sudo`.

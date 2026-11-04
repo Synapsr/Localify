@@ -826,6 +826,19 @@ pub struct SetProjectServiceDomainResultDto {
 pub struct MaterializeProjectServicesRequest {
     pub project_id: String,
     pub root_path: String,
+    /// What the caller found in `root_path`. The root helper only records this
+    /// and never reads the folder itself.
+    #[serde(default)]
+    pub detected_services: Vec<DetectedProjectServiceDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedProjectServiceDto {
+    pub service_name: String,
+    pub service_path: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub legacy_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

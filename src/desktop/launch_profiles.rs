@@ -5,12 +5,20 @@ use std::path::Path;
 
 use crate::desktop::dto::LaunchProfileInfoDto;
 use crate::infrastructure::launch_profiles::LaunchProfiles;
+use crate::infrastructure::privilege::running_as_root;
 
 /// Lists the launch profiles of a checkout. A broken `localify.toml` is
 /// reported as an error string so the UI can show it next to the service.
+///
+/// Returns nothing in a root process. The caller picks the checkout, the file can
+/// be a link, and a parse error quotes the file, so root must not read it. The
+/// app reads the profiles itself when it refreshes.
 pub fn environment_launch_profiles(
     root_path: Option<&str>,
 ) -> (Vec<LaunchProfileInfoDto>, Option<String>) {
+    if running_as_root() {
+        return (Vec::new(), None);
+    }
     let Some(root_path) = root_path else {
         return (Vec::new(), None);
     };

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, chown};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ use crate::desktop::dto::{
 };
 use crate::infrastructure::binary_identity::DaemonBinaryCheck;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
+use crate::infrastructure::privilege::current_real_uid;
 
 const HELPER_PING_TIMEOUT: Duration = Duration::from_secs(1);
 const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -204,31 +205,6 @@ impl HelperCommand {
             Self::ReportLaunchSession { .. } => "report a launch profile session",
             _ => "run a system helper command",
         }
-    }
-
-    fn may_write_config(&self) -> bool {
-        matches!(
-            self,
-            Self::InstallLocalify
-                | Self::UpdateConfig { .. }
-                | Self::CreateProject { .. }
-                | Self::CreateProjectWithDomains { .. }
-                | Self::InitProject { .. }
-                | Self::AddProjectService { .. }
-                | Self::SetProjectServiceDomain { .. }
-                | Self::MaterializeProjectServices { .. }
-                | Self::EnsureProjectEnvironment { .. }
-                | Self::UpdateProject { .. }
-                | Self::RemoveProject { .. }
-                | Self::RemoveProjectEnvironment { .. }
-                | Self::AttachProjectWorktree { .. }
-                | Self::AssignDomainProject { .. }
-                | Self::RegisterDomain { .. }
-                | Self::UpdateDomain { .. }
-                | Self::UnregisterDomain { .. }
-                | Self::AddRoute { .. }
-                | Self::RemoveRoute { .. }
-        )
     }
 }
 
@@ -562,32 +538,7 @@ pub fn helper_socket_path(uid: u32) -> PathBuf {
 }
 
 pub fn current_uid() -> Result<u32> {
-    if let Ok(uid) = std::env::var("UID") {
-        return uid
-            .trim()
-            .parse::<u32>()
-            .context("Failed to parse UID from environment");
-    }
-
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .context("Failed to determine the current user ID")?;
-
-    if !output.status.success() {
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string()
-                .if_empty("Failed to determine the current user ID.")
-        );
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .context("Failed to parse the current user ID")
+    Ok(current_real_uid())
 }
 
 pub fn serve(
@@ -708,7 +659,6 @@ fn handle_connection(
         std::process::exit(0);
     }
 
-    let may_write_config = command.may_write_config();
     let response = match dispatch_command(api, command) {
         Ok(data) => HelperResponse {
             ok: true,
@@ -721,14 +671,6 @@ fn handle_connection(
             data: None,
         },
     };
-    if may_write_config && let Err(error) = restore_user_config_ownership(config_path, allowed_uid)
-    {
-        eprintln!(
-            "{} helper could not restore config ownership for {}: {error}",
-            BRANDING.app_name,
-            config_path.display()
-        );
-    }
 
     let mut writer = stream;
     writer.write_all(serde_json::to_string(&response)?.as_bytes())?;
@@ -756,90 +698,6 @@ fn spawn_service_removal(config_path: &Path, allowed_uid: u32) -> Result<()> {
         .spawn()
         .context("Failed to start the system helper removal")?;
     Ok(())
-}
-
-fn restore_user_config_ownership(config_path: &Path, allowed_uid: u32) -> Result<()> {
-    if config_path.starts_with("/etc") {
-        return Ok(());
-    }
-
-    if let Some(parent) = config_path.parent()
-        && parent.exists()
-        && should_restore_config_parent_ownership(config_path)
-    {
-        chown_path_to_uid(parent, allowed_uid).with_context(|| {
-            format!(
-                "Failed to restore config directory ownership for '{}'",
-                parent.display()
-            )
-        })?;
-    }
-
-    if !config_path.exists() {
-        return Ok(());
-    }
-
-    chown_path_to_uid(config_path, allowed_uid).with_context(|| {
-        format!(
-            "Failed to restore config file ownership for '{}'",
-            config_path.display()
-        )
-    })?;
-
-    let mut permissions = fs::metadata(config_path)?.permissions();
-    permissions.set_mode(permissions.mode() | 0o600);
-    fs::set_permissions(config_path, permissions)?;
-    Ok(())
-}
-
-fn should_restore_config_parent_ownership(config_path: &Path) -> bool {
-    let Some(parent) = config_path.parent() else {
-        return false;
-    };
-
-    let state_dir_name = parent.file_name().and_then(|name| name.to_str());
-    let is_localify_state_dir = state_dir_name == Some(BRANDING.desktop_state_dir_name)
-        || state_dir_name == Some(BRANDING.dev_desktop_state_dir_name);
-    if !is_localify_state_dir {
-        return false;
-    }
-
-    let Some(application_support_dir) = parent.parent() else {
-        return false;
-    };
-    if application_support_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        != Some("Application Support")
-    {
-        return false;
-    }
-
-    application_support_dir
-        .parent()
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        == Some("Library")
-}
-
-fn chown_path_to_uid(path: &Path, uid: u32) -> Result<()> {
-    let output = Command::new("chown")
-        .arg(uid.to_string())
-        .arg(path)
-        .output()
-        .with_context(|| format!("Failed to run chown for '{}'", path.display()))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    bail!(
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .to_string()
-            .if_empty("Failed to change ownership.")
-    );
 }
 
 fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_json::Value> {
@@ -887,7 +745,7 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
             serde_json::to_value(api.set_project_service_domain(request)?).map_err(Into::into)
         }
         HelperCommand::MaterializeProjectServices { request } => {
-            serde_json::to_value(api.materialize_project_services(request)?).map_err(Into::into)
+            serde_json::to_value(api.apply_detected_project_services(request)?).map_err(Into::into)
         }
         HelperCommand::EnsureProjectEnvironment { request } => {
             serde_json::to_value(api.ensure_project_environment(request)?).map_err(Into::into)
@@ -964,21 +822,8 @@ fn dispatch_command(api: &DesktopApi, command: HelperCommand) -> Result<serde_js
 }
 
 fn set_socket_owner(socket_path: &Path, allowed_uid: u32) -> Result<()> {
-    let output = Command::new("chown")
-        .arg(allowed_uid.to_string())
-        .arg(socket_path)
-        .output()
+    chown(socket_path, Some(allowed_uid), None)
         .context("Failed to hand the helper socket to the desktop user")?;
-
-    if !output.status.success() {
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string()
-                .if_empty("Failed to change helper socket ownership.")
-        );
-    }
 
     let mut permissions = fs::metadata(socket_path)?.permissions();
     permissions.set_mode(0o600);
@@ -986,24 +831,9 @@ fn set_socket_owner(socket_path: &Path, allowed_uid: u32) -> Result<()> {
     Ok(())
 }
 
-trait StringExt {
-    fn if_empty(self, fallback: &str) -> String;
-}
-
-impl StringExt for String {
-    fn if_empty(self, fallback: &str) -> String {
-        if self.is_empty() {
-            fallback.to_string()
-        } else {
-            self
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop::dto::DomainPatternRequest;
 
     /// These took a file path and made root read or write it, for any caller
     /// holding the socket. The app does this work in its own process instead.
@@ -1023,56 +853,5 @@ mod tests {
         let command = serde_json::from_str::<HelperCommand>(r#"{"cmd":"removeService"}"#).unwrap();
 
         assert!(matches!(command, HelperCommand::RemoveService));
-        assert!(!command.may_write_config());
-    }
-
-    #[test]
-    fn read_commands_do_not_restore_config_ownership() {
-        assert!(!HelperCommand::Ping.may_write_config());
-        assert!(!HelperCommand::GetBootstrap.may_write_config());
-        assert!(!HelperCommand::ListDomains.may_write_config());
-        assert!(!HelperCommand::GetAvailablePort.may_write_config());
-    }
-
-    #[test]
-    fn config_mutations_restore_config_ownership() {
-        assert!(HelperCommand::InstallLocalify.may_write_config());
-        assert!(
-            HelperCommand::UnregisterDomain {
-                request: DomainPatternRequest {
-                    domain: "demo.localify".into(),
-                    wildcard: false,
-                }
-            }
-            .may_write_config()
-        );
-    }
-
-    #[test]
-    fn daemon_mutations_do_not_restore_config_ownership() {
-        assert!(!HelperCommand::StopDaemon.may_write_config());
-        assert!(!HelperCommand::RefreshDomainCertificates.may_write_config());
-    }
-
-    #[test]
-    fn restores_parent_ownership_for_localify_application_support_config() {
-        assert!(should_restore_config_parent_ownership(
-            std::path::Path::new("/Users/dev/Library/Application Support/Localify Dev/config.toml")
-        ));
-        assert!(should_restore_config_parent_ownership(
-            std::path::Path::new(
-                "/Users/dev/Library/Application Support/Localify Desktop/config.toml"
-            )
-        ));
-    }
-
-    #[test]
-    fn does_not_restore_parent_ownership_for_arbitrary_config_paths() {
-        assert!(!should_restore_config_parent_ownership(
-            std::path::Path::new("/tmp/localify/config.toml")
-        ));
-        assert!(!should_restore_config_parent_ownership(
-            std::path::Path::new("/Users/dev/project/config.toml")
-        ));
     }
 }

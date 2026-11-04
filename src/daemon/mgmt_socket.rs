@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -87,26 +87,36 @@ pub struct DaemonPorts {
     pub dns: u16,
 }
 
+/// Binds the management socket, replacing a stale one. Runs before the daemon
+/// drops root, because the directory belongs to root in a system install. The
+/// file stays owner-only, so only root or a daemon running as the user can use
+/// it, and the listener keeps working after the drop.
+pub fn bind_socket(socket_path: &Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
+    let _ = std::fs::remove_file(socket_path);
+    let listener = std::os::unix::net::UnixListener::bind(socket_path)?;
+    crate::infrastructure::file_security::restrict_key_permissions(socket_path)
+        .map_err(|e| anyhow::anyhow!("Failed to set socket permissions: {e}"))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 /// Serve management commands on a Unix domain socket.
 ///
 /// The socket accepts one command per connection (JSON-over-lines protocol).
-/// Socket file is cleaned up when the cancellation token fires.
+/// The socket file is removed when the cancellation token fires, if this process
+/// still may; after a privilege drop the next start replaces it instead.
 pub async fn serve(
+    listener: std::os::unix::net::UnixListener,
     socket_path: PathBuf,
     state: SharedState,
     reload_tx: mpsc::Sender<()>,
     cancel: CancellationToken,
     ports: DaemonPorts,
 ) -> anyhow::Result<()> {
-    // Remove stale socket file if it exists
-    let _ = std::fs::remove_file(&socket_path);
-
     // Identity of the binary this daemon runs, so the system helper can
     // restart it after an update replaced the file.
     let binary = BinaryIdentity::current_executable();
-    let listener = UnixListener::bind(&socket_path)?;
-    crate::infrastructure::file_security::restrict_key_permissions(&socket_path)
-        .map_err(|e| anyhow::anyhow!("Failed to set socket permissions: {e}"))?;
+    let listener = UnixListener::from_std(listener)?;
     info!(path = %socket_path.display(), "Management socket listening");
 
     loop {
@@ -253,8 +263,17 @@ mod tests {
             https: 443,
             dns: 1053,
         };
+        let listener = bind_socket(&sock_clone).unwrap();
         tokio::spawn(async move {
-            let _ = serve(sock_clone, state, reload_tx, cancel_serve, test_ports).await;
+            let _ = serve(
+                listener,
+                sock_clone,
+                state,
+                reload_tx,
+                cancel_serve,
+                test_ports,
+            )
+            .await;
         });
 
         // Give the listener time to bind

@@ -5,6 +5,9 @@
 //! service never points at the installed app or CLI, which usually belong to
 //! the user. Only an administrator-approved `helper ensure-running` writes this
 //! copy; the helper never updates itself from a user-writable path.
+//!
+//! Root also must not trust a config another user could change, which is why
+//! this module checks that location too.
 
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind};
@@ -16,6 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::branding::BRANDING;
+use crate::infrastructure::privilege::running_as_root;
 
 const LAUNCHD_PLIST_DIR: &str = "/Library/LaunchDaemons";
 const PRIVILEGED_HELPER_DIR: &str = "/Library/PrivilegedHelperTools";
@@ -43,8 +47,8 @@ pub fn helper_plist_path(uid: u32) -> PathBuf {
     PathBuf::from(LAUNCHD_PLIST_DIR).join(format!("{}.plist", helper_service_label(uid)))
 }
 
-/// The label names the copy, so a dev profile gets its own file and can never
-/// replace the one the production helper runs.
+/// The label names the copy, so a helper left by an older dev install is a
+/// separate file from the one the production helper runs.
 pub fn helper_binary_path(uid: u32) -> PathBuf {
     PathBuf::from(PRIVILEGED_HELPER_DIR).join(helper_service_label(uid))
 }
@@ -58,10 +62,37 @@ pub fn install_helper_binary(source: &Path, uid: u32) -> Result<()> {
     install_copy(source, &helper_binary_path(uid), Path::new("/"), ROOT)
 }
 
-/// Refuses to install a debug build as the production helper. A debug build
-/// may only replace the separate dev copy, selected by the dev profile.
+/// Refuses to install a debug build as the root helper. Only release builds
+/// get one: the dev profile runs without a helper.
 pub fn ensure_build_may_install_helper() -> Result<()> {
-    check_build_may_install(cfg!(debug_assertions), BRANDING.is_dev_profile())
+    check_build_may_install(cfg!(debug_assertions))
+}
+
+/// Stops any root process from acting on a config another user could change,
+/// because that config steers root. Does nothing when this process is not root.
+///
+/// The file must be root's, not a link, and reachable only through directories
+/// no other user can change. Fails closed with what to do about it.
+pub fn ensure_root_may_use_config(path: &Path) -> Result<()> {
+    if !running_as_root() {
+        return Ok(());
+    }
+
+    if BRANDING.is_dev_profile() {
+        bail!(
+            "The dev profile runs as your user and never as root. Run {} without sudo.",
+            BRANDING.cli_command()
+        );
+    }
+
+    verify_config_location(path, Path::new("/"), ROOT).with_context(|| {
+        format!(
+            "Refusing to run as root with the config '{}', because another user could change it.\n\
+             Use the default config, or run {} without sudo.",
+            path.display(),
+            BRANDING.cli_command()
+        )
+    })
 }
 
 /// Whether the service runs the root-owned copy. False for a plist written by
@@ -120,6 +151,8 @@ pub fn remove_if_present(path: &Path) -> io::Result<()> {
 /// Builds the LaunchDaemon plist. It takes no executable path so a caller
 /// cannot point launchd at a user-writable file.
 pub fn launchd_plist_contents(config_path: &Path, socket: &Path, uid: u32) -> String {
+    // No environment: the helper never runs with a profile, and its service must
+    // not be steerable by one.
     let args = [
         helper_binary_path(uid).to_string_lossy().to_string(),
         "--config".into(),
@@ -149,7 +182,6 @@ pub fn launchd_plist_contents(config_path: &Path, socket: &Path, uid: u32) -> St
   <array>
 {}
   </array>
-{}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -161,19 +193,6 @@ pub fn launchd_plist_contents(config_path: &Path, socket: &Path, uid: u32) -> St
 "#,
         escape_xml(&helper_service_label(uid)),
         program_arguments,
-        launchd_environment_variables(),
-    )
-}
-
-fn launchd_environment_variables() -> String {
-    let Some(profile) = BRANDING.active_profile() else {
-        return String::new();
-    };
-
-    format!(
-        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>",
-        escape_xml(BRANDING.profile_env()),
-        escape_xml(&profile)
     )
 }
 
@@ -186,11 +205,11 @@ fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn check_build_may_install(debug_build: bool, dev_profile: bool) -> Result<()> {
-    if debug_build && !dev_profile {
+fn check_build_may_install(debug_build: bool) -> Result<()> {
+    if debug_build {
         bail!(
             "Refusing to install a debug build as the {} system helper.\n\
-             Set {}=dev to use the separate dev helper, or install a release build.",
+             Set {}=dev to run without a helper, or install a release build.",
             BRANDING.app_name,
             BRANDING.profile_env()
         );
@@ -377,6 +396,71 @@ fn verify_directory_chain(dir: &Path, trust_root: &Path, owner: TrustedOwner) ->
         verify_directory(ancestor, owner, true)?;
     }
     Ok(())
+}
+
+/// Checks a config path as given, component by component, so a link anywhere on
+/// the way counts. A link is acceptable only if root owns it, and then what it
+/// points at must pass too: `/etc` is such a link on macOS.
+fn verify_config_location(path: &Path, trust_root: &Path, owner: TrustedOwner) -> Result<()> {
+    let path = std::path::absolute(path)
+        .with_context(|| format!("Failed to resolve '{}'", path.display()))?;
+    let exists = match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            verify_protected_file(&path, owner)?;
+            true
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to inspect '{}'", path.display()));
+        }
+    };
+
+    let Some(parent) = path.parent() else {
+        bail!("Config path '{}' has no parent directory.", path.display());
+    };
+    let Some(nearest) = parent
+        .ancestors()
+        .find(|ancestor| fs::symlink_metadata(ancestor).is_ok())
+    else {
+        bail!("Config path '{}' has no existing parent.", path.display());
+    };
+
+    // Another user could create a missing file in a sticky directory first.
+    if !exists {
+        verify_nearest_config_directory(nearest, owner)?;
+    }
+    for ancestor in nearest
+        .ancestors()
+        .take_while(|ancestor| ancestor.starts_with(trust_root))
+    {
+        verify_config_directory(ancestor, trust_root, owner)?;
+    }
+    Ok(())
+}
+
+fn verify_nearest_config_directory(path: &Path, owner: TrustedOwner) -> Result<()> {
+    let target = fs::canonicalize(path)
+        .with_context(|| format!("Failed to resolve '{}'", path.display()))?;
+    verify_directory(&target, owner, false)
+}
+
+fn verify_config_directory(path: &Path, trust_root: &Path, owner: TrustedOwner) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("Failed to inspect '{}'", path.display()))?;
+    if !metadata.is_symlink() {
+        return verify_directory(path, owner, true);
+    }
+
+    if metadata.uid() != owner.uid {
+        bail!(
+            "'{}' is a link belonging to UID {}, which could point it anywhere.",
+            path.display(),
+            metadata.uid()
+        );
+    }
+    let target = fs::canonicalize(path)
+        .with_context(|| format!("Failed to resolve '{}'", path.display()))?;
+    verify_directory_chain(&target, trust_root, owner)
 }
 
 /// `allow_sticky` covers directories above the copy: in a sticky directory,
@@ -952,11 +1036,136 @@ mod tests {
     }
 
     #[test]
-    fn debug_builds_only_install_the_dev_helper() {
-        assert!(check_build_may_install(true, false).is_err());
-        assert!(check_build_may_install(true, true).is_ok());
-        assert!(check_build_may_install(false, false).is_ok());
-        assert!(check_build_may_install(false, true).is_ok());
+    fn debug_builds_never_install_a_root_helper() {
+        assert!(check_build_may_install(true).is_err());
+        assert!(check_build_may_install(false).is_ok());
+    }
+
+    fn config_layout() -> (Layout, PathBuf) {
+        let layout = Layout::new();
+        let directory = layout.root.join("etc");
+        fs::create_dir(&directory).unwrap();
+        set_mode(&directory, 0o755);
+        let config = directory.join("config.toml");
+        fs::write(&config, "").unwrap();
+        set_mode(&config, 0o644);
+        (layout, config)
+    }
+
+    #[test]
+    fn a_protected_config_is_accepted() {
+        let (layout, config) = config_layout();
+
+        verify_config_location(&config, &layout.root, layout.owner).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_config_is_refused() {
+        let (layout, target) = config_layout();
+        let config = target.parent().unwrap().join("link.toml");
+        symlink(&target, &config).unwrap();
+
+        let error = verify_config_location(&config, &layout.root, layout.owner).unwrap_err();
+
+        assert!(error.to_string().contains("not a link"));
+    }
+
+    #[test]
+    fn a_config_owned_by_another_user_is_refused() {
+        let (layout, config) = config_layout();
+
+        let error =
+            verify_config_location(&config, &layout.root, layout.another_user()).unwrap_err();
+
+        assert!(error.to_string().contains("system account"));
+    }
+
+    #[test]
+    fn a_config_other_users_can_write_is_refused() {
+        let (layout, config) = config_layout();
+        set_mode(&config, 0o664);
+
+        let error = verify_config_location(&config, &layout.root, layout.owner).unwrap_err();
+
+        assert!(error.to_string().contains("changed by other users"));
+    }
+
+    #[test]
+    fn a_config_under_a_writable_directory_is_refused() {
+        let (layout, config) = config_layout();
+        set_mode(config.parent().unwrap(), 0o777);
+
+        let error = verify_config_location(&config, &layout.root, layout.owner).unwrap_err();
+
+        assert!(error.to_string().contains("changed by other users"));
+    }
+
+    #[test]
+    fn a_config_under_a_directory_of_another_user_is_refused() {
+        let (layout, config) = config_layout();
+
+        let error = verify_config_directory(
+            config.parent().unwrap(),
+            &layout.root,
+            layout.another_user(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("system account"));
+    }
+
+    #[test]
+    fn a_config_through_a_link_of_another_user_is_refused() {
+        let (layout, config) = config_layout();
+        let link = layout.root.join("linked-etc");
+        symlink(config.parent().unwrap(), &link).unwrap();
+
+        let error =
+            verify_config_directory(&link, &layout.root, layout.another_user()).unwrap_err();
+
+        assert!(error.to_string().contains("a link belonging"));
+    }
+
+    #[test]
+    fn a_config_through_a_trusted_link_is_checked_at_its_target() {
+        let (layout, config) = config_layout();
+        let link = layout.root.join("linked-etc");
+        symlink(config.parent().unwrap(), &link).unwrap();
+        let through_link = link.join("config.toml");
+
+        verify_config_location(&through_link, &layout.root, layout.owner).unwrap();
+
+        set_mode(config.parent().unwrap(), 0o777);
+        assert!(verify_config_location(&through_link, &layout.root, layout.owner).is_err());
+    }
+
+    #[test]
+    fn a_missing_config_is_accepted_only_in_a_protected_directory() {
+        let (layout, config) = config_layout();
+        let missing = config.parent().unwrap().join("nested/missing.toml");
+
+        verify_config_location(&missing, &layout.root, layout.owner).unwrap();
+
+        // In a sticky directory another user could create the file first.
+        set_mode(config.parent().unwrap(), 0o1777);
+        assert!(verify_config_location(&missing, &layout.root, layout.owner).is_err());
+    }
+
+    #[test]
+    fn a_root_owned_config_in_a_sticky_directory_is_accepted() {
+        let (layout, config) = config_layout();
+        set_mode(config.parent().unwrap(), 0o1777);
+
+        verify_config_location(&config, &layout.root, layout.owner).unwrap();
+    }
+
+    #[test]
+    fn this_process_may_use_any_config_when_it_is_not_root() {
+        if running_as_root() {
+            return;
+        }
+
+        ensure_root_may_use_config(Path::new("/tmp/any/config.toml")).unwrap();
     }
 
     #[test]

@@ -299,8 +299,9 @@ DNS configuration (created by `localify install`):
 This tells the system to resolve all `*.localify` domains
 through the local DNS server.
 
-All paths are configurable via the `[paths]` section in
-`config.toml` (see [Configuration](#configuration)).
+These locations are fixed for a system install. A config you
+run as yourself can move them with its `[paths]` section (see
+[Paths Section](#paths-section)).
 
 ## Auto-Start on Boot
 
@@ -322,7 +323,9 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/localify start --foreground
+# Your user ID, from `id -u`. The daemon binds its ports as root, then drops to
+# this user. It refuses to start as root without one.
+ExecStart=/usr/local/bin/localify start --foreground --run-as-uid 1000
 Restart=on-failure
 
 [Install]
@@ -426,6 +429,11 @@ Example using a custom config:
 sudo localify -c /opt/localify/config.toml start
 ```
 
+With `sudo`, the config must belong to root, must not be a link, and must sit
+in folders only root can change. Localify refuses to run as root on anything
+else, because that file steers what root does. Run it without `sudo` to use a
+config of your own.
+
 ## Configuration
 
 The configuration lives in `/etc/localify/config.toml`
@@ -442,7 +450,18 @@ log_level = "info"
 ```
 
 All three ports must be different. The daemon needs
-`sudo` to bind to ports below 1024.
+`sudo` to bind to ports below 1024, and as root it binds
+only 80, 443, and ports from 1024 up.
+
+Once its ports are open, a daemon started as root drops to
+the user who ran `sudo` and stays that user, so it serves
+only what that user can read. It refuses to start if there
+is no such user, for example from a root shell. Name one with
+`--run-as-uid`:
+
+```bash
+localify start --foreground --run-as-uid 1000
+```
 
 ### Domain Sections
 
@@ -469,18 +488,23 @@ Wildcard registrations use a `*.` prefix
 
 ### Paths Section
 
-Override where Localify stores its data:
+A config you run as yourself can say where Localify stores
+its data:
 
 ```toml
 [paths]
-data_dir = "/etc/localify"
-pid_file = "/var/run/localify.pid"
-log_file = "/var/log/localify/localify.log"
-certs_dir = "/etc/localify/certs"
+data_dir = "/home/me/.localify"
+pid_file = "/home/me/.localify/localify.pid"
+log_file = "/home/me/.localify/localify.log"
+certs_dir = "/home/me/.localify/certs"
 ```
 
-The values above are the defaults. You only need this
-section if you want different locations.
+Localify ignores this section for `/etc/localify/config.toml`
+and whenever it runs as root, and uses the defaults instead:
+`/etc/localify`, `/var/run/localify.pid`,
+`/var/log/localify/localify.log`, and `/etc/localify/certs`.
+Root rewrites the file with the defaults the next time it
+reads it.
 
 ## Docker Integration
 

@@ -66,6 +66,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # Utilities
 humantime = "2.1"
+# setuid, setgid, initgroups and getpwuid_r for dropping root in the daemon
+libc = "0.2"
 dialoguer = { version = "0.12", default-features = false }
 
 # Tracing

@@ -15,6 +15,7 @@ use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
     DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest,
 };
+use localify::system_helper_binary::ensure_root_may_use_config;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -1095,7 +1096,13 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let api = DesktopApi::new(default_config_path(), default_binary_path());
+    let config_path = default_config_path();
+    // `LOCALIFY_CONFIG_PATH` is the user's to set, so it must not steer a root app.
+    if let Err(error) = ensure_root_may_use_config(&config_path) {
+        eprintln!("{error:#}");
+        std::process::exit(1);
+    }
+    let api = DesktopApi::new(config_path, default_binary_path());
 
     let mut builder = tauri::Builder::default();
 

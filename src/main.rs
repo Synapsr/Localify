@@ -17,6 +17,7 @@ mod infrastructure;
 use cli::context::AppContext;
 use infrastructure::config::{Config, ConfigStore};
 use infrastructure::paths::LocalifyPaths;
+use localify::system_helper_binary::ensure_root_may_use_config;
 
 #[derive(Parser)]
 #[command(name = "localify")]
@@ -274,6 +275,10 @@ enum Commands {
         /// Run in foreground (don't daemonize)
         #[arg(long)]
         foreground: bool,
+
+        /// When started as root, the user the daemon drops to once it has bound its ports. Defaults to the user who ran sudo.
+        #[arg(long, value_name = "UID")]
+        run_as_uid: Option<u32>,
     },
 
     /// Stop the Localify daemon
@@ -339,6 +344,53 @@ enum HelperCommands {
         #[arg(long)]
         uid: u32,
     },
+
+    /// Prints a short-lived CA for the daemon's on-demand certificates. A
+    /// separate process, so the Root CA key never enters the daemon.
+    IssueDaemonCa,
+
+    /// Removes a root helper left by an older dev install, as administrator.
+    RemoveDevHelper {
+        #[arg(long)]
+        uid: u32,
+    },
+
+    /// One-time system setup for the dev profile, as administrator.
+    DevSystemSetup {
+        #[arg(long)]
+        dns_port: u16,
+
+        /// Where the `localify-dev` command should point.
+        #[arg(long)]
+        cli_target: PathBuf,
+    },
+
+    /// Undoes `dev-system-setup`, as administrator.
+    DevSystemRemove {
+        /// Removes the `localify-dev` command if it points here.
+        #[arg(long)]
+        cli_target: PathBuf,
+    },
+}
+
+impl HelperCommands {
+    /// Commands that touch only fixed system paths. Root runs these without
+    /// reading any config, which is what lets them clean up a dev install whose
+    /// config belongs to the user.
+    fn run_without_config(&self) -> Option<Result<()>> {
+        match self {
+            Self::UninstallService { uid } => Some(cli::helper::uninstall_service(*uid)),
+            Self::RemoveDevHelper { uid } => Some(cli::helper::remove_dev_helper(*uid)),
+            Self::DevSystemSetup {
+                dns_port,
+                cli_target,
+            } => Some(cli::helper::dev_system_setup(*dns_port, cli_target)),
+            Self::DevSystemRemove { cli_target } => {
+                Some(cli::helper::dev_system_remove(cli_target))
+            }
+            Self::EnsureRunning { .. } | Self::Serve { .. } | Self::IssueDaemonCa => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -597,6 +649,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Commands::Helper { command } = &cli.command
+        && let Some(result) = command.run_without_config()
+    {
+        return result;
+    }
+
+    ensure_root_may_use_config(config_path)?;
     let (config, paths) = load_config_and_paths(config_path)?;
     let ctx = AppContext::new(config_path, &paths);
 
@@ -858,9 +917,17 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Commands::Start { foreground } => {
-            cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
-        }
+        Commands::Start {
+            foreground,
+            run_as_uid,
+        } => cli::start::execute(
+            foreground,
+            cli.verbose,
+            run_as_uid,
+            config_path,
+            &paths,
+            &config.daemon,
+        ),
         Commands::Stop => cli::stop::execute(&ctx),
         Commands::Restart => cli::restart::execute(cli.verbose, config_path, &ctx),
         Commands::Status => cli::status::execute(&ctx, &config.daemon),
@@ -877,8 +944,58 @@ fn main() -> Result<()> {
             HelperCommands::Serve { socket, uid } => {
                 cli::helper::serve_forever(config_path, uid, socket)
             }
-            HelperCommands::UninstallService { uid } => cli::helper::uninstall_service(uid),
+            HelperCommands::IssueDaemonCa => cli::helper::issue_daemon_ca(&paths),
+            HelperCommands::UninstallService { .. }
+            | HelperCommands::RemoveDevHelper { .. }
+            | HelperCommands::DevSystemSetup { .. }
+            | HelperCommands::DevSystemRemove { .. } => {
+                unreachable!("handled before the config is loaded")
+            }
         },
         Commands::Completions { .. } => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_takes_the_user_to_drop_to() {
+        let cli = Cli::try_parse_from(["localify", "start", "--foreground", "--run-as-uid", "501"])
+            .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Start {
+                foreground: true,
+                run_as_uid: Some(501)
+            }
+        ));
+    }
+
+    #[test]
+    fn helper_commands_that_read_no_config_are_separate_from_those_that_do() {
+        for args in [
+            vec!["localify", "helper", "issue-daemon-ca"],
+            vec![
+                "localify", "helper", "serve", "--socket", "/s", "--uid", "501",
+            ],
+            vec![
+                "localify",
+                "helper",
+                "ensure-running",
+                "--socket",
+                "/s",
+                "--uid",
+                "501",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Helper { command } = cli.command else {
+                panic!("expected a helper command");
+            };
+            assert!(command.run_without_config().is_none());
+        }
     }
 }

@@ -49,8 +49,9 @@ from the installed app:
 
 - config at `~/Library/Application Support/Localify Dev/config.toml`
 - data and certificates under `~/Library/Application Support/Localify Dev/data`
-- pid, socket, logs, resolver, and helper names based on `localify-dev`
+- pid, socket, logs, and resolver names based on `localify-dev`
 - domains under `.localify.test` instead of `.localify`
+- no root helper: see [Dev Profile](#dev-profile)
 
 You can override both when running the desktop app:
 
@@ -74,8 +75,8 @@ pnpm tauri:dev
 uses the explicit "Localify (Dev)" name and the dev-only icon asset.
 The dev script also forces `LOCALIFY_PROFILE=dev` and
 `LOCALIFY_CLI_PATH=$PWD/target/debug/localify`, so daemon start/restart actions
-from the dev shell use the repo's debug CLI, separate runtime files, and the
-dev helper instead of the installed production app.
+from the dev shell use the repo's debug CLI and separate runtime files instead
+of the installed production app.
 
 When the dev app enables command line access, it installs `localify-dev`.
 Invoking the CLI under that name automatically uses the dev profile, so test
@@ -103,9 +104,52 @@ reopen the hole, so each new binary needs the administrator's approval. The appr
 is at the app's path when it is given: replacing the app before the prompt still gets that file
 installed.
 
-The dev profile has its own copy, `dev.localify-dev.helper.<uid>`, and a debug build refuses to
-install the production helper. Rebuilding the CLI makes the dev helper stale, so the next launch of
-the dev app asks for the password once.
+A debug build refuses to install the helper, and so does the dev profile.
+
+Root also refuses to run on a config another user could change: one that is a link, is not root's,
+or sits under a folder someone else can write to. The check covers `--config` and
+`LOCALIFY_CONFIG_PATH`. Root takes its paths from the build's defaults and ignores `[paths]`, so a
+value left in an older config steers nothing, and root rewrites the file with the defaults.
+
+## Daemon Privileges
+
+The daemon starts as root and drops to the helper's `--uid`, or to the user who ran `sudo`, before it
+serves anything. It stays that user: a static route can only reach what that user can read.
+
+While still root and on a single thread, it opens the log file, binds its ports and the management
+socket, loads the leaf certificates and keys, and writes the PID file. It then sets its groups, group
+and user, and exits if it could become root again. A root process with no user to become does not
+start a daemon.
+
+- **Root CA key:** only root can read it, and it never enters the daemon. Before the drop, a separate
+  process prints a fresh issuer for on-demand certificates: a CA limited to the local domain suffix
+  that can't issue further CAs. A domain added after startup or found through Docker gets its
+  certificate from it. It lives only in the daemon's memory and renews on restart.
+- **Leaf keys:** still root-only on disk. The daemon holds the ones it loaded in memory.
+- **Other sites:** neither the Root CA nor the issuer signs for a name outside the local suffix.
+- **Files after the drop:** the daemon keeps writing to the log file it opened, and re-reads the config,
+  which anyone can read. It can't remove its PID file or socket from root's folders, so the helper and
+  the next start clean those up. A stale PID file is harmless, because its PID isn't running.
+- **Docker:** the daemon connects as the user, so that user must be able to open the socket.
+
+The helper stays root. It writes the config and certificates and starts and stops the daemon. It
+runs Git and stops port conflicts as the user, and leaves reading project folders to the caller.
+
+## Dev Profile
+
+Dev ports are unprivileged (8080, 8443, 1054), so the dev daemon runs as the user, with no helper and
+no privilege drop. `pnpm tauri:dev` starts it directly, and everything lives in the user's folder.
+
+One administrator prompt covers what the user can't do: the resolver file at
+`/etc/resolver/localify.test` and the `localify-dev` link (`helper dev-system-setup`). The CA is
+trusted in the login keychain, which needs no administrator. Because the user can read this CA's key,
+it is limited to `.localify.test`.
+
+An older dev install left a root helper and root-owned files. The dev app finds them on launch and
+asks once to remove them (`helper remove-dev-helper`): the service and its copy, a dev daemon still
+running as root, the old CA's system trust, and the root-owned files in the dev state folder. After
+that, the app asks to set up HTTPS again with a new CA. If you decline, the daemon won't start until
+the removal has run, and the error gives the command.
 
 ## Updates
 

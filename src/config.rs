@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use crate::branding::BRANDING;
 
+const FIRST_UNPRIVILEGED_PORT: u16 = 1024;
+
 fn default_http_port() -> u16 {
     if BRANDING.is_dev_profile() {
         return 8080;
@@ -89,6 +91,27 @@ impl DaemonConfig {
 
         Ok(())
     }
+
+    /// Limits what a root process will bind for the user. The config can be
+    /// changed through the helper socket with no password, so it must not be a
+    /// way to take over another low port. Anything else stays unprivileged.
+    pub fn validate_root_ports(&self) -> Result<(), String> {
+        for (name, port, allowed) in [
+            ("http_port", self.http_port, Some(80)),
+            ("https_port", self.https_port, Some(443)),
+            ("dns_port", self.dns_port, None),
+        ] {
+            if port < FIRST_UNPRIVILEGED_PORT && Some(port) != allowed {
+                return Err(format!(
+                    "{name} {port} is a privileged port that {} does not use. \
+                     Choose a port of {FIRST_UNPRIVILEGED_PORT} or above{}.",
+                    BRANDING.app_name,
+                    allowed.map_or(String::new(), |port| format!(", or {port}"))
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_data_dir() -> PathBuf {
@@ -151,7 +174,7 @@ impl Default for AgentConfig {
 
 /// All resolved paths needed by Localify components.
 /// Loaded once from config, then passed to components via DI.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LocalifyPaths {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -177,6 +200,38 @@ impl Default for LocalifyPaths {
             log_file: default_log_file(),
             certs_dir: default_certs_dir(),
             socket_path: default_socket_path(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn daemon(http_port: u16, https_port: u16, dns_port: u16) -> DaemonConfig {
+        DaemonConfig {
+            http_port,
+            https_port,
+            dns_port,
+            log_level: default_log_level(),
+        }
+    }
+
+    #[test]
+    fn root_binds_the_standard_ports_and_unprivileged_ones() {
+        assert!(daemon(80, 443, 1053).validate_root_ports().is_ok());
+        assert!(daemon(8080, 8443, 1054).validate_root_ports().is_ok());
+    }
+
+    #[test]
+    fn root_refuses_other_privileged_ports() {
+        for config in [
+            daemon(22, 443, 1053),
+            daemon(80, 631, 1053),
+            daemon(443, 80, 1053),
+            daemon(80, 443, 53),
+        ] {
+            assert!(config.validate_root_ports().is_err(), "{config:?}");
         }
     }
 }

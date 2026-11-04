@@ -17,6 +17,7 @@ pub mod output_masking;
 pub mod paths;
 pub mod pid;
 pub mod port_check;
+pub mod privilege;
 pub mod process;
 pub mod project_marker;
 pub mod target_probe;

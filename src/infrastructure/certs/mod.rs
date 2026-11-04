@@ -9,6 +9,8 @@ pub mod generator;
 pub mod service;
 pub mod trust_store;
 
+#[allow(unused_imports)] // The library crate has no user of `RootCA`.
+pub use ca::{OnDemandIssuer, RootCA};
 pub use generator::CertificateGenerator;
 pub use service::CertificateService;
 

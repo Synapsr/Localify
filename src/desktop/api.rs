@@ -3,7 +3,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::TcpListener;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,6 +19,7 @@ use crate::application::install::Install;
 use crate::application::manage_routes::ManageRoutes;
 use crate::application::ports::DaemonConnection;
 use crate::application::ports::DaemonConnectionError;
+use crate::application::ports::DnsManager;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
 use crate::application::register_domain::RegisterDomain;
@@ -34,16 +35,17 @@ use crate::desktop::dto::{
     AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
     CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
     CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
-    DetectProjectInitPlanRequest, DiscoverProjectWorktreesRequest, DnsResolutionDto, DomainInfoDto,
-    DomainPatternRequest, EnsureProjectEnvironmentRequest, EnsureProjectEnvironmentResultDto,
-    EnvironmentDto, EnvironmentFileCandidateDto, EnvironmentFileCopyItemDto,
-    EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
-    EnvironmentFileDto, EnvironmentFileListDto, EnvironmentFileRequest, FolderInitServiceDto,
-    InitProjectFromFolderRequest, InitProjectFromFolderResultDto, InitProjectRequest,
-    InitProjectResultDto, InstallResultDto, KillPortConflictRequest, LauncherAvailabilityDto,
-    LogsDto, LogsRequest, MaterializeProjectServicesRequest, MaterializeProjectServicesResultDto,
-    NodeTrustDto, OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest,
-    PortConflictDto, ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto, ProjectInfoDto,
+    DetectProjectInitPlanRequest, DetectedProjectServiceDto, DiscoverProjectWorktreesRequest,
+    DnsResolutionDto, DomainInfoDto, DomainPatternRequest, EnsureProjectEnvironmentRequest,
+    EnsureProjectEnvironmentResultDto, EnvironmentDto, EnvironmentFileCandidateDto,
+    EnvironmentFileCopyItemDto, EnvironmentFileCopyPreviewDto, EnvironmentFileCopyRequest,
+    EnvironmentFileCopyStatusDto, EnvironmentFileDto, EnvironmentFileListDto,
+    EnvironmentFileRequest, FolderInitServiceDto, InitProjectFromFolderRequest,
+    InitProjectFromFolderResultDto, InitProjectRequest, InitProjectResultDto, InstallResultDto,
+    KillPortConflictRequest, LauncherAvailabilityDto, LogsDto, LogsRequest,
+    MaterializeProjectServicesRequest, MaterializeProjectServicesResultDto, NodeTrustDto,
+    OpenEnvInEditorRequest, OpenInEditorRequest, OpenProjectUrlRequest, PortConflictDto,
+    ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto, ProjectInfoDto,
     ProjectServiceInfoDto, ProjectWorktreeDiscoveryDto, ProjectWorktreeDto,
     ProjectWorktreeServiceCandidateDto, ProjectWorktreeStatusDto, RegisterDomainRequest,
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RelinkProjectRootRequest,
@@ -84,6 +86,7 @@ use crate::infrastructure::network::{get_lan_ip, get_network_info};
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
+use crate::infrastructure::privilege::{run_as_acting_user, running_as_root};
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
@@ -92,7 +95,9 @@ use crate::project_init::{
     resolve_folder_init_selection,
 };
 use crate::system_helper::{SystemHelperClient, current_uid, helper_socket_path};
-use crate::system_helper_binary::{binary_is_root_protected, helper_binary_path};
+use crate::system_helper_binary::{
+    binary_is_root_protected, helper_binary_path, helper_plist_path,
+};
 #[cfg(target_os = "macos")]
 use crate::system_helper_binary::{helper_service_is_current, helper_service_uses_root_copy};
 
@@ -116,6 +121,8 @@ pub struct DesktopApi {
     config_path: PathBuf,
     binary_path: PathBuf,
     direct_mode: bool,
+    /// Who a daemon started by this API drops to, when this is the root helper.
+    daemon_uid: Option<u32>,
 }
 
 fn dns_resolution_status(daemon_running: bool) -> DnsResolutionDto {
@@ -150,6 +157,7 @@ impl DesktopApi {
             config_path,
             binary_path,
             direct_mode: false,
+            daemon_uid: None,
         }
     }
 
@@ -158,10 +166,19 @@ impl DesktopApi {
             config_path,
             binary_path,
             direct_mode: true,
+            daemon_uid: None,
         }
     }
 
+    /// For the root helper, which knows its user from `--uid`.
+    pub fn with_daemon_uid(mut self, uid: u32) -> Self {
+        self.daemon_uid = Some(uid);
+        self
+    }
+
     pub fn bootstrap(&self) -> Result<BootstrapDto> {
+        self.remove_legacy_dev_helper_once();
+
         if let Some(helper) = self.connected_helper_client()? {
             let mut bootstrap = helper.get_bootstrap()?;
             bootstrap.environment = self.environment();
@@ -218,7 +235,7 @@ impl DesktopApi {
             binary_path: self.binary_path.display().to_string(),
             binary_exists: self.binary_path.exists(),
             fixed_domain_suffix: BRANDING.domain_suffix().into(),
-            cli_helper_ready: self.direct_mode || self.cli_helper_ready(),
+            cli_helper_ready: !self.should_use_system_helper() || self.cli_helper_ready(),
             cli_access_ready: self.cli_access_ready(),
             cli_command_path: self.cli_command_path().display().to_string(),
             node_trust: self.node_trust_status_dto(),
@@ -319,6 +336,12 @@ impl DesktopApi {
         }
 
         config.validate()?;
+        if running_as_root() {
+            config
+                .daemon
+                .validate_root_ports()
+                .map_err(anyhow::Error::msg)?;
+        }
         self.config_store().save(&config)?;
         Ok(map_config(self.config_path.as_path(), config))
     }
@@ -591,7 +614,7 @@ impl DesktopApi {
         &self,
         request: AttachProjectWorktreeRequest,
     ) -> Result<AttachProjectWorktreeResultDto> {
-        if self.should_use_system_helper_for_worktree_attach() {
+        if self.should_use_system_helper() {
             let helper = self.ensure_helper_running()?;
             match helper.attach_project_worktree(request.clone()) {
                 Ok(result) => return Ok(result),
@@ -1047,16 +1070,49 @@ impl DesktopApi {
         &self,
         request: MaterializeProjectServicesRequest,
     ) -> Result<MaterializeProjectServicesResultDto> {
+        let request = self.with_detected_project_services(request)?;
         if self.should_use_system_helper() {
             return self
                 .ensure_helper_running()?
                 .materialize_project_services(request);
         }
 
+        self.apply_detected_project_services(request)
+    }
+
+    /// Reads the project's folder in the caller's own process. The helper is
+    /// root, and the folder and anything linked from it are the caller's choice,
+    /// so the helper only ever receives the result.
+    pub fn with_detected_project_services(
+        &self,
+        request: MaterializeProjectServicesRequest,
+    ) -> Result<MaterializeProjectServicesRequest> {
+        let config_store = self.config_store();
+        let project = configured_project(&config_store, &request.project_id)?;
+        let has_inferred_service = config_store
+            .list_services()?
+            .iter()
+            .any(|service| service.project_id == project.id && service.inferred);
+        if !has_inferred_service {
+            return Ok(request);
+        }
+
+        let root = PathBuf::from(&request.root_path);
+        let detected = detect_folder_init_plan(&root, Some(&project.name))?;
+        Ok(MaterializeProjectServicesRequest {
+            detected_services: detected_project_services(&root, &detected.services)?,
+            ..request
+        })
+    }
+
+    /// Records what the caller detected. Touches only the config.
+    pub(crate) fn apply_detected_project_services(
+        &self,
+        request: MaterializeProjectServicesRequest,
+    ) -> Result<MaterializeProjectServicesResultDto> {
         self.ensure_config_writable()?;
         let config_store = self.config_store();
         let project = configured_project(&config_store, &request.project_id)?;
-        let root = PathBuf::from(&request.root_path);
         let services = config_store
             .list_services()?
             .into_iter()
@@ -1066,9 +1122,8 @@ impl DesktopApi {
             return Ok(MaterializeProjectServicesResultDto { materialized: 0 });
         }
 
-        let detected = detect_folder_init_plan(&root, Some(&project.name))?;
         let (project_services, materialized) =
-            materialized_project_services(&services, &root, &detected.services)?;
+            materialized_project_services(&services, &request.detected_services);
         if materialized > 0 {
             config_store.set_project_services(&project.id, project_services)?;
         }
@@ -2101,6 +2156,10 @@ impl DesktopApi {
         if self.should_use_system_helper() {
             return self.install_with_system_helper();
         }
+        if self.manages_dev_system_setup() {
+            self.remove_legacy_dev_helper()?;
+            self.run_dev_system_setup_if_needed()?;
+        }
 
         let daemon_was_running = self
             .daemon_status()
@@ -2127,6 +2186,11 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
+        if self.manages_dev_system_setup()
+            && let Some(step) = self.ensure_desktop_ca_trust_step()?
+        {
+            steps.push(step);
+        }
         let refresh = self.refresh_domain_certificates_local()?;
         steps.extend(refresh.steps);
         if refresh.refreshed {
@@ -2346,6 +2410,13 @@ impl DesktopApi {
             return Ok(result);
         }
 
+        let mut dev_steps = Vec::new();
+        if self.manages_dev_system_setup() {
+            self.remove_legacy_dev_helper()?;
+            self.run_dev_system_remove()?;
+            dev_steps.extend(self.remove_desktop_ca_trust_step());
+        }
+
         let (_, paths) = self.load_config_and_paths()?;
         let certs = CertificateService::new(&paths);
         let dns = get_dns_service()?;
@@ -2367,6 +2438,7 @@ impl DesktopApi {
             .into_iter()
             .map(|(label, outcome)| map_step(Some(label), outcome))
             .collect::<Vec<_>>();
+        steps.extend(dev_steps);
         steps.push(self.remove_cli_access_step());
         if !self.direct_mode
             && let Some(step) = self.remove_node_trust_step()
@@ -2601,6 +2673,7 @@ impl DesktopApi {
         if self.should_use_system_helper() {
             return self.ensure_helper_running()?.start_daemon(request);
         }
+        self.remove_legacy_dev_helper()?;
 
         let (config, paths) = self.load_config_and_paths()?;
         let pid_file = PidFile::new(paths.pid_file.clone());
@@ -2637,6 +2710,7 @@ impl DesktopApi {
         if self.should_use_system_helper() {
             return self.ensure_helper_running()?.restart_daemon(request);
         }
+        self.remove_legacy_dev_helper()?;
 
         let config_store = self.config_store();
         let (_, paths) = self.load_config_and_paths()?;
@@ -2667,6 +2741,7 @@ impl DesktopApi {
         if self.should_use_system_helper() {
             return self.ensure_helper_running()?.reload_daemon(request);
         }
+        self.remove_legacy_dev_helper()?;
 
         let config_store = self.config_store();
         let (_, paths) = self.load_config_and_paths()?;
@@ -2824,6 +2899,9 @@ impl DesktopApi {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
+        if let Some(uid) = self.daemon_uid {
+            cmd.arg("--run-as-uid").arg(uid.to_string());
+        }
         if verbose {
             cmd.env(BRANDING.env_var("LOG"), "debug");
         }
@@ -3000,11 +3078,17 @@ impl DesktopApi {
     }
 
     fn should_use_system_helper(&self) -> bool {
-        !self.direct_mode && (self.config_path.starts_with("/etc") || BRANDING.is_dev_profile())
+        uses_system_helper(
+            self.direct_mode,
+            &self.config_path,
+            BRANDING.is_dev_profile(),
+        )
     }
 
-    fn should_use_system_helper_for_worktree_attach(&self) -> bool {
-        !self.direct_mode && self.config_path.starts_with("/etc")
+    /// The dev profile has no helper, so this API asks for the administrator
+    /// prompt itself for the little it cannot do as the user.
+    fn manages_dev_system_setup(&self) -> bool {
+        BRANDING.is_dev_profile() && !self.direct_mode
     }
 
     fn cli_helper_ready(&self) -> bool {
@@ -3032,7 +3116,11 @@ impl DesktopApi {
         let already_ready = cli_command_points_to_binary(&command_path, &self.binary_path);
 
         if !already_ready {
-            ensure_cli_command_link(&command_path, &self.binary_path)?;
+            if self.manages_dev_system_setup() {
+                self.run_dev_system_setup()?;
+            } else {
+                ensure_cli_command_link(&command_path, &self.binary_path)?;
+            }
         }
 
         Ok(CliAccessDto {
@@ -3040,6 +3128,106 @@ impl DesktopApi {
             command_path: command_path.display().to_string(),
             already_ready,
         })
+    }
+
+    /// Links the terminal command, for the one-time dev setup that runs as root.
+    pub fn link_cli_command(target: &Path) -> Result<()> {
+        ensure_cli_command_link(&BRANDING.cli_link_path(), target)
+    }
+
+    /// Removes the terminal command if it points at `target`.
+    pub fn unlink_cli_command(target: &Path) -> Result<()> {
+        remove_cli_command_link(&BRANDING.cli_link_path(), target).map(|_| ())
+    }
+
+    /// Writes the resolver file and links the terminal command, unless they are
+    /// already in place, so a dev install asks for the password once.
+    fn run_dev_system_setup_if_needed(&self) -> Result<()> {
+        let dns = get_dns_service()?;
+        if DnsManager::is_configured(&dns)
+            && DnsManager::validate(&dns).is_ok()
+            && cli_command_points_to_binary(&self.cli_command_path(), &self.binary_path)
+        {
+            return Ok(());
+        }
+        self.run_dev_system_setup()
+    }
+
+    fn run_dev_system_setup(&self) -> Result<()> {
+        let (config, _) = self.load_config_and_paths()?;
+        self.run_cli_command_with_admin(&[
+            "helper".into(),
+            "dev-system-setup".into(),
+            "--dns-port".into(),
+            config.daemon.dns_port.to_string(),
+            "--cli-target".into(),
+            self.binary_path.display().to_string(),
+        ])
+        .map(|_| ())
+    }
+
+    fn run_dev_system_remove(&self) -> Result<()> {
+        self.run_cli_command_with_admin(&[
+            "helper".into(),
+            "dev-system-remove".into(),
+            "--cli-target".into(),
+            self.binary_path.display().to_string(),
+        ])
+        .map(|_| ())
+    }
+
+    /// For the CLI, which stops here rather than fail later on a root-owned file.
+    /// Does nothing outside the dev profile.
+    pub fn ensure_no_legacy_dev_helper() -> Result<()> {
+        if !BRANDING.is_dev_profile() {
+            return Ok(());
+        }
+        let uid = current_uid()?;
+        if legacy_dev_helper_present(uid, &BRANDING.config_dir())? {
+            bail!(legacy_dev_helper_guidance(
+                uid,
+                &std::env::current_exe().unwrap_or_else(|_| PathBuf::from(BRANDING.cli_command()))
+            ));
+        }
+        Ok(())
+    }
+
+    /// Asks once per app launch, and only when an older dev install left a root
+    /// helper. Declining leaves the app usable until something needs the files.
+    fn remove_legacy_dev_helper_once(&self) {
+        use std::sync::OnceLock;
+        static ATTEMPTED: OnceLock<()> = OnceLock::new();
+        if !self.manages_dev_system_setup() || ATTEMPTED.set(()).is_err() {
+            return;
+        }
+
+        if let Err(error) = self.remove_legacy_dev_helper() {
+            eprintln!(
+                "{} could not remove the old dev helper: {error}",
+                BRANDING.app_name
+            );
+        }
+    }
+
+    /// Removes a helper an older dev install left, through the administrator
+    /// prompt, along with the root-owned files the dev daemon could not reuse.
+    fn remove_legacy_dev_helper(&self) -> Result<()> {
+        if !self.manages_dev_system_setup() {
+            return Ok(());
+        }
+
+        let uid = current_uid()?;
+        if !legacy_dev_helper_present(uid, &BRANDING.config_dir())? {
+            return Ok(());
+        }
+        self.run_cli_command_with_admin(&[
+            "helper".into(),
+            "remove-dev-helper".into(),
+            "--uid".into(),
+            uid.to_string(),
+        ])
+        .map(|_| ())
+        .with_context(|| legacy_dev_helper_guidance(uid, &self.binary_path))
     }
 
     fn cli_access_step_with(
@@ -3260,12 +3448,12 @@ impl DesktopApi {
 
         self.refresh_outdated_helper_once(&client);
 
-        if self.helper_uses_root_copy()? && self.helper_matches_runtime_config(&client)? {
+        if self.helper_uses_root_copy()? {
             return Ok(Some(client));
         }
 
         eprintln!(
-            "ignoring running {} helper because it was installed by an older version or uses another config",
+            "ignoring running {} helper because it was installed by an older version",
             BRANDING.app_name
         );
         Ok(None)
@@ -3278,10 +3466,7 @@ impl DesktopApi {
         if client.ping().is_ok() && self.helper_uses_root_copy()? {
             self.refresh_outdated_helper_once(&client);
         }
-        if client.ping().is_ok()
-            && self.helper_uses_root_copy()?
-            && self.helper_matches_runtime_config(&client)?
-        {
+        if client.ping().is_ok() && self.helper_uses_root_copy()? {
             return Ok(client);
         }
 
@@ -3381,7 +3566,7 @@ impl DesktopApi {
         // launchd throttles service respawns (up to ~10s for services that
         // just started); poll a little past that.
         for _ in 0..150 {
-            if client.ping().is_ok() && self.helper_matches_runtime_config(client)? {
+            if client.ping().is_ok() {
                 return Ok(true);
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -3418,24 +3603,6 @@ impl DesktopApi {
 
         self.run_cli_commands_with_admin(&commands)?;
         Ok(())
-    }
-
-    fn helper_matches_runtime_config(&self, client: &SystemHelperClient) -> Result<bool> {
-        if !BRANDING.is_dev_profile() {
-            return Ok(true);
-        }
-
-        let helper_config = match client.get_config() {
-            Ok(config) => config,
-            Err(_) => return Ok(false),
-        };
-        let current_config = self.config_store().load()?;
-        let expected_path = self.config_path.display().to_string();
-
-        Ok(helper_config.config_path == expected_path
-            && helper_config.daemon.http_port == current_config.daemon.http_port
-            && helper_config.daemon.https_port == current_config.daemon.https_port
-            && helper_config.daemon.dns_port == current_config.daemon.dns_port)
     }
 
     #[cfg(target_os = "macos")]
@@ -3622,6 +3789,58 @@ impl DesktopApi {
             BRANDING.env_var("CONFIG_PATH")
         )
     }
+}
+
+/// The helper is for the root-owned system config only. Everything else, and the
+/// dev profile above all, runs as the user.
+fn uses_system_helper(direct_mode: bool, config_path: &Path, dev_profile: bool) -> bool {
+    !direct_mode && !dev_profile && config_path.starts_with("/etc")
+}
+
+fn legacy_dev_helper_guidance(uid: u32, binary: &Path) -> String {
+    format!(
+        "An older dev install left a root helper that must be removed first.\n\
+         Open the dev app and approve the prompt, or run: sudo env {}=dev {} helper remove-dev-helper --uid {uid}",
+        BRANDING.profile_env(),
+        binary.display()
+    )
+}
+
+/// Whether an older dev install left a helper or root-owned files. The daemon
+/// cannot write over those as the user.
+fn legacy_dev_helper_present(uid: u32, state_dir: &Path) -> Result<bool> {
+    let service_files = [
+        helper_plist_path(uid),
+        helper_binary_path(uid),
+        helper_socket_path(uid),
+    ];
+    if service_files
+        .iter()
+        .any(|path| fs::symlink_metadata(path).is_ok())
+    {
+        return Ok(true);
+    }
+    has_root_owned_entries(state_dir)
+}
+
+fn has_root_owned_entries(dir: &Path) -> Result<bool> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to read '{}'", dir.display()));
+        }
+    };
+
+    for entry in entries {
+        let metadata = entry
+            .and_then(|entry| entry.metadata())
+            .with_context(|| format!("Failed to read '{}'", dir.display()))?;
+        if metadata.uid() == 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn parse_pattern(request: &DomainPatternRequest) -> Result<DomainPattern> {
@@ -5136,14 +5355,13 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Runs as the user, never as root: a repository's config can make Git run
+/// commands, and the caller picks the repository. It needs no `safe.directory`
+/// override either, because the user owns their own checkouts.
 fn git_command(root: &Path) -> Command {
-    let safe_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut command = Command::new(git_executable());
-    command
-        .arg("-c")
-        .arg(format!("safe.directory={}", safe_root.display()))
-        .arg("-C")
-        .arg(root);
+    command.arg("-C").arg(root);
+    run_as_acting_user(&mut command);
     command
 }
 
@@ -5621,17 +5839,15 @@ fn environment_display_name(
 
 fn materialized_project_services(
     services: &[ConfiguredService],
-    root: &Path,
-    detected_services: &[crate::project_init::FolderInitServicePlan],
-) -> Result<(Vec<ProjectServiceConfig>, usize)> {
-    let detected = detected_service_matches(root, detected_services)?;
+    detected: &[DetectedProjectServiceDto],
+) -> (Vec<ProjectServiceConfig>, usize) {
     let mut materialized_count = 0;
     let project_services = services
         .iter()
         .map(|service| {
             let mut config = project_service_config_from_existing(service);
             if service.inferred
-                && let Some(detected) = detected_service_for_existing(service, &detected)
+                && let Some(detected) = detected_service_for_existing(service, detected)
             {
                 let next_path = detected.service_path.clone();
                 let next_command = detected.command.clone();
@@ -5645,18 +5861,13 @@ fn materialized_project_services(
         })
         .collect();
 
-    Ok((project_services, materialized_count))
+    (project_services, materialized_count)
 }
 
-struct DetectedServiceMatch<'a> {
-    service: &'a crate::project_init::FolderInitServicePlan,
-    legacy_target: Option<String>,
-}
-
-fn detected_service_matches<'a>(
+fn detected_project_services(
     root: &Path,
-    services: &'a [crate::project_init::FolderInitServicePlan],
-) -> Result<Vec<DetectedServiceMatch<'a>>> {
+    services: &[crate::project_init::FolderInitServicePlan],
+) -> Result<Vec<DetectedProjectServiceDto>> {
     services
         .iter()
         .map(|service| {
@@ -5665,8 +5876,10 @@ fn detected_service_matches<'a>(
                 .as_ref()
                 .map(|path| root.join(path))
                 .unwrap_or_else(|| root.to_path_buf());
-            Ok(DetectedServiceMatch {
-                service,
+            Ok(DetectedProjectServiceDto {
+                service_name: service.service_name.clone(),
+                service_path: service.service_path.clone(),
+                command: service.command.clone(),
                 legacy_target: crate::project_init::detect_current_dir_localify_target(
                     &package_dir,
                 )?,
@@ -5677,8 +5890,8 @@ fn detected_service_matches<'a>(
 
 fn detected_service_for_existing<'a>(
     service: &ConfiguredService,
-    detected: &'a [DetectedServiceMatch<'a>],
-) -> Option<&'a crate::project_init::FolderInitServicePlan> {
+    detected: &'a [DetectedProjectServiceDto],
+) -> Option<&'a DetectedProjectServiceDto> {
     service_proxy_port(service)
         .and_then(|port| {
             detected
@@ -5690,11 +5903,10 @@ fn detected_service_for_existing<'a>(
             let service_name = normalize_display_path(&service.name).to_ascii_lowercase();
             detected.iter().find(|candidate| {
                 let detected_name =
-                    normalize_display_path(&candidate.service.service_name).to_ascii_lowercase();
+                    normalize_display_path(&candidate.service_name).to_ascii_lowercase();
                 detected_name == service_id || detected_name == service_name
             })
         })
-        .map(|candidate| candidate.service)
 }
 
 fn service_proxy_port(service: &ConfiguredService) -> Option<String> {
@@ -6977,12 +7189,13 @@ mod tests {
         cli_shell_command, cli_shell_commands, ensure_cli_command_link,
         ensure_environment_file_target, ensure_existing_domain_https, env_file_target,
         environment_file_modified_at, environment_service_domains, export_route_string,
-        git_command, infer_primary_worktree_root, is_stale_system_helper_error,
-        normalize_desktop_route, normalize_project_snapshot_id, parse_desktop_route,
-        parse_git_worktree_porcelain, read_environment_file_target, remove_cli_command_link,
-        resolve_attach_primary_git_root, restart_daemon_after_certificate_refresh_step_with,
-        service_env_root, shell_escape, should_restart_helper_after_attach_error, slugify,
-        unique_environment_slug, validate_settings_snapshot,
+        git_command, has_root_owned_entries, infer_primary_worktree_root,
+        is_stale_system_helper_error, normalize_desktop_route, normalize_project_snapshot_id,
+        parse_desktop_route, parse_git_worktree_porcelain, read_environment_file_target,
+        remove_cli_command_link, resolve_attach_primary_git_root,
+        restart_daemon_after_certificate_refresh_step_with, service_env_root, shell_escape,
+        should_restart_helper_after_attach_error, slugify, unique_environment_slug,
+        uses_system_helper, validate_settings_snapshot,
     };
     use crate::config::LocalifyPaths;
     use crate::desktop::dto::{
@@ -7219,17 +7432,14 @@ mod tests {
     }
 
     #[test]
-    fn git_command_marks_checkout_safe_before_chdir() {
+    fn git_command_does_not_override_git_ownership_checks() {
         let root = Path::new("/tmp/localify-client-app");
         let args = git_command(root)
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(args[0], "-c");
-        assert_eq!(args[1], "safe.directory=/tmp/localify-client-app");
-        assert_eq!(args[2], "-C");
-        assert_eq!(args[3], "/tmp/localify-client-app");
+        assert_eq!(args, ["-C", "/tmp/localify-client-app"]);
     }
 
     #[test]
@@ -7408,19 +7618,67 @@ mod tests {
     }
 
     #[test]
-    fn worktree_attach_uses_helper_only_for_system_config() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let user_api = DesktopApi::new(
-            temp_dir.path().join("Localify Dev").join("config.toml"),
-            temp_dir.path().join("localify"),
-        );
-        let system_api = DesktopApi::new(
-            PathBuf::from("/etc/localify/config.toml"),
-            temp_dir.path().join("localify"),
-        );
+    fn only_the_system_config_outside_the_dev_profile_uses_the_helper() {
+        let system = Path::new("/etc/localify/config.toml");
+        let user = Path::new("/Users/dev/Library/Application Support/Localify Dev/config.toml");
 
-        assert!(!user_api.should_use_system_helper_for_worktree_attach());
-        assert!(system_api.should_use_system_helper_for_worktree_attach());
+        assert!(uses_system_helper(false, system, false));
+        assert!(!uses_system_helper(false, user, false));
+    }
+
+    #[test]
+    fn the_dev_profile_never_uses_the_helper() {
+        let system = Path::new("/etc/localify/config.toml");
+        let user = Path::new("/Users/dev/Library/Application Support/Localify Dev/config.toml");
+
+        assert!(!uses_system_helper(false, user, true));
+        assert!(!uses_system_helper(false, system, true));
+    }
+
+    #[test]
+    fn the_helper_itself_never_calls_the_helper() {
+        assert!(!uses_system_helper(
+            true,
+            Path::new("/etc/localify/config.toml"),
+            false
+        ));
+    }
+
+    #[test]
+    fn a_missing_state_folder_has_nothing_root_owned() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(!has_root_owned_entries(&dir.path().join("missing")).unwrap());
+    }
+
+    #[test]
+    fn a_state_folder_of_the_user_has_nothing_root_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("config.toml"), "").unwrap();
+
+        assert!(!has_root_owned_entries(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn a_root_owned_folder_counts_as_root_owned() {
+        // `/` holds entries that belong to root on any Unix system.
+        assert!(has_root_owned_entries(Path::new("/")).unwrap());
+    }
+
+    #[test]
+    fn a_daemon_started_by_the_helper_is_told_whom_to_become() {
+        let api = DesktopApi::new_direct(
+            PathBuf::from("/etc/localify/config.toml"),
+            PathBuf::from("/usr/bin/true"),
+        )
+        .with_daemon_uid(501);
+
+        assert_eq!(api.daemon_uid, Some(501));
+        assert!(
+            !DesktopApi::new_direct(PathBuf::from("/x"), PathBuf::from("/y"))
+                .daemon_uid
+                .is_some()
+        );
     }
 
     #[test]
@@ -8636,6 +8894,7 @@ SHA-1 hash: EF0D835649DD3E4D1D109862315A09B1EA40C27F
             .materialize_project_services(crate::desktop::dto::MaterializeProjectServicesRequest {
                 project_id: project.id.clone(),
                 root_path: root.display().to_string(),
+                detected_services: Vec::new(),
             })
             .unwrap();
         let services = store.list_services().unwrap();

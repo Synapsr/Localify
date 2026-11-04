@@ -8,13 +8,14 @@ use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository,
 use crate::branding::BRANDING;
 use crate::domain::value_objects::{RouteTarget, RouteTargetError};
 use crate::domain::{DomainPattern, DomainRegistration};
+use crate::infrastructure::privilege::running_as_root;
 use dto::{
     ProjectDto, ProjectEnvironmentDto, ProjectEnvironmentServiceDto, ProjectServiceDto,
     RegistrationDto,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -961,7 +962,14 @@ impl ConfigStore {
 
         let content = fs::read_to_string(&self.path).map_err(ConfigError::ReadError)?;
         let mut config: Config = toml::from_str(&content)?;
-        if apply_runtime_profile_defaults(&mut config) {
+        let overridden = apply_fixed_paths(
+            &mut config,
+            paths_come_from_defaults(&self.path, running_as_root(), BRANDING.is_dev_profile()),
+        );
+        // Root rewrites the config at once, so a value from an older version
+        // does not stay on disk. Other users can only ignore it.
+        let heal_paths = overridden && running_as_root();
+        if apply_runtime_profile_defaults(&mut config) || heal_paths {
             self.save(&config)?;
         }
         Ok(config)
@@ -1562,6 +1570,26 @@ impl ConfigStore {
     }
 }
 
+/// Whether the `[paths]` section may be honored. Root acts on these paths, and a
+/// system config could be edited through the helper by older versions, so they
+/// always come from the build's defaults there. A config the user runs for
+/// themselves keeps its own paths, which reach only what that user can reach.
+fn paths_come_from_defaults(config_path: &Path, running_as_root: bool, dev_profile: bool) -> bool {
+    running_as_root || (!dev_profile && config_path.starts_with("/etc"))
+}
+
+/// Returns whether the config had different paths.
+fn apply_fixed_paths(config: &mut Config, from_defaults: bool) -> bool {
+    if !from_defaults {
+        return false;
+    }
+
+    let defaults = LocalifyPaths::default();
+    let overridden = config.paths != defaults;
+    config.paths = defaults;
+    overridden
+}
+
 fn apply_runtime_profile_defaults(config: &mut Config) -> bool {
     if !BRANDING.is_dev_profile() {
         return false;
@@ -1696,6 +1724,77 @@ mod tests {
     use super::*;
     use crate::branding::BRANDING;
     use crate::domain::Route;
+
+    fn hostile_paths() -> LocalifyPaths {
+        LocalifyPaths {
+            data_dir: PathBuf::from("/tmp/steered/data"),
+            pid_file: PathBuf::from("/tmp/steered/pid"),
+            log_file: PathBuf::from("/tmp/steered/log"),
+            certs_dir: PathBuf::from("/tmp/steered/certs"),
+            socket_path: PathBuf::from("/tmp/steered/sock"),
+        }
+    }
+
+    #[test]
+    fn root_never_honors_the_paths_section() {
+        for config_path in ["/etc/localify/config.toml", "/tmp/custom/config.toml"] {
+            for dev_profile in [false, true] {
+                assert!(paths_come_from_defaults(
+                    Path::new(config_path),
+                    true,
+                    dev_profile
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_system_config_never_honors_the_paths_section() {
+        assert!(paths_come_from_defaults(
+            Path::new("/etc/localify/config.toml"),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_config_the_user_runs_for_themselves_keeps_its_paths() {
+        assert!(!paths_come_from_defaults(
+            Path::new("/tmp/custom/config.toml"),
+            false,
+            false
+        ));
+        assert!(!paths_come_from_defaults(
+            Path::new("/Users/dev/Library/Application Support/Localify Dev/config.toml"),
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn fixed_paths_replace_a_tampered_config_and_report_it() {
+        let mut config = Config {
+            paths: hostile_paths(),
+            ..Config::default()
+        };
+
+        assert!(apply_fixed_paths(&mut config, true));
+
+        assert_eq!(config.paths, LocalifyPaths::default());
+        assert!(!apply_fixed_paths(&mut config, true));
+    }
+
+    #[test]
+    fn honored_paths_stay_as_configured() {
+        let mut config = Config {
+            paths: hostile_paths(),
+            ..Config::default()
+        };
+
+        assert!(!apply_fixed_paths(&mut config, false));
+
+        assert_eq!(config.paths, hostile_paths());
+    }
 
     fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();

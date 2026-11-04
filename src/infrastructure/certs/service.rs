@@ -2,6 +2,7 @@ use super::ca::RootCA;
 use super::trust_store::{TrustStore, get_trust_store};
 use super::{CertError, CertificateGenerator};
 use crate::application::ports::{CertificateError, CertificateManager};
+use crate::branding::BRANDING;
 use crate::domain::DomainPattern;
 use crate::infrastructure::paths::LocalifyPaths;
 
@@ -25,6 +26,12 @@ impl CertificateService {
         if !self.ca.exists() {
             // Generate CA
             self.ca.generate()?;
+        }
+
+        // The dev profile trusts its CA in the user's own keychain, which needs
+        // no root. The desktop API does that step.
+        if cfg!(target_os = "macos") && BRANDING.is_dev_profile() {
+            return Ok(());
         }
 
         let cert_path = self.ca.cert_path();

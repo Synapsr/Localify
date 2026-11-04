@@ -1,6 +1,7 @@
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+    GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose, NameConstraints, PKCS_ECDSA_P256_SHA256,
+    SanType,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -10,6 +11,9 @@ use super::CertError;
 use super::ca::RootCA;
 use crate::branding::BRANDING;
 use crate::domain::DomainPattern;
+
+/// Longer than any leaf it signs, and renewed whenever the daemon restarts.
+const ON_DEMAND_ISSUER_VALIDITY_DAYS: i64 = 398;
 
 /// Represents a generated certificate with its key pair
 pub struct Certificate {
@@ -64,6 +68,48 @@ pub(crate) fn build_ca_cert_params() -> CertificateParams {
     params
 }
 
+/// Limits a CA to the names Localify serves. Applied to anything whose key a
+/// process of the user can hold, so that key can never sign for another site.
+pub(crate) fn local_domains_only() -> NameConstraints {
+    NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName(BRANDING.domain_label().to_string())],
+        excluded_subtrees: Vec::new(),
+    }
+}
+
+/// Build parameters for the issuer the daemon signs on-demand certificates with.
+///
+/// The daemon runs as the user, so it holds this short-lived, name-constrained
+/// CA instead of the Root CA. It cannot issue further CAs or sign for any name
+/// outside the local suffix.
+pub(crate) fn build_on_demand_issuer_params() -> CertificateParams {
+    let mut params = CertificateParams::default();
+
+    let mut dn = DistinguishedName::new();
+    dn.push(
+        DnType::CommonName,
+        format!("{} On-Demand Issuer", BRANDING.ca_name()),
+    );
+    dn.push(DnType::OrganizationName, BRANDING.app_name);
+    params.distinguished_name = dn;
+
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now;
+    params.not_after = now + Duration::days(ON_DEMAND_ISSUER_VALIDITY_DAYS);
+
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.name_constraints = Some(local_domains_only());
+
+    params
+}
+
+/// Whether the Root CA may sign for this name. The CA is trusted system-wide, so
+/// it signs only for the local suffix, whoever asks.
+pub(crate) fn is_local_domain(name: &str) -> bool {
+    name.ends_with(BRANDING.domain_suffix())
+}
+
 pub struct CertificateGenerator {
     base_dir: PathBuf,
     certs_dir: PathBuf,
@@ -83,6 +129,15 @@ impl CertificateGenerator {
     /// For exact patterns, generates a single-domain cert.
     /// For wildcard patterns, generates a cert with SANs for base + *.base.
     pub fn generate(&self, pattern: &DomainPattern) -> Result<Certificate, CertError> {
+        if !is_local_domain(pattern.base_domain().as_str()) {
+            return Err(CertError::GenerationError(format!(
+                "{} is not under {}, so {} will not issue a certificate for it.",
+                pattern.base_domain(),
+                BRANDING.domain_suffix(),
+                BRANDING.app_name
+            )));
+        }
+
         let ca = RootCA::new(self.base_dir.clone());
 
         if !ca.exists() {
@@ -126,18 +181,14 @@ impl CertificateGenerator {
             source: e,
         })?;
 
-        // Write private key with restricted permissions
-        fs::write(&key_path, &cert.key_pem).map_err(|e| CertError::WriteError {
+        // Owner read/write only, from the moment the file exists
+        crate::infrastructure::file_security::write_private_file(
+            &key_path,
+            cert.key_pem.as_bytes(),
+        )
+        .map_err(|e| CertError::WriteError {
             path: key_path.clone(),
             source: e,
-        })?;
-
-        // Set key file permissions to 0600 (owner read/write only)
-        crate::infrastructure::file_security::restrict_key_permissions(&key_path).map_err(|e| {
-            CertError::WriteError {
-                path: key_path.clone(),
-                source: e,
-            }
         })?;
 
         Ok(())
@@ -221,6 +272,19 @@ mod tests {
         assert_eq!(cert.file_stem, "test.localify");
         assert!(cert.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(cert.key_pem.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn the_root_ca_only_signs_for_local_domains() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+        RootCA::new(base_dir.clone()).generate().unwrap();
+        let generator = CertificateGenerator::new(base_dir.clone(), base_dir.join("certs"));
+        let other_site = DomainPattern::Exact(DomainName::new("bank.example.com").unwrap());
+
+        let error = generator.generate(&other_site).err().unwrap();
+
+        assert!(error.to_string().contains("will not issue"));
     }
 
     #[test]

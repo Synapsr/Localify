@@ -1,9 +1,13 @@
+use std::env;
+
 use anyhow::Result;
+use localify::desktop::DesktopApi;
 
 use super::backend::WriteBackend;
 use super::context::AppContext;
 use crate::application::StepOutcome;
 use crate::application::uninstall::Uninstall;
+use crate::branding::BRANDING;
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
 use crate::infrastructure::paths::LocalifyPaths;
@@ -31,6 +35,21 @@ pub fn execute(force: bool, ctx: &AppContext, paths: &LocalifyPaths) -> Result<(
         println!("  - All data in {}/", preview.data_dir);
         println!("  - The system helper");
         println!("\nRun with --force to confirm, or press Ctrl+C to cancel.");
+        return Ok(());
+    }
+
+    if BRANDING.is_dev_profile() {
+        println!("Uninstalling Localify...\n");
+        let result = DesktopApi::new(ctx.config_path.clone(), env::current_exe()?).uninstall()?;
+        for step in &result.steps {
+            let label = step.label.as_deref().unwrap_or("");
+            if step.status == "warning" {
+                eprintln!("  {}: {}", label, step.message);
+            } else {
+                println!("  {}: {}", label, step.message);
+            }
+        }
+        println!("\nLocalify dev uninstallation complete!");
         return Ok(());
     }
 

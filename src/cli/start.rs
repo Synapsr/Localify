@@ -3,6 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use localify::desktop::DesktopApi;
 use localify::desktop::dto::{DaemonLaunchDto, StartDaemonRequest};
 use std::env;
 #[cfg(unix)]
@@ -18,10 +19,14 @@ use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::pid::PidFile;
 use crate::infrastructure::port_check::ensure_daemon_ports_available;
+use crate::infrastructure::privilege::{
+    Credentials, ProcessCredentials, UnprivilegedUser, daemon_uid,
+};
 
 pub fn execute(
     foreground: bool,
     verbose: bool,
+    run_as_uid: Option<u32>,
     config_path: &Path,
     paths: &LocalifyPaths,
     daemon_config: &DaemonConfig,
@@ -32,6 +37,11 @@ pub fn execute(
         return Ok(());
     }
 
+    // Decided before anything starts, so a root process with nobody to become
+    // stops here with the reason, even when it would start in the background.
+    let user = daemon_user(run_as_uid)?;
+    DesktopApi::ensure_no_legacy_dev_helper()?;
+
     let pid_file = PidFile::new(paths.pid_file.clone());
     let service = StartDaemon::new(&pid_file, daemon_config);
     let ready = service.preflight()?;
@@ -39,11 +49,11 @@ pub fn execute(
 
     if foreground {
         // Run in foreground (blocking) — daemon module lives in binary crate
-        return crate::daemon::lifecycle::run(verbose, config_path, paths);
+        return crate::daemon::lifecycle::run(verbose, config_path, paths, user);
     }
 
     let exe = env::current_exe()?;
-    let child = spawn_background_daemon(&exe, config_path, verbose)?;
+    let child = spawn_background_daemon(&exe, config_path, verbose, user.as_ref())?;
     let pid = wait_for_daemon_start(child, &pid_file, &paths.log_file)?;
 
     let lan_ip = get_lan_ip();
@@ -61,6 +71,18 @@ pub fn execute(
     println!("Use 'localify stop' to stop the daemon");
 
     Ok(())
+}
+
+/// The account a root daemon drops to. `None` when this process is not root.
+fn daemon_user(run_as_uid: Option<u32>) -> Result<Option<UnprivilegedUser>> {
+    let sudo_uid = env::var("SUDO_UID").ok();
+    daemon_uid(
+        ProcessCredentials.ids().euid,
+        run_as_uid,
+        sudo_uid.as_deref(),
+    )?
+    .map(UnprivilegedUser::lookup)
+    .transpose()
 }
 
 /// Prints the same startup summary as a direct launch for a daemon started
@@ -96,7 +118,12 @@ fn print_dns_resolution_warning() {
     );
 }
 
-fn spawn_background_daemon(exe: &Path, config_path: &Path, verbose: bool) -> Result<Child> {
+fn spawn_background_daemon(
+    exe: &Path,
+    config_path: &Path,
+    verbose: bool,
+    user: Option<&UnprivilegedUser>,
+) -> Result<Child> {
     #[cfg(unix)]
     let mut cmd = if Path::new("/usr/bin/nohup").exists() {
         let mut cmd = Command::new("/usr/bin/nohup");
@@ -116,6 +143,10 @@ fn spawn_background_daemon(exe: &Path, config_path: &Path, verbose: bool) -> Res
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    if let Some(user) = user {
+        cmd.arg("--run-as-uid").arg(user.uid.to_string());
+    }
 
     if verbose {
         cmd.env(BRANDING.env_var("LOG"), "debug");

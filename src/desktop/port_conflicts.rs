@@ -2,6 +2,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::infrastructure::privilege::run_as_acting_user;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortConflictKind {
     Http,
@@ -120,17 +122,20 @@ pub fn kill_daemon_port_conflict(
             )
         })?;
 
-    let output = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .output()
-        .with_context(|| {
-            format!(
-                "Failed to signal PID {} on {} port {}.",
-                pid,
-                expected_kind.display_name(),
-                port
-            )
-        })?;
+    // Signals as the user, even from the root helper: the caller can name any
+    // process that listens on a daemon port, and this must not stop one that
+    // belongs to someone else.
+    let mut kill = Command::new("kill");
+    kill.args(["-TERM", &pid.to_string()]);
+    run_as_acting_user(&mut kill);
+    let output = kill.output().with_context(|| {
+        format!(
+            "Failed to signal PID {} on {} port {}.",
+            pid,
+            expected_kind.display_name(),
+            port
+        )
+    })?;
 
     if !output.status.success() {
         bail!(

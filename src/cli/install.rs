@@ -1,4 +1,7 @@
+use std::env;
+
 use anyhow::Result;
+use localify::desktop::DesktopApi;
 
 use super::backend::WriteBackend;
 use super::context::AppContext;
@@ -6,6 +9,7 @@ use crate::application::StepOutcome;
 use crate::application::install::Install;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
+use crate::branding::BRANDING;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::dns::get_dns_service;
 use crate::infrastructure::filesystem::FileSystemSetup;
@@ -16,6 +20,10 @@ use crate::infrastructure::paths::LocalifyPaths;
 
 pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Result<()> {
     println!("Setting up Localify...\n");
+
+    if BRANDING.is_dev_profile() {
+        return install_dev_profile(ctx);
+    }
 
     if let WriteBackend::Helper(client) = WriteBackend::resolve(&ctx.config_path)? {
         let result = client.install_localify()?;
@@ -66,6 +74,23 @@ pub fn execute(ctx: &AppContext, paths: &LocalifyPaths, config: &Config) -> Resu
     println!();
     println!("Register domains with: localify register <domain> --route \"/=3000\"");
 
+    Ok(())
+}
+
+/// The dev profile runs as the user. The API asks for the administrator prompt
+/// itself for the resolver file and the terminal command.
+fn install_dev_profile(ctx: &AppContext) -> Result<()> {
+    let result = DesktopApi::new(ctx.config_path.clone(), env::current_exe()?).install()?;
+    println!("  Using IP address: {}", result.lan_ip);
+    for step in &result.steps {
+        let label = step.label.as_deref().unwrap_or("");
+        if step.status == "warning" {
+            eprintln!("  {} {}", label, step.message);
+        } else {
+            println!("  {} {}", label, step.message);
+        }
+    }
+    println!("\nLocalify dev setup complete!");
     Ok(())
 }
 

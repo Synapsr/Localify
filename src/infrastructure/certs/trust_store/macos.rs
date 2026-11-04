@@ -105,13 +105,18 @@ impl TrustStore for MacOsTrustStore {
     }
 
     fn is_ca_trusted(&self, cert_path: &Path) -> Result<bool, CertError> {
+        // The dev profile trusts its CA in the user's own keychain instead.
+        if BRANDING.is_dev_profile() {
+            return verify_certificate_trust(cert_path, &login_keychain_path()?);
+        }
+
         let local_hash = certificate_sha1(cert_path)?;
         let trusted_hashes = find_keychain_hashes()?;
         if !trusted_hashes.iter().any(|hash| hash == &local_hash) {
             return Ok(false);
         }
 
-        verify_certificate_trust(cert_path)
+        verify_certificate_trust(cert_path, "/Library/Keychains/System.keychain")
     }
 }
 
@@ -198,7 +203,26 @@ fn certificate_sha1(cert_path: &Path) -> Result<String, CertError> {
     parse_openssl_fingerprint(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn verify_certificate_trust(cert_path: &Path) -> Result<bool, CertError> {
+fn login_keychain_path() -> Result<String, CertError> {
+    let output = Command::new("security")
+        .arg("login-keychain")
+        .output()
+        .map_err(|e| {
+            CertError::TrustStoreError(format!("Failed to find the login keychain: {}", e))
+        })?;
+    let path = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    if !output.status.success() || path.is_empty() {
+        return Err(CertError::TrustStoreError(
+            "Failed to find the login keychain.".into(),
+        ));
+    }
+    Ok(path)
+}
+
+fn verify_certificate_trust(cert_path: &Path, keychain: &str) -> Result<bool, CertError> {
     let cert_path_str = cert_path.to_str().ok_or_else(|| {
         CertError::TrustStoreError(format!(
             "Certificate path contains invalid UTF-8: {}",
@@ -215,7 +239,7 @@ fn verify_certificate_trust(cert_path: &Path) -> Result<bool, CertError> {
             "basic",
             "-L",
             "-k",
-            "/Library/Keychains/System.keychain",
+            keychain,
         ])
         .output()
         .map_err(|e| {

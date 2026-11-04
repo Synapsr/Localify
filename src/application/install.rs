@@ -86,6 +86,9 @@ impl<'a> Install<'a> {
         let ca_outcome = match self.certs.is_ca_installed() {
             Ok(true) => StepOutcome::Skipped("Root CA already installed.".into()),
             _ => match self.certs.init_ca() {
+                Ok(()) if BRANDING.is_dev_profile() => {
+                    StepOutcome::Success("Root CA ready.".into())
+                }
                 Ok(()) => StepOutcome::Success(
                     "Root CA created and installed in system trust store.".into(),
                 ),

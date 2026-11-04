@@ -189,7 +189,9 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/localify start --foreground
+# Your user ID, from `id -u`. The daemon binds its ports as root, then drops to
+# this user. It refuses to start as root without one.
+ExecStart=/usr/local/bin/localify start --foreground --run-as-uid 1000
 Restart=on-failure
 
 [Install]

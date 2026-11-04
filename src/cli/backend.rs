@@ -25,7 +25,12 @@ impl WriteBackend {
     /// Returns an actionable error when neither is available instead of
     /// failing later with a bare permission error.
     pub fn resolve(config_path: &Path) -> Result<Self> {
-        let socket_path = current_uid().ok().map(helper_socket_path);
+        // The dev profile has no helper: a helper answering there is left over
+        // from an older install.
+        let socket_path = current_uid()
+            .ok()
+            .filter(|_| !BRANDING.is_dev_profile())
+            .map(helper_socket_path);
         Self::resolve_with(config_path, socket_path.as_deref())
     }
 
