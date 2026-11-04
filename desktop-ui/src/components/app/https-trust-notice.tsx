@@ -25,16 +25,14 @@ export const HttpsTrustNotice = () => {
   }
 
   return (
-    <div className="border-t border-[--color-border] bg-[--color-surface]">
-      <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4 px-8 py-2">
-        <p className="text-xs text-[--color-muted]">
-          Browsers warn about HTTPS until you confirm this certificate in macOS. HTTP and Node.js
-          already work.
-        </p>
-        <Button size="sm" variant="secondary" loading={trust.isPending} onClick={handleTrust}>
-          Trust HTTPS
-        </Button>
-      </div>
+    <div className="flex items-center justify-between gap-4 rounded-t-lg border-b border-amber-500/20 bg-amber-500/10 px-4 py-2">
+      <p className="min-w-0 text-xs text-amber-700 dark:text-amber-300">
+        Browsers warn about HTTPS until you confirm Localify's certificate in macOS. HTTP and
+        Node.js already work.
+      </p>
+      <Button size="sm" variant="secondary" loading={trust.isPending} onClick={handleTrust}>
+        Trust HTTPS
+      </Button>
     </div>
   );
 };
