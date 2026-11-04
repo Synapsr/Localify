@@ -24,8 +24,8 @@ importers:
         specifier: ^6.7.0
         version: 6.7.0
       '@codemirror/view':
-        specifier: ^6.43.3
-        version: 6.43.3
+        specifier: ^6.43.15
+        version: 6.43.15
       '@fontsource-variable/dm-sans':
         specifier: ^5.2.8
         version: 5.2.8
@@ -342,8 +342,8 @@ packages:
   '@codemirror/state@6.7.0':
     resolution: {integrity: sha512-Zbl9NyscLMZkfXPQnNAIIAFftidrA1UbcJEIMp24C0Bukc2I5T8wJS0wsXYsnDOqCFJUeJ1BITGNs5CqPDSmSg==}
 
-  '@codemirror/view@6.43.3':
-    resolution: {integrity: sha512-MwEwCAr/o0agJefhC2+reBv5kfOQpMcDRUNQrRYZgWlhH8IwQcerMZrpqWyUFSyO0ebgN2cnh/w87F7G4BGSng==}
+  '@codemirror/view@6.43.15':
+    resolution: {integrity: sha512-HHsfpqFeHyXLs983pSRe38Xajs0vFWZQ2BuX0m7Ki8w3jZ5iD8cuR3lBz2/5/X53Dhf32SBHKh6rtSTB6tKeGw==}
 
   '@date-fns/tz@1.4.1':
     resolution: {integrity: sha512-P5LUNhtbj6YfI3iJjw5EL9eUAG6OitD0W3fWQcpQjDRc/QIsL0tRNuO1PcDvPccWL1fSTXXdE1ds+l95DV/OFA==}
@@ -3256,20 +3256,20 @@ snapshots:
     dependencies:
       '@codemirror/language': 6.12.4
       '@codemirror/state': 6.7.0
-      '@codemirror/view': 6.43.3
+      '@codemirror/view': 6.43.15
       '@lezer/common': 1.5.2
 
   '@codemirror/commands@6.10.4':
     dependencies:
       '@codemirror/language': 6.12.4
       '@codemirror/state': 6.7.0
-      '@codemirror/view': 6.43.3
+      '@codemirror/view': 6.43.15
       '@lezer/common': 1.5.2
 
   '@codemirror/language@6.12.4':
     dependencies:
       '@codemirror/state': 6.7.0
-      '@codemirror/view': 6.43.3
+      '@codemirror/view': 6.43.15
       '@lezer/common': 1.5.2
       '@lezer/highlight': 1.2.3
       '@lezer/lr': 1.4.10
@@ -3282,20 +3282,20 @@ snapshots:
   '@codemirror/lint@6.9.7':
     dependencies:
       '@codemirror/state': 6.7.0
-      '@codemirror/view': 6.43.3
+      '@codemirror/view': 6.43.15
       crelt: 1.0.6
 
   '@codemirror/search@6.7.1':
     dependencies:
       '@codemirror/state': 6.7.0
-      '@codemirror/view': 6.43.3
+      '@codemirror/view': 6.43.15
       crelt: 1.0.6
 
   '@codemirror/state@6.7.0':
     dependencies:
       '@marijn/find-cluster-break': 1.0.2
 
-  '@codemirror/view@6.43.3':
+  '@codemirror/view@6.43.15':
     dependencies:
       '@codemirror/state': 6.7.0
       crelt: 1.0.6
@@ -3501,7 +3501,7 @@ snapshots:
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.12)
       ajv: 8.18.0
-      ajv-formats: 3.0.1
+      ajv-formats: 3.0.1(ajv@8.18.0)
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
@@ -4173,8 +4173,8 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  ajv-formats@3.0.1:
-    dependencies:
+  ajv-formats@3.0.1(ajv@8.18.0):
+    optionalDependencies:
       ajv: 8.18.0
 
   ajv@8.18.0:
@@ -4317,7 +4317,7 @@ snapshots:
       '@codemirror/lint': 6.9.7
       '@codemirror/search': 6.7.1
       '@codemirror/state': 6.7.0
-      '@codemirror/view': 6.43.3
+      '@codemirror/view': 6.43.15
 
   color-convert@2.0.1:
     dependencies:
