@@ -51,6 +51,16 @@ async function errorCode(response: Response): Promise<string> {
   return ((await response.json()) as { error: string }).error;
 }
 
+/** The cleanup's bookkeeping for one machine. */
+function cleanupRow(id: string) {
+  return context.sqlite
+    .prepare(
+      `SELECT user_id, tunnel_id, dns_record_id, reconcile, cleanup_attempts, next_cleanup_at
+       FROM machines WHERE id = ?`,
+    )
+    .get(id) as Record<string, unknown>;
+}
+
 function machineRow(id: string) {
   return context.sqlite
     .prepare("SELECT status, tunnel_id, dns_record_id, revoked_at FROM machines WHERE id = ?")
@@ -708,6 +718,69 @@ describe("hourly cleanup", () => {
       dns_record_id: null,
     });
     expect(machineRow("young")).toMatchObject({ status: "provisioning" });
+  });
+
+  it("finds by name what a failed sign-in created without recording it", async () => {
+    const { machineId } = await signIn(context);
+    const { user_id } = cleanupRow(machineId) as { user_id: string };
+    context.sqlite
+      .prepare(
+        `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, revoked_at, reconcile)
+         VALUES ('failed', ?, 'failed', 'revoked', 7381, ?, ?, 1)`,
+      )
+      .run(user_id, Date.now(), Date.now());
+    context.routes.set(`GET ${CF}/accounts/account-1/cfd_tunnel?`, () =>
+      cloudflareOk([{ id: "tunnel-failed" }]),
+    );
+    context.routes.set(`GET ${CF}/zones/zone-1/dns_records?`, () =>
+      cloudflareOk([{ id: "record-failed" }]),
+    );
+    context.calls.length = 0;
+
+    await runCleanup(context.env);
+    expect(cloudflareCalls()).toEqual([
+      "GET /accounts/account-1/cfd_tunnel?name=localify-failed&is_deleted=false",
+      "GET /zones/zone-1/dns_records?type=CNAME&name=m-failed.localify.dev",
+      "DELETE /accounts/account-1/cfd_tunnel/tunnel-failed/connections",
+      "DELETE /accounts/account-1/cfd_tunnel/tunnel-failed",
+      "DELETE /zones/zone-1/dns_records/record-failed",
+    ]);
+    expect(cleanupRow("failed")).toMatchObject({
+      reconcile: 0,
+      tunnel_id: null,
+      dns_record_id: null,
+      next_cleanup_at: null,
+    });
+  });
+
+  it("keeps machines whose cleanup fails from holding back the others", async () => {
+    const { machineId } = await signIn(context);
+    const { user_id } = cleanupRow(machineId) as { user_id: string };
+    const insert = context.sqlite.prepare(
+      `INSERT INTO machines (id, user_id, name, status, tunnel_id, ingress_port, created_at, revoked_at)
+       VALUES (?, ?, ?, 'revoked', ?, 7381, ?, ?)`,
+    );
+    const old = Date.now() - 60 * 60 * 1000;
+    for (let i = 0; i < 9; i++) {
+      insert.run(`stale-${i}`, user_id, `stale-${i}`, `tunnel-stale-${i}`, old, old + i);
+    }
+    context.routes.clear();
+    context.routes.set(`DELETE ${CF}/accounts/account-1/cfd_tunnel/tunnel-stale`, () =>
+      jsonResponse({ success: false, errors: [] }, 500),
+    );
+    context.routes.set(`DELETE ${CF}/accounts/`, () => cloudflareOk(null));
+
+    const now = Date.now();
+    await runCleanup(context.env, now);
+    // The budget allows 8 machines a run: the 9th waits.
+    expect(cleanupRow("stale-7")).toMatchObject({ cleanup_attempts: 1 });
+    expect(cleanupRow("stale-8")).toMatchObject({ cleanup_attempts: 0, next_cleanup_at: null });
+
+    insert.run("fresh", user_id, "fresh", "tunnel-fresh", now, now);
+    await runCleanup(context.env, now + 60 * 1000);
+    expect(cleanupRow("stale-8")).toMatchObject({ cleanup_attempts: 1 });
+    expect(cleanupRow("fresh")).toMatchObject({ tunnel_id: null, cleanup_attempts: 0 });
+    expect(cleanupRow("stale-0")).toMatchObject({ cleanup_attempts: 1 });
   });
 
   it("purges URL rows deleted more than 30 days ago", async () => {

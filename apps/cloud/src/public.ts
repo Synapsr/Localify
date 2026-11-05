@@ -6,6 +6,7 @@ import { ConfigError, setting } from "./config";
 import { ACCESS_COOKIE, accessCookieHeader, readCookie, signAccess, verifyAccess } from "./cookie";
 import { verifyPassword } from "./crypto";
 import { upstreamHeaders, withHostOnlyCookies, type LocalifyHeaders } from "./headers";
+import { readLimitedText } from "./http";
 import { isOriginOfUrl, localHostFor, parsePublicHost } from "./names";
 import {
   ACCESS_PATH,
@@ -111,17 +112,19 @@ async function handleAccess(
 
   const clientIp = request.headers.get("cf-connecting-ip") ?? "unknown";
   const { success } = await env.PASSWORD_LIMITER.limit({ key: `${site.id}:${clientIp}` });
-  const form = await readForm(request);
-  const next = safeNext(form?.get("next") ?? null, host);
+  // Refused before the body is read, so throttled requests cost no memory.
   if (!success) {
+    await request.body?.cancel();
     return passwordPage({
       host,
-      next,
+      next: "/",
       status: 429,
       error: "Too many attempts. Wait a minute, then try again.",
     });
   }
+  const form = await readForm(request);
   if (!form) return plain(413, "The form is too large.");
+  const next = safeNext(form.get("next"), host);
 
   const password = form.get("password") ?? "";
   const valid =
@@ -147,8 +150,8 @@ async function handleAccess(
 }
 
 async function readForm(request: Request): Promise<URLSearchParams | null> {
-  const text = await request.text();
-  return text.length > MAX_FORM_BYTES ? null : new URLSearchParams(text);
+  const text = await readLimitedText(request, MAX_FORM_BYTES);
+  return text === null ? null : new URLSearchParams(text);
 }
 
 /** A relative path on this same host to return to after the password; `/` otherwise. */

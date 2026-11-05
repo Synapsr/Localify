@@ -10,8 +10,16 @@ import { ApiError } from "./http";
 export const MAX_ACTIVE_MACHINES = 5;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
 const DELETED_URL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-/** Machines per cleanup run, to stay well within a run's subrequest limit. */
+/** Stuck sign-ins revoked per run; this step only writes to D1. */
 const CLEANUP_BATCH = 25;
+/**
+ * Cloudflare API calls one cleanup run may make, below the Workers Free limit
+ * of 50 subrequests. A machine costs at most 5: two lookups by name, the
+ * tunnel's connections and the tunnel, and the DNS record.
+ */
+const CLEANUP_CALL_BUDGET = 40;
+const CALLS_PER_MACHINE = 5;
+const MAX_CLEANUP_DELAY_MS = 24 * 60 * 60 * 1000;
 
 export type CloudflareResources = {
   id: string;
@@ -138,10 +146,14 @@ async function provision(env: Env, id: string, ingressPort: number): Promise<voi
     .run();
 }
 
-/** A machine that will never become active: revoked, and its Cloudflare resources removed. */
+/**
+ * A machine that will never become active: revoked, and its Cloudflare
+ * resources removed. A failed call may have created something whose id never
+ * came back, so the machine stays marked for the cleanup to look up by name.
+ */
 async function revokeAndClean(env: Env, id: string): Promise<void> {
   const row = await env.DB.prepare(
-    `UPDATE machines SET status = 'revoked', revoked_at = ?2 WHERE id = ?1
+    `UPDATE machines SET status = 'revoked', revoked_at = ?2, reconcile = 1 WHERE id = ?1
      RETURNING tunnel_id, dns_record_id`,
   )
     .bind(id, Date.now())
@@ -177,17 +189,22 @@ export async function signOutMachine(env: Env, machine: CloudflareResources): Pr
  * record, clearing each id once Cloudflare confirms. Never throws: what fails
  * stays recorded on the revoked machine for the hourly cleanup.
  */
+/** Whether everything recorded is gone; failures are logged and retried hourly. */
 export async function removeCloudflareResources(
   env: Env,
   machine: CloudflareResources,
-): Promise<void> {
-  const failed = (error: unknown) =>
+): Promise<boolean> {
+  let cleaned = true;
+  const failed = (error: unknown) => {
+    cleaned = false;
     console.error("Cloudflare cleanup failed; the hourly cleanup retries it", machine.id, error);
+  };
   let cloudflare: CloudflareApi;
   try {
     cloudflare = new CloudflareApi(env);
   } catch (error) {
-    return failed(error);
+    failed(error);
+    return cleaned;
   }
   if (machine.tunnelId) {
     try {
@@ -210,62 +227,77 @@ export async function removeCloudflareResources(
       failed(error);
     }
   }
+  return cleaned;
 }
 
 /**
  * The hourly cleanup: purges URL rows deleted more than 30 days ago, revokes
  * machines stuck in `provisioning` for 10 minutes or more, and retries the
- * Cloudflare cleanup of revoked machines. Each step runs whatever happens to
- * the others.
+ * Cloudflare cleanup of revoked machines within a budget of API calls,
+ * looking up by name what a failed sign-in may have left unrecorded.
  */
 export async function runCleanup(env: Env, now = Date.now()): Promise<void> {
   await env.DB.prepare(`DELETE FROM public_urls WHERE deleted_at IS NOT NULL AND deleted_at < ?1`)
     .bind(now - DELETED_URL_RETENTION_MS)
     .run();
-  await revokeStuckMachines(env, now);
-
-  const pending = await env.DB.prepare(
-    `SELECT id, tunnel_id, dns_record_id FROM machines
-     WHERE status = 'revoked' AND (tunnel_id IS NOT NULL OR dns_record_id IS NOT NULL)
-     ORDER BY revoked_at LIMIT ?1`,
+  await env.DB.prepare(
+    `UPDATE machines SET status = 'revoked', revoked_at = ?1, reconcile = 1
+     WHERE status = 'provisioning' AND created_at <= ?2`,
   )
-    .bind(CLEANUP_BATCH)
-    .all<{ id: string; tunnel_id: string | null; dns_record_id: string | null }>();
+    .bind(now, now - STUCK_AFTER_MS)
+    .run();
+
+  // Due machines first, oldest first; one whose cleanup keeps failing waits
+  // longer each time, so it cannot hold back the others.
+  const pending = await env.DB.prepare(
+    `SELECT id, tunnel_id, dns_record_id, reconcile, cleanup_attempts FROM machines
+     WHERE status = 'revoked'
+       AND (tunnel_id IS NOT NULL OR dns_record_id IS NOT NULL OR reconcile = 1)
+       AND (next_cleanup_at IS NULL OR next_cleanup_at <= ?1)
+     ORDER BY next_cleanup_at IS NOT NULL, next_cleanup_at, revoked_at LIMIT ?2`,
+  )
+    .bind(now, Math.floor(CLEANUP_CALL_BUDGET / CALLS_PER_MACHINE))
+    .all<PendingMachine>();
   for (const machine of pending.results) {
-    await removeCloudflareResources(env, {
-      id: machine.id,
-      tunnelId: machine.tunnel_id,
-      dnsRecordId: machine.dns_record_id,
-    });
+    const cleaned = await cleanUpMachine(env, machine);
+    const attempts = cleaned ? 0 : machine.cleanup_attempts + 1;
+    const nextAt = cleaned
+      ? null
+      : now + Math.min(2 ** attempts * 60 * 60 * 1000, MAX_CLEANUP_DELAY_MS);
+    await env.DB.prepare(
+      `UPDATE machines SET cleanup_attempts = ?2, next_cleanup_at = ?3 WHERE id = ?1`,
+    )
+      .bind(machine.id, attempts, nextAt)
+      .run();
   }
 }
 
-/** Marks stuck sign-ins `revoked` with their resources, for the retry that follows. */
-async function revokeStuckMachines(env: Env, now: number): Promise<void> {
-  const stuck = await env.DB.prepare(
-    `SELECT id, tunnel_id, dns_record_id FROM machines
-     WHERE status = 'provisioning' AND created_at <= ?1 ORDER BY created_at LIMIT ?2`,
-  )
-    .bind(now - STUCK_AFTER_MS, CLEANUP_BATCH)
-    .all<{ id: string; tunnel_id: string | null; dns_record_id: string | null }>();
-  for (const machine of stuck.results) {
+type PendingMachine = {
+  id: string;
+  tunnel_id: string | null;
+  dns_record_id: string | null;
+  reconcile: number;
+  cleanup_attempts: number;
+};
+
+/** Finds unrecorded resources by name when needed, then removes everything. */
+async function cleanUpMachine(env: Env, machine: PendingMachine): Promise<boolean> {
+  let tunnelId = machine.tunnel_id;
+  let dnsRecordId = machine.dns_record_id;
+  if (machine.reconcile === 1) {
     try {
       const cloudflare = new CloudflareApi(env);
-      // A sign-in that stopped between creating something and recording it
-      // left no id: find it by name.
-      const tunnelId =
-        machine.tunnel_id ?? (await cloudflare.findTunnelId(`localify-${machine.id}`));
-      const dnsRecordId =
-        machine.dns_record_id ??
-        (await cloudflare.findDnsRecordId(machineHostname(env, machine.id)));
+      tunnelId ??= await cloudflare.findTunnelId(`localify-${machine.id}`);
+      dnsRecordId ??= await cloudflare.findDnsRecordId(machineHostname(env, machine.id));
       await env.DB.prepare(
-        `UPDATE machines SET status = 'revoked', revoked_at = ?2, tunnel_id = ?3, dns_record_id = ?4
-         WHERE id = ?1 AND status = 'provisioning'`,
+        `UPDATE machines SET tunnel_id = ?2, dns_record_id = ?3, reconcile = 0 WHERE id = ?1`,
       )
-        .bind(machine.id, now, tunnelId, dnsRecordId)
+        .bind(machine.id, tunnelId, dnsRecordId)
         .run();
     } catch (error) {
-      console.error("Could not revoke a machine stuck in provisioning", machine.id, error);
+      console.error("Could not look up a revoked machine's resources", machine.id, error);
+      return false;
     }
   }
+  return removeCloudflareResources(env, { id: machine.id, tunnelId, dnsRecordId });
 }

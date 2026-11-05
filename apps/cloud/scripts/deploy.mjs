@@ -30,16 +30,24 @@ if (missing.length > 0) {
 const dir = mkdtempSync(join(tmpdir(), "localify-cloud-"));
 const file = join(dir, "secrets.json");
 try {
-  writeFileSync(file, JSON.stringify(Object.fromEntries(SECRETS.map((name) => [name, values[name]]))), {
-    mode: 0o600,
-  });
+  writeFileSync(
+    file,
+    JSON.stringify(Object.fromEntries(SECRETS.map((name) => [name, values[name]]))),
+    {
+      mode: 0o600,
+    },
+  );
   const env = { ...process.env };
   delete env.CLOUDFLARE_API_TOKEN;
   delete env.CLOUDFLARE_ACCOUNT_ID;
-  const result = spawnSync("wrangler", ["deploy", "--secrets-file", file, ...process.argv.slice(2)], {
-    stdio: "inherit",
-    env,
-  });
+  const result = spawnSync(
+    "wrangler",
+    ["deploy", "--secrets-file", file, ...process.argv.slice(2)],
+    {
+      stdio: "inherit",
+      env,
+    },
+  );
   process.exitCode = result.status ?? 1;
 } finally {
   rmSync(dir, { recursive: true, force: true });
