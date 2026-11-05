@@ -66,20 +66,12 @@ The route tests run the Worker in Node against a D1 stand-in on `node:sqlite` wi
 
 ## Setup, once
 
-1. **GitHub OAuth App** (github.com → Settings → Developer settings → OAuth Apps): any homepage and callback URL, **Enable Device Flow** checked. Put its client ID in `GITHUB_CLIENT_ID` in [`wrangler.jsonc`](wrangler.jsonc). It needs no client secret.
-2. **Cloudflare API token** in Infisical, project `localify`, folder `/cloud`, environment `prod`, as `CLOUDFLARE_API_TOKEN`. Wrangler deploys with it (Workers Scripts, Workers Routes, D1, and the custom domain), and the Worker uses it as its secret to manage tunnels (Cloudflare Tunnel Edit) and DNS (DNS Edit on `localify.dev`). A second, narrower token for the secret alone is safer.
-3. **D1 database**: `cd apps/cloud && pnpm exec wrangler d1 create localify-cloud`, then put the printed id in `database_id` in `wrangler.jsonc`.
-4. **Secrets**, before the first deploy, from `apps/cloud`: the deploy refuses to run while one is missing.
+Already done for `localify.fyi` on 2026-11-05; this is how to do it again.
 
-   ```bash
-   openssl rand -hex 32 | pnpm exec wrangler secret put COOKIE_KEY
-   openssl rand -hex 32 | pnpm exec wrangler secret put INGRESS_KEY
-   infisical run --project-config-dir ../.. --env prod --path /cloud -- \
-     sh -c 'printf %s "$CLOUDFLARE_API_TOKEN" | pnpm exec wrangler secret put CLOUDFLARE_API_TOKEN'
-   ```
-
-   Wrangler authenticates with your login or a `CLOUDFLARE_API_TOKEN` in the environment. `wrangler secret put` creates the Worker, without routes, the first time. Changing `COOKIE_KEY` signs every browser out; changing `INGRESS_KEY` makes every daemon refuse public traffic until its next runtime fetch, within 5 minutes.
-5. **Migrations and deploy**: `pnpm cloud:migrate`, then `pnpm cloud:deploy`. Both run through `infisical run --env prod --path /cloud`.
+1. **GitHub OAuth App** (in the Synapsr organization: Settings → Developer settings → OAuth Apps): any homepage and callback URL, **Enable Device Flow** checked. Its client ID is `GITHUB_CLIENT_ID` in [`wrangler.jsonc`](wrangler.jsonc). It needs no client secret.
+2. **Infisical**, project `localify`, folder `/cloud`, same keys in `dev` and `prod`: `CLOUDFLARE_API_TOKEN` (a token with Cloudflare Tunnel Edit and DNS Edit on `localify.dev` and `localify.fyi`, used by the Worker to manage tunnels; it cannot deploy), `COOKIE_KEY` and `INGRESS_KEY` (`openssl rand -hex 32` each), plus `CLOUDFLARE_ACCOUNT_ID`, `GITHUB_CLIENT_ID` and `D1_DATABASE_ID` for reference. Changing `COOKIE_KEY` signs every browser out; changing `INGRESS_KEY` makes every daemon refuse public traffic until its next runtime fetch, within 5 minutes.
+3. **D1 database**: `pnpm exec wrangler d1 create localify-cloud --location weur`, then put the printed id in `database_id` in `wrangler.jsonc`.
+4. **Migrations and deploy**, with your own `wrangler login`: `pnpm cloud:migrate`, then `pnpm cloud:deploy`. The deploy script ([`scripts/deploy.mjs`](scripts/deploy.mjs)) reads the three secrets from Infisical and passes them to `wrangler deploy --secrets-file`, keeping the Tunnel and DNS token out of wrangler's own environment.
 
 The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route.
 

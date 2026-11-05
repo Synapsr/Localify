@@ -7,8 +7,8 @@
     "dev": "wrangler d1 migrations apply localify-cloud --local && wrangler dev --infer-origin-from-routes=false",
     "typecheck": "wrangler types --strict-vars=false && tsc --noEmit",
     "test": "vitest run",
-    "deploy": "infisical run --project-config-dir ../.. --env prod --path /cloud -- wrangler deploy",
-    "migrate": "infisical run --project-config-dir ../.. --env prod --path /cloud -- wrangler d1 migrations apply localify-cloud --remote",
+    "deploy": "node scripts/deploy.mjs",
+    "migrate": "wrangler d1 migrations apply localify-cloud --remote",
     "migrate:local": "wrangler d1 migrations apply localify-cloud --local"
   },
   "devDependencies": {
