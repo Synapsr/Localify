@@ -16,7 +16,7 @@ const SECRETS = ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY"];
 const exported = JSON.parse(
   execFileSync(
     "infisical",
-    ["export", "--project-config-dir", "../..", "--env", "prod", "--path", "/cloud", "--format", "json", "--silent"],
+    ["export", "--env", "prod", "--path", "/cloud", "--format", "json", "--silent"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   ),
 );
