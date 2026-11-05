@@ -9,6 +9,7 @@ Everything runs locally with `wrangler dev`, except the [real-network run](#real
 - `edge/`: Worker and Durable Object (TypeScript). `src/protocol.ts` defines the frame format.
 - `connector/`: standalone Rust connector. `src/protocol.rs` mirrors the frame format.
 - `fixture/`: Vite 7 app with 331 generated modules (a wide tree plus a 10-deep import chain), an HMR target, and `/sse`, `/big`, `/echo`, `/headers` routes.
+- `tunnel-edge/`: the alternative measured afterwards, a Worker that checks an access cookie and forwards to a named Cloudflare Tunnel (no Durable Object).
 - `bench/`: Playwright scripts driving the installed Chrome. `run.mjs` is the full bench; `diag.mjs` repeats page loads and lists failed or pending requests.
 
 ## Run it
@@ -98,6 +99,25 @@ Findings:
 - **Upstream connections must be capped.** Over HTTP/2 the browser sends the whole module graph at once. The connector opened one connection per request to Vite, overflowed its accept backlog (128 on macOS), and up to 145 of 300 requests failed with 502 or stalled until the 75 s connect timeout, mostly after a few idle seconds when Vite had closed its keep-alive connections. A semaphore of 32 in-flight upstream requests fixed it: 4 of 4 bursts and 15 of 15 page loads succeeded. The local `wrangler dev` runs never hit this because the browser spoke HTTP/1.1, limited to 6 connections. The daemon today is not affected either, since its TLS listener does not offer HTTP/2.
 - **Nagle is not the cost.** Disabling it on the connector socket changed the per-request median from 89.5 to 93.6 ms, within noise. It stays disabled.
 - **The Durable Object design costs about 20 ms per request and 45% on this page compared with `cloudflared`.** The extra hops are the Worker and the Durable Object. Both designs are dominated by round trips times import depth: a dev page over a real network takes seconds either way.
+
+## Named tunnel
+
+Measured the same day, after a review by Codex recommended replacing the native connector with one named Cloudflare Tunnel per machine. `tunnel-edge/` checks a signed `__Host-` access cookie, strips Localify, `X-Forwarded-*`, `CF-*` and `Forwarded` headers and the access cookie, then fetches the machine's tunnel hostname with a secret header that the machine's ingress would check. The tunnel was created through the API with `config_src: "cloudflare"`, its ingress pointing at the fixture with `httpHostHeader: feature.app.localify`, and `cloudflared tunnel run` read its token from `TUNNEL_TOKEN`. It opened four QUIC connections, in Paris and Marseille.
+
+| Measure, from the laptop | Worker + named tunnel | Named tunnel alone | Quick Tunnel | Worker + DO + connector |
+|---|---|---|---|---|
+| One request, median | 59–64 ms | 54–55 ms | 66 ms | 84–104 ms |
+| 336-module page, median of 15 | 1.01 s | | 1.23 s | 2.15 s |
+| 300-request burst after 12 s idle | 300/300, 0.3–0.4 s | | | 300/300, 0.8–1.1 s with the cap |
+
+The full bench through the Worker and the named tunnel: page load 970 ms, 61 ms per sequential request, HMR in 495 ms without a reload over the proxied WebSocket, SSE streamed, 20 MB down and 8 MB up intact, abort then reuse fine.
+
+Findings:
+
+- **The named tunnel wins on every measure,** and the Worker in front costs 4 to 10 ms. Localify drops its own multiplexing protocol, flow control and stream lifecycle, and supervises `cloudflared` instead.
+- **Cloudflare rewrites `X-Forwarded-Host`** to the tunnel hostname by the time the request reaches the origin. The public host has to travel in a Localify header that the machine's ingress trusts only with the right secret.
+- **The tunnel hostname is public.** Without the secret check at the machine's ingress, anyone who learns it skips the password.
+- **The cap still matters behind the tunnel.** `cloudflared` pooled its connections to the fixture, but the daemon's proxy opens one upstream connection per request, so the ingress must bound concurrent requests.
 
 ## Not covered
 

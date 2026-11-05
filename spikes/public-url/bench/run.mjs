@@ -27,6 +27,8 @@ const PATHS = REMOTE_TUNNEL
       ["workerAndDurableObject", "http://baseline-do--app-a8f3.localhost:8787"],
       ["tunnel", TUNNEL],
     ];
+// SPIKE_COOKIE (`name=value`) passes an edge access gate on the tunnel host.
+const ACCESS_COOKIE = process.env.SPIKE_COOKIE;
 const PAGE_LOAD_RUNS = 7;
 const SEQUENTIAL_REQUESTS = 200;
 const HMR_FILE = join(import.meta.dirname, "../fixture/src/hmr-target.js");
@@ -63,6 +65,7 @@ console.log(`\nSaved ${file}`);
 
 async function withPage(origin, work) {
   const context = await browser.newContext();
+  if (ACCESS_COOKIE && origin === TUNNEL) await context.addCookies([accessCookie(TUNNEL)]);
   const page = await context.newPage();
   try {
     return await work(page, origin);
@@ -243,8 +246,14 @@ async function hmrCheck(origin) {
 /** Rewrites the HMR target on the remote fixture (see fixture/vite.config.js). */
 async function writeRemoteHmr(version) {
   const url = `${REMOTE_TUNNEL}/__spike/hmr?version=${encodeURIComponent(version)}`;
-  const response = await fetch(url, { method: "POST" });
+  const headers = ACCESS_COOKIE ? { cookie: ACCESS_COOKIE } : {};
+  const response = await fetch(url, { method: "POST", headers });
   if (!response.ok) throw new Error(`HMR trigger failed: ${response.status}`);
+}
+
+function accessCookie(url) {
+  const [name, ...value] = ACCESS_COOKIE.split("=");
+  return { name, value: value.join("="), url };
 }
 
 function median(values) {

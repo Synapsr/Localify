@@ -1,9 +1,15 @@
 import { chromium } from "playwright-core";
 const ORIGIN = process.argv[2];
 const RUNS = Number(process.argv[3] ?? 6);
+// SPIKE_COOKIE (`name=value`) passes an edge access gate.
+const COOKIE = process.env.SPIKE_COOKIE;
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 for (let i = 0; i < RUNS; i++) {
   const context = await browser.newContext();
+  if (COOKIE) {
+    const [name, ...value] = COOKIE.split("=");
+    await context.addCookies([{ name, value: value.join("="), url: ORIGIN }]);
+  }
   const page = await context.newPage();
   const pending = new Map();
   const failed = [];

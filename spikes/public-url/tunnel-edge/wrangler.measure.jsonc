@@ -1,0 +1,17 @@
+{
+  "$schema": "../../../apps/web/node_modules/wrangler/config-schema.json",
+  // Real-network measurement of the named-tunnel transport. Deleted after the run.
+  "name": "localify-public-url-tunnel-measure",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-26",
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "tbench-a8f3.localify.fyi", "custom_domain": true },
+    { "pattern": "feature--tbench-a8f3.localify.fyi", "custom_domain": true }
+  ],
+  // GATE_SECRET and INGRESS_SECRET are secrets, passed with --secrets-file.
+  "vars": {
+    "PUBLIC_BASE_DOMAIN": "localify.fyi",
+    "ORIGIN_HOST": "m-bench.localify.dev"
+  }
+}

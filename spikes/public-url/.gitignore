@@ -2,5 +2,7 @@ node_modules/
 connector/target/
 edge/.wrangler/
 edge/worker-configuration.d.ts
+tunnel-edge/.wrangler/
+tunnel-edge/worker-configuration.d.ts
 fixture/src/generated/
 bench/results/
