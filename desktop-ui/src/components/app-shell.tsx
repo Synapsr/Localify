@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
+import { useConnectAgentsOnce } from "@/hooks/use-connect-agents-once";
 import { bootstrapQueries } from "@/lib/queries";
 import {
   loadStoredOnboardingCompleted,
@@ -21,6 +22,11 @@ interface AppShellProps {
 export const AppShell = ({ children }: AppShellProps) => {
   const { data, isPending, error, refetch, isFetching } = useQuery(bootstrapQueries.read());
   const [onboardingCompleted, setOnboardingCompleted] = useState(loadStoredOnboardingCompleted);
+
+  // Setup connects agents itself; an update connects them once the app is ready.
+  useConnectAgentsOnce(
+    Boolean(data && !data.environment.systemSetupRequired && data.daemon.caInstalled),
+  );
 
   useEffect(() => {
     if (data?.daemon.caInstalled) {

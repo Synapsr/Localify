@@ -3,6 +3,16 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.2.1 - 2026-11-05
+
+### Improved
+
+- **Your coding agents connect to Localify by themselves.** After the update, Localify
+  connects Claude Code, Codex, and Cursor to its MCP server once, tells you which ones,
+  and removes the old Localify skill it had installed for them. `localify install`
+  connects them too. Turn this off in Settings → AI agents.
+  [Coding agents](https://github.com/Synapsr/Localify/blob/main/docs/README.md#coding-agents)
+
 ## 1.2.0 - 2026-11-05
 
 Your coding agents can now do everything you do in Localify, and clean up after

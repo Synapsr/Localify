@@ -126,8 +126,8 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
         <div className="overflow-hidden">
           <div className="mt-5 space-y-4 border-t border-border/40 pt-5">
             <SettingToggle
-              label="Connect agents during setup"
-              description="Give compatible coding agents Localify's MCP server, with every action the app has."
+              label="Connect agents automatically"
+              description="During setup and once after an update, give compatible coding agents Localify's MCP server, with every action the app has."
               checked={config.agent.connectAgents}
               disabled={updateConfig.isPending}
               onChange={(connectAgents) =>

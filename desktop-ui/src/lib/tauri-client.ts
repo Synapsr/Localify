@@ -189,6 +189,7 @@ export interface DesktopClient {
   trustIosSimulators(): Promise<StepDto>;
   getAgentMcpStatus(): Promise<AgentMcpStatusDto>;
   installAgentMcp(): Promise<AgentMcpInstallResultDto>;
+  connectAgentsOnce(): Promise<AgentMcpInstallResultDto | null>;
   listPortConflicts(): Promise<PortConflictDto[]>;
   killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
@@ -290,6 +291,7 @@ export function createDesktopClient(): DesktopClient {
     trustIosSimulators: () => tauriInvoke<StepDto>("trust_ios_simulators"),
     getAgentMcpStatus: () => tauriInvoke("get_agent_mcp_status"),
     installAgentMcp: () => tauriInvoke("install_agent_mcp"),
+    connectAgentsOnce: () => tauriInvoke("connect_agents_once"),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),
     killPortConflict: (request) =>
       tauriInvoke("kill_port_conflict", {

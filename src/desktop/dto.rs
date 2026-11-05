@@ -83,6 +83,8 @@ pub struct AgentMcpStatusDto {
 pub struct AgentMcpInstallResultDto {
     pub status: AgentMcpStatusDto,
     pub installed_agents: Vec<String>,
+    /// Copies of the old Localify skill that were removed.
+    pub removed_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
