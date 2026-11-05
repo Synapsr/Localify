@@ -26,7 +26,7 @@ Working with AI agents means running several dev servers in parallel. Each one w
 ## 3. How the app works
 
 1. **Download the app.**
-2. **Onboarding**: on first launch it asks for the administrator password once, then sets up HTTPS, DNS, and the daemon.
+2. **Onboarding**: on first launch it asks for the administrator password once, then sets up HTTPS, DNS, and the daemon. macOS asks to confirm the certificate once, the first time HTTPS is needed in a browser.
 3. **Add projects**, two ways:
    - **Pick a folder**: Localify scans it and fills in what it can (name, apps, ports, likely domains). The user reviews and confirms.
    - **CLI**: `localify init-project` in the project directory does the same from the editor's terminal.

@@ -52,7 +52,7 @@
     "steps": [
       {
         "title": "Ein Passwort, null Config.",
-        "body": "Beim ersten Start fragt Localify einmal nach deinem Administratorpasswort. Danach richtet es die Zertifizierungsstelle, DNS und den Daemon selbst ein."
+        "body": "Beim ersten Start fragt Localify einmal nach deinem Administratorpasswort. Danach richtet es die Zertifizierungsstelle, DNS und den Daemon selbst ein. Wenn du zum ersten Mal HTTPS im Browser brauchst, bittet macOS dich einmal, das Zertifikat zu bestätigen."
       },
       {
         "title": "Ordner auswählen. Localify vervollständigt.",

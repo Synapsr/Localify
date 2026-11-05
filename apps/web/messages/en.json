@@ -52,7 +52,7 @@
     "steps": [
       {
         "title": "One password, zero config.",
-        "body": "On first launch, Localify asks for your administrator password once. Then it sets up the certificate authority, DNS, and the daemon by itself."
+        "body": "On first launch, Localify asks for your administrator password once. Then it sets up the certificate authority, DNS, and the daemon by itself. The first time you need HTTPS in a browser, macOS asks you to confirm the certificate once."
       },
       {
         "title": "Pick a folder. Localify autocompletes.",

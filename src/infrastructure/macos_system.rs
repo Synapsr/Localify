@@ -940,6 +940,30 @@ pub fn remove_login_keychain_ca() -> Option<(String, StepOutcome)> {
     }
 }
 
+/// The app's login item. The app removes it through its autostart plugin, but
+/// `localify uninstall` runs without the app.
+pub fn remove_login_item() -> Option<(String, StepOutcome)> {
+    // The dev profile runs beside an installed app, and this item belongs to that app.
+    if BRANDING.is_dev_profile() {
+        return None;
+    }
+    remove_login_item_from(&user_home_dir()?.join("Library/LaunchAgents"))
+}
+
+fn remove_login_item_from(launch_agents: &Path) -> Option<(String, StepOutcome)> {
+    let path = launch_agents.join(format!("{}.plist", BRANDING.app_name));
+    let contents = fs::read_to_string(&path).ok()?;
+    // Another app could use the same file name. Ours is the one that passes this flag.
+    if !contents.contains("--autostart") {
+        return None;
+    }
+    let outcome = match fs::remove_file(&path) {
+        Ok(()) => StepOutcome::Success("Removed.".into()),
+        Err(error) => StepOutcome::Warning(error.to_string()),
+    };
+    Some(("Remove login item".into(), outcome))
+}
+
 pub fn parse_keychain_hashes(output: &str) -> Vec<String> {
     output
         .lines()
@@ -1480,6 +1504,43 @@ mod tests {
         assert_eq!(legacy.helper_copies.len(), 1);
         assert_eq!(legacy.run_files.len(), 2);
         assert!(!legacy.is_empty());
+    }
+
+    #[test]
+    fn it_removes_the_apps_login_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.plist", BRANDING.app_name));
+        fs::write(
+            &path,
+            "<string>localify-desktop</string><string>--autostart</string>",
+        )
+        .unwrap();
+
+        let (_, outcome) = remove_login_item_from(dir.path()).unwrap();
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn it_leaves_another_apps_login_item_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.plist", BRANDING.app_name));
+        fs::write(
+            &path,
+            "<string>/Applications/Other.app/Contents/MacOS/other</string>",
+        )
+        .unwrap();
+
+        assert!(remove_login_item_from(dir.path()).is_none());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn no_login_item_means_nothing_to_report() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(remove_login_item_from(dir.path()).is_none());
     }
 
     #[test]

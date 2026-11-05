@@ -52,7 +52,7 @@
     "steps": [
       {
         "title": "Un mot de passe, zéro config.",
-        "body": "Au premier lancement, Localify te demande une fois ton mot de passe administrateur. Ensuite, il installe seul l'autorité de certification, le DNS et le daemon."
+        "body": "Au premier lancement, Localify te demande une fois ton mot de passe administrateur. Ensuite, il installe seul l'autorité de certification, le DNS et le daemon. La première fois que tu as besoin de HTTPS dans un navigateur, macOS te demande de confirmer le certificat une fois."
       },
       {
         "title": "Choisis un dossier. Localify autocomplete.",

@@ -52,7 +52,7 @@
     "steps": [
       {
         "title": "Una contraseña, cero config.",
-        "body": "En el primer arranque, Localify te pide una vez tu contraseña de administrador. Después configura por sí solo la autoridad de certificación, el DNS y el daemon."
+        "body": "En el primer arranque, Localify te pide una vez tu contraseña de administrador. Después configura por sí solo la autoridad de certificación, el DNS y el daemon. La primera vez que necesites HTTPS en un navegador, macOS te pide confirmar el certificado una vez."
       },
       {
         "title": "Elige una carpeta. Localify autocompleta.",

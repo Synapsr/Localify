@@ -52,7 +52,7 @@
     "steps": [
       {
         "title": "Uma senha, zero config.",
-        "body": "Na primeira execução, o Localify pede sua senha de administrador uma vez. Depois ele configura sozinho a autoridade certificadora, o DNS e o daemon."
+        "body": "Na primeira execução, o Localify pede sua senha de administrador uma vez. Depois ele configura sozinho a autoridade certificadora, o DNS e o daemon. Na primeira vez que você precisar de HTTPS em um navegador, o macOS pede para confirmar o certificado uma vez."
       },
       {
         "title": "Escolha uma pasta. Localify completa.",
