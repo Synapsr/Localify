@@ -162,8 +162,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Extract version from tag
         id: version
@@ -196,12 +194,13 @@ jobs:
           name: linux-artifacts
           path: artifacts/
 
-      - name: Generate changelog for this release
-        uses: orhun/git-cliff-action@v4
-        with:
-          args: --latest --strip all
-        env:
-          OUTPUT: release_notes.md
+      - name: Take this version's notes from CHANGELOG.md
+        run: |
+          awk -v heading="## ${{ steps.version.outputs.version }} " '
+            index($0, "## ") == 1 { if (found) exit; found = (index($0, heading) == 1); next }
+            found
+          ' CHANGELOG.md > release_notes.md
+          test -s release_notes.md
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v1

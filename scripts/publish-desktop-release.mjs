@@ -18,7 +18,7 @@ if (args.dryRun) {
   console.log(`Current desktop version: ${currentVersion}`);
   console.log(`Next desktop version: ${nextVersion}`);
   console.log("Dry run only. No files will be changed, no build will run, and nothing will be uploaded.");
-  console.log(`pnpm version:desktop -- ${nextVersion}`);
+  console.log(`pnpm version:set -- ${nextVersion}`);
   console.log("pnpm tauri:build");
   console.log("pnpm publish:update:r2");
   process.exit(0);
@@ -29,7 +29,7 @@ requireEnv("LOCALIFY_R2_BUCKET");
 
 console.log(`Publishing Localify Desktop ${currentVersion} -> ${nextVersion}`);
 
-run("pnpm", ["version:desktop", "--", nextVersion]);
+run("pnpm", ["version:set", "--", nextVersion]);
 run("pnpm", ["tauri:build"]);
 run("pnpm", ["publish:update:r2"]);
 
