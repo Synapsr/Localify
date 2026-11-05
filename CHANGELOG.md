@@ -3,6 +3,15 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.1.1 - 2026-11-05
+
+### Fixed
+
+- `localify uninstall` now also removes the app's login item. Before, only uninstalling
+  from the app did.
+- The desktop app sends usage analytics and error reports, as the privacy policy describes.
+  Version 1.1.0 shipped without them.
+
 ## 1.1.0 - 2026-11-05
 
 The first version with open source code, and the first with nothing running as root.

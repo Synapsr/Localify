@@ -123,8 +123,8 @@ The production Settings screen exposes the same login item as a "Launch at
 login" toggle so users can verify, disable, or re-enable it without
 reinstalling.
 
-Desktop uninstall disables the same login item so the app does not keep a stale
-startup entry.
+Uninstalling, from the app or with `localify uninstall`, removes the same login
+item so the app does not keep a stale startup entry.
 
 ## Package It
 

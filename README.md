@@ -24,7 +24,8 @@ on your machine is free, with no limit on projects or domains.
 
 Download the app from [localify.dev](https://localify.dev). On first launch it
 asks for your administrator password once, then sets up HTTPS, DNS, and the
-daemon.
+daemon. The first time you need HTTPS in a browser, macOS asks you to confirm the
+certificate once.
 
 ### CLI from source
 
