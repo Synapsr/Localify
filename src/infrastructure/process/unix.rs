@@ -19,11 +19,23 @@ impl ProcessControl for UnixProcessControl {
 
 /// Signals a process and every process it started (`pnpm` → `next` → workers).
 pub fn signal_process_tree(root_pid: u32, signal: &str) {
+    signal_processes(&process_tree(root_pid), signal);
+}
+
+/// A process and all its descendants, parents first.
+pub fn process_tree(root_pid: u32) -> Vec<u32> {
     let mut pids = vec![root_pid];
     let mut index = 0;
     while index < pids.len() {
         pids.extend(child_pids(pids[index]));
         index += 1;
+    }
+    pids
+}
+
+pub fn signal_processes(pids: &[u32], signal: &str) {
+    if pids.is_empty() {
+        return;
     }
     let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
     let _ = Command::new("kill")
@@ -47,13 +59,18 @@ fn child_pids(pid: u32) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// When a process started, as `ps` prints it. A PID comes back once its process
-/// has ended, so a PID read from a file is only trusted with the same start time.
+/// When a process started, as `ps` prints it, or `None` once it ended. A PID
+/// comes back once its process has ended, so a PID read from a file is only
+/// trusted with the same start time. A zombie has ended and only waits for its
+/// parent to read its exit status.
 pub fn process_started_at(pid: u32) -> Option<String> {
     let output = Command::new("ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .args(["-o", "stat=", "-o", "lstart=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    let started = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (output.status.success() && !started.is_empty()).then_some(started)
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (state, started) = line.split_once(char::is_whitespace)?;
+    let started = started.trim();
+    (output.status.success() && !state.starts_with('Z') && !started.is_empty())
+        .then(|| started.to_string())
 }

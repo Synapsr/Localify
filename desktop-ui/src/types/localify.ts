@@ -471,12 +471,21 @@ export interface AppUpdateCheckDto {
   update: AppUpdateInfoDto | null;
 }
 
-export type DeepLinkRouteDto = "projects" | "logs";
+export type DeepLinkRouteDto = "projects" | "logs" | "launchService";
+
+export interface DeepLinkLaunchDto {
+  projectId: string;
+  environmentSlug: string;
+  serviceId: string;
+  profile: string | null;
+}
 
 export interface DeepLinkPayloadDto {
   route: DeepLinkRouteDto;
   projectId: string | null;
   view: string | null;
+  /** The service to start, for `launchService`. */
+  launch: DeepLinkLaunchDto | null;
 }
 
 export interface StepDto {

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use commands::{AppState, DeepLinkPayloadDto, DeepLinkRouteDto};
+use commands::{AppState, DeepLinkLaunchDto, DeepLinkPayloadDto, DeepLinkRouteDto};
 use localify::branding::BRANDING;
 use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
@@ -224,6 +224,7 @@ enum DeepLinkAction {
     Logs { domain: String },
     InEditor { domain: String },
     RunLocalDevServer { domain: String },
+    LaunchService(DeepLinkLaunchDto),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -294,6 +295,12 @@ fn parse_deep_link_action(url: &tauri::Url) -> Result<DeepLinkAction, String> {
         ("action", "/run-local-dev-server") => Ok(DeepLinkAction::RunLocalDevServer {
             domain: query_param(url, "domain")?,
         }),
+        ("action", "/launch-service") => Ok(DeepLinkAction::LaunchService(DeepLinkLaunchDto {
+            project_id: query_param(url, "project")?,
+            environment_slug: query_param(url, "env")?,
+            service_id: query_param(url, "service")?,
+            profile: query_param(url, "profile").ok(),
+        })),
         _ => Err(format!(
             "Unsupported deep-link target '{}{}'.",
             host,
@@ -317,12 +324,25 @@ fn execute_deep_link_action<R: Runtime>(
     let state = app.state::<AppState>();
 
     match action {
+        // The terminal panel starts it, as its launch button does, so the
+        // session shows from its first line.
+        DeepLinkAction::LaunchService(launch) => deliver_deep_link_payload(
+            app,
+            DeepLinkPayloadDto {
+                route: DeepLinkRouteDto::LaunchService,
+                project_id: Some(launch.project_id.clone()),
+                view: None,
+                launch: Some(launch),
+            },
+            delivery,
+        ),
         DeepLinkAction::Projects => deliver_deep_link_payload(
             app,
             DeepLinkPayloadDto {
                 route: DeepLinkRouteDto::Projects,
                 project_id: None,
                 view: None,
+                launch: None,
             },
             delivery,
         ),
@@ -333,11 +353,13 @@ fn execute_deep_link_action<R: Runtime>(
                     route: DeepLinkRouteDto::Logs,
                     project_id: Some(project_id),
                     view: Some("requests".into()),
+                    launch: None,
                 },
                 None => DeepLinkPayloadDto {
                     route: DeepLinkRouteDto::Projects,
                     project_id: None,
                     view: None,
+                    launch: None,
                 },
             };
 
@@ -352,11 +374,13 @@ fn execute_deep_link_action<R: Runtime>(
                     route: DeepLinkRouteDto::Logs,
                     project_id: Some(project_id.clone()),
                     view: Some("requests".into()),
+                    launch: None,
                 })
                 .unwrap_or(DeepLinkPayloadDto {
                     route: DeepLinkRouteDto::Projects,
                     project_id: None,
                     view: None,
+                    launch: None,
                 });
 
             deliver_deep_link_payload(app, payload, delivery)?;
@@ -389,11 +413,13 @@ fn execute_deep_link_action<R: Runtime>(
                     route: DeepLinkRouteDto::Logs,
                     project_id: Some(project_id.clone()),
                     view: Some("requests".into()),
+                    launch: None,
                 })
                 .unwrap_or(DeepLinkPayloadDto {
                     route: DeepLinkRouteDto::Projects,
                     project_id: None,
                     view: None,
+                    launch: None,
                 });
 
             deliver_deep_link_payload(app, payload, delivery)?;
@@ -1206,5 +1232,26 @@ mod tests {
             parse_deep_link_action(&url),
             Ok(DeepLinkAction::Projects)
         ));
+    }
+
+    #[test]
+    fn launch_service_deep_link_names_the_service() {
+        let url = tauri::Url::parse(
+            "localify://action/launch-service?project=my%20app&env=feat-auth&service=web",
+        )
+        .unwrap();
+
+        let Ok(DeepLinkAction::LaunchService(launch)) = parse_deep_link_action(&url) else {
+            panic!("not a launch-service action");
+        };
+        assert_eq!(
+            launch,
+            DeepLinkLaunchDto {
+                project_id: "my app".into(),
+                environment_slug: "feat-auth".into(),
+                service_id: "web".into(),
+                profile: None,
+            }
+        );
     }
 }

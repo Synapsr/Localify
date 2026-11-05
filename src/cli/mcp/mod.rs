@@ -34,7 +34,13 @@ pub fn serve(config_path: &Path) -> Result<()> {
                 BRANDING.cli_command()
             )
         })?,
-        config_path: config_path.to_path_buf(),
+        // A relative path would be read from the `cwd` each tool runs in.
+        config_path: std::path::absolute(config_path).with_context(|| {
+            format!(
+                "Failed to resolve the config path '{}'",
+                config_path.display()
+            )
+        })?,
     };
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
@@ -257,7 +263,7 @@ mod tests {
         let response = handle_line(
             &request(
                 "tools/call",
-                json!({ "name": "stop_service", "arguments": { "service": "web", "env": "feat" } }),
+                json!({ "name": "service_stop", "arguments": { "service": "web", "env": "feat" } }),
             ),
             &runner(),
         )
@@ -266,7 +272,7 @@ mod tests {
         assert_eq!(response["result"]["isError"], false);
         assert_eq!(
             response["result"]["content"][0]["text"],
-            "--config /tmp/config.toml services stop web --env=feat"
+            "--config /tmp/config.toml stop web --env=feat"
         );
     }
 
@@ -275,7 +281,7 @@ mod tests {
         let response = handle_line(
             &request(
                 "tools/call",
-                json!({ "name": "stop_service", "arguments": {} }),
+                json!({ "name": "service_stop", "arguments": {} }),
             ),
             &runner(),
         )

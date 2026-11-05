@@ -35,6 +35,21 @@ struct Cli {
     command: Commands,
 }
 
+/// A service for `stop`, `restart` and `logs`, which act on the daemon without one.
+#[derive(clap::Args, Debug, Default)]
+struct ServiceSelector {
+    /// Service name or ID
+    service: Option<String>,
+
+    /// Project ID/name when service resolution is ambiguous
+    #[arg(long, requires = "service")]
+    project: Option<String>,
+
+    /// Project environment (worktree) name or slug. Defaults to the current worktree's.
+    #[arg(long, requires = "service")]
+    env: Option<String>,
+}
+
 /// Launch profile options shared by `dev` and `run`.
 #[derive(clap::Args, Debug, Default)]
 struct LaunchProfileFlags {
@@ -242,7 +257,11 @@ enum Commands {
         #[command(flatten)]
         launch_profile: LaunchProfileFlags,
 
-        /// Run in the background and return once the service listens. Its output goes to a file: read it with `services logs`, stop it with `services stop`.
+        /// Start the service in the desktop app's terminal, as its launch button does, and return once it listens. Read its output with `logs <service>`, stop it with `stop <service>`.
+        #[arg(long, conflicts_with = "detach")]
+        in_app: bool,
+
+        /// Run in the background, without the app, and return once the service listens. Read its output with `logs <service>`, stop it with `stop <service>`.
         #[arg(long)]
         detach: bool,
 
@@ -283,26 +302,39 @@ enum Commands {
         foreground: bool,
     },
 
-    /// Stop the Localify daemon
-    Stop,
+    /// Stop a service Localify started, or the Localify daemon when no service is given
+    Stop {
+        #[command(flatten)]
+        service: ServiceSelector,
+    },
 
-    /// Restart the Localify daemon
-    Restart,
+    /// Restart a service Localify started where it ran, or the Localify daemon when no service is given
+    Restart {
+        #[command(flatten)]
+        service: ServiceSelector,
+    },
 
     /// Show daemon and domain status
     Status,
 
-    /// View daemon logs
+    /// Print a service's output as the app's terminal shows it, or the daemon logs when no service is given
     Logs {
+        #[command(flatten)]
+        service: ServiceSelector,
+
         /// Number of lines to show
         #[arg(short = 'n', long, default_value = "50")]
         lines: usize,
 
-        /// Clear all logs
-        #[arg(long)]
+        /// Print only the output after this cursor, as the previous `logs` call gave it
+        #[arg(long, requires = "service", conflicts_with = "follow")]
+        cursor: Option<u64>,
+
+        /// Clear the daemon logs
+        #[arg(long, conflicts_with = "service")]
         clear: bool,
 
-        /// Follow log output (like tail -f)
+        /// Follow log output (like tail -f). For a service, until it stops.
         #[arg(short = 'f', long)]
         follow: bool,
     },
@@ -608,43 +640,11 @@ enum ServicesCommands {
         json: bool,
     },
 
-    /// List the services Localify started that are running now, in any environment
-    Running {
+    /// Show every service Localify started, in any environment: running or not, PID, URL, port, since when, exit code
+    Status {
         /// Print structured JSON
         #[arg(long)]
         json: bool,
-    },
-
-    /// Stop a service started with `dev`, from any terminal
-    Stop {
-        /// Service name or ID
-        service: String,
-
-        /// Project ID/name when service resolution is ambiguous
-        #[arg(long)]
-        project: Option<String>,
-
-        /// Project environment name/slug. Defaults to the current worktree environment.
-        #[arg(long)]
-        env: Option<String>,
-    },
-
-    /// Print the output of a service started with `dev --detach`
-    Logs {
-        /// Service name or ID
-        service: String,
-
-        /// Project ID/name when service resolution is ambiguous
-        #[arg(long)]
-        project: Option<String>,
-
-        /// Project environment name/slug. Defaults to the current worktree environment.
-        #[arg(long)]
-        env: Option<String>,
-
-        /// Number of lines to show
-        #[arg(short = 'n', long, default_value = "100")]
-        lines: usize,
     },
 }
 
@@ -967,18 +967,7 @@ fn main() -> Result<()> {
         }
         Commands::Services { command } => match command {
             ServicesCommands::List { json } => cli::services::list(&ctx, json),
-            ServicesCommands::Running { json } => cli::background::running(json),
-            ServicesCommands::Stop {
-                service,
-                project,
-                env,
-            } => cli::background::stop(&service, project.as_deref(), env.as_deref(), &ctx),
-            ServicesCommands::Logs {
-                service,
-                project,
-                env,
-                lines,
-            } => cli::background::logs(&service, project.as_deref(), env.as_deref(), lines, &ctx),
+            ServicesCommands::Status { json } => cli::background::status(json),
         },
         Commands::Get {
             service,
@@ -1011,13 +1000,44 @@ fn main() -> Result<()> {
         ),
         Commands::Dev { detach: true, .. } => cli::background::start_detached(),
         Commands::Dev {
+            in_app: true,
             service,
             domain,
             project,
             env,
             launch_profile,
-            detach: false,
             command,
+            ..
+        } => {
+            if !command.is_empty()
+                || !launch_profile.env_file.is_empty()
+                || launch_profile.confirm_profile.is_some()
+                || launch_profile.no_masking
+            {
+                anyhow::bail!(
+                    "--in-app starts the service as the app's launch button does: it takes a service, --project, --env and --profile only. Use --detach for the other options."
+                );
+            }
+            cli::background::start_in_app(
+                cli::services::RunTarget {
+                    service: service.as_deref(),
+                    project: project.as_deref(),
+                    environment: env.as_deref(),
+                    init_domain: domain.as_deref(),
+                },
+                launch_profile.profile.as_deref(),
+                config_path,
+                &ctx,
+            )
+        }
+        Commands::Dev {
+            service,
+            domain,
+            project,
+            env,
+            launch_profile,
+            command,
+            ..
         } => cli::services::run(
             cli::services::RunArgs {
                 mode: cli::services::RunMode::Dev,
@@ -1060,16 +1080,46 @@ fn main() -> Result<()> {
         Commands::Start { foreground } => {
             cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
         }
-        Commands::Stop => cli::stop::execute(&ctx, &paths, &config.daemon),
-        Commands::Restart => {
-            cli::restart::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon)
-        }
+        Commands::Stop { service } => match service.service {
+            Some(name) => cli::background::stop(
+                &name,
+                service.project.as_deref(),
+                service.env.as_deref(),
+                &ctx,
+            ),
+            None => cli::stop::execute(&ctx, &paths, &config.daemon),
+        },
+        Commands::Restart { service } => match service.service {
+            Some(name) => cli::background::restart(
+                &name,
+                service.project.as_deref(),
+                service.env.as_deref(),
+                config_path,
+                &ctx,
+            ),
+            None => cli::restart::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon),
+        },
         Commands::Status => cli::status::execute(&ctx, &config.daemon),
         Commands::Logs {
+            service,
             lines,
+            cursor,
             clear,
             follow,
-        } => cli::logs::execute(lines, clear, follow, &paths),
+        } => match service.service {
+            Some(name) => cli::background::logs(
+                cli::background::LogsArgs {
+                    service: &name,
+                    project: service.project.as_deref(),
+                    environment: service.env.as_deref(),
+                    lines,
+                    follow,
+                    cursor,
+                },
+                &ctx,
+            ),
+            None => cli::logs::execute(lines, clear, follow, &paths),
+        },
         Commands::Reload => {
             cli::reload::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon)
         }

@@ -12,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 
 import type {
   TerminalExitPayload,
@@ -21,6 +22,7 @@ import type {
   TerminalTargetRequest,
 } from "@/types/localify";
 
+import { setDeepLinkLaunchHandler } from "@/lib/deep-link";
 import { bootstrapQueries } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 
@@ -236,6 +238,29 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     },
     [queryClient, upsertSession],
   );
+
+  // `localify dev --in-app` and agents start services through a deep link, which
+  // takes the same path as the launch button.
+  useEffect(() => {
+    setDeepLinkLaunchHandler(async (launch) => {
+      setIsOpen(true);
+      try {
+        await launchService(
+          {
+            kind: "service",
+            projectId: launch.projectId,
+            environmentSlug: launch.environmentSlug,
+            serviceId: launch.serviceId,
+          },
+          launch.profile,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toast.error(`Could not start ${launch.serviceId}`, { description: message });
+      }
+    });
+    return () => setDeepLinkLaunchHandler(null);
+  }, [launchService]);
 
   const openSelectedTarget = useCallback(async () => {
     if (!selectedTarget) {

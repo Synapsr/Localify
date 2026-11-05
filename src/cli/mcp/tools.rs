@@ -91,6 +91,15 @@ const CONFIRM_PROFILE: Param = param(
 );
 const LINES: Param = param("lines", Kind::Integer, "Number of lines to return.");
 
+/// `stop` or `restart` of one service.
+fn service_command(verb: &str, args: &ToolArgs) -> Result<Vec<String>> {
+    Args::new(&[verb])
+        .positional(args.required("service")?)?
+        .option("--project", args.string("project")?)
+        .option("--env", args.string("env")?)
+        .done()
+}
+
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "status",
@@ -129,13 +138,13 @@ pub const TOOLS: &[Tool] = &[
         build: |_| Ok(argv(&["services", "list", "--json"])),
     },
     Tool {
-        name: "list_running_services",
-        description: "Lists the services Localify started that run now, in every environment (JSON), with PID, URL and output file.",
+        name: "service_status",
+        description: "Shows every service Localify started, in every environment (JSON): running or not, PID, URL, port, origin (app, background, terminal), start time, and exit code once it stopped.",
         params: &[],
         uses_cwd: false,
         read_only: true,
         destructive: false,
-        build: |_| Ok(argv(&["services", "running", "--json"])),
+        build: |_| Ok(argv(&["services", "status", "--json"])),
     },
     Tool {
         name: "get_service_url",
@@ -154,8 +163,8 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
-        name: "start_service",
-        description: "Starts a service through Localify in the background (`localify dev --detach`) and returns once it listens, with its URL. Without a service, uses the one in cwd. In a folder that is not a project yet, creates the project and its domains first. Injects PORT, HOST, LOCALIFY_URL and URL variables. Read its output with read_service_logs, stop it with stop_service.",
+        name: "service_start",
+        description: "Starts a service in the Localify app's terminal, as its launch button does, so the user sees it there, and returns once it listens, with its URL. If it already runs, says so and starts nothing. Without a service, uses the one in cwd; in a folder that is not a project yet, creates the project and its domains first. Set background when the app is not installed. Read its output with service_logs.",
         params: &[
             param(
                 "service",
@@ -170,12 +179,17 @@ pub const TOOLS: &[Tool] = &[
                 "Primary domain to use when this call creates the project. Not for existing services: use set_service_domain.",
             ),
             PROFILE,
+            param(
+                "background",
+                Kind::Boolean,
+                "Run it in the background instead of the app's terminal. Needed for env_files, confirm_profile and command.",
+            ),
             ENV_FILES,
             CONFIRM_PROFILE,
             param(
                 "command",
                 Kind::StringList,
-                "Command to run instead of the service's dev command, one argument per item.",
+                "With background: command to run instead of the service's dev command, one argument per item.",
             ),
         ],
         uses_cwd: true,
@@ -186,8 +200,10 @@ pub const TOOLS: &[Tool] = &[
             if let Some(service) = args.string("service")? {
                 command = command.positional(service)?;
             }
+            let background = args.flag("background")?;
             command
-                .flag("--detach", true)
+                .flag("--in-app", !background)
+                .flag("--detach", background)
                 .option("--project", args.string("project")?)
                 .option("--env", args.string("env")?)
                 .option("--domain", args.string("domain")?)
@@ -199,33 +215,47 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
-        name: "stop_service",
-        description: "Stops a service Localify started, with everything it launched.",
+        name: "service_stop",
+        description: "Stops a service Localify started (in the app, the background or a terminal), with everything it launched.",
         params: &[SERVICE, PROJECT, ENV],
         uses_cwd: true,
         read_only: false,
         destructive: false,
-        build: |args| {
-            Args::new(&["services", "stop"])
-                .positional(args.required("service")?)?
-                .option("--project", args.string("project")?)
-                .option("--env", args.string("env")?)
-                .done()
-        },
+        build: |args| service_command("stop", args),
     },
     Tool {
-        name: "read_service_logs",
-        description: "Returns the last output of a service started with start_service, running or stopped. Use it when a service fails to start or misbehaves.",
-        params: &[SERVICE, PROJECT, ENV, LINES],
+        name: "service_restart",
+        description: "Stops a service and starts it again where it ran, on the same launch profile, and returns once it listens.",
+        params: &[SERVICE, PROJECT, ENV],
+        uses_cwd: true,
+        read_only: false,
+        destructive: false,
+        build: |args| service_command("restart", args),
+    },
+    Tool {
+        name: "service_logs",
+        description: "Returns a service's output, the same lines the app's terminal shows, without colors: the last `lines` lines, or with `cursor` only what came after it. The result ends with the next cursor: pass it back to read what follows.",
+        params: &[
+            SERVICE,
+            PROJECT,
+            ENV,
+            LINES,
+            param(
+                "cursor",
+                Kind::Integer,
+                "Cursor from the previous service_logs call, to read only newer lines.",
+            ),
+        ],
         uses_cwd: true,
         read_only: true,
         destructive: false,
         build: |args| {
-            Args::new(&["services", "logs"])
+            Args::new(&["logs"])
                 .positional(args.required("service")?)?
                 .option("--project", args.string("project")?)
                 .option("--env", args.string("env")?)
                 .option("--lines", args.integer("lines")?)
+                .option("--cursor", args.integer("cursor")?)
                 .done()
         },
     },
@@ -260,7 +290,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "init_project",
-        description: "Creates a Localify project for the app in cwd without starting it: reserves free ports, registers .localify domains and patches supported framework config (Next.js, Vite). For a first run, start_service does this too. Do not rerun it to repair a project: use configure_dev or add_service.",
+        description: "Creates a Localify project for the app in cwd without starting it: reserves free ports, registers .localify domains and patches supported framework config (Next.js, Vite). For a first run, service_start does this too. Do not rerun it to repair a project: use configure_dev or add_service.",
         params: &[
             param(
                 "name",
@@ -465,7 +495,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "ensure_environment",
-        description: "Attaches a worktree as a project environment with its own domains and ports. start_service does it by itself when run inside a worktree.",
+        description: "Attaches a worktree as a project environment with its own domains and ports. service_start does it by itself when run inside a worktree.",
         params: &[
             PROJECT,
             param(
@@ -820,7 +850,7 @@ impl Param {
         let mut schema = match self.kind {
             Kind::String => json!({ "type": "string" }),
             Kind::Boolean => json!({ "type": "boolean" }),
-            Kind::Integer => json!({ "type": "integer", "minimum": 1 }),
+            Kind::Integer => json!({ "type": "integer", "minimum": 0 }),
             Kind::StringList => json!({ "type": "array", "items": { "type": "string" } }),
             Kind::OneOf(values) => json!({ "type": "string", "enum": values }),
         };
@@ -876,10 +906,8 @@ impl ToolArgs {
     pub fn integer(&self, name: &str) -> Result<Option<String>> {
         match self.values.get(name) {
             None | Some(Value::Null) => Ok(None),
-            Some(Value::Number(value)) if value.as_u64().is_some_and(|value| value > 0) => {
-                Ok(Some(value.to_string()))
-            }
-            Some(_) => bail!("'{name}' must be a positive integer."),
+            Some(Value::Number(value)) if value.as_u64().is_some() => Ok(Some(value.to_string())),
+            Some(_) => bail!("'{name}' must be a whole number, 0 or more."),
         }
     }
 
@@ -980,24 +1008,30 @@ mod tests {
     }
 
     #[test]
-    fn start_service_runs_dev_in_the_background() {
-        let args = build(
-            "start_service",
-            json!({ "service": "web", "env": "feat-auth", "command": ["pnpm", "dev"] }),
-        )
-        .unwrap();
-
+    fn service_start_runs_in_the_app_unless_asked_for_the_background() {
         assert_eq!(
-            args,
-            [
-                "dev",
-                "web",
-                "--detach",
-                "--env=feat-auth",
-                "--",
-                "pnpm",
-                "dev"
-            ]
+            build(
+                "service_start",
+                json!({ "service": "web", "env": "feat-auth" })
+            )
+            .unwrap(),
+            ["dev", "web", "--in-app", "--env=feat-auth"]
+        );
+        assert_eq!(
+            build(
+                "service_start",
+                json!({ "service": "web", "background": true, "command": ["pnpm", "dev"] }),
+            )
+            .unwrap(),
+            ["dev", "web", "--detach", "--", "pnpm", "dev"]
+        );
+    }
+
+    #[test]
+    fn service_logs_reads_on_from_a_cursor() {
+        assert_eq!(
+            build("service_logs", json!({ "service": "web", "cursor": 0 })).unwrap(),
+            ["logs", "web", "--cursor=0"]
         );
     }
 
@@ -1017,14 +1051,14 @@ mod tests {
 
     #[test]
     fn a_value_cannot_become_a_flag() {
-        assert!(build("stop_service", json!({ "service": "--all" })).is_err());
+        assert!(build("service_stop", json!({ "service": "--all" })).is_err());
 
         let args = build(
-            "stop_service",
+            "service_stop",
             json!({ "service": "web", "project": "--force" }),
         )
         .unwrap();
-        assert_eq!(args, ["services", "stop", "web", "--project=--force"]);
+        assert_eq!(args, ["stop", "web", "--project=--force"]);
     }
 
     #[test]
@@ -1041,13 +1075,7 @@ mod tests {
 
     #[test]
     fn wrong_types_are_refused() {
-        assert!(
-            build(
-                "read_service_logs",
-                json!({ "service": "web", "lines": "ten" })
-            )
-            .is_err()
-        );
+        assert!(build("service_logs", json!({ "service": "web", "lines": "ten" })).is_err());
         assert!(build("daemon", json!({ "action": "explode" })).is_err());
         assert!(build("run_command", json!({ "command": [] })).is_err());
     }

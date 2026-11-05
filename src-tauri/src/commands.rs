@@ -74,6 +74,9 @@ pub struct DeepLinkPayloadDto {
     pub route: DeepLinkRouteDto,
     pub project_id: Option<String>,
     pub view: Option<String>,
+    /// The service to start, for `LaunchService`.
+    #[serde(default)]
+    pub launch: Option<DeepLinkLaunchDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +84,17 @@ pub struct DeepLinkPayloadDto {
 pub enum DeepLinkRouteDto {
     Projects,
     Logs,
+    /// Start a service in the terminal panel, as its launch button does.
+    LaunchService,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepLinkLaunchDto {
+    pub project_id: String,
+    pub environment_slug: String,
+    pub service_id: String,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

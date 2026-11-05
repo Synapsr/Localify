@@ -11,6 +11,9 @@ use localify::desktop::dto::{
     BootstrapDto, DomainInfoDto, ProjectEnvironmentInfoDto, ProjectInfoDto, ProjectServiceInfoDto,
 };
 use localify::domain::launch_profile::LaunchProfileName;
+use localify::infrastructure::running_services::{
+    RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV, ServiceOrigin,
+};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -138,6 +141,8 @@ pub struct TerminalManager {
 
 struct TerminalProcess {
     dto: TerminalSessionDto,
+    /// Where a service session copies its output, for `localify logs` and agents.
+    output_file: Option<PathBuf>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -238,6 +243,12 @@ impl TerminalManager {
         let mut command = CommandBuilder::new_default_prog();
         command.cwd(resolved.working_directory.as_os_str());
         command.env("TERM", "xterm-256color");
+        let output_file = service_output_file(&resolved.target);
+        if let Some(path) = &output_file {
+            // `localify dev` run in this shell records this file as its output.
+            command.env(SERVICE_OUTPUT_ENV, path);
+            command.env(SERVICE_ORIGIN_ENV, ServiceOrigin::App.as_env());
+        }
 
         let child = pair
             .slave
@@ -266,6 +277,7 @@ impl TerminalManager {
             id.clone(),
             TerminalProcess {
                 dto: dto.clone(),
+                output_file: output_file.clone(),
                 master: pair.master,
                 writer,
                 killer,
@@ -273,7 +285,7 @@ impl TerminalManager {
         );
 
         drop(pair.slave);
-        spawn_output_thread(app.clone(), id.clone(), reader);
+        spawn_output_thread(app.clone(), id.clone(), reader, output_file);
         spawn_wait_thread(app, Arc::clone(&self.sessions), id, child);
 
         Ok((dto, true))
@@ -318,6 +330,9 @@ impl TerminalManager {
             .session_guard()
             .remove(&request.session_id)
             .ok_or_else(|| format!("Terminal session '{}' was not found.", request.session_id))?;
+        if let Some(path) = &session.output_file {
+            remove_unused_output_file(path);
+        }
         session
             .killer
             .kill()
@@ -362,17 +377,54 @@ fn session_target_matches(
         && left.service_id == right.service_id
 }
 
+/// A new output file for a service session. Without one the session still
+/// works; only `localify logs` cannot read it.
+fn service_output_file(target: &TerminalSessionTargetDto) -> Option<PathBuf> {
+    if target.kind != TerminalTargetKind::Service {
+        return None;
+    }
+    let owner = format!("app-{}", std::process::id());
+    match RunningServiceStore::new_default().and_then(|store| store.new_log_file(&owner)) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("Service output will not be readable with `localify logs`: {error:#}");
+            None
+        }
+    }
+}
+
+/// A closed session's output is kept while a service run still points at it,
+/// so `localify logs` can show why that run stopped.
+fn remove_unused_output_file(path: &Path) {
+    let in_use = RunningServiceStore::new_default()
+        .and_then(|store| store.log_in_use(path))
+        .unwrap_or(true);
+    if !in_use {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn spawn_output_thread<R: Runtime + 'static>(
     app: AppHandle<R>,
     session_id: String,
     mut reader: Box<dyn Read + Send>,
+    output_file: Option<PathBuf>,
 ) {
     thread::spawn(move || {
+        let mut output = output_file.and_then(|path| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .ok()
+        });
         let mut buffer = [0_u8; 4096];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(count) => {
+                    if let Some(file) = output.as_mut() {
+                        let _ = file.write_all(&buffer[..count]);
+                    }
                     let _ = app.emit(
                         TERMINAL_OUTPUT_EVENT,
                         TerminalOutputPayload {

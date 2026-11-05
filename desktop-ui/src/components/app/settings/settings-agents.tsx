@@ -4,12 +4,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
+import type { AppConfigDto } from "@/types/localify";
+
 import { CheckIcon, ChevronDownIcon, InfoCircleIcon, SparklesIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { configMutations, systemMutations, systemQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import type { AppConfigDto } from "@/types/localify";
 
 import { SettingsCard } from "./settings-card";
 
@@ -167,7 +168,9 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
                   {connectionReadiness.tone === "ready" ? <CheckIcon /> : <InfoCircleIcon />}
                 </span>
                 <div className="min-w-0 flex-1 space-y-1">
-                  <div className="text-sm font-medium text-foreground">{connectionReadiness.title}</div>
+                  <div className="text-sm font-medium text-foreground">
+                    {connectionReadiness.title}
+                  </div>
                   <div className="text-xs leading-normal text-muted-foreground">
                     {connectionReadiness.description}
                   </div>
@@ -219,23 +222,12 @@ type SettingToggleProps = {
   onChange: (checked: boolean) => void;
 };
 
-const SettingToggle = ({
-  label,
-  description,
-  checked,
-  disabled,
-  onChange,
-}: SettingToggleProps) => (
+const SettingToggle = ({ label, description, checked, disabled, onChange }: SettingToggleProps) => (
   <div className="flex items-center gap-3">
     <div className="min-w-0 flex-1">
       <div className="text-sm font-medium text-foreground">{label}</div>
       <div className="text-xs leading-normal text-muted-foreground">{description}</div>
     </div>
-    <Switch
-      aria-label={label}
-      checked={checked}
-      disabled={disabled}
-      onCheckedChange={onChange}
-    />
+    <Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onChange} />
   </div>
 );
