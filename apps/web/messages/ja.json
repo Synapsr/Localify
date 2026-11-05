@@ -23,9 +23,9 @@
     "later": "あとで",
     "download": "今すぐダウンロード"
   },
-  "AgentSkill": {
+  "Agents": {
     "title": "エージェントにすべて任せよう。",
-    "description": "Claude Code、Codex、Cursor で /localify を実行するだけ。プロジェクト全体を設定してくれて、直したいことがあれば話しかけるだけです。"
+    "description": "Claude Code、Codex、Cursor を Localify につなぐだけ。エージェントがプロジェクトを設定してサービスを起動し、作業が終わればワークツリーも片付けます。あなたは話しかけるだけです。"
   },
   "Problem": {
     "titleLine1": "本当に変わるのは",

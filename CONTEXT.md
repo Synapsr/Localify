@@ -12,9 +12,9 @@ _Avoid_: App, repository
 The local domain label used to generate default service domains for a project. A project namespace is not itself a service or local domain unless the user assigns that hostname to a service.
 _Avoid_: Project domain, root domain, canonical domain
 
-**Agent Skill**:
-A reusable instruction package that teaches coding agents how to use Localify consistently across projects.
-_Avoid_: Prompt, plugin, script
+**MCP Server**:
+`localify mcp`, which gives coding agents every Localify action as a tool, each one a CLI command, along with the rules for using them.
+_Avoid_: Skill, plugin, integration
 
 **Agent-Initialized Project**:
 A project created or bootstrapped by a coding agent with Localify local domains and framework settings configured from the start.

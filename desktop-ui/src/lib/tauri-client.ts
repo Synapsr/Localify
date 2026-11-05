@@ -4,8 +4,8 @@ import type {
   AddProjectServiceRequest,
   AddProjectServiceResultDto,
   AddRouteRequest,
-  AgentSkillInstallResultDto,
-  AgentSkillStatusDto,
+  AgentMcpInstallResultDto,
+  AgentMcpStatusDto,
   AssignDomainProjectRequest,
   AvailablePortDto,
   AppConfigDto,
@@ -187,8 +187,8 @@ export interface DesktopClient {
   setupNodeTrust(): Promise<NodeTrustDto>;
   trustCa(): Promise<void>;
   trustIosSimulators(): Promise<StepDto>;
-  getAgentSkillStatus(): Promise<AgentSkillStatusDto>;
-  installAgentSkill(): Promise<AgentSkillInstallResultDto>;
+  getAgentMcpStatus(): Promise<AgentMcpStatusDto>;
+  installAgentMcp(): Promise<AgentMcpInstallResultDto>;
   listPortConflicts(): Promise<PortConflictDto[]>;
   killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
@@ -288,8 +288,8 @@ export function createDesktopClient(): DesktopClient {
     setupNodeTrust: () => tauriInvoke("setup_node_trust"),
     trustCa: () => tauriInvoke("trust_ca"),
     trustIosSimulators: () => tauriInvoke<StepDto>("trust_ios_simulators"),
-    getAgentSkillStatus: () => tauriInvoke("get_agent_skill_status"),
-    installAgentSkill: () => tauriInvoke("install_agent_skill"),
+    getAgentMcpStatus: () => tauriInvoke("get_agent_mcp_status"),
+    installAgentMcp: () => tauriInvoke("install_agent_mcp"),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),
     killPortConflict: (request) =>
       tauriInvoke("kill_port_conflict", {

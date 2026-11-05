@@ -42,20 +42,94 @@ run them as root, and start the daemon yourself with `localify start`.
 | `localify route remove ...`        | Remove route           |
 | `localify route list <domain>`     | List routes for domain |
 | `localify start [--foreground]`    | Start daemon           |
-| `localify stop`                    | Stop daemon            |
-| `localify restart`                 | Restart daemon         |
+| `localify stop`                    | Stop daemon (without a service) |
+| `localify restart`                 | Restart daemon (without a service) |
 | `localify reload`                  | Reload configuration   |
 | `localify status`                  | Show daemon status     |
-| `localify logs [-n N] [-f]`        | View or follow logs    |
+| `localify logs [-n N] [-f]`        | View or follow daemon logs |
 | `localify lan enable\|disable\|status` | Let other devices connect, or not |
 | `localify dev [service] --profile <name>` | Run a service on a [launch profile](launch-profiles.md) |
 | `localify profile init`            | Set up launch profiles interactively |
 | `localify exec --profile <name> -- <cmd>` | Run a command (not a service) on a launch profile |
+| `localify dev [service] --in-app`  | Run a service in the app's terminal |
+| `localify dev [service] --detach`  | Run a service in the background |
+| `localify services status`         | Show the services Localify started |
+| `localify logs <service> [-n N] [-f] [--cursor C]` | Print a service's output |
+| `localify stop <service>`          | Stop a service Localify started |
+| `localify restart <service>`       | Restart a service where it ran |
+| `localify project update <project> ...` | Rename, enable, disable, or re-link a project |
+| `localify project domain attach\|detach <domain>` | Move a domain into or out of a project |
+| `localify project env remove <env> [--delete-worktree]` | Remove a worktree environment, and the worktree |
+| `localify project env prune`       | Remove environments whose folder is gone |
+| `localify agent install`           | Connect coding agents to Localify's MCP server |
+| `localify mcp`                     | The MCP server agents start |
 | `localify completions <shell>`     | Generate completions   |
 
 None of these need `sudo`, and Localify refuses to run under it. `install`, `uninstall`
 and `lan` ask for an administrator's approval when they have to change the system. The
 one exception is Linux with no systemd, where the system setup needs root.
+
+## Coding Agents
+
+`localify mcp` is an MCP server that gives Claude Code, Codex, and Cursor every Localify
+action as a tool: starting and stopping services, reading their output, projects,
+domains, routes, worktree environments, and the daemon. Each tool runs the CLI command of
+the same name, so an agent gets exactly what you get in a terminal. Because the server is
+the installed binary, agents always see the actions of the installed version.
+
+```bash
+localify agent install   # connect every agent installed here
+localify agent status    # see which ones are connected
+```
+
+`agent install` uses `claude mcp add` and `codex mcp add`, and edits
+`~/.cursor/mcp.json` for Cursor. The desktop app does the same from **Settings → AI
+agents → Connect agents**, and during setup unless you turn that off. Restart open agent
+sessions afterwards.
+
+### Services in the app, from the command line
+
+`localify dev --in-app` starts a service in the desktop app's terminal, as its launch
+button does: the app opens if needed, and the command prints the URL and returns once the
+service listens. If the service already runs, it says so and starts nothing. Without the
+app, `--detach` runs it in the background instead.
+
+The app's terminal also writes what it shows to a file, so everyone reads the same lines:
+
+```bash
+localify dev web --in-app          # add --env feat-login for a worktree
+localify logs web -n 100           # the app terminal's lines, without colors
+localify logs web --follow         # until the service stops
+localify services status           # running or not, PID, URL, port, since, exit code
+localify restart web               # stops it and starts it again where it ran
+localify stop web
+```
+
+`stop`, `restart` and `logs` work on any `localify dev`, in the app, in the background, or
+in a terminal; only the output of a service run in your own terminal stays in that
+terminal. Without a service, `stop`, `restart` and `logs` act on the daemon, as before.
+When `logs` writes to something other than a terminal, it ends with `Next cursor: N`;
+`--cursor N` then prints only the lines that came after. Agents use this to follow a
+service.
+
+The link `localify://action/launch-service?project=<id>&env=<slug>&service=<id>`, with an
+optional `&profile=<name>`, does the same as `--in-app`.
+
+### Cleaning up worktrees
+
+Running `localify dev` inside a Git worktree gives it its own environment: domains,
+certificates, and ports. When the work there is done, remove it from another folder:
+
+```bash
+localify project env remove feat-login --delete-worktree
+```
+
+This stops the environment's services, deletes the worktree with `git worktree remove`,
+and unregisters its domains. Git refuses when the worktree has uncommitted changes, and
+nothing is removed; `--force` discards them. The branch is kept. Without
+`--delete-worktree`, the folder stays and only Localify's side goes. For a worktree
+deleted another way, `localify project env prune` removes the environments whose folder
+is gone.
 
 ## Route Targets
 

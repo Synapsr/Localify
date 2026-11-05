@@ -4,12 +4,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
+import type { AppConfigDto } from "@/types/localify";
+
 import { CheckIcon, ChevronDownIcon, InfoCircleIcon, SparklesIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { configMutations, systemMutations, systemQueries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import type { AppConfigDto } from "@/types/localify";
 
 import { SettingsCard } from "./settings-card";
 
@@ -19,25 +20,19 @@ type SettingsAgentsProps = {
 
 export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
   const queryClient = useQueryClient();
-  const { data: skillStatus } = useQuery(systemQueries.agentSkillStatus());
+  const { data: mcpStatus } = useQuery(systemQueries.agentMcpStatus());
   const updateConfig = useMutation(configMutations.update(queryClient));
-  const installSkill = useMutation(systemMutations.installAgentSkill(queryClient));
+  const installMcp = useMutation(systemMutations.installAgentMcp(queryClient));
   const [open, setOpen] = useState(false);
 
-  const detectedAgentOptions =
-    skillStatus?.detectedAgents.filter((agent) => agent.detected) ?? [];
+  const detectedAgentOptions = mcpStatus?.agents.filter((agent) => agent.detected) ?? [];
   const detectedAgents = detectedAgentOptions.map((agent) => agent.label);
   const missingAgentOptions = detectedAgentOptions.filter((agent) => !agent.installed);
   const allDetectedAgentsInstalled =
     detectedAgentOptions.length > 0 && missingAgentOptions.length === 0;
-  const detectedAgentsLabel =
-    detectedAgents.length > 0 ? detectedAgents.join(", ") : "No supported agent detected";
-  const missingAgentsLabel =
-    missingAgentOptions.length > 0
-      ? missingAgentOptions.map((agent) => agent.label).join(", ")
-      : detectedAgentsLabel;
-  const skillReadiness = (() => {
-    if (!skillStatus) {
+  const missingAgentsLabel = missingAgentOptions.map((agent) => agent.label).join(", ");
+  const connectionReadiness = (() => {
+    if (!mcpStatus) {
       return {
         tone: "loading" as const,
         title: "Checking agent setup",
@@ -48,33 +43,19 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
       return {
         tone: "warning" as const,
         title: "No compatible agent found yet",
-        description: "Install Codex, Claude Code, or Cursor, then come back to connect Localify.",
-      };
-    }
-    if (!skillStatus.npxAvailable) {
-      return {
-        tone: "warning" as const,
-        title: "Agent setup needs Node.js",
-        description: "Install Node.js so Localify can connect the skill to your coding agents.",
-      };
-    }
-    if (allDetectedAgentsInstalled) {
-      return {
-        tone: "ready" as const,
-        title: "Agents connected",
-        description: "Localify is already available to compatible coding agents on this Mac.",
+        description: "Install Claude Code, Codex, or Cursor, then come back to connect Localify.",
       };
     }
     return {
       tone: "ready" as const,
       title: "Ready to connect",
-      description: `Localify can guide ${missingAgentsLabel} when they create or update projects.`,
+      description: `${missingAgentsLabel} will get every Localify action: start and stop services, manage domains, and clean up worktrees.`,
     };
   })();
   const showInstallPrompt = !allDetectedAgentsInstalled;
-  const isInstallingSkill = installSkill.isPending;
+  const isInstallingMcp = installMcp.isPending;
   const summary = [
-    config.agent.installSkill ? "Agent guidance on" : "Agent guidance off",
+    config.agent.connectAgents ? "Connects new agents" : "Agents connected by hand",
     config.agent.promoteDevScript ? "Localify-first dev" : "Manual dev scripts",
     allDetectedAgentsInstalled
       ? "Agents connected"
@@ -92,19 +73,19 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
     }
   };
 
-  const handleInstallSkill = async () => {
+  const handleInstallMcp = async () => {
     try {
-      const result = await installSkill.mutateAsync();
-      queryClient.setQueryData(systemQueries.agentSkillStatus().queryKey, result.status);
-      const installedAgentLabels = result.status.detectedAgents
+      const result = await installMcp.mutateAsync();
+      queryClient.setQueryData(systemQueries.agentMcpStatus().queryKey, result.status);
+      const installedAgentLabels = result.status.agents
         .filter((agent) => result.installedAgents.includes(agent.id))
         .map((agent) => agent.label);
-      toast.success("Localify skill installed", {
-        description: installedAgentLabels.join(", "),
+      toast.success("Agents connected to Localify", {
+        description: `${installedAgentLabels.join(", ")}. Restart open agent sessions to load it.`,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      toast.error("Skill installation failed", { description: message });
+      toast.error("Could not connect agents", { description: message });
     }
   };
 
@@ -145,14 +126,14 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
         <div className="overflow-hidden">
           <div className="mt-5 space-y-4 border-t border-border/40 pt-5">
             <SettingToggle
-              label="Set up agents automatically"
-              description="Give compatible coding agents Localify's project setup instructions."
-              checked={config.agent.installSkill}
+              label="Connect agents during setup"
+              description="Give compatible coding agents Localify's MCP server, with every action the app has."
+              checked={config.agent.connectAgents}
               disabled={updateConfig.isPending}
-              onChange={(installSkillEnabled) =>
+              onChange={(connectAgents) =>
                 void updateAgentConfig({
                   ...config.agent,
-                  installSkill: installSkillEnabled,
+                  connectAgents,
                 })
               }
             />
@@ -176,20 +157,22 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
                   aria-hidden
                   className={cn(
                     "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 [&>svg]:size-4",
-                    skillReadiness.tone === "ready" &&
+                    connectionReadiness.tone === "ready" &&
                       "bg-primary/10 text-primary ring-primary/20",
-                    skillReadiness.tone === "warning" &&
+                    connectionReadiness.tone === "warning" &&
                       "bg-amber-500/10 text-amber-700 ring-amber-500/20 dark:text-amber-300",
-                    skillReadiness.tone === "loading" &&
+                    connectionReadiness.tone === "loading" &&
                       "bg-muted text-muted-foreground ring-border/60",
                   )}
                 >
-                  {skillReadiness.tone === "ready" ? <CheckIcon /> : <InfoCircleIcon />}
+                  {connectionReadiness.tone === "ready" ? <CheckIcon /> : <InfoCircleIcon />}
                 </span>
                 <div className="min-w-0 flex-1 space-y-1">
-                  <div className="text-sm font-medium text-foreground">{skillReadiness.title}</div>
+                  <div className="text-sm font-medium text-foreground">
+                    {connectionReadiness.title}
+                  </div>
                   <div className="text-xs leading-normal text-muted-foreground">
-                    {skillReadiness.description}
+                    {connectionReadiness.description}
                   </div>
                   {detectedAgents.length > 0 ? (
                     <div className="flex flex-wrap gap-1.5 pt-1">
@@ -216,16 +199,11 @@ export const SettingsAgents = ({ config }: SettingsAgentsProps) => {
               <div className="flex justify-end">
                 <Button
                   variant="secondary"
-                  disabled={
-                    isInstallingSkill ||
-                    !config.agent.installSkill ||
-                    detectedAgents.length === 0 ||
-                    !skillStatus?.npxAvailable
-                  }
-                  loading={isInstallingSkill}
-                  onClick={() => void handleInstallSkill()}
+                  disabled={isInstallingMcp || detectedAgents.length === 0}
+                  loading={isInstallingMcp}
+                  onClick={() => void handleInstallMcp()}
                 >
-                  {isInstallingSkill ? "Installing..." : "Install skill"}
+                  {isInstallingMcp ? "Connecting..." : "Connect agents"}
                 </Button>
               </div>
             ) : null}
@@ -244,23 +222,12 @@ type SettingToggleProps = {
   onChange: (checked: boolean) => void;
 };
 
-const SettingToggle = ({
-  label,
-  description,
-  checked,
-  disabled,
-  onChange,
-}: SettingToggleProps) => (
+const SettingToggle = ({ label, description, checked, disabled, onChange }: SettingToggleProps) => (
   <div className="flex items-center gap-3">
     <div className="min-w-0 flex-1">
       <div className="text-sm font-medium text-foreground">{label}</div>
       <div className="text-xs leading-normal text-muted-foreground">{description}</div>
     </div>
-    <Switch
-      aria-label={label}
-      checked={checked}
-      disabled={disabled}
-      onCheckedChange={onChange}
-    />
+    <Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onChange} />
   </div>
 );

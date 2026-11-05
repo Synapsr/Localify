@@ -23,9 +23,9 @@
     "later": "Может, позже",
     "download": "Скачать сейчас"
   },
-  "AgentSkill": {
+  "Agents": {
     "title": "Доверь всё своему агенту.",
-    "description": "Запусти /localify с Claude Code, Codex или Cursor. Агент настроит весь проект, а если что-то нужно починить, просто скажи ему."
+    "description": "Подключи Claude Code, Codex или Cursor к Localify. Агент настроит проект, запустит сервисы и уберёт свои worktree, когда закончит. Тебе остаётся только говорить с ним."
   },
   "Problem": {
     "titleLine1": "Что действительно",

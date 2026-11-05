@@ -9,8 +9,9 @@ use crate::infrastructure::config::{ConfigStore, ConfiguredProject};
 use crate::infrastructure::project_marker::{find_project_marker, write_project_marker};
 use localify::desktop::ProjectRootStore;
 use localify::desktop::dto::{
-    AddProjectServiceRequest, AddProjectServiceResultDto, MaterializeProjectServicesRequest,
-    SetProjectServiceDomainRequest,
+    AddProjectServiceRequest, AddProjectServiceResultDto, AssignDomainProjectRequest,
+    MaterializeProjectServicesRequest, RelinkProjectRootRequest, SetProjectServiceDomainRequest,
+    UpdateProjectRequest,
 };
 use localify::project_init::{
     FolderInitSelection, LocalAppUpdatePolicy, ServicePlan, apply_local_app_updates,
@@ -35,6 +36,95 @@ pub struct SetDomainArgs {
     pub domain: String,
     pub project: Option<String>,
     pub environment: Option<String>,
+}
+
+pub struct UpdateProjectArgs {
+    pub project: String,
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
+    pub root: Option<PathBuf>,
+}
+
+/// Renames, enables or disables a project, or points it at the folder it moved to.
+pub fn update(args: UpdateProjectArgs, config_path: &Path, ctx: &AppContext) -> Result<()> {
+    if args.name.is_none() && args.enabled.is_none() && args.root.is_none() {
+        bail!("Nothing to change. Pass --name, --enable, --disable or --root.");
+    }
+    let project = find_project(&ctx.config_store, &args.project)?;
+    let api = direct_api(config_path)?;
+
+    if args.name.is_some() || args.enabled.is_some() {
+        api.update_project(UpdateProjectRequest {
+            id: project.id.clone(),
+            name: args.name,
+            enabled: args.enabled,
+            root_path: None,
+        })?;
+    }
+    if let Some(root) = args.root {
+        let root = effective_current_dir()?.join(root);
+        api.relink_project_root(RelinkProjectRootRequest {
+            project_id: project.id.clone(),
+            root_path: root.display().to_string(),
+        })?;
+    }
+    ctx.apply_config_to_daemon();
+
+    let updated = find_project(&ctx.config_store, &project.id)?;
+    println!(
+        "Updated project '{}' [{}]{}",
+        updated.name,
+        updated.id,
+        if updated.enabled { "" } else { " (disabled)" }
+    );
+    if let Some(root) = updated.root_path {
+        println!("  root: {root}");
+    }
+    Ok(())
+}
+
+/// Moves a registered domain into a project, or out of every project with `None`.
+pub fn assign_domain(
+    domain: String,
+    wildcard: bool,
+    project: Option<String>,
+    config_path: &Path,
+    ctx: &AppContext,
+) -> Result<()> {
+    let project = project
+        .map(|project| find_project(&ctx.config_store, &project))
+        .transpose()?;
+    let result = direct_api(config_path)?.assign_domain_project(AssignDomainProjectRequest {
+        domain,
+        wildcard,
+        project_id: project.as_ref().map(|project| project.id.clone()),
+    })?;
+    ctx.apply_config_to_daemon();
+    match project {
+        Some(project) => println!(
+            "{} now belongs to '{}' [{}].",
+            result.registration.pattern, project.name, project.id
+        ),
+        None => println!(
+            "{} no longer belongs to a project.",
+            result.registration.pattern
+        ),
+    }
+    Ok(())
+}
+
+/// A project by ID or by name, as `list-projects` shows them.
+fn find_project(config_store: &ConfigStore, value: &str) -> Result<ConfiguredProject> {
+    config_store
+        .list_projects()?
+        .into_iter()
+        .find(|project| project.id == value || project.name.eq_ignore_ascii_case(value))
+        .ok_or_else(|| {
+            anyhow!(
+                "Project '{value}' not found. Run '{} list-projects' to see project IDs.",
+                BRANDING.cli_command()
+            )
+        })
 }
 
 pub fn configure_dev(

@@ -15,7 +15,7 @@ use serde::Serialize;
 use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
-use super::project_env::ensure_implicit_worktree_environment;
+use super::project_env::{current_worktree_environment, ensure_implicit_worktree_environment};
 use super::service_supervisor::{self, LaunchOutcome, SessionReporter, SupervisedLaunch};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
@@ -31,6 +31,10 @@ use crate::infrastructure::local_dev::{
 };
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
+use crate::infrastructure::running_services::{
+    NewRun, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
+    ServiceKey, ServiceOrigin,
+};
 use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
     find_existing_vite_config_path,
@@ -224,79 +228,21 @@ pub fn run(
         );
     }
 
-    // A moved project folder would otherwise resolve to nothing and trigger a
-    // duplicate auto-init below; the in-project marker re-links it first.
-    if let Ok(cwd) = effective_current_dir()
-        && let Some(healed) = super::project::heal_moved_project_root(&ctx.config_store, &cwd)
-    {
-        eprintln!(
-            "Re-linked project '{}' [{}] to '{}' (folder moved).",
-            healed.project_name,
-            healed.project_id,
-            healed.root_path.display()
-        );
-    }
-
     let has_override_command = !override_command.is_empty();
     let ports = daemon_ports(ctx)?;
-    let implicit_environment = if environment.is_none() {
-        ensure_implicit_worktree_environment(project.as_deref(), ctx)?
-    } else {
-        None
-    };
-    let effective_project = project.as_deref().or_else(|| {
-        implicit_environment
-            .as_ref()
-            .map(|environment| environment.project_id.as_str())
-    });
-    let effective_environment = environment.as_deref().or_else(|| {
-        implicit_environment
-            .as_ref()
-            .map(|environment| environment.slug.as_str())
-    });
-
-    if let Some(environment) = &implicit_environment {
-        eprintln!(
-            "Using project environment '{}' [{}] for worktree.",
-            environment.name, environment.slug
-        );
-    }
-
-    ensure_run_context_is_initialized(
-        service_name.as_deref(),
-        effective_project,
-        effective_environment,
-        init_domain.as_deref(),
+    let (service, effective_environment) = resolve_runnable_service(
+        RunTarget {
+            service: service_name.as_deref(),
+            project: project.as_deref(),
+            environment: environment.as_deref(),
+            init_domain: init_domain.as_deref(),
+        },
+        mode,
         config_path,
         policy,
         ctx,
     )?;
-
-    let service = service_with_launch_for_mode(
-        resolve_run_service(
-            service_name.as_deref(),
-            effective_project,
-            effective_environment,
-            ctx,
-        )?,
-        mode,
-    );
-    if !service.project_enabled {
-        bail!(
-            "Service '{}' belongs to disabled project '{}'. Enable the project before running it.",
-            service.id,
-            service.project_id
-        );
-    }
-
-    // Backfill the marker for pre-marker projects so a future move can
-    // auto-heal. Never overwrites an existing marker.
-    if let Some(root) = service.project_root_path.as_deref() {
-        let root = Path::new(root);
-        if root.is_dir() && read_project_marker(root).is_none() {
-            let _ = write_project_marker(root, &service.project_id);
-        }
-    }
+    let effective_environment = effective_environment.as_deref();
 
     let command = if !has_override_command {
         service.command.clone().ok_or_else(|| {
@@ -324,6 +270,8 @@ pub fn run(
     }
 
     let port = proxy_target.port().value();
+    let key = service_key(&service, effective_environment, ctx);
+    refuse_second_run(&key)?;
     ensure_port_available(port, &service)?;
 
     let workdir = service_workdir(&service)?;
@@ -370,37 +318,261 @@ pub fn run(
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
+    let profile_name = profile
+        .as_ref()
+        .and_then(|profile| profile.name())
+        .map(str::to_string);
+    record_running_service(&key, &url, port, profile_name);
 
     let Some(profile) = profile else {
-        return run_plain(&service, &command, &workdir, &environment);
+        let status = run_plain(&command, &workdir, &environment);
+        record_exit(&key, status.as_ref().ok().and_then(|status| status.code()));
+        let status = status?;
+        if !status.success() {
+            bail!("Service '{}' exited with {}", service.id, status);
+        }
+        return Ok(());
     };
     let session = launch_profile::start_launch_session(
         &profile,
         SessionTarget {
             project_id: service.project_id.clone(),
-            environment_slug: environment_slug(&service, effective_environment, ctx),
+            environment_slug: key.environment.clone(),
             service_id: service.id.clone(),
             target_port: port,
             browser_indicator: profile.resolved.browser_indicator,
         },
         &paths.socket_path,
     )?;
-    run_with_profile(
+    let outcome = run_with_profile(
         &profile,
         &service,
         &command,
         &workdir,
         &environment,
         session,
+    );
+    record_exit(
+        &key,
+        match &outcome {
+            Ok(LaunchOutcome::Exited(status)) => status.code(),
+            _ => None,
+        },
+    );
+    profile_outcome(&profile, &service, outcome?)
+}
+
+/// What `dev` was asked to run, before resolution.
+#[derive(Clone, Copy)]
+pub(crate) struct RunTarget<'a> {
+    pub service: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub environment: Option<&'a str>,
+    pub init_domain: Option<&'a str>,
+}
+
+/// Finds the service `dev` runs, creating the project from the current folder
+/// and the environment of the current worktree when they do not exist yet.
+/// Returns it with its environment slug.
+pub(crate) fn resolve_runnable_service(
+    target: RunTarget<'_>,
+    mode: RunMode,
+    config_path: &Path,
+    policy: LocalAppUpdatePolicy,
+    ctx: &AppContext,
+) -> Result<(ConfiguredService, Option<String>)> {
+    // A moved project folder would otherwise resolve to nothing and trigger a
+    // duplicate auto-init below; the in-project marker re-links it first.
+    if let Ok(cwd) = effective_current_dir()
+        && let Some(healed) = super::project::heal_moved_project_root(&ctx.config_store, &cwd)
+    {
+        eprintln!(
+            "Re-linked project '{}' [{}] to '{}' (folder moved).",
+            healed.project_name,
+            healed.project_id,
+            healed.root_path.display()
+        );
+    }
+
+    let implicit_environment = if target.environment.is_none() {
+        ensure_implicit_worktree_environment(target.project, ctx)?
+    } else {
+        None
+    };
+    let effective_project = target.project.or_else(|| {
+        implicit_environment
+            .as_ref()
+            .map(|environment| environment.project_id.as_str())
+    });
+    let effective_environment = target.environment.or_else(|| {
+        implicit_environment
+            .as_ref()
+            .map(|environment| environment.slug.as_str())
+    });
+
+    if let Some(environment) = &implicit_environment {
+        eprintln!(
+            "Using project environment '{}' [{}] for worktree.",
+            environment.name, environment.slug
+        );
+    }
+
+    ensure_run_context_is_initialized(
+        target.service,
+        effective_project,
+        effective_environment,
+        target.init_domain,
+        config_path,
+        policy,
+        ctx,
+    )?;
+
+    let service = service_with_launch_for_mode(
+        resolve_run_service(
+            target.service,
+            effective_project,
+            effective_environment,
+            ctx,
+        )?,
+        mode,
+    );
+    if !service.project_enabled {
+        bail!(
+            "Service '{}' belongs to disabled project '{}'. Enable the project before running it.",
+            service.id,
+            service.project_id
+        );
+    }
+
+    // Backfill the marker for pre-marker projects so a future move can
+    // auto-heal. Never overwrites an existing marker. A worktree gets none: it
+    // would show as a change there, and a moved project could heal to it.
+    if !is_worktree_environment(&service.project_id, effective_environment, ctx)
+        && let Some(root) = service.project_root_path.as_deref()
+    {
+        let root = Path::new(root);
+        if root.is_dir() && read_project_marker(root).is_none() {
+            let _ = write_project_marker(root, &service.project_id);
+        }
+    }
+
+    Ok((service, effective_environment.map(str::to_string)))
+}
+
+/// A service resolved for a launch somewhere else than this process: the app's
+/// terminal or the background.
+pub(crate) struct LaunchTarget {
+    pub key: ServiceKey,
+    pub url: String,
+    pub port: u16,
+}
+
+pub(crate) fn resolve_launch_target(
+    target: RunTarget<'_>,
+    config_path: &Path,
+    ctx: &AppContext,
+) -> Result<LaunchTarget> {
+    let ports = daemon_ports(ctx)?;
+    let (service, environment) = resolve_runnable_service(
+        target,
+        RunMode::Dev,
+        config_path,
+        LocalAppUpdatePolicy::runtime_only(),
+        ctx,
+    )?;
+    let port = service_proxy_target(&service)?.port().value();
+    let url = service_url(&service, service_endpoint(&service, ports, ctx)?);
+    Ok(LaunchTarget {
+        key: service_key(&service, environment.as_deref(), ctx),
+        url,
+        port,
+    })
+}
+
+fn service_key(
+    service: &ConfiguredService,
+    environment: Option<&str>,
+    ctx: &AppContext,
+) -> ServiceKey {
+    ServiceKey {
+        project_id: service.project_id.clone(),
+        environment: environment_slug(service, environment, ctx),
+        service_id: service.id.clone(),
+    }
+}
+
+/// A service runs once per environment: a second start would only fight the
+/// first one for its port.
+fn refuse_second_run(key: &ServiceKey) -> Result<()> {
+    let Some(previous) = RunningServiceStore::new_default()
+        .ok()
+        .and_then(|store| store.get(key).ok().flatten())
+        .filter(RunningService::is_running)
+    else {
+        return Ok(());
+    };
+    bail!(
+        "'{}' is already running (PID {}) at {}. Stop it first with: {} stop {}",
+        key.service_id,
+        previous.pid,
+        previous.url,
+        BRANDING.cli_command(),
+        crate::infrastructure::running_services::service_selector(key)
     )
 }
 
+/// Lets `status`, `logs` and `stop` find this run. A failure only costs those
+/// commands, so the service starts anyway.
+fn record_running_service(key: &ServiceKey, url: &str, port: u16, profile: Option<String>) {
+    let recorded = RunningServiceStore::new_default().and_then(|store| {
+        store.register(NewRun {
+            key: key.clone(),
+            url: url.to_string(),
+            port,
+            origin: ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref()),
+            profile,
+            log_file: env::var_os(SERVICE_OUTPUT_ENV).map(PathBuf::from),
+        })
+    });
+    if let Err(error) = recorded {
+        eprintln!(
+            "Warning: '{} stop {}' will not find this run: {error:#}",
+            BRANDING.cli_command(),
+            key.service_id
+        );
+    }
+}
+
+fn record_exit(key: &ServiceKey, code: Option<i32>) {
+    if let Ok(store) = RunningServiceStore::new_default() {
+        let _ = store.mark_exited(key, code);
+    }
+}
+
+/// Which run of a service `stop`, `restart` and `logs` act on. Inside a
+/// worktree, the service of that worktree's environment, like `dev`.
+pub(crate) fn resolve_service_key(
+    service_name: &str,
+    project: Option<&str>,
+    environment: Option<&str>,
+    ctx: &AppContext,
+) -> Result<ServiceKey> {
+    let implicit = match environment {
+        Some(_) => None,
+        None => current_worktree_environment(project, ctx)?,
+    };
+    let project = project.or(implicit.as_ref().map(|env| env.project_id.as_str()));
+    let environment = environment.or(implicit.as_ref().map(|env| env.slug.as_str()));
+    let service = resolve_service(service_name, project, ctx)?;
+    let service = resolve_environment_service(service, environment, ctx)?;
+    Ok(service_key(&service, environment, ctx))
+}
+
 fn run_plain(
-    service: &ConfiguredService,
     command: &[String],
     workdir: &Path,
     environment: &LaunchEnvironment,
-) -> Result<()> {
+) -> Result<std::process::ExitStatus> {
     let mut child = Command::new(&command[0]);
     child
         .args(&command[1..])
@@ -413,14 +585,9 @@ fn run_plain(
     }
     child.envs(environment.set.iter().map(|(key, value)| (key, value)));
 
-    let status = child
+    child
         .status()
-        .with_context(|| format!("Failed to start command '{}'", command[0]))?;
-    if !status.success() {
-        bail!("Service '{}' exited with {}", service.id, status);
-    }
-
-    Ok(())
+        .with_context(|| format!("Failed to start command '{}'", command[0]))
 }
 
 fn run_with_profile(
@@ -430,7 +597,7 @@ fn run_with_profile(
     workdir: &Path,
     environment: &LaunchEnvironment,
     session: Option<SessionReporter>,
-) -> Result<()> {
+) -> Result<LaunchOutcome> {
     let dangerous_name = profile.name().filter(|_| profile.is_dangerous());
     if let Some(name) = dangerous_name {
         let service_label = format!("{} ({})", service.id, service.project_name);
@@ -449,8 +616,15 @@ fn run_with_profile(
     if dangerous_name.is_some() {
         launch_profile::reset_title();
     }
+    outcome
+}
 
-    match outcome? {
+fn profile_outcome(
+    profile: &PreparedProfile,
+    service: &ConfiguredService,
+    outcome: LaunchOutcome,
+) -> Result<()> {
+    match outcome {
         LaunchOutcome::Exited(status) if !status.success() => {
             bail!("Service '{}' exited with {}", service.id, status)
         }
@@ -1585,6 +1759,21 @@ fn resolve_environment_service(
     };
 
     service_for_environment(service, &environment, ctx)
+}
+
+fn is_worktree_environment(project_id: &str, environment: Option<&str>, ctx: &AppContext) -> bool {
+    let Some(environment) = environment else {
+        return false;
+    };
+    ctx.config_store
+        .list_project_environments(Some(project_id))
+        .ok()
+        .and_then(|environments| {
+            environments
+                .into_iter()
+                .find(|candidate| environment_matches(candidate, environment))
+        })
+        .is_some_and(|environment| !environment.primary)
 }
 
 fn environment_matches(environment: &ConfiguredProjectEnvironment, value: &str) -> bool {

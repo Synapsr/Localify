@@ -1,4 +1,4 @@
-pub mod agent_skill;
+pub mod agent_mcp;
 pub mod application;
 pub mod branding;
 pub mod config;

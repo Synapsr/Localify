@@ -1,0 +1,11 @@
+# Agents Use Localify Through Its MCP Server
+
+Coding agents reach Localify through `localify mcp`, an MCP server over stdio, instead of a bundled skill. A skill only described commands for an agent to type into a shell; an agent without one, or inside a sandbox, could do nothing, and the skill had to be copied and resynced on every update. The MCP server is the installed binary itself, so its tools always match the installed version.
+
+Every manual action of the desktop app and every CLI action an agent can use is a tool, and each tool runs exactly one CLI command with the same binary. The CLI stays the only implementation: a tool adds no behavior, and an action that is missing from the CLI is added there first (ADR 0011). Tool arguments become `--name=value` options, and positional values may not start with `-`, so no argument can turn into a flag.
+
+Some actions are left out on purpose. `uninstall` is for a person to decide. `profile init` is interactive; agents write `localify.toml` directly. Purely visual actions of the app (opening an editor, a browser, or the terminal panel) and its own settings (autostart, updates) have nothing to give an agent.
+
+Long-running commands do not fit a tool call, so `localify dev --in-app` asks the desktop app, through the `localify://action/launch-service` link, to start the service in its terminal exactly as its launch button does, and returns once the service listens; `--detach` does the same in the background when there is no app. Every run of `localify dev` records its PID, start time, origin and exit code in the user's state folder, and the app's terminal and `--detach` write the output to a file the record points at. That one record is what `services status`, `logs`, `stop` and `restart` read, for a person in the app and an agent alike. A PID reused by another process is never signaled, and stopping waits for every process the service started, not only `localify dev`.
+
+The server carries its usage rules in its MCP instructions, in place of the skill's text. Localify registers the server with detected agents through their own CLIs, or Cursor's `mcp.json`, from `localify agent install`, from the desktop's Settings, and during setup unless the user turned that off.

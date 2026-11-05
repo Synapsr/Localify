@@ -1,5 +1,7 @@
 # Bundle and Sync the Localify Agent Skill
 
+Superseded by [0018](0018-agents-use-localify-through-its-mcp-server.md): agents now reach Localify through its MCP server, and there is no skill to bundle or sync.
+
 Localify ships its Agent Skill as part of the Localify app instead of treating GitHub as the runtime source of truth. When the user enables agent skill support, Localify writes the bundled skill to a stable user-local location and delegates installation to the external `skills` CLI so Claude Code, Codex, Cursor, and other supported agents receive the same global symlinked skill. If the setting remains enabled, Localify refreshes that canonical local copy after app updates and reinstalls it so agents stay aligned with the installed Localify version.
 
 This keeps Localify responsible for version synchronization while avoiding a local reimplementation of the multi-agent skill installer.

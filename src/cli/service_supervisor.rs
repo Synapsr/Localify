@@ -24,6 +24,7 @@ use localify::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
+use crate::infrastructure::process::signal_process_tree;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const STOP_GRACE_PERIOD: Duration = Duration::from_secs(10);
@@ -228,37 +229,6 @@ fn watch_stop_signals(child_pid: u32, interrupted: Arc<AtomicBool>) {
         });
     });
     let _ = ready_receiver.recv_timeout(Duration::from_secs(1));
-}
-
-/// Signals the service and every process it started (`pnpm` → `next` →
-/// workers), without touching the shell or Localify itself.
-fn signal_process_tree(root_pid: u32, signal: &str) {
-    let mut pids = vec![root_pid];
-    let mut index = 0;
-    while index < pids.len() {
-        pids.extend(child_pids(pids[index]));
-        index += 1;
-    }
-    let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
-    let _ = Command::new("kill")
-        .arg(format!("-{signal}"))
-        .args(&pids)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-fn child_pids(pid: u32) -> Vec<u32> {
-    Command::new("pgrep")
-        .args(["-P", &pid.to_string()])
-        .output()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| line.trim().parse().ok())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn describe_exit(status: ExitStatus) -> String {

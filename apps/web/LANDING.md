@@ -62,7 +62,7 @@ DNS, TLS, CA install, Node trust, and CLI install happen during onboarding. Ther
 
 ### 4.7 Set up by your AI agent
 
-Localify ships a skill for Claude Code, Codex, and Cursor (`localify agent install-skill`, or the desktop **Settings → AI agents** toggle). In any project, the developer runs `/localify` and the agent bootstraps it with `localify init-project --yes`: it reserves ports, registers `.localify` domains, wires trusted HTTPS, and updates dev scripts. The site shows this as an inline step in **How it works** (`public/videos/agent.mp4`).
+Localify includes an MCP server for Claude Code, Codex, and Cursor (`localify agent install`, or **Connect agents** in the desktop **Settings → AI agents**). Every action of the app and the CLI is a tool. The agent sets the project up, starts and stops services behind their `.localify` URLs, and when its work in a Git worktree is done, removes that environment and the worktree folder. The site shows this as an inline step in **How it works** (`public/videos/agent.mp4`).
 
 ## 5. Technical snapshot
 

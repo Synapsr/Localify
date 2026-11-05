@@ -60,7 +60,7 @@ const videos = [
 
 export const HowItWorks = () => {
   const t = useTranslations("HowItWorks");
-  const ta = useTranslations("AgentSkill");
+  const ta = useTranslations("Agents");
   const steps = t.raw("steps") as Array<{ title: string; body: string }>;
 
   const rows: Array<{ key: string; title: string; body: string; video?: VideoSrc }> = steps.map(
@@ -72,7 +72,7 @@ export const HowItWorks = () => {
     }),
   );
 
-  // The agent skill is one of the ways into a project — drop it inline, right
+  // Agents are one of the ways into a project — drop them inline, right
   // after the folder-import and CLI steps.
   rows.splice(2, 0, {
     key: "agents",

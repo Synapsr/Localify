@@ -23,9 +23,9 @@
     "later": "Maybe later",
     "download": "Download it now"
   },
-  "AgentSkill": {
+  "Agents": {
     "title": "Let your agent handle everything.",
-    "description": "Run /localify with Claude Code, Codex, or Cursor. It sets up the whole project, and you just talk to it to fix anything."
+    "description": "Connect Claude Code, Codex, or Cursor to Localify. Your agent sets up the project, runs your services, and cleans up its worktrees when it's done. You just talk to it."
   },
   "Problem": {
     "titleLine1": "What actually",

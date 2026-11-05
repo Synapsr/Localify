@@ -1,7 +1,7 @@
 use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
     AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
-    AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
+    AgentMcpInstallResultDto, AgentMcpStatusDto, AppConfigDto, AssignDomainProjectRequest,
     AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
     CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
     DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
@@ -74,6 +74,9 @@ pub struct DeepLinkPayloadDto {
     pub route: DeepLinkRouteDto,
     pub project_id: Option<String>,
     pub view: Option<String>,
+    /// The service to start, for `LaunchService`.
+    #[serde(default)]
+    pub launch: Option<DeepLinkLaunchDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +84,17 @@ pub struct DeepLinkPayloadDto {
 pub enum DeepLinkRouteDto {
     Projects,
     Logs,
+    /// Start a service in the terminal panel, as its launch button does.
+    LaunchService,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepLinkLaunchDto {
+    pub project_id: String,
+    pub environment_slug: String,
+    pub service_id: String,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -523,17 +537,17 @@ pub fn trust_ios_simulators(state: tauri::State<'_, AppState>) -> StepDto {
 }
 
 #[tauri::command]
-pub fn get_agent_skill_status(
+pub fn get_agent_mcp_status(
     state: tauri::State<'_, AppState>,
-) -> Result<AgentSkillStatusDto, String> {
-    state.api.agent_skill_status().map_err(map_error)
+) -> Result<AgentMcpStatusDto, String> {
+    state.api.agent_mcp_status().map_err(map_error)
 }
 
 #[tauri::command]
-pub fn install_agent_skill(
+pub fn install_agent_mcp(
     state: tauri::State<'_, AppState>,
-) -> Result<AgentSkillInstallResultDto, String> {
-    state.api.install_agent_skill().map_err(map_error)
+) -> Result<AgentMcpInstallResultDto, String> {
+    state.api.install_agent_mcp().map_err(map_error)
 }
 
 #[tauri::command]

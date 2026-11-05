@@ -3,7 +3,7 @@ import type { AbstractIntlMessages } from "next-intl";
 // The namespaces client components read. Sending only these keeps the legal pages'
 // text out of the payload of every other page.
 const clientNamespaces = [
-  "AgentSkill",
+  "Agents",
   "CookieBanner",
   "DemoDialog",
   "Faq",

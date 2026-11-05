@@ -118,6 +118,22 @@ impl Branding {
         Path::new("/run/systemd/system").is_dir()
     }
 
+    /// The user's own state, which no root process reads or writes, such as the
+    /// services `dev` runs. `None` only when `HOME` is unset.
+    pub fn user_state_dir(&self) -> Option<PathBuf> {
+        if cfg!(target_os = "macos") {
+            return user_home_dir().map(|home| {
+                home.join("Library/Application Support")
+                    .join(self.desktop_state_dir_name())
+            });
+        }
+        std::env::var_os("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|home| home.join(".local/state")))
+            .map(|base| base.join(self.slug()))
+    }
+
     pub fn config_dir(&self) -> PathBuf {
         if self.uses_user_directories() {
             return self.local_application_support_dir();
