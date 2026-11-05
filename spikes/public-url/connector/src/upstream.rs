@@ -12,7 +12,7 @@ use hyper::{Method, Request};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, warn};
 
@@ -22,6 +22,12 @@ use crate::protocol::{
 use crate::session::{Outbound, send};
 
 type UpstreamBody = BoxBody<Bytes, Infallible>;
+
+/// Upstream requests in flight at once. Over HTTP/2 a browser sends a whole
+/// module graph at once, and one new connection per request overflows the
+/// dev server's accept backlog (128 on macOS): the extra connections fail or
+/// stall. Browsers cap HTTP/1.1 at 6 connections per host.
+const MAX_IN_FLIGHT: usize = 32;
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -45,6 +51,7 @@ struct Inner {
     address: String,
     local_domain: String,
     client: Client<HttpConnector, UpstreamBody>,
+    in_flight: Arc<Semaphore>,
 }
 
 impl Upstream {
@@ -55,6 +62,7 @@ impl Upstream {
                 address,
                 local_domain,
                 client,
+                in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             }),
         }
     }
@@ -139,6 +147,11 @@ pub async fn proxy(
         }
     };
 
+    // Held until the body ends, so it bounds open upstream connections. A
+    // long-lived stream such as SSE keeps its permit for its whole life.
+    let Ok(_permit) = upstream.inner.in_flight.clone().acquire_owned().await else {
+        return;
+    };
     let response = match upstream.inner.client.request(request).await {
         Ok(response) => response,
         Err(error) => {

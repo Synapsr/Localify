@@ -1,0 +1,23 @@
+{
+  "$schema": "../../../apps/web/node_modules/wrangler/config-schema.json",
+  // Real-network measurement on localify.fyi. Deleted after the run.
+  "name": "localify-public-url-measure",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-26",
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "PUBLIC_ENDPOINT", "class_name": "PublicEndpoint" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PublicEndpoint"] }],
+  // Exact hostnames as Worker custom domains: wrangler creates their DNS
+  // records. The apex takes connector sessions.
+  "routes": [
+    { "pattern": "localify.fyi", "custom_domain": true },
+    { "pattern": "bench-a8f3.localify.fyi", "custom_domain": true },
+    { "pattern": "feature--bench-a8f3.localify.fyi", "custom_domain": true },
+    // No connector serves this slug: measures the Worker and Durable Object alone.
+    { "pattern": "idle-a8f3.localify.fyi", "custom_domain": true }
+  ],
+  // CONNECTOR_TOKEN is a secret, passed with --secrets-file.
+  "vars": { "PUBLIC_BASE_DOMAIN": "localify.fyi" }
+}

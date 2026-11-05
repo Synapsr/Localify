@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -60,7 +60,8 @@ pub async fn run(config: &Config, upstream: &Upstream) -> Result<()> {
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", config.token))?,
     );
-    let (socket, _) = connect_async(request)
+    // Nagle would hold back the small frames that follow a response head.
+    let (socket, _) = connect_async_with_config(request, None, true)
         .await
         .context("could not connect to the edge")?;
     info!(slug = %config.slug, upstream = %config.upstream, "connector online");

@@ -8,16 +8,25 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 
-const DIRECT = "http://127.0.0.1:5199";
-const TUNNEL = "http://feature--app-a8f3.localhost:8787";
+const DIRECT = process.env.SPIKE_DIRECT ?? "http://127.0.0.1:5199";
+// SPIKE_TUNNEL points the bench at a deployed edge whose connector and fixture
+// run on another machine. HMR is then triggered through the tunnel.
+const REMOTE_TUNNEL = process.env.SPIKE_TUNNEL;
+const TUNNEL = REMOTE_TUNNEL ?? "http://feature--app-a8f3.localhost:8787";
 // Spike-only labels that skip part of the path (see edge/src/index.ts), so the
 // tunnel cost can be split between the local runtime and the connector protocol.
-const PATHS = [
-  ["direct", DIRECT],
-  ["workerOnly", "http://baseline-worker--app-a8f3.localhost:8787"],
-  ["workerAndDurableObject", "http://baseline-do--app-a8f3.localhost:8787"],
-  ["tunnel", TUNNEL],
-];
+// They need wrangler dev next to the fixture, so a remote run skips them.
+const PATHS = REMOTE_TUNNEL
+  ? [
+      ["direct", DIRECT],
+      ["tunnel", TUNNEL],
+    ]
+  : [
+      ["direct", DIRECT],
+      ["workerOnly", "http://baseline-worker--app-a8f3.localhost:8787"],
+      ["workerAndDurableObject", "http://baseline-do--app-a8f3.localhost:8787"],
+      ["tunnel", TUNNEL],
+    ];
 const PAGE_LOAD_RUNS = 7;
 const SEQUENTIAL_REQUESTS = 200;
 const HMR_FILE = join(import.meta.dirname, "../fixture/src/hmr-target.js");
@@ -41,7 +50,8 @@ try {
   results.abortThenReuse = await abortThenReuseCheck(TUNNEL);
   results.hmr = await hmrCheck(TUNNEL);
 } finally {
-  writeFileSync(HMR_FILE, originalHmrSource);
+  if (REMOTE_TUNNEL) await writeRemoteHmr("v0");
+  else writeFileSync(HMR_FILE, originalHmrSource);
   await browser.close();
 }
 
@@ -214,7 +224,8 @@ async function hmrCheck(origin) {
 
     const version = `v-${Date.now()}`;
     const started = Date.now();
-    writeFileSync(HMR_FILE, `export const message = "${version}";\n`);
+    if (REMOTE_TUNNEL) await writeRemoteHmr(version);
+    else writeFileSync(HMR_FILE, `export const message = "${version}";\n`);
     await page.waitForFunction(
       (expected) => document.querySelector("#hmr")?.textContent === expected,
       version,
@@ -227,6 +238,13 @@ async function hmrCheck(origin) {
       hotUpdateWithoutReload: await page.evaluate(() => window.__beforeHmr === true),
     };
   });
+}
+
+/** Rewrites the HMR target on the remote fixture (see fixture/vite.config.js). */
+async function writeRemoteHmr(version) {
+  const url = `${REMOTE_TUNNEL}/__spike/hmr?version=${encodeURIComponent(version)}`;
+  const response = await fetch(url, { method: "POST" });
+  if (!response.ok) throw new Error(`HMR trigger failed: ${response.status}`);
 }
 
 function median(values) {

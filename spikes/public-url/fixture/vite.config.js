@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { defineConfig } from "vite";
 
 // Local domains the connector sends in `Host` (ADR 0017).
 const ALLOWED_HOSTS = [".app.localify"];
+const HMR_FILE = join(import.meta.dirname, "src/hmr-target.js");
 
 export default defineConfig({
   root: import.meta.dirname,
@@ -21,6 +24,12 @@ function spikeRoutes() {
         if (url.pathname === "/big") return big(res, Number(url.searchParams.get("mb") ?? 20));
         if (url.pathname === "/echo" && req.method === "POST") return echo(req, res);
         if (url.pathname === "/headers") return json(res, req.headers);
+        // Lets a bench on another machine trigger a hot update.
+        if (url.pathname === "/__spike/hmr" && req.method === "POST") {
+          const version = url.searchParams.get("version") ?? "";
+          writeFileSync(HMR_FILE, `export const message = ${JSON.stringify(version)};\n`);
+          return json(res, { written: version });
+        }
         next();
       });
     },

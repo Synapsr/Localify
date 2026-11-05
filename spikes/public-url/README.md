@@ -2,14 +2,14 @@
 
 Throwaway spike for the native connector transport chosen in ADR 0003: a Worker, one `PublicEndpoint` Durable Object per endpoint, and a Rust connector multiplexing public requests over one WebSocket. It answers two questions before any product code: do Vite HMR and SSE survive the tunnel, and what does the protocol cost on a page that loads hundreds of modules?
 
-Everything runs locally with `wrangler dev`. Nothing is deployed.
+Everything runs locally with `wrangler dev`, except the [real-network run](#real-network), which was deployed for one session and then deleted.
 
 ## Layout
 
 - `edge/`: Worker and Durable Object (TypeScript). `src/protocol.ts` defines the frame format.
 - `connector/`: standalone Rust connector. `src/protocol.rs` mirrors the frame format.
 - `fixture/`: Vite 7 app with 331 generated modules (a wide tree plus a 10-deep import chain), an HMR target, and `/sse`, `/big`, `/echo`, `/headers` routes.
-- `bench/`: Playwright script driving the installed Chrome.
+- `bench/`: Playwright scripts driving the installed Chrome. `run.mjs` is the full bench; `diag.mjs` repeats page loads and lists failed or pending requests.
 
 ## Run it
 
@@ -68,9 +68,39 @@ Functional checks, all passing on both runs:
 - The upstream app sees `Host: feature.app.localify` and `X-Forwarded-Host` set to the public host (ADR 0017). Client-supplied `X-Localify-*` and `X-Forwarded-*` headers are overwritten.
 - With the connector stopped, the public URL returns a 502 "offline" page. After a restart, or after `wrangler dev` reloads the Durable Object, the connector reconnects on its own.
 
+## Real network
+
+Run on 2026-11-05. The Worker was deployed on `localify.fyi` with exact hostnames as Worker custom domains (`edge/wrangler.measure.jsonc`), then deleted. The fixture and connector ran on one Mac at home, the browser on a laptop on another ISP. Both reached Cloudflare in Paris (CDG), about 20 ms away. A `cloudflared` Quick Tunnel to the same fixture served as the comparison.
+
+```bash
+# Laptop: deploy the edge (custom domains need the localify.fyi zone)
+cd edge && wrangler deploy -c wrangler.measure.jsonc --secrets-file <file with CONNECTOR_TOKEN>
+# Remote machine: fixture, then the connector pointed at the deployed edge
+LOCALIFY_EDGE_URL=wss://localify.fyi LOCALIFY_SLUG=bench-a8f3 LOCALIFY_CONNECTOR_TOKEN=<secret> cargo run --release
+# Laptop: local fixture as the reference, then the bench through the tunnel
+SPIKE_TUNNEL=https://feature--bench-a8f3.localify.fyi node bench/run.mjs
+node bench/diag.mjs https://feature--bench-a8f3.localify.fyi 15
+```
+
+Remote mode triggers HMR through the tunnel with `POST /__spike/hmr`, since the HMR target lives on the other machine.
+
+| Measure, from the laptop | Localify tunnel | `cloudflared` | Local Vite |
+|---|---|---|---|
+| One request, median | 84–104 ms | 65–67 ms | 0.3 ms |
+| 336-module page, median of 15 | 2.15 s | 1.48 s | 0.1 s |
+
+Per-request median from the laptop, by segment: Worker alone 32 ms, Worker and Durable Object 45 ms, full tunnel 104 ms. The connector leg is the round trip to the remote machine's network.
+
+Functional checks through the real tunnel all pass: the page loads with correct module values, HMR applies in 613 ms without a reload (including the trigger request), SSE streams, a 20 MB download (23 MB/s) and an 8 MB upload arrive intact, and aborting a stream does not break the next request.
+
+Findings:
+
+- **Upstream connections must be capped.** Over HTTP/2 the browser sends the whole module graph at once. The connector opened one connection per request to Vite, overflowed its accept backlog (128 on macOS), and up to 145 of 300 requests failed with 502 or stalled until the 75 s connect timeout, mostly after a few idle seconds when Vite had closed its keep-alive connections. A semaphore of 32 in-flight upstream requests fixed it: 4 of 4 bursts and 15 of 15 page loads succeeded. The local `wrangler dev` runs never hit this because the browser spoke HTTP/1.1, limited to 6 connections. The daemon today is not affected either, since its TLS listener does not offer HTTP/2.
+- **Nagle is not the cost.** Disabling it on the connector socket changed the per-request median from 89.5 to 93.6 ms, within noise. It stays disabled.
+- **The Durable Object design costs about 20 ms per request and 45% on this page compared with `cloudflared`.** The extra hops are the Worker and the Durable Object. Both designs are dominated by round trips times import depth: a dev page over a real network takes seconds either way.
+
 ## Not covered
 
-- **Real network latency.** Locally every hop is free. In production each Vite import level pays browser → edge → Durable Object → connector and back, and this fixture has about 13 levels. It has to be measured with the connector on the remote machine and the browser on the laptop, on the real `localify.fyi` zone. `workers.dev` cannot host wildcard labels.
 - **Flow control.** The Durable Object queues response chunks without backpressure, and the connector buffers request bodies without limit. A fast upstream feeding a slow browser could fill the Durable Object's memory. The product needs per-stream credit windows.
 - **Hibernation.** Not observed under `wrangler dev`.
 - **Daemon integration.** The spike connector talks to Vite directly. Looping through the daemon would lose the public host, because `set_forwarding_headers` in `src/daemon/proxy.rs` overwrites `X-Forwarded-*` from the daemon's own client. That argues for dispatching public requests straight into the router.
