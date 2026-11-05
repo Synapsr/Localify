@@ -1,0 +1,68 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Localify Cloud: the JSON API on api.localify.dev and the public URLs on
+  // *.localify.fyi. The contract is docs/public-urls.md, section "Cloud".
+  "name": "localify-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Subrequests to m-<machine>.localify.dev take the public path to the tunnel,
+  // even though api.localify.dev sits on the same zone.
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "api.localify.dev", "custom_domain": true },
+    // The zone has a proxied `*` AAAA record, so every label reaches this route.
+    { "pattern": "*.localify.fyi/*", "zone_name": "localify.fyi" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "localify-cloud",
+      // Placeholder: replace with the id `wrangler d1 create localify-cloud`
+      // prints. Local development ignores it.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Namespace ids are any integers unique to this account.
+  "ratelimits": [
+    // Password attempts, keyed by public URL id and client IP.
+    {
+      "name": "PASSWORD_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    // Both device-flow routes, keyed by client IP. A sign-in polls every 5 s.
+    {
+      "name": "DEVICE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 60, "period": 60 }
+    }
+  ],
+  // Retries Cloudflare cleanups, revokes stuck sign-ins, purges deleted URLs.
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    // The GitHub OAuth App's client ID, with Device Flow enabled. It is public;
+    // the app needs no client secret. Fill it in before deploying.
+    "GITHUB_CLIENT_ID": "",
+    // Who can sign in: numeric GitHub user ids, comma-separated. Ids, not
+    // logins, because a login can be renamed and taken by someone else.
+    "ALLOWED_GITHUB_IDS": "77238381,61839831,23056644,88707023,261605370",
+    "PUBLIC_BASE_DOMAIN": "localify.fyi",
+    "MACHINE_DOMAIN": "localify.dev",
+    "CLOUDFLARE_ACCOUNT_ID": "3346bba113d622c4b100e546032bc5dc",
+    // The localify.dev zone, where each machine gets m-<machine-id>.
+    "MACHINE_ZONE_ID": "0a4ca7eeb2a20ddbcc50de8f86a74ae9"
+  },
+  // Set with `wrangler secret put <NAME>`; locally, in .dev.vars. Deploys
+  // refuse to run while one is missing.
+  "secrets": {
+    "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}
