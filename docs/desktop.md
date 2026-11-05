@@ -336,10 +336,10 @@ The build reads these variables from the environment or from `.env`:
 # The certificate's name or, safer when the name has accents, its SHA-1 hash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 
-# With an API key
+# With an API key, read from ~/.appstoreconnect/private_keys/AuthKey_<id>.p8
+# unless APPLE_API_KEY_PATH says otherwise
 export APPLE_API_KEY="ABCDE12345"
 export APPLE_API_ISSUER="00000000-0000-0000-0000-000000000000"
-export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_ABCDE12345.p8"
 
 # Or with an Apple ID
 export APPLE_ID="you@example.com"
@@ -348,6 +348,16 @@ export APPLE_TEAM_ID="ABCDE12345"
 
 pnpm tauri:build
 ```
+
+Maintainers keep them in Infisical, project `localify`, folder `/release`, so a
+release build needs no `.env`:
+
+```bash
+infisical run --env prod --path /release -- pnpm tauri:build
+```
+
+If `LOCALIFY_RELEASE_KEYCHAIN_PASSWORD` is set and the Mac has a
+`localify-release` keychain, the build unlocks it and locks it again at the end.
 
 With those set, `pnpm tauri:build`:
 

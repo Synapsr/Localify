@@ -20,6 +20,15 @@ fi
 
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
+# A keychain kept only for releases stays locked outside builds. Machines that sign
+# from their login keychain don't have one.
+RELEASE_KEYCHAIN="$HOME/Library/Keychains/localify-release.keychain-db"
+if [ -n "${LOCALIFY_RELEASE_KEYCHAIN_PASSWORD:-}" ] && [ -f "$RELEASE_KEYCHAIN" ]; then
+  security unlock-keychain -p "$LOCALIFY_RELEASE_KEYCHAIN_PASSWORD" "$RELEASE_KEYCHAIN"
+  trap 'security lock-keychain "$RELEASE_KEYCHAIN"' EXIT
+fi
+unset LOCALIFY_RELEASE_KEYCHAIN_PASSWORD
+
 cd "$ROOT_DIR"
 
 pnpm check-version-sync

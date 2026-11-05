@@ -1,0 +1,6 @@
+version: 1
+general:
+    domain: https://env.lumy.dev
+secrets-management:
+    project-id: 5a9b5dd8-dd0d-47b9-a9c7-b8d85f160c6b
+    default-environment: dev
