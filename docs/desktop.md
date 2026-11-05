@@ -327,13 +327,21 @@ Prerequisites:
 - a paid Apple Developer account
 - a `Developer ID Application` certificate installed in your login keychain
 - the signing identity available via `security find-identity -v -p codesigning`
-- an [app-specific password](https://support.apple.com/102654) for the Apple
-  account, not its main password
+- an App Store Connect API key, or an Apple ID with an
+  [app-specific password](https://support.apple.com/102654)
 
 The build reads these variables from the environment or from `.env`:
 
 ```bash
+# The certificate's name or, safer when the name has accents, its SHA-1 hash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+
+# With an API key
+export APPLE_API_KEY="ABCDE12345"
+export APPLE_API_ISSUER="00000000-0000-0000-0000-000000000000"
+export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_ABCDE12345.p8"
+
+# Or with an Apple ID
 export APPLE_ID="you@example.com"
 export APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"
 export APPLE_TEAM_ID="ABCDE12345"

@@ -40,12 +40,17 @@ if [ ! -d "$APP_PATH" ]; then
   exit 0
 fi
 
-has_notary_credentials=1
-for var in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-  if [ -z "${!var:-}" ]; then
-    has_notary_credentials=0
-  fi
-done
+NOTARY_AUTH=()
+if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+  NOTARY_AUTH=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+  NOTARY_AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+fi
+
+has_notary_credentials=0
+if [ "${#NOTARY_AUTH[@]}" -gt 0 ]; then
+  has_notary_credentials=1
+fi
 
 submit_for_notarization() {
   local artifact_path="$1"
@@ -55,9 +60,7 @@ submit_for_notarization() {
     echo "Submitting $(basename "$artifact_path") for notarization (attempt $attempt/$NOTARY_ATTEMPTS)"
     if xcrun notarytool submit \
       "$artifact_path" \
-      --apple-id "$APPLE_ID" \
-      --password "$APPLE_PASSWORD" \
-      --team-id "$APPLE_TEAM_ID" \
+      "${NOTARY_AUTH[@]}" \
       "${NOTARY_EXTRA_ARGS[@]}" \
       --wait; then
       return 0
@@ -120,7 +123,7 @@ if [ "$has_notary_credentials" -eq 1 ]; then
     xcrun stapler staple "$DMG_PATH"
   fi
 else
-  echo "Skipping DMG notarization because APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID are not all set"
+  echo "Skipping notarization because neither the APPLE_API_* nor the APPLE_ID variables are all set"
 fi
 
 if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ "$has_notary_credentials" -eq 1 ]; then
