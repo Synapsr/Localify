@@ -30,7 +30,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
   rm -rf "$ROOT_DIR/src-tauri/target/release/bundle/dmg"
 fi
 
-env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID pnpm tauri build --bundles app,dmg
+# Tauri only signs here. The post-processing notarizes the final app and DMG.
+env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
+  -u APPLE_API_KEY -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH \
+  pnpm tauri build --bundles app,dmg
 pnpm desktop:postprocess-macos-bundles
 
 if [ -n "${LOCALIFY_UPDATER_BASE_URL:-}" ]; then
