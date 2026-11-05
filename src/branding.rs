@@ -60,6 +60,13 @@ impl Branding {
         }
     }
 
+    /// Loopback port where the daemon takes public traffic from `cloudflared`.
+    /// Each brand has its own, so `Localify (Dev)` can run next to the
+    /// installed app (`docs/public-urls.md`, section "Public ingress").
+    pub fn public_ingress_port(&self) -> u16 {
+        if self.is_dev_profile() { 7382 } else { 7381 }
+    }
+
     pub fn domain_suffix(&self) -> &'static str {
         if self.is_dev_profile() {
             self.dev_domain_suffix
