@@ -943,6 +943,10 @@ pub fn remove_login_keychain_ca() -> Option<(String, StepOutcome)> {
 /// The app's login item. The app removes it through its autostart plugin, but
 /// `localify uninstall` runs without the app.
 pub fn remove_login_item() -> Option<(String, StepOutcome)> {
+    // The dev profile runs beside an installed app, and this item belongs to that app.
+    if BRANDING.is_dev_profile() {
+        return None;
+    }
     remove_login_item_from(&user_home_dir()?.join("Library/LaunchAgents"))
 }
 
