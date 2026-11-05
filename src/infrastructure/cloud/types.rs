@@ -28,7 +28,6 @@ pub enum ProtectionMode {
 #[serde(rename_all = "camelCase")]
 pub struct Protection {
     pub mode: ProtectionMode,
-    pub exceptions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +98,7 @@ mod tests {
             "id": "u1", "slug": "journal-a8f3", "url": "https://journal-a8f3.localify.fyi",
             "localDomain": "journal.localify", "wildcard": true,
             "machine": {"id": "m1", "name": "runner"},
-            "protection": {"mode": "password", "exceptions": ["/api/webhooks"]},
+            "protection": {"mode": "password"},
             "createdAt": "2026-11-05T18:00:00Z"
         }"#;
         let url: PublicUrl = serde_json::from_str(json).unwrap();

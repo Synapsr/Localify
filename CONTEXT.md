@@ -80,16 +80,12 @@ _Avoid_: Subdomain, public domain
 The shared password a public URL asks for before any traffic reaches the machine.
 _Avoid_: User login, account access
 
-**Access Exception**:
-A path prefix on a protected public URL that stays reachable without the password, for webhooks and OAuth callbacks.
-_Avoid_: Route, bypass
-
 **Localify Cloud**:
 The hosted service behind public URLs: accounts, URL reservations, access protection and the public entry point.
 _Avoid_: Backend, server, relay
 
 **Cloud Account**:
-A person signed in to Localify Cloud with GitHub. Each machine they sign in from serves the public URLs it created or claimed.
+A person on the allowlist, signed in to Localify Cloud with GitHub. Each machine they sign in from serves the public URLs it created or claimed.
 _Avoid_: License, user profile
 
 **Serving Machine**:

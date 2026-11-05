@@ -1,4 +1,4 @@
-> **Amended.** [ADR 0021](0021-public-urls-are-protected-by-default.md) makes protection the default for every new public URL.
+> **Amended.** [ADR 0021](0021-public-urls-are-protected-by-default.md) makes protection the default for every new public URL and leaves path exceptions out of v1.
 
 # Public URL Access Protection
 

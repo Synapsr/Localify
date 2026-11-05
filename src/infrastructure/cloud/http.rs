@@ -2,7 +2,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
 use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use hyper::{Method, Request, StatusCode};
@@ -17,7 +17,10 @@ pub const DEFAULT_API_BASE: &str = "https://api.localify.dev";
 /// Points the CLI, the app and the daemon at another API, such as
 /// `wrangler dev` while working on the cloud.
 const API_BASE_ENV: &str = "LOCALIFY_CLOUD_API";
+/// For the whole exchange, body included.
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// The API's largest answer is a list of at most 10 public URLs.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// The API base for a new sign-in. A signed-in machine uses the one saved in
 /// its credentials.
@@ -70,6 +73,7 @@ impl CloudHttp {
     /// `token` is `None` only for the device flow, before sign-in.
     pub fn new(api_base: impl Into<String>, token: Option<String>) -> Result<Self, CloudError> {
         let api_base = api_base.into();
+        check_api_base(&api_base)?;
         // An explicit provider, because the desktop app never installs a
         // process-wide default one.
         let connector = hyper_rustls::HttpsConnectorBuilder::new()
@@ -78,7 +82,7 @@ impl CloudHttp {
                 api_base: api_base.clone(),
                 reason: format!("TLS setup failed: {error}"),
             })?
-            // Plain HTTP only reaches a local `wrangler dev` set with LOCALIFY_CLOUD_API.
+            // `check_api_base` allows plain HTTP only for a loopback `wrangler dev`.
             .https_or_http()
             .enable_http1()
             .build();
@@ -122,26 +126,39 @@ impl CloudHttp {
         body: Option<serde_json::Value>,
     ) -> Result<Bytes, CloudError> {
         let request = self.build(method, path, body)?;
-        let unreachable = |reason: String| CloudError::Unreachable {
-            api_base: self.api_base.clone(),
-            reason,
-        };
-        let response = tokio::time::timeout(TIMEOUT, self.client.request(request))
+        let (status, bytes) = tokio::time::timeout(TIMEOUT, self.exchange(request))
             .await
-            .map_err(|_| unreachable(format!("no answer after {} s", TIMEOUT.as_secs())))?
-            .map_err(|error| unreachable(error_chain(&error)))?;
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|error| unreachable(error_chain(&error)))?
-            .to_bytes();
+            .map_err(|_| CloudError::Unreachable {
+                api_base: self.api_base.clone(),
+                reason: format!("no complete answer after {} s", TIMEOUT.as_secs()),
+            })??;
         if status.is_success() {
             Ok(bytes)
         } else {
             Err(api_error(status, &bytes))
         }
+    }
+
+    async fn exchange(
+        &self,
+        request: Request<Full<Bytes>>,
+    ) -> Result<(StatusCode, Bytes), CloudError> {
+        let unreachable = |reason: String| CloudError::Unreachable {
+            api_base: self.api_base.clone(),
+            reason,
+        };
+        let response = self
+            .client
+            .request(request)
+            .await
+            .map_err(|error| unreachable(error_chain(&error)))?;
+        let status = response.status();
+        let bytes = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
+            .collect()
+            .await
+            .map_err(|error| unreachable(error_chain(error.as_ref())))?
+            .to_bytes();
+        Ok((status, bytes))
     }
 
     fn build(
@@ -170,6 +187,26 @@ impl CloudHttp {
             reason: format!("invalid request: {error}"),
         })
     }
+}
+
+/// A token must never cross the network in clear text: plain HTTP is only for
+/// a `wrangler dev` on this machine.
+fn check_api_base(api_base: &str) -> Result<(), CloudError> {
+    let Some(rest) = api_base.strip_prefix("http://") else {
+        return Ok(());
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        return Ok(());
+    }
+    Err(CloudError::Unreachable {
+        api_base: api_base.to_string(),
+        reason: "plain http:// is only allowed for 127.0.0.1, localhost or [::1]".to_string(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -238,6 +275,17 @@ mod tests {
         let error = api_error(StatusCode::BAD_GATEWAY, b"<html>");
         assert_eq!(error.code(), Some("http_502"));
         assert!(error.to_string().contains("502"));
+    }
+
+    #[test]
+    fn plain_http_is_refused_except_on_loopback() {
+        assert!(CloudHttp::new("http://127.0.0.1:8787", None).is_ok());
+        assert!(CloudHttp::new("http://localhost:8787", None).is_ok());
+        assert!(CloudHttp::new("http://[::1]:8787", None).is_ok());
+        assert!(CloudHttp::new("https://api.localify.dev", None).is_ok());
+        assert!(CloudHttp::new("http://api.localify.dev", None).is_err());
+        assert!(CloudHttp::new("http://127.0.0.1.evil.example", None).is_err());
+        assert!(CloudHttp::new("http://[2001:db8::1]:8787", None).is_err());
     }
 
     #[test]
