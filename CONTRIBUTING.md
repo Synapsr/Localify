@@ -53,8 +53,10 @@ Please also read:
 
 - Keep pull requests focused: one fix or feature per PR.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
-  messages (`feat:`, `fix:`, `docs:`, `chore:`…). The changelog is generated
-  from them.
+  messages (`feat:`, `fix:`, `docs:`, `chore:`…).
+- When users will notice a change, add a short note in `changes/<slug>.md` with
+  it: a `type` (`new`, `improved` or `fixed`) and a title that says what they can
+  do now. Releases gather those notes into [CHANGELOG.md](CHANGELOG.md).
 - For larger changes, open an issue first so the approach can be discussed
   before you invest time in it.
 - Never commit secrets. `.env` files are ignored; keep it that way.

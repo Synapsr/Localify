@@ -1,6 +1,6 @@
 {
   "name": "localify-workspace",
-  "version": "0.2.20",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -28,13 +28,13 @@
     "web:upload": "pnpm --filter @localify/web run upload",
     "web:typecheck": "pnpm --filter @localify/web typecheck",
     "desktop:prepare-sidecar": "node scripts/prepare-tauri-sidecar.mjs --release",
-    "desktop:check-version-sync": "node scripts/check-desktop-version-sync.mjs",
+    "check-version-sync": "node scripts/check-version-sync.mjs",
     "desktop:postprocess-macos-bundles": "bash scripts/postprocess-macos-bundles.sh",
     "desktop:publish": "node scripts/publish-desktop-release.mjs",
     "desktop:publish-updater": "node scripts/publish-updater-manifest.mjs",
     "desktop:publish-r2": "node scripts/publish-updater-r2.mjs",
     "publish:update:r2": "pnpm desktop:publish-r2",
-    "version:desktop": "node scripts/set-desktop-version.mjs",
+    "version:set": "node scripts/set-version.mjs",
     "tauri": "tauri",
     "tauri:dev": "LOCALIFY_PROFILE=dev LOCALIFY_CLI_PATH=\"$PWD/target/debug/localify\" tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "bash scripts/run-tauri-build.sh",

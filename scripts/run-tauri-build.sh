@@ -22,7 +22,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 
 cd "$ROOT_DIR"
 
-pnpm desktop:check-version-sync
+pnpm check-version-sync
 pnpm desktop:prepare-sidecar
 
 if [ "$(uname -s)" = "Darwin" ]; then

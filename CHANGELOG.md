@@ -1,154 +1,39 @@
-# Localify Changelog
+# Changelog
 
-Welcome to the Localify changelog! This document tracks all notable changes to Localify,
-a local development proxy tool that gives your projects custom `.localify` domains with
-automatic HTTPS certificates. Think Laravel Valet, but written in Rust.
+What changes for people using Localify, one section per version. The command line
+and the desktop app share the same version.
 
-All entries follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format,
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## 1.1.0 - 2026-11-05
 
-## [1.0.0] - 2026-03-30
+The first version with open source code, and the first with nothing running as root.
 
-### Features
+### Improved
 
-- Add Docker container auto-discovery with provider registry 
+- **Create as many projects as you want, for free.** Everything Localify does on your
+  machine is now free and has no limits, and you no longer need a license key. Existing
+  projects stay as they are. The source code is now open under the AGPL.
+- **Run Localify on your Mac with nothing running as root.** Localify asks for an
+  administrator's password once, at install. After that it runs under your own account
+  and still starts at boot on ports 80 and 443. Updates no longer ask for your password.
+  When you want HTTPS in browsers, click Trust HTTPS in the app or run `localify trust`,
+  and macOS asks you to confirm once.
+- **Run Localify on Linux with nothing running as root.** On Linux with systemd,
+  `localify install` asks for your password once. After that the daemon runs under your
+  own account and still starts at boot on ports 80 and 443. `register`, `stop`, `start`
+  and updates need no password. Your files move to `~/.config/localify`.
+- **Choose whether other devices can reach your projects.** Only your own machine can
+  reach Localify from now on. To test from a phone or another computer, turn on network
+  access in Settings, or run `localify lan enable`.
+- **Use a domain as soon as you register it.** A new domain or route now works the moment
+  `localify register`, `unregister` or `route` finishes. Before, requests could get a 404
+  for up to two seconds, which tripped up scripts and agents that called the domain
+  straight away.
+- **Send error reports without your project names and domains.** The desktop app now
+  removes `.localify` domains and quoted names from error reports before sending them,
+  along with URLs and file paths. Onboarding also describes the folder picker and
+  `localify init-project` as they really work.
 
-### Miscellaneous Tasks
+### Fixed
 
-- Bump bollard version
-- Remove notice about early development
-
-### Other Changes
-
-- Revert "chore(release): prepare release v1.0.0"
-
-This reverts commit 699e8ad90023f2bc00c0ad486dad2bf7145d3090.
-
-### Refactoring
-
-- Introduce ports & adapters architecture with hot reload and management socket 
-
-### Styling
-
-- Fix clippy warning
-
-## [0.5.0] - 2026-02-20
-
-### Bug Fixes
-
-- Add X-Forwarded-For/Host/Proto headers and hop-by-hop stripping 
-
-### Documentation
-
-- Add caddy to the comparison table
-- Honest Caddy comparison and CLI-first messaging
-
-### Features
-
-- Add shell completion
-- Add support for Ubuntu/Debian 
-
-## [0.4.0] - 2026-02-14
-
-### Features
-
-- Add wild card certificates option 
-
-## [0.3.0] - 2026-02-13
-
-### Documentation
-
-- Update docs and readme
-
-### Features
-
-- Add file browser 
-
-## [0.2.0] - 2026-02-10
-
-### Features
-
-- Add brew services integration 
-
-### Miscellaneous Tasks
-
-
-## [0.1.1] - 2026-02-09
-
-### Bug Fixes
-
-- Fix wss upgrade connection
-
-### CI/CD
-
-- Disable tests in master branch on push
-
-### Documentation
-
-- Update readme
-- Marked first task as done 🚀
-
-## [0.1.0] - 2026-02-08
-
-### Bug Fixes
-
-- Resolve type inference errors in cross-platform builds
-- Update release workflow to use macos-latest for tests
-
-### CI/CD
-
-- Add automated release mechanism
-- Add GH Actions integration
-- Use macos workers just we do not support linux yet
-
-### Documentation
-
-- Improving docs
-- Display todo's properly
-- Update readme
-- Add troubleshooting section to doc
-- Update readme and docs
-- Update readme
-
-### Features
-
-- Add DNS management
-- Add domain registration
-- Add certificate management
-- Add reverse proxy
-- Enhance CLI interface
-- Add websocket, http2 proxy and improve uninstall
-- Add DNS server
-- Geenerate root CA
-- Add support for multiple destinations
-- Improve loggin
-
-### Miscellaneous Tasks
-
-- Add config validation
-- Hacking the dns
-- Give-up on docker for now
-- Clean unused code
-- Clean code
-- Update dependencies
-- Add readme
-- Add license
-- Implement forgotten todo
-
-### Refactoring
-
-- Replace rustls-pemfile with rustls built-in PEM parsing
-
-### Styling
-
-- CS
-- Clean repo and add agent
-- Clean the code
-- Add missing conventional method
-- Update clippy warning
-
-### Testing
-
-- Fix tests
-
-<!-- generated by git-cliff -->
+- Commands like `localify status | head -1` now stop quietly when the output is closed.
+  Before, they crashed and left a crash report behind.

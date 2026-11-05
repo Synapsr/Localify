@@ -145,26 +145,31 @@ Artifacts are written under:
 If you need to override the CLI path while testing a packaged build, set
 `LOCALIFY_CLI_PATH`.
 
-## Desktop Versioning
+## Versioning
 
-The desktop release version is managed from the repo-root `package.json` and
-then synced to the two Tauri/Rust files that also need an explicit version.
+The command line and the desktop app share one version. It is managed from the
+repo-root `package.json` and synced to the files that also need an explicit
+version.
 
 Use:
 
 ```bash
-pnpm version:desktop -- 0.1.2
+pnpm version:set -- 1.2.0
 ```
 
 That updates:
 
 - `package.json`
 - `src-tauri/tauri.conf.json`
-- `src-tauri/Cargo.toml`
+- `Cargo.toml` and `Cargo.lock`
+- `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock`
 
-`pnpm tauri:build` now validates that those three files stay aligned before it
-starts packaging. If they drift, the build exits early and tells you to rerun
-the sync command.
+`pnpm tauri:build` validates that these stay aligned before it starts packaging.
+If they drift, the build exits early and tells you to rerun the sync command.
+
+Before a release, gather the notes in `changes/` into a new section of
+`CHANGELOG.md` and delete the notes you used. The GitHub release takes its text
+from that section.
 
 For a production release, prefer the one-command publisher:
 
@@ -313,29 +318,19 @@ The script uses `wrangler r2 object put` with explicit metadata:
 
 ## Sign And Notarize
 
-For external macOS distribution, the desktop app should be signed with a
-`Developer ID Application` certificate and notarized by Apple. Tauri supports
-that flow directly during `tauri build`.
+For external macOS distribution, the desktop app is signed with a
+`Developer ID Application` certificate and notarized by Apple. Releases are built
+on a Mac, not in CI.
 
-Local build prerequisites:
+Prerequisites:
 
 - a paid Apple Developer account
 - a `Developer ID Application` certificate installed in your login keychain
 - the signing identity available via `security find-identity -v -p codesigning`
-- notarization credentials configured through Tauri env vars
+- an [app-specific password](https://support.apple.com/102654) for the Apple
+  account, not its main password
 
-This repo now uses the Apple ID notarization flow for both local builds and CI:
-
-- `APPLE_SIGNING_IDENTITY`
-- `APPLE_ID`
-- `APPLE_PASSWORD`
-- `APPLE_TEAM_ID`
-
-Optional when the Apple account is attached to multiple teams:
-
-- `APPLE_PROVIDER_SHORT_NAME`
-
-For local notarized builds on your Mac:
+The build reads these variables from the environment or from `.env`:
 
 ```bash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
@@ -346,62 +341,21 @@ export APPLE_TEAM_ID="ABCDE12345"
 pnpm tauri:build
 ```
 
-`pnpm tauri:build` now does the full macOS post-processing automatically when
-those env vars are present:
+With those set, `pnpm tauri:build`:
 
-- build the `.app` and `.dmg`
-- let Tauri sign + notarize the `.app`
-- submit the `.dmg` to `notarytool` if it is not already stapled
-- staple the `.dmg`
-- verify both artifacts with `codesign`, `spctl`, and `stapler`
+- builds and signs the `.app`
+- notarizes the `.app` and staples the ticket
+- rebuilds the updater archive and the `.dmg` from the stapled `.app`
+- signs and notarizes the `.dmg`, and staples its ticket
+- verifies both artifacts with `codesign`, `spctl`, and `stapler`
 
-The verification script checks:
-
-- `codesign --verify` on the `.app`
-- `spctl --assess` on the `.app`
-- `xcrun stapler validate` on the `.app`
-- `codesign --verify` on the `.dmg`
-- `xcrun stapler validate` on the `.dmg`
+It uploads nothing. Only `pnpm publish:update:r2`, which `pnpm desktop:publish`
+calls, changes what existing installs and the website see.
 
 If you need to rerun only the post-processing on existing artifacts:
 
 ```bash
 pnpm desktop:postprocess-macos-bundles
-```
-
-## GitHub Actions
-
-A manual workflow is available at `.github/workflows/desktop-notarize.yml`.
-It builds a notarized desktop artifact on `macos-latest` without changing the
-existing CLI release pipeline.
-
-Required GitHub secrets:
-
-- `APPLE_SIGNING_IDENTITY`
-- `APPLE_ID`
-- `APPLE_PASSWORD`
-- `APPLE_TEAM_ID`
-- `APPLE_CERTIFICATE`
-- `APPLE_CERTIFICATE_PASSWORD`
-- `KEYCHAIN_PASSWORD`
-- `APPLE_PROVIDER_SHORT_NAME` optional
-
-Notes:
-
-- `APPLE_CERTIFICATE` should be the base64-encoded exported `.p12`
-- `APPLE_PASSWORD` must be an Apple app-specific password, not your main Apple
-  account password
-- `APPLE_TEAM_ID` is the Developer Team ID shown on your Apple Developer
-  membership page
-- `APPLE_PROVIDER_SHORT_NAME` is only needed if notarization complains about
-  multiple teams/providers on the same Apple account
-- the workflow uploads a notarized `.app` and `.dmg` as build artifacts
-
-Useful helper commands:
-
-```bash
-# Export your signing certificate from a local .p12 for GitHub Secrets
-openssl base64 -A -in /path/to/certificate.p12 -out apple-certificate-base64.txt
 ```
 
 ## Frontend Files
