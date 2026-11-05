@@ -301,8 +301,15 @@ impl LegacyInstall {
         }
     }
 
+    /// A log folder alone is not an install. Anything can recreate it, like a launchd
+    /// job that logs there, and it is not worth an approval. It goes with the rest.
     pub fn is_empty(&self) -> bool {
-        self == &Self::default()
+        self.helper_labels.is_empty()
+            && self.helper_plists.is_empty()
+            && self.helper_copies.is_empty()
+            && self.run_files.is_empty()
+            && self.config_dir.is_none()
+            && !self.root_daemon
     }
 
     /// Whether this Mac still has the old root helper, daemon or config.
@@ -537,13 +544,17 @@ impl SystemChanges {
             "umask 022".to_string(),
             r#"fail() { echo "$1" >&2; exit 1; }"#.to_string(),
         ];
-        script.extend(legacy_commands(&self.legacy));
-        script.extend(keychain_commands(&self.stale_keychain_hashes));
-        // The service goes first: if it fails, the script stops with the old resolver
-        // and link still matching the old service.
+        // The old daemon stops first, so the ports are free. Its files and trust go last:
+        // if anything fails, the config, certificates and logs are still there for
+        // another try.
+        script.extend(legacy_stop_commands(&self.legacy));
+        // The service goes before the resolver and the link: if it fails, the script
+        // stops with both still matching the old service.
         script.extend(self.service_commands());
         script.extend(self.resolver_commands());
         script.extend(self.cli_link_commands());
+        script.extend(legacy_removal_commands(&self.legacy));
+        script.extend(keychain_commands(&self.stale_keychain_hashes));
         script.push("exit 0".to_string());
         script.join("\n")
     }
@@ -652,8 +663,6 @@ fi"#
     }
 }
 
-/// Everything from the old install goes first, so the ports are free before
-/// launchd tries to open them.
 fn root_daemon_pattern() -> &'static str {
     if BRANDING.is_dev_profile() {
         DEV_ROOT_DAEMON_PATTERN
@@ -684,8 +693,8 @@ pub(crate) fn legacy_stop_commands(legacy: &LegacyInstall) -> Vec<String> {
     commands
 }
 
-/// Removes what the old install left. The Linux script runs this only once the new
-/// service works, so a failure leaves the old files for another try.
+/// Removes what the old install left. The scripts run this only once the new service
+/// works, so a failure leaves the old files for another try.
 pub(crate) fn legacy_removal_commands(legacy: &LegacyInstall) -> Vec<String> {
     let mut commands = Vec::new();
 
@@ -971,9 +980,10 @@ fn normalize_hash(value: &str) -> String {
 }
 
 /// launchd will run this path from now on, so it has to stay there. macOS runs an
-/// app it has not cleared yet from a random temporary path, which is gone later.
+/// app it has not cleared yet from a random temporary path, which is gone later, and
+/// a disk image goes away when it is ejected.
 fn check_service_binary(binary: &Path) -> Result<()> {
-    if binary.to_string_lossy().contains("/AppTranslocation/") {
+    if binary.to_string_lossy().contains("/AppTranslocation/") || binary.starts_with("/Volumes") {
         bail!(
             "macOS is running {0} from a temporary location. Move {0} to Applications, open it from there, then try again.",
             BRANDING.app_name
@@ -1340,6 +1350,16 @@ mod tests {
     }
 
     #[test]
+    fn an_app_on_a_disk_image_cannot_become_the_service_binary() {
+        let error = check_service_binary(Path::new(
+            "/Volumes/Localify/Localify.app/Contents/MacOS/localify",
+        ))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Move"));
+    }
+
+    #[test]
     fn the_service_starts_at_boot_and_restarts_quickly_only_after_a_failure() {
         let plist = plist_contents(&spec());
 
@@ -1463,6 +1483,18 @@ mod tests {
     }
 
     #[test]
+    fn a_log_folder_alone_is_not_an_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = empty_roots(dir.path());
+        fs::create_dir_all(roots.var_log.join(BRANDING.slug())).unwrap();
+
+        let legacy = LegacyInstall::detect(&roots);
+
+        assert!(legacy.log_dir.is_some());
+        assert!(legacy.is_empty());
+    }
+
+    #[test]
     fn it_finds_a_config_and_logs_in_system_folders() {
         let dir = tempfile::tempdir().unwrap();
         let roots = empty_roots(dir.path());
@@ -1582,6 +1614,24 @@ mod tests {
         let bootstrap = script.find("launchctl bootstrap system").unwrap();
 
         assert!(helper < daemon && daemon < bootstrap);
+    }
+
+    #[test]
+    fn the_old_files_stay_until_the_new_setup_is_in_place() {
+        let script = all_changes().script();
+
+        let bootstrap = script.find("launchctl bootstrap system").unwrap();
+        let link = script.find("/bin/ln -sfn").unwrap();
+        let trust = script.find("remove-trusted-cert").unwrap();
+        let plist = script
+            .find("/bin/rm -f '/Library/LaunchDaemons/dev.localify.helper.501.plist'")
+            .unwrap();
+        let folder = script.find("/bin/rm -rf '/etc/localify'").unwrap();
+        let keychain = script.find("delete-certificate -Z 'AABB'").unwrap();
+
+        for removal in [trust, plist, folder, keychain] {
+            assert!(bootstrap < removal && link < removal);
+        }
     }
 
     #[test]
