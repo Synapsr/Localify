@@ -230,6 +230,21 @@ impl Config {
             .collect()
     }
 
+    /// Each enabled project's id, by its namespace `<project-id><suffix>`,
+    /// such as `journal.localify`. A public URL may target the namespace even
+    /// when no service registers it, as in a monorepo, and the namespace then
+    /// decides which project the URL reaches (`docs/public-urls.md`, "Names").
+    pub fn project_namespaces(&self) -> HashMap<String, String> {
+        self.projects
+            .iter()
+            .filter(|(_, project)| project.enabled)
+            .map(|(id, _)| {
+                let namespace = format!("{}{}", id.to_ascii_lowercase(), BRANDING.domain_suffix());
+                (namespace, id.clone())
+            })
+            .collect()
+    }
+
     #[allow(dead_code)]
     pub fn configured_projects(&self) -> Vec<ConfiguredProject> {
         let mut projects = self
@@ -2866,5 +2881,26 @@ target = "127.0.0.1:61092"
             registration.pattern().display_pattern(),
             "*.store.example-app.io"
         );
+    }
+
+    #[test]
+    fn every_enabled_project_owns_its_namespace() {
+        let toml = r#"
+[projects.journal]
+name = "Journal"
+
+[projects.paused]
+name = "Paused"
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        let namespaces = config.project_namespaces();
+
+        assert_eq!(
+            namespaces.get(&format!("journal{}", BRANDING.domain_suffix())),
+            Some(&"journal".to_string())
+        );
+        assert_eq!(namespaces.len(), 1);
     }
 }

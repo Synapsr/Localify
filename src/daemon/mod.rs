@@ -6,6 +6,8 @@ pub mod listeners;
 pub mod mgmt_socket;
 pub mod profile_indicator;
 pub mod proxy;
+pub mod public_ingress;
+pub mod public_tunnel;
 pub mod router;
 pub mod server;
 pub mod static_files;

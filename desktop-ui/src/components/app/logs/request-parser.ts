@@ -24,6 +24,10 @@ export interface RequestEntry {
   projectId: string | null;
   projectName: string | null;
   noise: RequestNoise | null;
+  /** `public` for traffic that came through a public URL, otherwise null. */
+  source: string | null;
+  /** The public host a visitor used, such as `journal-a8f3.localify.fyi`. */
+  publicHost: string | null;
   raw: string;
 }
 
@@ -37,6 +41,8 @@ interface Fields {
   host?: string;
   path?: string;
   status?: string;
+  source?: string;
+  public_host?: string;
 }
 
 function parseFields(rest: string): { message: string; fields: Fields } {
@@ -58,7 +64,14 @@ function parseFields(rest: string): { message: string; fields: Fields } {
     if (value.startsWith('"') && value.endsWith('"')) {
       value = value.slice(1, -1).replace(/\\(.)/g, "$1");
     }
-    if (key === "method" || key === "host" || key === "path" || key === "status") {
+    if (
+      key === "method" ||
+      key === "host" ||
+      key === "path" ||
+      key === "status" ||
+      key === "source" ||
+      key === "public_host"
+    ) {
       fields[key] = value;
     }
     cursor = m.index + m[0].length;
@@ -190,6 +203,8 @@ export function parseRequests(content: string, domains: DomainInfoDto[]): Reques
       projectId: match?.projectId ?? null,
       projectName: match?.projectName ?? null,
       noise,
+      source: fields.source ?? null,
+      publicHost: fields.public_host ?? null,
       raw: line,
     });
   }

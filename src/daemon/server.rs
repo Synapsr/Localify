@@ -21,9 +21,12 @@ use super::launch_sessions::LaunchSessions;
 use super::lifecycle::ShutdownHandle;
 use super::listeners::DaemonListeners;
 use super::proxy::{ClientAddr, Scheme};
+use super::public_ingress::{self, IngressAccess};
+use super::public_tunnel::{self, PublicTunnel, TunnelFiles};
 use super::router::{DomainAccessLog, RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
 use crate::application::ports::RegistrationProvider;
+use crate::branding::BRANDING;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::network::get_lan_ip;
@@ -47,6 +50,8 @@ pub struct Server {
     reload_provider: Arc<dyn RegistrationProvider>,
     config_path: PathBuf,
     socket_path: PathBuf,
+    data_dir: PathBuf,
+    log_file: PathBuf,
     tls_acceptor: Option<TlsAcceptor>,
     listeners: DaemonListeners,
     http_port: u16,
@@ -71,7 +76,7 @@ impl Server {
         let registrations = reload_provider
             .load()
             .context("Failed to load registrations for daemon startup")?;
-        let project_roots = load_project_root_paths(config);
+        let projects = ProjectMetadata::of(config);
 
         // Collect patterns for domains with HTTPS enabled
         let https_patterns: Vec<_> = registrations
@@ -84,9 +89,11 @@ impl Server {
         let state: SharedState = Arc::new(ArcSwap::from_pointee(
             RuntimeState::with_project_roots_and_access_log(
                 registrations,
-                project_roots,
+                projects.roots,
                 domain_accesses.clone(),
             )
+            .with_domain_projects(projects.domains)
+            .with_project_namespaces(projects.namespaces)
             .with_launch_sessions(LaunchSessions::default()),
         ));
 
@@ -102,6 +109,8 @@ impl Server {
             reload_provider,
             config_path,
             socket_path: paths.socket_path.clone(),
+            data_dir: paths.data_dir.clone(),
+            log_file: paths.log_file.clone(),
             tls_acceptor,
             listeners,
             http_port: config.daemon.http_port,
@@ -134,14 +143,36 @@ impl Server {
             launch_sessions,
             cancel.clone(),
         );
+        let tunnel = PublicTunnel::new(BRANDING.public_ingress_port());
+        let access = IngressAccess::default();
+        spawn_public_ingress(
+            self.state.clone(),
+            access.clone(),
+            tunnel.clone(),
+            cancel.clone(),
+        )
+        .await;
+        public_tunnel::spawn(
+            tunnel.clone(),
+            access,
+            TunnelFiles {
+                data_dir: self.data_dir,
+                daemon_log: self.log_file,
+            },
+            cancel.clone(),
+        );
+        let ports = super::mgmt_socket::DaemonPorts {
+            http: self.http_port,
+            https: self.https_port,
+            dns: self.dns_port,
+        };
         spawn_mgmt_socket(
             self.state.clone(),
             self.reload_tx,
             self.socket_path,
-            self.http_port,
-            self.https_port,
-            self.dns_port,
+            ports,
             shutdown,
+            tunnel,
         );
 
         let http_server =
@@ -182,12 +213,15 @@ fn spawn_reload_listener(
                         match reload_provider.load() {
                             Ok(regs) => {
                                 let count = regs.len();
-                                let project_roots = load_project_root_paths_from_store(Path::new(&config_path));
+                                let projects = ProjectMetadata::from_store(Path::new(&config_path));
                                 let new = Arc::new(RuntimeState::with_project_roots_and_access_log(
                                     regs,
-                                    project_roots,
+                                    projects.roots,
                                     domain_accesses.clone(),
-                                ).with_launch_sessions(launch_sessions.clone()));
+                                )
+                                .with_domain_projects(projects.domains)
+                                .with_project_namespaces(projects.namespaces)
+                                .with_launch_sessions(launch_sessions.clone()));
                                 state.store(new);
                                 info!(count, "Runtime state reloaded");
                             }
@@ -201,6 +235,48 @@ fn spawn_reload_listener(
             }
         }
     });
+}
+
+/// What the runtime state needs to know about projects, by domain pattern.
+#[derive(Default)]
+struct ProjectMetadata {
+    /// Project folder of each project domain, for the editor shortcuts.
+    roots: HashMap<String, String>,
+    /// Project id of each domain of an enabled project, for public traffic.
+    domains: HashMap<String, String>,
+    /// Project id of each enabled project, by its namespace domain.
+    namespaces: HashMap<String, String>,
+}
+
+impl ProjectMetadata {
+    fn of(config: &Config) -> Self {
+        Self {
+            roots: load_project_root_paths(config),
+            domains: config
+                .configured_domains()
+                .into_iter()
+                .filter(|domain| domain.project_enabled)
+                .filter_map(|domain| {
+                    Some((domain.registration.display_pattern(), domain.project_id?))
+                })
+                .collect(),
+            namespaces: config.project_namespaces(),
+        }
+    }
+
+    fn from_store(config_path: &Path) -> Self {
+        match ConfigStore::new(config_path.to_path_buf()).load() {
+            Ok(config) => Self::of(&config),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    config_path = %config_path.display(),
+                    "Failed to load project metadata during daemon reload"
+                );
+                Self::default()
+            }
+        }
+    }
 }
 
 fn load_project_root_paths(config: &Config) -> HashMap<String, String> {
@@ -222,20 +298,6 @@ fn load_project_root_paths(config: &Config) -> HashMap<String, String> {
         .collect()
 }
 
-fn load_project_root_paths_from_store(config_path: &Path) -> HashMap<String, String> {
-    match ConfigStore::new(config_path.to_path_buf()).load() {
-        Ok(config) => load_project_root_paths(&config),
-        Err(error) => {
-            warn!(
-                error = %error,
-                config_path = %config_path.display(),
-                "Failed to load project root metadata during daemon reload"
-            );
-            HashMap::new()
-        }
-    }
-}
-
 fn load_local_project_root_paths() -> HashMap<String, String> {
     ProjectRootStore::new_default()
         .ok()
@@ -243,23 +305,43 @@ fn load_local_project_root_paths() -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+/// The listener binds whether or not the machine is signed in: until the
+/// tunnel supervisor grants access, it answers every request with 403. A
+/// port held by another program does not stop the daemon; the public status
+/// says why public URLs cannot work.
+async fn spawn_public_ingress(
+    state: SharedState,
+    access: IngressAccess,
+    tunnel: PublicTunnel,
+    cancel: CancellationToken,
+) {
+    let port = BRANDING.public_ingress_port();
+    match public_ingress::bind(port).await {
+        Ok(listener) => {
+            let router = public_ingress::ingress_router(state, access);
+            tokio::spawn(public_ingress::serve(listener, router, cancel));
+        }
+        Err(error) => {
+            warn!(port, error = %error, "Public ingress could not listen");
+            tunnel.ingress_failed(format!(
+                "{} could not listen on 127.0.0.1:{port} for public traffic ({error}). Quit the program that uses this port, then restart {}.",
+                BRANDING.app_name, BRANDING.app_name
+            ));
+        }
+    }
+}
+
 fn spawn_mgmt_socket(
     state: SharedState,
     reload_tx: mpsc::Sender<()>,
     socket_path: PathBuf,
-    http_port: u16,
-    https_port: u16,
-    dns_port: u16,
+    ports: super::mgmt_socket::DaemonPorts,
     shutdown: ShutdownHandle,
+    tunnel: PublicTunnel,
 ) {
-    let mgmt_ports = super::mgmt_socket::DaemonPorts {
-        http: http_port,
-        https: https_port,
-        dns: dns_port,
-    };
     tokio::spawn(async move {
         if let Err(e) =
-            super::mgmt_socket::serve(socket_path, state, reload_tx, shutdown, mgmt_ports).await
+            super::mgmt_socket::serve(socket_path, state, reload_tx, shutdown, ports, tunnel).await
         {
             error!(error = %e, "Management socket error");
         }
