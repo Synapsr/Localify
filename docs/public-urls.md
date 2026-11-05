@@ -23,6 +23,7 @@ V1 is invite-only: GitHub accounts on an allowlist. Out of v1: path exceptions (
 - **Slug:** 3 to 32 characters, `a-z`, `0-9` and `-`, starting with a letter, not ending with `-`, never containing `--`. Unique across all users, deleted ones included (see "Data"). When not chosen with `--slug`, it is generated from the first label of the local domain: lowercased, every run of characters outside `a-z0-9` replaced by one `-`, leading digits and `-` removed (`url` when nothing is left), cut to 20 characters without a trailing `-`, then `-` and 4 random hex characters (`journal-a8f3`).
 - **Public host:** `<slug>.localify.fyi`, or `<slug>--<label>.localify.fyi` for a wildcard URL. The first `--` separates the slug from the label, so labels may contain `--` (`web--feature`). The slug comes first so that `--` never sits at positions 3–4 of the DNS label, which IDNA reserves (ADR 0022).
 - **Local host:** `<local-domain>` for `<slug>`, and `<label>.<local-domain>` for `<slug>--<label>`. A label is `a-z`, `0-9` and `-`, does not start or end with `-`, and is at most `61 − slug length` characters so the public DNS label fits in 63. Longer names cannot be served; the CLI says so instead of truncating.
+- **Exposable local domain:** a domain registered by a project in this machine's config, or a project's namespace `<project-id>.localify` even when no service uses it as its own domain. The namespace is what a wildcard URL usually targets: in a monorepo, `<slug>--web--feature.localify.fyi` reaches `web--feature.<project-id>.localify`. The project of a public URL is the one that registers its local domain or owns that namespace.
 - **Machine:** one signed-in installation of Localify. Its tunnel hostname is `m-<machine-id>.localify.dev`.
 
 ## Cloud (`apps/cloud`)
@@ -147,7 +148,7 @@ A listener on `127.0.0.1:<ingress port>`. The port is fixed per brand: 7381 for 
 1. Compares `X-Localify-Ingress` with the ingress secret in constant time. A mismatch, or no secret yet because the machine is signed out or the runtime has not loaded: 403 with a generic body.
 2. Reads and removes every `X-Localify-*` header.
 3. Refuses paths under `/.localify/` with 404, so public traffic never reaches the open-in-editor or run-dev-server actions.
-4. Checks the request against the runtime inventory, with a generic 404 for any failure: the URL id is one this machine serves; the public host is that URL's own host or, for a wildcard URL, one of its labels; the local host is exactly what that public host maps to; the registration the router selects for the local host belongs to the same project as the registration of the URL's local domain. Docker and external registrations are never served. Without the last check, a wildcard URL on `app.localify` would reach `private.app.localify` of another project through the more specific registration.
+4. Checks the request against the runtime inventory, with a generic 404 for any failure: the URL id is one this machine serves; the public host is that URL's own host or, for a wildcard URL, one of its labels; the local host is exactly what that public host maps to; the registration the router selects for the local host belongs to the project of the URL (see "Exposable local domain"). Docker and external registrations are never served. Without the last check, a wildcard URL on `app.localify` would reach `private.app.localify` of another project through the more specific registration.
 5. Hands the request to the router with `Host` set to the local host and a public source carrying the public host and client IP. The proxy then sets `X-Forwarded-Host` to the public host, `X-Forwarded-Proto: https`, `X-Forwarded-Port: 443`, `X-Forwarded-For` to the client IP and `X-Localify-Local-Domain` to the local host, for HTTP and WebSocket alike. The client address the router sees is the public client IP, never loopback.
 6. Holds one of 32 permits from the moment the request is admitted until its response head arrives. Over HTTP/2 a browser sends a whole module graph at once, and the proxy opens one upstream connection per request; without the cap the dev server's accept backlog overflows. Releasing at the head keeps SSE and other long responses from starving the rest.
 
@@ -184,7 +185,7 @@ localify public-url unprotect <url-or-slug-or-id> [--yes]
 localify public-url claim <url-or-slug-or-id>
 ```
 
-`create` checks that the local domain belongs to a project on this machine before calling the cloud, prints the URL and, when one was generated, the password with a note that it is shown once. A generated password is 4 lowercase words from a fixed list, joined by `-`.
+`create` checks that the local domain is exposable on this machine (see "Names") before calling the cloud, prints the URL and, when one was generated, the password with a note that it is shown once. A generated password is 4 lowercase words from a fixed list, joined by `-`.
 
 ## MCP
 
@@ -193,6 +194,6 @@ One tool per command except `login`, `logout` and `unprotect`: signing in and op
 ## Desktop app
 
 - **Settings → Localify Cloud:** sign in (shows the code, opens github.com), who is signed in, sign out, and this Mac's tunnel status.
-- **Domain detail → Public URL:** create (wildcard switch for a project's namespace domain), the URL with copy and open, the password shown once after create or rotate with a copy button, protection on and off, remove. When this Mac serves the URL, its state comes from this Mac's tunnel; when another machine serves it, the section says "Served by <machine>" with a button to serve it from this Mac, and claims nothing about whether it is online.
+- **Domain detail → Public URL:** create (wildcard switch for a project's namespace domain; a project also offers its namespace when no service registers it, as in a monorepo), the URL with copy and open, the password shown once after create or rotate with a copy button, protection on and off, remove. When this Mac serves the URL, its state comes from this Mac's tunnel; when another machine serves it, the section says "Served by <machine>" with a button to serve it from this Mac, and claims nothing about whether it is online.
 
 All of it goes through `DesktopApi`, which calls the same application use cases as the CLI. The app does no HTTP itself.
