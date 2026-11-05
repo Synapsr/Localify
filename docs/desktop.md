@@ -358,6 +358,8 @@ infisical run --env prod --path /release -- pnpm tauri:build
 
 If `LOCALIFY_RELEASE_KEYCHAIN_PASSWORD` is set and the Mac has a
 `localify-release` keychain, the build unlocks it and locks it again at the end.
+The app sends analytics and error reports only when the build has
+`VITE_PUBLIC_POSTHOG_TOKEN`.
 
 With those set, `pnpm tauri:build`:
 

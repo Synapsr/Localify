@@ -19,7 +19,7 @@ pnpm web:build
 
 ## Environment
 
-Nothing is required to run or build the site. It reads these public values at build time, listed in the root [`.env.example`](../../.env.example):
+Nothing is required to run or build the site. It reads these public values at build time, listed in the root [`.env.example`](../../.env.example). Maintainers keep them in Infisical, project `localify`, folder `/web`, and deploy with `infisical run --env prod --path /web -- pnpm web:deploy`:
 
 - `NEXT_PUBLIC_POSTHOG_TOKEN` turns on PostHog and its cookie banner in production. PostHog stores and sends nothing until the visitor accepts.
 - `NEXT_PUBLIC_POSTHOG_HOST` defaults to `https://us.i.posthog.com`.
