@@ -41,9 +41,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { bootstrapQueries, cloudQueries, projectMutations } from "@/lib/queries";
+import { bootstrapQueries, projectMutations } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
-import { findPublicUrlForDomain } from "@/lib/util.cloud";
 import { cn } from "@/lib/utils";
 import { useTerminal } from "@/providers/terminal-provider";
 
@@ -51,7 +50,9 @@ import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog"
 import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
 import { ProjectEditDomainDialog } from "./projects-list-item-edit-domain-dialog";
+import { PublicUrlBadge } from "./public-url/public-url-badge";
 import { PublicUrlDialog } from "./public-url/public-url-dialog";
+import { usePublicUrl } from "./public-url/use-public-url";
 
 interface ProjectDomainChipProps {
   domain: DomainInfoDto;
@@ -130,15 +131,7 @@ export const ProjectDomainChip = ({
   const stopLocalDevServer = useMutation(
     projectMutations.stopLocalDevServer(queryClient),
   );
-  const { data: cloudAccount } = useQuery(cloudQueries.account());
-  const signedInToCloud = cloudAccount?.signedIn ?? false;
-  const { data: publicUrls } = useQuery({
-    ...cloudQueries.publicUrls(),
-    enabled: signedInToCloud,
-  });
-  const publicUrl = signedInToCloud
-    ? findPublicUrlForDomain(publicUrls, domain)
-    : null;
+  const publicUrl = usePublicUrl(domain.registration.domain);
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
@@ -362,24 +355,10 @@ export const ProjectDomainChip = ({
         )}
 
         {publicUrl ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setPublicUrlDialogOpen(true);
-                  }}
-                  aria-label={`Public URL ${publicUrl.url}`}
-                  className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
-                />
-              }
-            >
-              <GlobeIcon className="size-3.5" />
-            </TooltipTrigger>
-            <TooltipContent>Public at {publicUrl.url}</TooltipContent>
-          </Tooltip>
+          <PublicUrlBadge
+            publicUrl={publicUrl}
+            onOpen={() => setPublicUrlDialogOpen(true)}
+          />
         ) : null}
 
         {launchProfiles.session ? (
@@ -529,7 +508,8 @@ export const ProjectDomainChip = ({
         onOpenChange={setDeleteDialogOpen}
       />
       <PublicUrlDialog
-        domain={domain}
+        localDomain={domain.registration.domain}
+        projectId={domain.projectId}
         open={publicUrlDialogOpen}
         onOpenChange={setPublicUrlDialogOpen}
       />

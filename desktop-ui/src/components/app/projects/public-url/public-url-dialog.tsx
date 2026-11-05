@@ -5,7 +5,7 @@ import { Link } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 
-import type { DomainInfoDto, PublicUrlWithPasswordDto } from "@/types/localify";
+import type { PublicUrlWithPasswordDto } from "@/types/localify";
 
 import { SpinnerIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -20,33 +20,39 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { bootstrapQueries, cloudQueries } from "@/lib/queries";
-import {
-  findPublicUrlForDomain,
-  isProjectNamespaceDomain,
-  SETTINGS_CLOUD_ANCHOR,
-} from "@/lib/util.cloud";
+import { findPublicUrl, projectNamespaceDomain, SETTINGS_CLOUD_ANCHOR } from "@/lib/util.cloud";
 
 import { PublicUrlCreateForm } from "./public-url-create-form";
 import { PublicUrlDetails } from "./public-url-details";
 import { PublicUrlPasswordDialog, type RevealedPassword } from "./public-url-password-dialog";
 
 interface PublicUrlDialogProps {
-  domain: DomainInfoDto;
+  /** A registered domain, or a project's namespace. */
+  localDomain: string;
+  projectId: string | null;
+  /** Start the create form with "Every environment" on. */
+  wildcardByDefault?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export const PublicUrlDialog = ({ domain, open, onOpenChange }: PublicUrlDialogProps) => {
+export const PublicUrlDialog = ({
+  localDomain,
+  projectId,
+  wildcardByDefault = false,
+  open,
+  onOpenChange,
+}: PublicUrlDialogProps) => {
   const { data: bootstrap } = useQuery(bootstrapQueries.read());
   const account = useQuery(cloudQueries.account());
   const signedIn = account.data?.signedIn ?? false;
   const publicUrls = useQuery({ ...cloudQueries.publicUrls(), enabled: signedIn });
   const [revealed, setRevealed] = useState<RevealedPassword | null>(null);
-  const publicUrl = findPublicUrlForDomain(publicUrls.data, domain);
-  const allowWildcard = isProjectNamespaceDomain(
-    domain,
-    bootstrap?.environment.fixedDomainSuffix ?? "",
-  );
+  const publicUrl = findPublicUrl(publicUrls.data, localDomain);
+  const allowWildcard =
+    projectId !== null &&
+    localDomain.toLowerCase() ===
+      projectNamespaceDomain(projectId, bootstrap?.environment.fixedDomainSuffix ?? "");
 
   const handleCreated = (result: PublicUrlWithPasswordDto) => {
     if (result.password) {
@@ -97,8 +103,9 @@ export const PublicUrlDialog = ({ domain, open, onOpenChange }: PublicUrlDialogP
     if (!publicUrl) {
       return (
         <PublicUrlCreateForm
-          domain={domain}
+          localDomain={localDomain}
           allowWildcard={allowWildcard}
+          wildcardByDefault={wildcardByDefault}
           onCreated={handleCreated}
         />
       );
@@ -118,8 +125,8 @@ export const PublicUrlDialog = ({ domain, open, onOpenChange }: PublicUrlDialogP
         <DialogHeader>
           <DialogTitle>Public URL</DialogTitle>
           <DialogDescription>
-            Open <span className="font-mono text-foreground">{domain.registration.domain}</span>{" "}
-            from any device, through Localify Cloud.
+            Open <span className="font-mono text-foreground">{localDomain}</span> from any device,
+            through Localify Cloud.
           </DialogDescription>
         </DialogHeader>
         {content}

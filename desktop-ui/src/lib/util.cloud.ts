@@ -1,9 +1,4 @@
-import type {
-  CloudAccountDto,
-  DomainInfoDto,
-  PublicUrlDto,
-  TunnelStatusDto,
-} from "@/types/localify";
+import type { CloudAccountDto, PublicUrlDto, TunnelStatusDto } from "@/types/localify";
 
 import { normalizeSuffix } from "@/lib/validators/validator.create-project";
 
@@ -100,22 +95,21 @@ export const cloudStatusDotClassName: Record<CloudStatusTone, string> = {
   off: "bg-neutral-400",
 };
 
-export function findPublicUrlForDomain(
+export function findPublicUrl(
   publicUrls: PublicUrlDto[] | undefined,
-  domain: DomainInfoDto,
+  localDomain: string,
 ): PublicUrlDto | null {
-  const localDomain = domain.registration.domain.toLowerCase();
-  return publicUrls?.find((url) => url.localDomain.toLowerCase() === localDomain) ?? null;
+  const wanted = localDomain.toLowerCase();
+  return publicUrls?.find((url) => url.localDomain.toLowerCase() === wanted) ?? null;
 }
 
 /**
- * A project's own domain (`journal.localify`): its environments live one label below
- * it, so a wildcard public URL on it reaches every environment.
+ * A project's namespace (`journal.localify`): its environments live one label below it,
+ * so a wildcard public URL on it reaches every environment. A project can expose it even
+ * when no service registers it, as in a monorepo.
  */
-export function isProjectNamespaceDomain(domain: DomainInfoDto, domainSuffix: string): boolean {
-  if (!domain.projectId) return false;
-  const expected = `${domain.projectId}${normalizeSuffix(domainSuffix)}`;
-  return domain.registration.domain.toLowerCase() === expected.toLowerCase();
+export function projectNamespaceDomain(projectId: string, domainSuffix: string): string {
+  return `${projectId}${normalizeSuffix(domainSuffix)}`.toLowerCase();
 }
 
 /** `https://journal-a8f3.localify.fyi` becomes `journal-a8f3--<label>.localify.fyi`. */

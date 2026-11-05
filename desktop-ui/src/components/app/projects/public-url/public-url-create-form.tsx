@@ -4,11 +4,7 @@ import { revalidateLogic } from "@tanstack/react-form";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import type {
-  DomainInfoDto,
-  PublicUrlProtectionModeDto,
-  PublicUrlWithPasswordDto,
-} from "@/types/localify";
+import type { PublicUrlProtectionModeDto, PublicUrlWithPasswordDto } from "@/types/localify";
 
 import { Button } from "@/components/ui/button";
 import { DialogBody, DialogClose, DialogFooter } from "@/components/ui/dialog";
@@ -24,9 +20,10 @@ import {
 } from "@/lib/validators/validator.cloud";
 
 interface PublicUrlCreateFormProps {
-  domain: DomainInfoDto;
-  /** Offer the wildcard switch: only a project's own domain has environments under it. */
+  localDomain: string;
+  /** Offer the wildcard switch: only a project's namespace has environments under it. */
   allowWildcard: boolean;
+  wildcardByDefault: boolean;
   onCreated: (result: PublicUrlWithPasswordDto) => void;
 }
 
@@ -39,17 +36,17 @@ const defaultValues: CreatePublicUrlFormInput = {
 };
 
 export const PublicUrlCreateForm = ({
-  domain,
+  localDomain,
   allowWildcard,
+  wildcardByDefault,
   onCreated,
 }: PublicUrlCreateFormProps) => {
   const queryClient = useQueryClient();
   const createPublicUrl = useMutation(cloudMutations.createPublicUrl(queryClient));
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const localDomain = domain.registration.domain;
 
   const form = useAppForm({
-    defaultValues,
+    defaultValues: { ...defaultValues, wildcard: allowWildcard && wildcardByDefault },
     validationLogic: revalidateLogic({ mode: "submit", modeAfterSubmission: "change" }),
     validators: { onDynamic: createPublicUrlFormSchema },
     onSubmit: async ({ value }) => {
