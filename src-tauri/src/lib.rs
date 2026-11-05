@@ -1170,6 +1170,7 @@ pub fn run() {
             commands::trust_ios_simulators,
             commands::get_agent_mcp_status,
             commands::install_agent_mcp,
+            commands::connect_agents_once,
             commands::list_port_conflicts,
             commands::kill_port_conflict,
             commands::get_uninstall_preview,

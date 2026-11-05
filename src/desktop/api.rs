@@ -237,15 +237,19 @@ impl DesktopApi {
     }
 
     pub fn install_agent_mcp(&self) -> Result<AgentMcpInstallResultDto> {
-        let result = crate::agent_mcp::install_agent_mcp(&self.binary_path)?;
-        Ok(AgentMcpInstallResultDto {
-            status: map_agent_mcp_status(result.status),
-            installed_agents: result
-                .installed_agents
-                .iter()
-                .map(|agent| agent.id().to_string())
-                .collect(),
-        })
+        Ok(map_agent_mcp_install_result(
+            crate::agent_mcp::install_agent_mcp(&self.binary_path)?,
+        ))
+    }
+
+    /// Connects coding agents once per machine after an update, when the user
+    /// leaves the setting on. `None` when there was nothing to do.
+    pub fn connect_agents_once(&self) -> Result<Option<AgentMcpInstallResultDto>> {
+        if self.cli_mode || !self.config_store().load()?.agent.connect_agents {
+            return Ok(None);
+        }
+        Ok(crate::agent_mcp::connect_agents_once(&self.binary_path)?
+            .map(map_agent_mcp_install_result))
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
@@ -2095,10 +2099,7 @@ impl DesktopApi {
         if let Some(step) = self.node_trust_step() {
             steps.push(step);
         }
-        if !self.cli_mode
-            && let Some(step) =
-                agent_mcp_install_step(config.agent.connect_agents, &self.binary_path)
-        {
+        if let Some(step) = agent_mcp_install_step(config.agent.connect_agents, &self.binary_path) {
             steps.push(step);
         }
 
@@ -3821,6 +3822,24 @@ fn map_config(config_path: &Path, config: Config) -> AppConfigDto {
         paths: config.paths.into(),
         docker: config.docker.into(),
         agent: config.agent.into(),
+    }
+}
+
+fn map_agent_mcp_install_result(
+    result: crate::agent_mcp::AgentMcpInstallResult,
+) -> AgentMcpInstallResultDto {
+    AgentMcpInstallResultDto {
+        status: map_agent_mcp_status(result.status),
+        installed_agents: result
+            .installed_agents
+            .iter()
+            .map(|agent| agent.id().to_string())
+            .collect(),
+        removed_skills: result
+            .removed_skills
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
     }
 }
 
@@ -5873,13 +5892,18 @@ fn agent_mcp_install_step(enabled: bool, binary_path: &Path) -> Option<StepDto> 
             label: Some("Coding agents".into()),
             status: "success".into(),
             message: format!(
-                "Connected the Localify MCP server to {}.",
+                "Connected the Localify MCP server to {}.{}",
                 result
                     .installed_agents
                     .iter()
                     .map(|agent| agent.label())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                if result.removed_skills.is_empty() {
+                    String::new()
+                } else {
+                    " Removed the old Localify skill.".to_string()
+                }
             ),
         },
         Err(error) => StepDto {

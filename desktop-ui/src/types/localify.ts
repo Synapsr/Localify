@@ -38,6 +38,8 @@ export interface AgentMcpStatusDto {
 export interface AgentMcpInstallResultDto {
   status: AgentMcpStatusDto;
   installedAgents: string[];
+  /** Copies of the old Localify skill that were removed. */
+  removedSkills: string[];
 }
 
 export interface DaemonConfigDto {

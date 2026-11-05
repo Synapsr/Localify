@@ -551,6 +551,16 @@ pub fn install_agent_mcp(
 }
 
 #[tauri::command]
+pub async fn connect_agents_once(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<AgentMcpInstallResultDto>, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.connect_agents_once().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
 pub fn list_port_conflicts(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<PortConflictDto>, String> {

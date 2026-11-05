@@ -141,6 +141,8 @@ pub struct AgentMcpStatus {
 pub struct AgentMcpInstallResult {
     pub status: AgentMcpStatus,
     pub installed_agents: Vec<Agent>,
+    /// Copies of the Localify skill that agents got before the MCP server.
+    pub removed_skills: Vec<PathBuf>,
 }
 
 /// Which agents are installed here and which already have the server.
@@ -174,12 +176,57 @@ pub fn install_agent_mcp(binary: &Path) -> Result<AgentMcpInstallResult> {
             "No supported coding agent was found. Install Claude Code, Codex or Cursor, then retry."
         );
     }
+    let installed = connect(&detected, &status.server)?;
+    Ok(AgentMcpInstallResult {
+        status: agent_mcp_status(binary)?,
+        installed_agents: installed,
+        removed_skills: remove_old_skill(&OldSkillPlaces::of_user(&user_home_dir()?)),
+    })
+}
 
+/// Connects the agents that do not have the server yet and removes the old
+/// skill, once per machine: an agent the user later disconnects stays so.
+/// Returns `None` when this already ran or changed nothing.
+pub fn connect_agents_once(binary: &Path) -> Result<Option<AgentMcpInstallResult>> {
+    let marker = BRANDING
+        .user_state_dir()
+        .context("HOME is not set, so Localify cannot connect coding agents.")?
+        .join("agents-connected");
+    if marker.exists() {
+        return Ok(None);
+    }
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create '{}'", parent.display()))?;
+    }
+    // Written first: a failure is reported once, not on every launch.
+    fs::write(&marker, "1\n").with_context(|| format!("Failed to write '{}'", marker.display()))?;
+
+    let status = agent_mcp_status(binary)?;
+    let missing = status
+        .agents
+        .iter()
+        .filter(|agent| agent.detected && !agent.installed)
+        .collect::<Vec<_>>();
+    let removed_skills = remove_old_skill(&OldSkillPlaces::of_user(&user_home_dir()?));
+    let installed = connect(&missing, &status.server)?;
+    if installed.is_empty() && removed_skills.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(AgentMcpInstallResult {
+        status: agent_mcp_status(binary)?,
+        installed_agents: installed,
+        removed_skills,
+    }))
+}
+
+/// Connects each agent, and fails with what to run by hand for those that could not be.
+fn connect(agents: &[&AgentMcpAgent], server: &McpServer) -> Result<Vec<Agent>> {
     let home = user_home_dir()?;
     let mut installed = Vec::new();
     let mut failures = Vec::new();
-    for agent in detected {
-        match install_for(agent.agent, &home, &status.server) {
+    for agent in agents {
+        match install_for(agent.agent, &home, server) {
             Ok(()) => installed.push(agent.agent),
             Err(error) => failures.push(format!(
                 "{}: {error:#}\n  Connect it by hand: {}",
@@ -188,26 +235,106 @@ pub fn install_agent_mcp(binary: &Path) -> Result<AgentMcpInstallResult> {
             )),
         }
     }
-    if !failures.is_empty() {
-        let done = installed
-            .iter()
-            .map(|agent| agent.label())
+    if failures.is_empty() {
+        return Ok(installed);
+    }
+    let done = installed
+        .iter()
+        .map(|agent| agent.label())
+        .collect::<Vec<_>>();
+    bail!(
+        "{}{}",
+        if done.is_empty() {
+            String::new()
+        } else {
+            format!("Connected {}. ", done.join(", "))
+        },
+        failures.join("\n")
+    )
+}
+
+/// Removes the Localify skill that earlier versions installed: the app's own
+/// copy, the copy `npx skills` made in `~/.agents/skills`, and the links agents
+/// got to them. A link to anywhere else, or a skill Localify did not write, is
+/// the user's and stays. Returns what was removed.
+fn remove_old_skill(places: &OldSkillPlaces) -> Vec<PathBuf> {
+    let owned_targets = places
+        .copies
+        .iter()
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect::<Vec<_>>();
+    let mut removed = Vec::new();
+    // Links first: they can only be recognized while their target exists.
+    for link in &places.links {
+        let points_at_ours = fs::canonicalize(link)
+            .is_ok_and(|target| owned_targets.iter().any(|owned| target.starts_with(owned)));
+        let is_link = fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink());
+        let removable = if is_link {
+            points_at_ours
+        } else {
+            is_localify_skill(link)
+        };
+        if removable && remove_path(link, is_link) {
+            removed.push(link.clone());
+        }
+    }
+    for copy in &places.copies {
+        if is_localify_skill(copy) && remove_path(copy, false) {
+            removed.push(copy.clone());
+        }
+    }
+    removed
+}
+
+/// Where earlier versions put the skill.
+struct OldSkillPlaces {
+    /// The skill itself: the copy `npx skills` made, and the app's own.
+    copies: Vec<PathBuf>,
+    /// Where agents read skills: a copy of the skill, or a link to one.
+    links: Vec<PathBuf>,
+}
+
+impl OldSkillPlaces {
+    fn of_user(home: &Path) -> Self {
+        let agent_dirs = [env_dir("CLAUDE_CONFIG_DIR"), env_dir("CODEX_HOME")]
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>();
-        bail!(
-            "{}{}",
-            if done.is_empty() {
-                String::new()
-            } else {
-                format!("Connected {}. ", done.join(", "))
-            },
-            failures.join("\n")
-        );
+        Self::new(home, BRANDING.user_state_dir().as_deref(), &agent_dirs)
     }
 
-    Ok(AgentMcpInstallResult {
-        status: agent_mcp_status(binary)?,
-        installed_agents: installed,
+    fn new(home: &Path, state_dir: Option<&Path>, agent_dirs: &[PathBuf]) -> Self {
+        let mut copies = vec![home.join(".agents/skills/localify")];
+        copies.extend(state_dir.map(|state| state.join("skills/localify")));
+        let mut dirs = vec![
+            home.join(".claude"),
+            home.join(".codex"),
+            home.join(".cursor"),
+        ];
+        dirs.extend(agent_dirs.iter().cloned());
+        dirs.dedup();
+        let links = dirs
+            .into_iter()
+            .map(|dir| dir.join("skills/localify"))
+            .collect();
+        Self { copies, links }
+    }
+}
+
+/// A folder holding the skill earlier versions of Localify shipped.
+fn is_localify_skill(path: &Path) -> bool {
+    fs::read_to_string(path.join("SKILL.md")).is_ok_and(|content| {
+        content.contains("name: localify")
+            && content.contains("description: Set up and use Localify")
     })
+}
+
+fn remove_path(path: &Path, is_link: bool) -> bool {
+    if is_link {
+        fs::remove_file(path).is_ok()
+    } else {
+        fs::remove_dir_all(path).is_ok()
+    }
 }
 
 fn install_for(agent: Agent, home: &Path, server: &McpServer) -> Result<()> {
@@ -540,6 +667,59 @@ mod tests {
 
         assert!(toml_has_server(&path, "localify"));
         assert!(!toml_has_server(&path, "other"));
+    }
+
+    fn write_old_skill(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: localify\ndescription: Set up and use Localify for stable local development domains\n---\n",
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_old_skill_goes_but_the_user_s_own_links_stay() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let canonical = home.join(".agents/skills/localify");
+        write_old_skill(&canonical);
+        fs::create_dir_all(home.join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(&canonical, home.join(".claude/skills/localify")).unwrap();
+        let elsewhere = home.join("my-skills/localify");
+        write_old_skill(&elsewhere);
+        fs::create_dir_all(home.join(".codex/skills")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join(".codex/skills/localify")).unwrap();
+        write_old_skill(&home.join(".cursor/skills/localify"));
+
+        let state = home.join("state");
+        write_old_skill(&state.join("skills/localify"));
+
+        let removed = remove_old_skill(&OldSkillPlaces::new(home, Some(&state), &[]));
+
+        assert!(!canonical.exists());
+        assert!(fs::symlink_metadata(home.join(".claude/skills/localify")).is_err());
+        assert!(!home.join(".cursor/skills/localify").exists());
+        assert!(home.join(".codex/skills/localify").exists());
+        assert!(elsewhere.exists());
+        assert!(!state.join("skills/localify").exists());
+        assert_eq!(removed.len(), 4, "{removed:?}");
+    }
+
+    #[test]
+    fn a_skill_localify_did_not_write_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let mine = home.path().join(".claude/skills/localify");
+        fs::create_dir_all(&mine).unwrap();
+        fs::write(
+            mine.join("SKILL.md"),
+            "---\nname: localify\ndescription: My notes\n---\n",
+        )
+        .unwrap();
+
+        assert!(remove_old_skill(&OldSkillPlaces::new(home.path(), None, &[])).is_empty());
+        assert!(mine.exists());
     }
 
     #[test]

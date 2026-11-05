@@ -83,9 +83,14 @@ localify agent status    # see which ones are connected
 ```
 
 `agent install` uses `claude mcp add` and `codex mcp add`, and edits
-`~/.cursor/mcp.json` for Cursor. The desktop app does the same from **Settings → AI
-agents → Connect agents**, and during setup unless you turn that off. Restart open agent
-sessions afterwards.
+`~/.cursor/mcp.json` for Cursor. It also removes the Localify skill earlier versions
+installed: the copies Localify made and the links to them, never a skill or link of your
+own. Restart open agent sessions afterwards.
+
+You rarely need to run it. `localify install` and the desktop app's setup connect the
+agents installed at that time, and after an update the app connects them once, with a
+message saying so. **Settings → AI agents** has the switch to turn this off and the
+**Connect agents** button for an agent installed later.
 
 ### Services in the app, from the command line
 

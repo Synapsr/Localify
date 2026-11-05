@@ -19,6 +19,9 @@ pub fn install() -> Result<()> {
         BRANDING.app_name,
         labels.join(", ")
     );
+    for path in &result.removed_skills {
+        println!("Removed the old Localify skill: {}", path.display());
+    }
     println!("Restart running agent sessions so they load it.");
     Ok(())
 }
