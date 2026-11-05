@@ -27,6 +27,11 @@ sources = [{ infisical = { env = "prod" } }]
 
 Never pass `confirm_profile` unless the user asked for that dangerous profile in this task, then say the service runs on its data. Never print, copy or write profile values into files. If `infisical` or `pass-cli` is signed out, ask the user to sign in.
 
+Public URLs (Localify Cloud), only when the user wants to reach an app from another device or share it:
+- `public_url_create` gives a project domain a `https://<slug>.localify.fyi` URL served from this machine; with `wildcard`, every worktree of the project gets one too. It is always protected by a password, returned once: give the user the URL and the password together. `public_url_protect` replaces the password and signs every browser out.
+- Opening a URL to everyone is the user's call: they run `localify public-url unprotect` themselves. So is signing in: when a tool says the machine is not signed in, ask them to run `localify login`.
+- `public_url_list` shows which machine serves each URL; `public_url_claim` moves one to this machine; `public_url_remove` takes it offline.
+
 When something does not work:
 - Call `status` first. A domain that does not resolve: the daemon may be stopped (`daemon` start) or Localify not installed (`install_localify`). A page saying the target is unavailable: the app is not listening; read its logs.
 - Do not edit /etc/hosts, run another proxy, bypass certificate errors, edit Localify's config file, or run Localify with sudo.

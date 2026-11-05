@@ -1,9 +1,11 @@
+pub mod cloud_account;
 pub mod daemon_status;
 pub mod install;
 pub mod list_all_domains;
 pub mod manage_routes;
 pub mod ports;
 pub mod provider_registry;
+pub mod public_urls;
 pub mod register_domain;
 pub mod restart_daemon;
 pub mod start_daemon;
