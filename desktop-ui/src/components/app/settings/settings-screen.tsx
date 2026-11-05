@@ -8,6 +8,7 @@ import { bootstrapQueries } from "@/lib/queries";
 import { SettingsAgents } from "./settings-agents";
 import { SettingsAnalytics } from "./settings-analytics";
 import { SettingsCli } from "./settings-cli";
+import { SettingsCloud } from "./settings-cloud";
 import { SettingsDeveloper } from "./settings-developer";
 import { SettingsHeader } from "./settings-header";
 import { SettingsHotkeys } from "./settings-hotkeys";
@@ -62,6 +63,7 @@ export const SettingsScreen = () => {
         <SettingsTroubleshooting />
         <SettingsLaunchers />
         <SettingsAgents config={data.config} />
+        <SettingsCloud />
         <SettingsAnalytics />
         <SettingsTransfer />
         <SettingsHotkeys />

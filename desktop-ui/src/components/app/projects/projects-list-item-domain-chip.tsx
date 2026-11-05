@@ -20,6 +20,7 @@ import {
   DotsIcon,
   EditIcon,
   ExternalLinkIcon,
+  GlobeIcon,
   PlayIcon,
   SpinnerIcon,
   TerminalIcon,
@@ -40,8 +41,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { bootstrapQueries, projectMutations } from "@/lib/queries";
+import { bootstrapQueries, cloudQueries, projectMutations } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
+import { findPublicUrlForDomain } from "@/lib/util.cloud";
 import { cn } from "@/lib/utils";
 import { useTerminal } from "@/providers/terminal-provider";
 
@@ -49,6 +51,7 @@ import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog"
 import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
 import { ProjectEditDomainDialog } from "./projects-list-item-edit-domain-dialog";
+import { PublicUrlDialog } from "./public-url/public-url-dialog";
 
 interface ProjectDomainChipProps {
   domain: DomainInfoDto;
@@ -115,6 +118,7 @@ export const ProjectDomainChip = ({
   } = useTerminal();
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [publicUrlDialogOpen, setPublicUrlDialogOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] =
     useState(false);
@@ -126,6 +130,15 @@ export const ProjectDomainChip = ({
   const stopLocalDevServer = useMutation(
     projectMutations.stopLocalDevServer(queryClient),
   );
+  const { data: cloudAccount } = useQuery(cloudQueries.account());
+  const signedInToCloud = cloudAccount?.signedIn ?? false;
+  const { data: publicUrls } = useQuery({
+    ...cloudQueries.publicUrls(),
+    enabled: signedInToCloud,
+  });
+  const publicUrl = signedInToCloud
+    ? findPublicUrlForDomain(publicUrls, domain)
+    : null;
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
@@ -348,6 +361,27 @@ export const ProjectDomainChip = ({
           </Tooltip>
         )}
 
+        {publicUrl ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setPublicUrlDialogOpen(true);
+                  }}
+                  aria-label={`Public URL ${publicUrl.url}`}
+                  className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+                />
+              }
+            >
+              <GlobeIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipContent>Public at {publicUrl.url}</TooltipContent>
+          </Tooltip>
+        ) : null}
+
         {launchProfiles.session ? (
           <LaunchProfileBadge session={launchProfiles.session} />
         ) : null}
@@ -440,6 +474,15 @@ export const ProjectDomainChip = ({
               )}
               {urlCopied ? "URL copied" : "Copy URL"}
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={(event) => {
+                event.stopPropagation();
+                setPublicUrlDialogOpen(true);
+              }}
+            >
+              <GlobeIcon />
+              Public URL
+            </DropdownMenuItem>
             <ProjectEnvironmentFileMenuItem
               active={menuOpen}
               label={serviceTerminalTarget ? "Open .env" : "Open .env"}
@@ -484,6 +527,11 @@ export const ProjectDomainChip = ({
         domain={domain}
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}
+      />
+      <PublicUrlDialog
+        domain={domain}
+        open={publicUrlDialogOpen}
+        onOpenChange={setPublicUrlDialogOpen}
       />
       <ProjectEnvironmentFileDialog
         open={environmentFileDialogOpen}
