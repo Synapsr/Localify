@@ -3,6 +3,45 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.2.0 - 2026-11-05
+
+Your coding agents can now do everything you do in Localify, and clean up after
+themselves.
+
+### New
+
+- **Let Claude Code, Codex, and Cursor do everything Localify does.** Connect them with
+  `localify agent install`, or **Connect agents** in Settings → AI agents. They get every
+  action of the app and the command line, from starting services to managing domains,
+  and always the ones of the version you have installed. This replaces the Localify
+  skill: `localify agent install-skill` is now `localify agent install`.
+  [Coding agents](https://github.com/Synapsr/Localify/blob/main/docs/README.md#coding-agents)
+- **Start a service in the app from the command line, and read its output anywhere.**
+  `localify dev --in-app` starts a service in the app's terminal, as its launch button
+  does, and returns once it answers. `localify logs <service>` prints the same lines the
+  app shows, `localify services status` shows what runs and since when, and
+  `localify stop` and `restart` act on it from any folder. Without the app, `--detach`
+  runs the service in the background.
+  [Services in the app](https://github.com/Synapsr/Localify/blob/main/docs/README.md#services-in-the-app-from-the-command-line)
+- **Remove a worktree and its domains when the work is done.**
+  `localify project env remove <env> --delete-worktree` stops the worktree's services,
+  deletes its folder, and unregisters its domains, so finished branches leave nothing
+  behind. If the worktree has uncommitted changes, nothing is removed.
+  `localify project env prune` cleans up after worktrees you deleted another way.
+  [Cleaning up worktrees](https://github.com/Synapsr/Localify/blob/main/docs/README.md#cleaning-up-worktrees)
+
+### Improved
+
+- **Rename, disable, or move a project from the command line.** `localify project update`
+  renames a project, enables or disables it, or points it at the folder it moved to, and
+  `localify project domain attach` and `detach` move a domain in or out of a project, as
+  the app already could.
+
+### Fixed
+
+- `localify dev` no longer changes `.gitignore` in a Git worktree, which showed up as a
+  change to commit there.
+
 ## 1.1.1 - 2026-11-05
 
 ### Fixed
