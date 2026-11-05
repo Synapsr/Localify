@@ -7,7 +7,7 @@ This document is the entry point for all architecture and convention decisions f
 ## Core Principles
 
 1. **Rust-first desktop core** — The core is a Rust binary (`src/`). The desktop UI is a thin Tauri shell that calls Rust commands via `invoke`. No business logic lives in the desktop frontend.
-2. **Desktop UI stays local-only** — The desktop UI talks to the Rust core through Tauri commands only. There is no HTTP client, no SQL driver, no ORM, no auth in `desktop-ui/`.
+2. **Desktop UI stays local-only** — The desktop UI talks to the Rust core through Tauri commands only. There is no HTTP client, no SQL driver, no ORM, no auth in `desktop-ui/`. Signing in to Localify Cloud and every cloud call run in Rust; the UI shows the sign-in code and the results.
 3. **Type-safe end-to-end** — TypeScript strict mode in the desktop UI. DTOs in [desktop-ui/src/types/localify.ts](../desktop-ui/src/types/localify.ts) mirror the serializable types returned by `DesktopApi` (see [src/desktop/](../src/desktop/)).
 4. **Minimal abstraction** — No premature helpers or wrappers. Three similar lines beats one clever abstraction.
 5. **Minimal workspace, separate apps** — The repo can host multiple app entry points when needed. Today that means the Tauri desktop shell plus a standalone website under `apps/web`. There are still no shared packages or internal frontend libraries.

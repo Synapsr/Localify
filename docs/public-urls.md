@@ -1,381 +1,188 @@
 # Public URLs
 
-> **Design note for a feature that is not built.** Nothing described here ships in Localify today.
+The v1 contract for public URLs: what the cloud, the daemon, the CLI, the MCP server and the desktop app each do, and the messages between them. The decisions behind it are ADRs 0019 to 0023. The measurements that chose the transport are in `spikes/public-url/README.md` on the `feat/public-urls-spike` branch.
 
-Planning reference for native Localify public URLs. This document summarizes the v1 product and architecture decisions captured in `CONTEXT.md` and `docs/adr/`.
+## What it does
 
-## Intent
-
-Public URLs let a Localify user expose a project-owned local domain to the internet without changing the local routing model. The public feature should feel as simple as copying a stable URL, while the implementation keeps ownership, DNS, access protection, and connector state explicit.
-
-LocalCan is a useful UX reference for persistent URLs, pause/resume, custom domains, access protection, and traffic visibility. Localify should not integrate LocalCan or copy its daemon/project model; public URLs are native Localify Cloud functionality.
-
-## Language
-
-Use the terms from `CONTEXT.md` consistently:
-
-- `Local Domain`: the configured `.localify` domain attached to a project.
-- `Public Endpoint`: the cloud-owned exposure of one local domain.
-- `Public URL`: an internet-reachable address attached to a public endpoint.
-- `Persistent Public URL`: a stable Localify-owned public URL.
-- `Custom Public URL`: a user-owned hostname attached to a public endpoint.
-- `Access Protection`: one shared password for one public URL.
-- `Access Exception`: a path prefix that bypasses access protection.
-
-Avoid using `tunnel` as the product term. It can describe internal transport, but the user-facing model is public endpoints and public URLs.
-
-## V1 Scope
-
-V1 supports:
-
-- Project-attached configured local domains only.
-- Exact local domains.
-- Wildcard local domains using existing Localify semantics: root plus one subdomain label.
-- Localify-owned public URLs with a generated, editable slug.
-- Custom public URLs with DNS verification and managed TLS.
-- Optional access protection per public URL.
-- Path-prefix access exceptions per protected public URL.
-- Native Localify connector integrated with the daemon/runtime.
-- Cloudflare-hosted Localify Cloud control plane and edge entry.
-- CLI parity for all desktop UI actions.
-- Enriched request logs for public traffic.
-
-V1 does not support:
-
-- Temporary/random public URLs.
-- External or Docker-discovered domains.
-- Standalone/unassigned local domains.
-- Multi-level wildcard forwarding.
-- Custom header rewrite rules.
-- Full traffic inspection with bodies, replay, or complete header capture.
-- Import/export of public endpoints through local settings transfer.
-- Multiple invited users or multiple passwords per public URL.
-- Method, header, token, or IP based access rules.
-
-## Core Model
-
-One configured local domain may have zero or one active public endpoint.
-
-One public endpoint may have one or more public URLs. A public URL may be Localify-owned or custom.
-
-Example:
+A signed-in user exposes a local domain of one of their projects at `https://<slug>.localify.fyi`. With `--wildcard`, every environment of the project is reachable too, at `https://<slug>--<label>.localify.fyi`. That is the main use case: open from a laptop or a phone the dev servers an agent runs on another machine. Every URL asks for a password by default.
 
 ```text
-Project: Journal
-Local Domain: journal.localify
-Public Endpoint: pe_123
-Public URLs:
-  - https://journal-a8f3.localify.dev
-  - https://preview.journal.com
+browser ──https──▶ Cloudflare edge ──▶ Localify Cloud Worker (password, routing)
+                                          │ fetch https://m-<machine>.localify.dev
+                                          ▼
+                              named Cloudflare Tunnel of the serving machine
+                                          │ cloudflared on that machine
+                                          ▼
+                     daemon public ingress (127.0.0.1) ──▶ Localify router ──▶ dev server
 ```
 
-The public endpoint targets the local domain, not the route target. Public traffic flows through Localify's existing local routing:
+V1 is invite-only: GitHub accounts on an allowlist. Out of v1: custom domains, temporary URLs, renaming a slug, several URLs per local domain, Docker or external domains, request inspection, billing.
 
-```text
-Public URL -> Localify Cloud -> Localify connector -> Local Domain -> Route Target
+## Names
+
+- **Slug:** 3 to 32 characters, `a-z`, `0-9` and `-`, starting with a letter, not ending with `-`, never containing `--`. Generated as the first label of the local domain plus 4 hex characters (`journal-a8f3`), or chosen with `--slug`. Unique across all users.
+- **Public host:** `<slug>.localify.fyi`, or `<slug>--<label>.localify.fyi` for a wildcard URL. The first `--` separates the slug from the label, so labels may contain `--` (`web--feature`). The slug comes first so that `--` never sits at positions 3–4 of the DNS label, which IDNA reserves (ADR 0022).
+- **Local host:** `<local-domain>` for `<slug>`, and `<label>.<local-domain>` for `<slug>--<label>`. A label is `a-z`, `0-9` and `-`, does not start or end with `-`, and the whole public DNS label stays within 63 characters. Longer names cannot be served; the CLI says so instead of truncating.
+- **Machine:** one signed-in installation of Localify. Its tunnel hostname is `m-<machine-id>.localify.dev`.
+
+## Cloud (`apps/cloud`)
+
+One Cloudflare Worker, deployed with wrangler, with a D1 database.
+
+- `api.localify.dev`: the JSON API for the CLI, the daemon and the app (Worker custom domain).
+- `*.localify.fyi/*`: public traffic (Worker route; the zone has a proxied `*` AAAA record).
+
+### Configuration
+
+| Name | Kind | Value |
+|---|---|---|
+| `GITHUB_CLIENT_ID` | var | the OAuth App's client ID (device flow, no secret) |
+| `ALLOWED_GITHUB_LOGINS` | var | comma-separated, case-insensitive |
+| `PUBLIC_BASE_DOMAIN` | var | `localify.fyi` |
+| `MACHINE_DOMAIN` | var | `localify.dev` |
+| `CLOUDFLARE_ACCOUNT_ID`, `MACHINE_ZONE_ID` | var | account, and the `localify.dev` zone |
+| `CLOUDFLARE_API_TOKEN` | secret | Tunnel Edit, DNS Edit (Infisical `localify` `/cloud`) |
+| `COOKIE_KEY` | secret | signs access cookies |
+| `INGRESS_KEY` | secret | derives each machine's ingress secret |
+
+### Data (D1)
+
+```sql
+users        (id TEXT PRIMARY KEY, github_id INTEGER UNIQUE NOT NULL, login TEXT NOT NULL, created_at INTEGER NOT NULL)
+machines     (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, tunnel_id TEXT NOT NULL,
+              dns_record_id TEXT NOT NULL, ingress_port INTEGER NOT NULL, created_at INTEGER NOT NULL)
+tokens       (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, machine_id TEXT NOT NULL, created_at INTEGER NOT NULL)
+public_urls  (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, local_domain TEXT NOT NULL,
+              wildcard INTEGER NOT NULL, machine_id TEXT, protected INTEGER NOT NULL,
+              password_hash TEXT, password_salt TEXT, password_version INTEGER NOT NULL, created_at INTEGER NOT NULL)
+url_exceptions (url_id TEXT NOT NULL, path_prefix TEXT NOT NULL, PRIMARY KEY (url_id, path_prefix))
 ```
 
-This preserves project enablement, route matching, path routing, local diagnostics, and logs.
+Tokens are stored as SHA-256 hashes. Passwords use PBKDF2-SHA-256 with a random salt and 100,000 iterations. A user has at most 10 public URLs.
 
-## Wildcards
+### API
 
-Wildcard public endpoints mirror Localify wildcard semantics.
+Every request except the device flow carries `Authorization: Bearer <token>`. Errors are `{"error": "<code>", "message": "<sentence for a person>"}` with a 4xx or 5xx status. Field names are camelCase.
 
-Supported:
+| Method and path | Body | Response |
+|---|---|---|
+| `POST /v1/auth/device` | — | `{deviceCode, userCode, verificationUri, interval, expiresIn}` (GitHub's device flow) |
+| `POST /v1/auth/device/token` | `{deviceCode, machineName, ingressPort}` | `200 {token, user, machine}`; `428 authorization_pending`; `429 slow_down`; `403 not_allowed`; `410 expired_token` |
+| `GET /v1/me` | — | `{user, machine}` |
+| `POST /v1/auth/logout` | — | `204`. Revokes the token, deletes the machine's tunnel and DNS record, and detaches its URLs (`machine: null`). |
+| `GET /v1/public-urls` | — | `{publicUrls: [PublicUrl]}`, the user's URLs |
+| `POST /v1/public-urls` | `{localDomain, wildcard, slug?, protection: {mode: "password", password?} \| {mode: "public"}}` | `201 {publicUrl, password?}`. The calling machine serves it. `password` is present only when the server generated it. `409 slug_taken`, `422 invalid_slug`, `403 quota_exceeded`. |
+| `DELETE /v1/public-urls/{id}` | — | `204` |
+| `PUT /v1/public-urls/{id}/protection` | same `protection` object | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
+| `POST /v1/public-urls/{id}/exceptions` | `{pathPrefix}` | `{publicUrl}` |
+| `DELETE /v1/public-urls/{id}/exceptions` | `{pathPrefix}` | `{publicUrl}` |
+| `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine |
+| `GET /v1/machines/self/runtime` | — | `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}`, the URLs this machine serves |
 
-```text
-*.journal.localify
-*.preview.journal.com
-
-preview.journal.com          -> journal.localify
-client-a.preview.journal.com -> client-a.journal.localify
-client-b.preview.journal.com -> client-b.journal.localify
+```ts
+type User = { login: string };
+type Machine = { id: string; name: string };
+type PublicUrl = {
+  id: string;
+  slug: string;
+  url: string;                 // https://<slug>.localify.fyi
+  localDomain: string;
+  wildcard: boolean;
+  machine: Machine | null;     // null when no machine serves it
+  protection: { mode: "password" | "public"; exceptions: string[] };
+  createdAt: string;           // RFC 3339
+};
 ```
 
-Not supported in v1:
+Signing in registers the machine: the Worker creates a named tunnel `localify-<machine-id>` with `config_src: "cloudflare"`, sets its ingress to `m-<machine-id>.localify.dev → http://127.0.0.1:<ingressPort>` with a final `http_status:404` rule, and creates the proxied CNAME `m-<machine-id>.localify.dev → <tunnel-id>.cfargotunnel.com`. The ingress secret is `HMAC-SHA-256(INGRESS_KEY, machine id)` in hex; it is never stored.
 
-```text
-a.b.preview.journal.com -> a.b.journal.localify
+### Public traffic
+
+For a request to `*.localify.fyi`, the Worker:
+
+1. Parses the host into slug and label, and loads the public URL with its machine and exceptions. Unknown slug, a label on a non-wildcard URL, or an invalid label: a 404 page. No serving machine: a 503 "offline" page. Lookups are cached in the isolate for 10 seconds, so a deleted URL or a new password reaches every location within that time.
+2. Checks access when the URL is protected and the path matches no exception. Access is the cookie `__Host-localify-access` = `<expiry>.<password version>.<hex HMAC-SHA-256(COOKIE_KEY, host|url id|version|expiry)>`, valid 7 days, `Secure; HttpOnly; SameSite=Lax; Path=/`, set for the exact host (each wildcard label signs in separately). Without it, `GET` and `HEAD` return the password page (401, HTML) and other methods a plain 401. The page posts to `/__localify/access` with the password and a same-host `next` path; a correct password sets the cookie and redirects with 303. Attempts are rate limited per URL and client IP. A WebSocket handshake also needs the cookie, and its `Origin`, when present, must be the same host.
+3. Path exceptions match the request path as the URL parser normalizes it: equal to the prefix, or starting with the prefix followed by `/`. A prefix starts with `/`, and may not contain `..`, `%2f`, `%2F`, `\`, `?` or `#`.
+4. Forwards to `https://m-<machine-id>.localify.dev<path>?<query>` with the method, body and headers, after removing `Host`, `Forwarded`, `X-Real-IP`, every `X-Forwarded-*`, `X-Localify-*` and `CF-*` header, and the access cookie from `Cookie`. It adds:
+
+| Header | Value |
+|---|---|
+| `X-Localify-Ingress` | the machine's ingress secret |
+| `X-Localify-Public-Host` | the public host |
+| `X-Localify-Local-Host` | the local host |
+| `X-Localify-Url-Id` | the public URL id |
+| `X-Localify-Client-Ip` | `CF-Connecting-IP` |
+
+   Responses stream back unchanged, with `redirect: "manual"`. WebSocket upgrades pass through the same `fetch`. Cloudflare rewrites `X-Forwarded-Host` on the way to the tunnel, which is why the public host travels in a Localify header.
+
+## Daemon
+
+### Credentials
+
+`cloud.json` in the data directory, written with `write_private_file` (0600). The CLI, the app and the daemon all read it; the daemon runs as the user but outside the login session, so the Keychain is not an option.
+
+```json
+{ "apiBase": "https://api.localify.dev", "token": "lfy_…", "login": "teo-goulois",
+  "machineId": "…", "machineName": "teo-laptop" }
 ```
 
-Wildcard custom public URLs require wildcard DNS records. If the root hostname should work, it needs its own DNS record too:
+`LOCALIFY_CLOUD_API` overrides `apiBase` for development. Signing out deletes the file after the API call, or when the API is unreachable after a warning.
 
-```text
-preview.journal.com   CNAME <endpoint>.localify...
-*.preview.journal.com CNAME <endpoint>.localify...
+### Public ingress
+
+A listener on `127.0.0.1:<ingress port>`, only when the machine is signed in. The port is fixed per brand: 7381 for Localify, 7382 for Localify (Dev). For each request it:
+
+1. Compares `X-Localify-Ingress` with the ingress secret in constant time. A mismatch, or no secret yet: 403 with a generic body.
+2. Reads and removes every `X-Localify-*` header.
+3. Refuses paths under `/.localify/` with 404, so public traffic never reaches the open-in-editor or run-dev-server actions.
+4. Checks that the local host resolves to a domain of a project in the config. Docker and external registrations are not served. Otherwise: a generic 404.
+5. Hands the request to the router with `Host` set to the local host and a public source carrying the public host and client IP. The proxy then sets `X-Forwarded-Host` to the public host, `X-Forwarded-Proto: https`, `X-Forwarded-Port: 443`, `X-Forwarded-For` to the client IP and `X-Localify-Local-Domain` to the local host, for HTTP and WebSocket alike. The client address the router sees is the public client IP, never loopback.
+6. Holds one of 32 permits from the moment the request is admitted until its response head arrives. Over HTTP/2 a browser sends a whole module graph at once, and the proxy opens one upstream connection per request; without the cap the dev server's accept backlog overflows. Releasing at the head keeps SSE and other long responses from starving the rest.
+
+Errors on public traffic use generic pages: no project paths, no commands, no config details. Request log lines for public traffic add `source=public public_host=<host>`.
+
+### Tunnel
+
+When signed in and this machine serves at least one public URL, the daemon runs `cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:<ingress port + 10> run` with the tunnel token in the `TUNNEL_TOKEN` environment variable, never on the command line. It restarts it with backoff when it exits, and stops it when the last URL leaves this machine, on sign-out and on daemon shutdown. Its output goes to `cloudflared.log` next to the daemon log, truncated at each start.
+
+`cloudflared` is downloaded on first use from its GitHub release, at a version pinned in the code, into `<data dir>/bin/cloudflared-<version>`, and its SHA-256 is checked against a value pinned next to the version before it is made executable. A mismatch deletes the file and reports an error. Supported: macOS arm64 and x86_64, Linux x86_64 and arm64.
+
+The daemon fetches `GET /v1/machines/self/runtime` at start, every 5 minutes, and when the management socket receives `public_refresh`. The CLI and the app send it after every change. The management command `public_status` returns:
+
+```json
+{ "signedIn": true, "tunnel": "stopped" | "starting" | "connected" | "error", "connections": 4,
+  "error": null, "servedUrls": ["…id"] }
 ```
 
-Access protection on a wildcard public URL applies to the whole wildcard. If one subdomain later needs a different policy, model it as a more specific exact public URL.
-
-## Localify-Owned Public URLs
-
-Localify-owned public URLs use a human-readable slug plus a short uniqueness suffix:
-
-```text
-journal-a8f3.localify.dev
-```
-
-Rules:
-
-- Generated at creation time.
-- Editable with availability validation.
-- Changing it is explicit because the old URL may break.
-- Deleted Localify-owned public URLs stay reserved for the same cloud identity for 30 days.
-- A wildcard public URL counts as one public URL reservation.
-
-## Custom Public URLs
-
-Custom public URLs require DNS verification before becoming active.
-
-Flow:
-
-1. User adds a hostname.
-2. Localify Cloud returns the required DNS record.
-3. User creates the DNS record.
-4. Localify verifies DNS.
-5. Localify provisions/validates TLS.
-6. URL becomes active.
-
-Custom URLs detach immediately when removed and require DNS verification to attach elsewhere.
-
-## Access Protection
-
-Access protection belongs to each public URL, not the public endpoint.
-
-Example:
-
-```text
-https://journal-a8f3.localify.dev -> password protected
-https://preview.journal.com       -> public
-```
-
-V1 behavior:
-
-- One shared password per protected public URL.
-- Passwords are never stored in plaintext.
-- Protection is enforced at Localify Cloud before traffic reaches the connector.
-- Browser users see a Localify password page.
-- Successful auth sets a browser cookie scoped to that public URL.
-- HTTP Basic Auth is not the v1 UX.
-- Path-prefix exceptions can bypass protection.
-
-Access exceptions use Localify path-prefix semantics:
-
-```text
-/api/webhooks/stripe
-/auth/callback
-/healthz
-/.well-known
-```
-
-`/api` matches `/api` and `/api/users`, but not `/apiv2`.
-
-## Request Routing And Headers
-
-Localify Cloud resolves the public URL to a public endpoint. The connector routes by local domain.
-
-The upstream app should see the public host by default:
-
-```text
-Host: preview.journal.com
-X-Forwarded-Host: preview.journal.com
-X-Forwarded-Proto: https
-X-Forwarded-For: <client-ip>
-X-Localify-Local-Domain: journal.localify
-```
-
-V1 does not expose user-configurable header rewrite rules.
-
-## Runtime States
-
-Keep endpoint runtime state separate from public URL provisioning state.
-
-Endpoint runtime examples:
-
-- `online`: connector is serving the endpoint.
-- `offline`: no active connector.
-- `disabled`: endpoint reservation exists but is intentionally not served.
-- `targetUnavailable`: connector is online but the local target is down.
-- `offlineByProject`: project is disabled, so public serving is stopped.
-- `orphanedLocalDomain`: cloud endpoint exists but the matching local domain is missing locally.
-
-Public URL provisioning examples:
-
-- `active`: URL can receive traffic.
-- `pendingDns`: custom DNS is not verified.
-- `pendingCertificate`: DNS is verified, TLS is not ready.
-- `error`: provisioning failed with a specific message.
-
-Endpoint creation is allowed when the local target is not reachable. The URL can be provisioned while Localify reports the target as unavailable until the dev server starts.
-
-## Project And Domain Rules
-
-Public endpoints v1 attach only to configured local domains assigned to projects.
-
-Current compatibility paths for standalone/unassigned domains may still exist in code, but new public endpoint flows should not use them.
-
-Rules:
-
-- Project disabled: public endpoints are not served, but reservations remain.
-- Endpoint disabled: reservation remains, connector does not serve it.
-- Deleting a public local domain: detach endpoint by default; deleting the cloud endpoint is an explicit destructive option.
-- Renaming or deleting a local domain that affects a public endpoint requires Localify Cloud to be reachable.
-- Cloud-aware mutations must write through Cloud first, then sync locally.
-- If a domain is removed outside the cloud-aware flow, the next cloud sync can surface the endpoint as orphaned.
-
-## Cloud Identity
-
-Cloud identity will be defined when Localify Cloud is built. It must cover endpoint ownership, contact email, quotas, and the machines that may serve an endpoint.
-
-Localify Cloud checks the identity server-side before cloud mutations. The desktop app must not rely on local cached state alone for URL reservation or endpoint mutations.
-
-## Machine Ownership
-
-Endpoints are owned by the cloud identity, but served by one selected local machine at a time.
-
-Rules:
-
-- A connector authenticates with a short-lived token scoped to endpoint, machine, and cloud identity.
-- A long-lived credential is not sent on every connector session.
-- Automatic daemon startup may reconnect endpoints selected for that machine.
-- It must not silently take over endpoints currently served by another machine.
-- Switching machines is an explicit claim.
-- A claim replaces the previous connector session.
-
-## Localify Cloud
-
-V1 runs on Cloudflare.
-
-Responsibilities:
-
-- Ownership by cloud identity.
-- Endpoint and URL reservation.
-- DNS verification.
-- TLS readiness.
-- Access protection.
-- Public traffic entry.
-- Connector token issuance.
-- Runtime coordination.
-- Retention of deleted Localify-owned URLs.
-
-Recommended shape:
-
-- Worker API for CRUD, DNS verification, auth, and CLI/DesktopApi calls.
-- One Durable Object per public endpoint for connector session and traffic dispatch.
-- Storage for endpoint metadata, public URLs, quotas, retention, and audit fields.
-
-The local connector remains native Localify Rust code. Cloudflare is the hosted control plane and public edge runtime, not an external tunnel binary dependency.
-
-## Local Cache
-
-The desktop may keep a public endpoint cache outside `config.toml`, for example:
-
-```text
-~/Library/Application Support/Localify/public_endpoints_cache.json
-```
-
-Rules:
-
-- Cache is resynchronizable from Localify Cloud.
-- Cache is excluded from settings export/import.
-- Cache must not store shared passwords or public access secrets.
-- Cache may store ids, URLs, statuses, access mode, exception paths, timestamps, and summary counts.
-
-## Desktop API
-
-Use dedicated public endpoint commands instead of embedding cloud mutations in local domain commands.
-
-Minimum v1 commands:
-
-- `list_public_endpoints`
-- `create_public_endpoint`
-- `update_public_endpoint_enabled`
-- `delete_public_endpoint`
-- `create_public_url`
-- `update_public_url`
-- `delete_public_url`
-- `check_public_url_dns`
-- `update_public_url_access_protection`
-- `rotate_public_url_password`
-- `select_public_endpoint_machine` or `claim_public_endpoint`
-
-Domain list DTOs may include only lightweight public endpoint summaries for project-list display. Detailed public endpoint state comes from dedicated commands.
+`connections` comes from the `/ready` endpoint of the metrics server.
 
 ## CLI
 
-Every desktop action must be available through the CLI so agents can perform the same work.
-
-User-facing namespace:
+Human output on a terminal, JSON when stdout is not a terminal or with `--json`. Nothing prompts when stdin is not a terminal. Every failure says what to do next.
 
 ```bash
-localify public-url
-```
-
-Expected v1 commands:
-
-```bash
+localify login                      # device flow: prints the code and URL, opens the browser on a terminal, waits
+localify logout
+localify whoami
 localify public-url list
-localify public-url create <local-domain>
-localify public-url add-custom <local-domain> <hostname>
-localify public-url remove <url-or-id>
-localify public-url enable <endpoint-or-domain>
-localify public-url disable <endpoint-or-domain>
-localify public-url protect <url-or-id>
-localify public-url unprotect <url-or-id>
-localify public-url password rotate <url-or-id>
-localify public-url exceptions add <url-or-id> <path-prefix>
-localify public-url exceptions remove <url-or-id> <path-prefix>
-localify public-url dns check <url-or-id>
-localify public-url claim <endpoint-or-domain>
+localify public-url create <local-domain> [--wildcard] [--slug <slug>] [--password <p> | --public]
+localify public-url remove <url-or-slug-or-id> [--yes]
+localify public-url protect <url-or-slug-or-id> [--password <p>]   # sets or rotates; generates when omitted
+localify public-url unprotect <url-or-slug-or-id> [--yes]
+localify public-url exception add <url-or-slug-or-id> <path-prefix>
+localify public-url exception remove <url-or-slug-or-id> <path-prefix>
+localify public-url claim <url-or-slug-or-id>
 ```
 
-CLI behavior:
+`create` checks that the local domain belongs to a project on this machine before calling the cloud, prints the URL and, when one was generated, the password with a note that it is shown once. A generated password is 4 lowercase words from a fixed list, joined by `-`.
 
-- Human-readable output for interactive terminals.
-- JSON automatically when stdout is not a TTY.
-- `--json` forces JSON.
-- Interactive prompts are allowed in TTY sessions.
-- Every prompt must have a flag-driven non-interactive path.
-- Non-TTY execution must never block waiting for input.
-- Destructive flows need explicit confirmation or flags such as `--yes`.
+## MCP
 
-## Logs
+One tool per command except `login`, `logout` and `unprotect`: signing in and opening a URL to everyone are for a person to decide (ADR 0018). `public_url_create` has no `public` option, so an agent always creates a protected URL and receives its password to pass on. `public_url_remove` is destructive.
 
-V1 enriches existing request logs rather than building a full traffic inspector.
+## Desktop app
 
-Capture enough dimensions for debugging:
+- **Settings → Localify Cloud:** sign in (shows the code, opens github.com), who is signed in, sign out, and the tunnel status.
+- **Domain detail → Public URL:** create (wildcard switch for a project's namespace domain), the URL with copy and open, the password shown once after create or rotate with a copy button, protection on and off, path exceptions, claim when another machine serves it, remove. Online or offline from `public_status`.
 
-- source: local or public
-- public URL used
-- local domain routed
-- method, path, status, duration
-- client IP and derived location if available
-- access protection outcome
-- access exception matched, if any
-- endpoint id and public URL id where useful
-
-Logs remain scoped by local domain. Public URLs are aliases/sources for that local entrypoint.
-
-## Quotas
-
-Track public endpoint and public URL quotas separately from local project/domain limits.
-
-Rules:
-
-- One public endpoint exposes one local domain.
-- One public URL is one address attached to an endpoint.
-- Wildcard public endpoint counts as one endpoint.
-- Wildcard public URL counts as one URL.
-
-Exact quota values are not fixed in this document.
-
-## Open Implementation Decisions
-
-The following still need design during implementation:
-
-- Exact connector transport protocol between daemon and Durable Object.
-- Cloudflare storage choice for metadata beyond Durable Object state.
-- DNS/TLS provisioning details for custom domains.
-- Exact DTO fields and status enum names.
-- Exact CLI prompts and flag names.
-- Exact UI layout and polish.
+All of it goes through `DesktopApi`, which calls the same application use cases as the CLI. The app does no HTTP itself.

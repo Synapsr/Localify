@@ -1,6 +1,7 @@
-> **Superseded.** Localify is now free and open source and has no licenses.
-> Cloud identity will be redefined when Localify Cloud is built. The original
-> decision is kept below for history.
+> **Superseded** by [ADR 0020](0020-cloud-accounts-sign-in-with-github.md):
+> Localify is free and open source and has no licenses, and Localify Cloud
+> identifies people by their GitHub account. The original decision is kept
+> below for history.
 
 # License Identity for Public Endpoints
 

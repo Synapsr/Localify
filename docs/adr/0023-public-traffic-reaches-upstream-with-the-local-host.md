@@ -1,0 +1,5 @@
+# Public Traffic Reaches Upstream Apps With the Local Host
+
+Public requests reach the upstream app with `Host` set to the local domain, the public host in `X-Forwarded-Host` and `X-Forwarded-Proto: https`. This reverses the part of ADR 0001 that forwarded the public host in `Host`. Localify adds the `.localify` domain to dev server allowlists such as Vite's `server.allowedHosts`; with the public host in `Host`, those servers would reject public traffic unless every project also allowed `localify.fyi`. The trade-off is that apps building absolute URLs, such as OAuth redirect URIs, must read `X-Forwarded-Host`, which most frameworks do once told to trust the proxy.
+
+Public traffic enters the daemon on its own loopback listener and goes through the same router as local traffic, so project enablement, routes and logs apply. The router treats it as coming from the public client, not from loopback: the `/.localify/` actions are refused and error pages carry no local paths or commands.

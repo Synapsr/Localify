@@ -1,6 +1,6 @@
 # Localify
 
-Localify gives local development projects stable local domains. Public URLs, which would expose selected local entrypoints for outside access, are designed but not built yet.
+Localify gives local development projects stable local domains, and exposes chosen ones on public URLs through Localify Cloud.
 
 ## Language
 
@@ -65,29 +65,33 @@ A path mapping on a local domain that sends matching requests to a local target.
 _Avoid_: Service, public URL
 
 **Public URL**:
-An internet-reachable address attached to a public endpoint. A public URL owns its own access protection settings.
-_Avoid_: Domain, project URL, public endpoint
+An internet-reachable address, `<slug>.localify.fyi`, that exposes one local domain of a project through the machine that serves it. It is protected by a password unless its creator opened it.
+_Avoid_: Tunnel, public endpoint, share link
+
+**Wildcard Public URL**:
+A public URL that also exposes every one-label subdomain of its local domain, such as the project's environments, at `<slug>--<label>.localify.fyi`.
+_Avoid_: Multi-level wildcard
+
+**Slug**:
+The unique name of a public URL under `localify.fyi`. It never contains `--`.
+_Avoid_: Subdomain, public domain
 
 **Access Protection**:
-A public URL rule that requires one shared password before traffic can reach the public endpoint.
+The shared password a public URL asks for before any traffic reaches the machine.
 _Avoid_: User login, account access
 
 **Access Exception**:
-A path prefix on a protected public URL that remains reachable without the shared password.
-_Avoid_: Route, public endpoint exception
+A path prefix on a protected public URL that stays reachable without the password, for webhooks and OAuth callbacks.
+_Avoid_: Route, bypass
 
-**Public Endpoint**:
-The public exposure of one local domain outside the developer's machine. A public endpoint has one or more public URLs and can be enabled or disabled without losing its reservation.
-_Avoid_: Public URL, tunnel
+**Localify Cloud**:
+The hosted service behind public URLs: accounts, URL reservations, access protection and the public entry point.
+_Avoid_: Backend, server, relay
 
-**Wildcard Public Endpoint**:
-A public endpoint for a wildcard local domain that preserves one subdomain label from the public URL to the local domain.
-_Avoid_: Multi-level wildcard
+**Cloud Account**:
+A person signed in to Localify Cloud with GitHub. Each machine they sign in from serves the public URLs it created or claimed.
+_Avoid_: License, user profile
 
-**Persistent Public URL**:
-A stable public URL reserved for a local domain and meant to survive local app or machine restarts.
-_Avoid_: Temporary URL, random URL
-
-**Custom Public URL**:
-A public URL on a domain name owned by the user.
-_Avoid_: Custom domain, local domain
+**Serving Machine**:
+The one signed-in machine whose tunnel carries a public URL's traffic. Another machine takes over with an explicit claim.
+_Avoid_: Host, connector, agent
