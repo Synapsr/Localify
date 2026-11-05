@@ -1,0 +1,257 @@
+use std::future::Future;
+use std::time::Duration;
+
+use anyhow::Context;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use hyper::{Method, Request, StatusCode};
+use hyper_rustls::HttpsConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+
+pub const DEFAULT_API_BASE: &str = "https://api.localify.dev";
+/// Points the CLI, the app and the daemon at another API, such as
+/// `wrangler dev` while working on the cloud.
+const API_BASE_ENV: &str = "LOCALIFY_CLOUD_API";
+const TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The API base for a new sign-in. A signed-in machine uses the one saved in
+/// its credentials.
+pub fn api_base() -> String {
+    std::env::var(API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CloudError {
+    /// The API refused the request and said why.
+    #[error("{message}")]
+    Api {
+        status: u16,
+        code: String,
+        message: String,
+    },
+    #[error(
+        "Could not reach Localify Cloud at {api_base}: {reason}. Check the connection and try again."
+    )]
+    Unreachable { api_base: String, reason: String },
+    #[error(
+        "Localify Cloud sent a response this version cannot read ({0}). Update Localify and try again."
+    )]
+    InvalidResponse(String),
+}
+
+impl CloudError {
+    /// The API's error code, such as `authorization_pending`.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Api { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+}
+
+/// A JSON client for the Localify Cloud API.
+#[derive(Clone)]
+pub struct CloudHttp {
+    api_base: String,
+    token: Option<String>,
+    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+}
+
+impl CloudHttp {
+    /// `token` is `None` only for the device flow, before sign-in.
+    pub fn new(api_base: impl Into<String>, token: Option<String>) -> Result<Self, CloudError> {
+        let api_base = api_base.into();
+        // An explicit provider, because the desktop app never installs a
+        // process-wide default one.
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_provider_and_webpki_roots(rustls::crypto::aws_lc_rs::default_provider())
+            .map_err(|error| CloudError::Unreachable {
+                api_base: api_base.clone(),
+                reason: format!("TLS setup failed: {error}"),
+            })?
+            // Plain HTTP only reaches a local `wrangler dev` set with LOCALIFY_CLOUD_API.
+            .https_or_http()
+            .enable_http1()
+            .build();
+        Ok(Self {
+            api_base,
+            token,
+            client: Client::builder(TokioExecutor::new()).build(connector),
+        })
+    }
+
+    pub fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    /// Sends a request and reads a JSON response.
+    pub async fn send<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, CloudError> {
+        let bytes = self.request(method, path, body).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| CloudError::InvalidResponse(error.to_string()))
+    }
+
+    /// Sends a request whose success has no body, such as a `204`.
+    pub async fn send_no_content(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(), CloudError> {
+        self.request(method, path, body).await.map(|_| ())
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<Bytes, CloudError> {
+        let request = self.build(method, path, body)?;
+        let unreachable = |reason: String| CloudError::Unreachable {
+            api_base: self.api_base.clone(),
+            reason,
+        };
+        let response = tokio::time::timeout(TIMEOUT, self.client.request(request))
+            .await
+            .map_err(|_| unreachable(format!("no answer after {} s", TIMEOUT.as_secs())))?
+            .map_err(|error| unreachable(error_chain(&error)))?;
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|error| unreachable(error_chain(&error)))?
+            .to_bytes();
+        if status.is_success() {
+            Ok(bytes)
+        } else {
+            Err(api_error(status, &bytes))
+        }
+    }
+
+    fn build(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<Request<Full<Bytes>>, CloudError> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.api_base))
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, concat!("localify/", env!("CARGO_PKG_VERSION")));
+        if let Some(token) = &self.token {
+            builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let body = match body {
+            Some(value) => {
+                builder = builder.header(CONTENT_TYPE, "application/json");
+                Full::new(Bytes::from(value.to_string()))
+            }
+            None => Full::new(Bytes::new()),
+        };
+        builder.body(body).map_err(|error| CloudError::Unreachable {
+            api_base: self.api_base.clone(),
+            reason: format!("invalid request: {error}"),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    error: String,
+    message: String,
+}
+
+fn api_error(status: StatusCode, body: &[u8]) -> CloudError {
+    match serde_json::from_slice::<ErrorBody>(body) {
+        Ok(body) => CloudError::Api {
+            status: status.as_u16(),
+            code: body.error,
+            message: body.message,
+        },
+        Err(_) => CloudError::Api {
+            status: status.as_u16(),
+            code: format!("http_{}", status.as_u16()),
+            message: format!("Localify Cloud answered {status}. Try again in a moment."),
+        },
+    }
+}
+
+/// hyper's top-level errors say little ("client error (Connect)"); the cause
+/// is further down the chain.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
+/// Runs one cloud call from synchronous code, such as the CLI and
+/// `DesktopApi`. It starts its own runtime, so async code must `.await` the
+/// call instead.
+pub fn block_on<F: Future>(future: F) -> anyhow::Result<F::Output> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Could not start the runtime for a Localify Cloud call")?;
+    Ok(runtime.block_on(future))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_api_error_keeps_its_code_and_message() {
+        let error = api_error(
+            StatusCode::CONFLICT,
+            br#"{"error":"slug_taken","message":"journal-a8f3 is taken. Choose another slug."}"#,
+        );
+        assert_eq!(error.code(), Some("slug_taken"));
+        assert_eq!(
+            error.to_string(),
+            "journal-a8f3 is taken. Choose another slug."
+        );
+    }
+
+    #[test]
+    fn an_unreadable_error_body_still_gives_a_sentence() {
+        let error = api_error(StatusCode::BAD_GATEWAY, b"<html>");
+        assert_eq!(error.code(), Some("http_502"));
+        assert!(error.to_string().contains("502"));
+    }
+
+    #[test]
+    fn requests_carry_the_token_and_a_json_body() {
+        let http = CloudHttp::new("https://api.example", Some("lfy_t".into())).unwrap();
+        let request = http
+            .build(
+                Method::POST,
+                "/v1/public-urls",
+                Some(serde_json::json!({"localDomain": "journal.localify"})),
+            )
+            .unwrap();
+        assert_eq!(request.uri(), "https://api.example/v1/public-urls");
+        assert_eq!(request.headers()[AUTHORIZATION], "Bearer lfy_t");
+        assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
+    }
+}
