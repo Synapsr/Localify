@@ -51,11 +51,67 @@ run them as root, and start the daemon yourself with `localify start`.
 | `localify dev [service] --profile <name>` | Run a service on a [launch profile](launch-profiles.md) |
 | `localify profile init`            | Set up launch profiles interactively |
 | `localify exec --profile <name> -- <cmd>` | Run a command (not a service) on a launch profile |
+| `localify dev [service] --detach`  | Run a service in the background |
+| `localify services running`        | List the services Localify started |
+| `localify services logs <service>` | Print a background service's output |
+| `localify services stop <service>` | Stop a service Localify started |
+| `localify project update <project> ...` | Rename, enable, disable, or re-link a project |
+| `localify project domain attach\|detach <domain>` | Move a domain into or out of a project |
+| `localify project env remove <env> [--delete-worktree]` | Remove a worktree environment, and the worktree |
+| `localify project env prune`       | Remove environments whose folder is gone |
+| `localify agent install`           | Connect coding agents to Localify's MCP server |
+| `localify mcp`                     | The MCP server agents start |
 | `localify completions <shell>`     | Generate completions   |
 
 None of these need `sudo`, and Localify refuses to run under it. `install`, `uninstall`
 and `lan` ask for an administrator's approval when they have to change the system. The
 one exception is Linux with no systemd, where the system setup needs root.
+
+## Coding Agents
+
+`localify mcp` is an MCP server that gives Claude Code, Codex, and Cursor every Localify
+action as a tool: starting and stopping services, reading their output, projects,
+domains, routes, worktree environments, and the daemon. Each tool runs the CLI command of
+the same name, so an agent gets exactly what you get in a terminal. Because the server is
+the installed binary, agents always see the actions of the installed version.
+
+```bash
+localify agent install   # connect every agent installed here
+localify agent status    # see which ones are connected
+```
+
+`agent install` uses `claude mcp add` and `codex mcp add`, and edits
+`~/.cursor/mcp.json` for Cursor. The desktop app does the same from **Settings → AI
+agents → Connect agents**, and during setup unless you turn that off. Restart open agent
+sessions afterwards.
+
+### Services in the background
+
+`localify dev --detach` starts a service in the background, its output in a file, and
+returns once it listens. Any `localify dev`, in a terminal or not, can then be stopped from
+anywhere:
+
+```bash
+localify dev web --detach
+localify services logs web
+localify services stop web
+```
+
+### Cleaning up worktrees
+
+Running `localify dev` inside a Git worktree gives it its own environment: domains,
+certificates, and ports. When the work there is done, remove it from another folder:
+
+```bash
+localify project env remove feat-login --delete-worktree
+```
+
+This stops the environment's services, deletes the worktree with `git worktree remove`,
+and unregisters its domains. Git refuses when the worktree has uncommitted changes, and
+nothing is removed; `--force` discards them. The branch is kept. Without
+`--delete-worktree`, the folder stays and only Localify's side goes. For a worktree
+deleted another way, `localify project env prune` removes the environments whose folder
+is gone.
 
 ## Route Targets
 

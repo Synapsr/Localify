@@ -20,6 +20,9 @@ pub fn is_root() -> bool {
 #[cfg(unix)]
 mod unix;
 
+#[cfg(unix)]
+pub use unix::{process_started_at, signal_process_tree};
+
 /// Concrete process control type for the current platform.
 #[cfg(unix)]
 pub type PlatformProcessControl = unix::UnixProcessControl;

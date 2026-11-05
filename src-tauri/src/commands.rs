@@ -1,7 +1,7 @@
 use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
     AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest,
-    AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
+    AgentMcpInstallResultDto, AgentMcpStatusDto, AppConfigDto, AssignDomainProjectRequest,
     AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
     CliAccessDto, ConfigUpdateRequest, CreateProjectRequest, CreateProjectWithDomainsRequest,
     DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto, DetectProjectInitPlanRequest,
@@ -523,17 +523,17 @@ pub fn trust_ios_simulators(state: tauri::State<'_, AppState>) -> StepDto {
 }
 
 #[tauri::command]
-pub fn get_agent_skill_status(
+pub fn get_agent_mcp_status(
     state: tauri::State<'_, AppState>,
-) -> Result<AgentSkillStatusDto, String> {
-    state.api.agent_skill_status().map_err(map_error)
+) -> Result<AgentMcpStatusDto, String> {
+    state.api.agent_mcp_status().map_err(map_error)
 }
 
 #[tauri::command]
-pub fn install_agent_skill(
+pub fn install_agent_mcp(
     state: tauri::State<'_, AppState>,
-) -> Result<AgentSkillInstallResultDto, String> {
-    state.api.install_agent_skill().map_err(map_error)
+) -> Result<AgentMcpInstallResultDto, String> {
+    state.api.install_agent_mcp().map_err(map_error)
 }
 
 #[tauri::command]

@@ -1,15 +1,16 @@
-# Agent Skill and Bootstrap Plan
+# Agents and Bootstrap Plan
 
 Localify should help coding agents use Localify the way a human would, and go further when they create new projects.
 
 ## Decisions
 
-- Localify ships the `localify` Agent Skill with the app and keeps a user-local canonical copy in sync with the installed Localify version.
-- Localify delegates global multi-agent installation to the `skills` CLI instead of maintaining Claude Code, Codex, Cursor, and other agent paths directly.
-- The Agent Skill stays lightweight. It tells agents when and how to call Localify CLI commands; it does not duplicate bootstrap logic in helper scripts.
-- Agent skill installation is best-effort: missing Node.js or `npx` is an actionable settings state, not a Localify installation failure.
-- The default install targets detected agents only. Installing to every `skills`-supported agent is an explicit advanced option.
-- The skill covers both existing projects and Agent-Initialized Projects.
+- Agents reach Localify through its MCP server, `localify mcp`, not a skill. Every action of the desktop app and the CLI is a tool, and each tool runs one CLI command, so the CLI stays the only implementation (ADR 0018).
+- The server is the installed binary, so agents always get the actions of the installed version and nothing has to be synced after an update.
+- `localify agent install`, and the desktop's Connect agents button, register the server with detected agents through their own CLIs (`claude mcp add`, `codex mcp add`) or, for Cursor, `~/.cursor/mcp.json`. A missing agent CLI is reported with the command to run by hand, not a Localify installation failure.
+- The default install targets detected agents only.
+- The server's instructions cover both existing projects and Agent-Initialized Projects.
+- An agent that is done with a Git worktree removes it: `project env remove <env> --delete-worktree` stops the environment's services, deletes the worktree with `git worktree remove`, and unregisters its domains. Git's refusal on uncommitted changes is checked before anything changes; `--force` discards them. The branch is kept. `project env prune` removes environments whose folder was deleted another way.
+- Agents have no terminal to keep a dev server in: `dev --detach` runs it in the background with its output in a file, and `services stop` and `services logs` act on any run of `localify dev`.
 - For new Next.js projects, Localify should configure the app aggressively enough that agents can use the `.localify` URL immediately:
   - launch through `localify dev` with runtime `PORT`, `HOST`, `LOCALIFY_URL`, URL envs, Node CA env, and framework CLI flags where needed;
   - add the Local Domain to `allowedDevOrigins`;

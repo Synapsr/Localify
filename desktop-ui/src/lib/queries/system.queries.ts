@@ -1,8 +1,8 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import type {
-  AgentSkillInstallResultDto,
-  AgentSkillStatusDto,
+  AgentMcpInstallResultDto,
+  AgentMcpStatusDto,
   AutostartStatusDto,
   CliAccessDto,
   InstallResultDto,
@@ -29,7 +29,7 @@ import { invalidateBootstrapAnd } from "./shared";
 
 const systemQueryKeys = {
   all: () => ["system"] as const,
-  agentSkillStatus: () => [...systemQueryKeys.all(), "agent-skill-status"] as const,
+  agentMcpStatus: () => [...systemQueryKeys.all(), "agent-mcp-status"] as const,
   autostartStatus: () => [...systemQueryKeys.all(), "autostart-status"] as const,
   uninstallPreview: () => [...systemQueryKeys.all(), "uninstall-preview"] as const,
 } as const;
@@ -44,10 +44,10 @@ const systemMutationInvalidations = [
 
 export const systemQueries = {
   all: systemQueryKeys.all,
-  agentSkillStatus: () =>
-    queryOptions<AgentSkillStatusDto, Error>({
-      queryKey: systemQueryKeys.agentSkillStatus(),
-      queryFn: () => tauriClient.getAgentSkillStatus(),
+  agentMcpStatus: () =>
+    queryOptions<AgentMcpStatusDto, Error>({
+      queryKey: systemQueryKeys.agentMcpStatus(),
+      queryFn: () => tauriClient.getAgentMcpStatus(),
     }),
   autostartStatus: () =>
     queryOptions<AutostartStatusDto, Error>({
@@ -86,9 +86,9 @@ export const systemMutations = {
     mutationOptions<StepDto, Error, void>({
       mutationFn: () => tauriClient.trustIosSimulators(),
     }),
-  installAgentSkill: (queryClient: QueryClient) =>
-    mutationOptions<AgentSkillInstallResultDto, Error, void>({
-      mutationFn: () => tauriClient.installAgentSkill(),
+  installAgentMcp: (queryClient: QueryClient) =>
+    mutationOptions<AgentMcpInstallResultDto, Error, void>({
+      mutationFn: () => tauriClient.installAgentMcp(),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
     }),
   exportSettings: () =>

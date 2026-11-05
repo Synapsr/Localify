@@ -23,9 +23,9 @@
     "later": "나중에",
     "download": "지금 다운로드"
   },
-  "AgentSkill": {
+  "Agents": {
     "title": "에이전트에게 전부 맡기세요.",
-    "description": "Claude Code, Codex, Cursor로 /localify를 실행하세요. 프로젝트 전체를 설정해 주고, 고칠 게 있으면 말만 하면 됩니다."
+    "description": "Claude Code, Codex, Cursor를 Localify에 연결하세요. 에이전트가 프로젝트를 설정하고 서비스를 실행하며, 작업이 끝나면 워크트리도 정리합니다. 말만 하면 됩니다."
   },
   "Problem": {
     "titleLine1": "정말로 바뀌는",

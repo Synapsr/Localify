@@ -29,8 +29,8 @@ use crate::application::uninstall::Uninstall;
 use crate::application::unregister_domain::UnregisterDomain;
 use crate::branding::BRANDING;
 use crate::desktop::dto::{
-    AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest, AgentSkillAgentDto,
-    AgentSkillInstallResultDto, AgentSkillStatusDto, AppConfigDto, AssignDomainProjectRequest,
+    AddProjectServiceRequest, AddProjectServiceResultDto, AddRouteRequest, AgentMcpAgentDto,
+    AgentMcpInstallResultDto, AgentMcpStatusDto, AppConfigDto, AssignDomainProjectRequest,
     AttachProjectWorktreeRequest, AttachProjectWorktreeResultDto, AvailablePortDto, BootstrapDto,
     CertificateRefreshDto, CliAccessDto, ConfigUpdateRequest, CreateProjectRequest,
     CreateProjectWithDomainsRequest, DaemonLaunchDto, DaemonStatusDto, DetectProjectInitPlanDto,
@@ -230,12 +230,22 @@ impl DesktopApi {
         })
     }
 
-    pub fn agent_skill_status(&self) -> Result<AgentSkillStatusDto> {
-        map_agent_skill_status(crate::agent_skill::agent_skill_status()?)
+    pub fn agent_mcp_status(&self) -> Result<AgentMcpStatusDto> {
+        Ok(map_agent_mcp_status(crate::agent_mcp::agent_mcp_status(
+            &self.binary_path,
+        )?))
     }
 
-    pub fn install_agent_skill(&self) -> Result<AgentSkillInstallResultDto> {
-        map_agent_skill_install_result(crate::agent_skill::install_agent_skill()?)
+    pub fn install_agent_mcp(&self) -> Result<AgentMcpInstallResultDto> {
+        let result = crate::agent_mcp::install_agent_mcp(&self.binary_path)?;
+        Ok(AgentMcpInstallResultDto {
+            status: map_agent_mcp_status(result.status),
+            installed_agents: result
+                .installed_agents
+                .iter()
+                .map(|agent| agent.id().to_string())
+                .collect(),
+        })
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
@@ -2086,7 +2096,8 @@ impl DesktopApi {
             steps.push(step);
         }
         if !self.cli_mode
-            && let Some(step) = agent_skill_install_step(config.agent.install_skill)
+            && let Some(step) =
+                agent_mcp_install_step(config.agent.connect_agents, &self.binary_path)
         {
             steps.push(step);
         }
@@ -3813,36 +3824,22 @@ fn map_config(config_path: &Path, config: Config) -> AppConfigDto {
     }
 }
 
-fn map_agent_skill_status(
-    status: crate::agent_skill::AgentSkillStatus,
-) -> Result<AgentSkillStatusDto> {
-    Ok(AgentSkillStatusDto {
-        skill_dir: status.skill_dir.display().to_string(),
-        npx_available: status.npx_available,
-        detected_agents: status
-            .detected_agents
+fn map_agent_mcp_status(status: crate::agent_mcp::AgentMcpStatus) -> AgentMcpStatusDto {
+    AgentMcpStatusDto {
+        server_name: status.server.name,
+        server_command: format!("{} mcp", status.server.binary.display()),
+        agents: status
+            .agents
             .into_iter()
-            .map(|agent| AgentSkillAgentDto {
-                id: agent.id.into(),
-                label: agent.label.into(),
+            .map(|agent| AgentMcpAgentDto {
+                id: agent.agent.id().into(),
+                label: agent.agent.label().into(),
                 detected: agent.detected,
                 installed: agent.installed,
-                skills_dir: agent.skills_dir.display().to_string(),
+                manual_command: agent.manual_command,
             })
             .collect(),
-        install_command: status.install_command,
-    })
-}
-
-fn map_agent_skill_install_result(
-    result: crate::agent_skill::AgentSkillInstallResult,
-) -> Result<AgentSkillInstallResultDto> {
-    Ok(AgentSkillInstallResultDto {
-        status: map_agent_skill_status(result.status)?,
-        installed_agents: result.installed_agents,
-        stdout: result.stdout,
-        stderr: result.stderr,
-    })
+    }
 }
 
 fn map_configured_domain_info(
@@ -5866,24 +5863,29 @@ fn map_step(label: Option<String>, outcome: StepOutcome) -> StepDto {
     }
 }
 
-fn agent_skill_install_step(enabled: bool) -> Option<StepDto> {
+fn agent_mcp_install_step(enabled: bool, binary_path: &Path) -> Option<StepDto> {
     if !enabled {
         return None;
     }
 
-    Some(match crate::agent_skill::install_agent_skill() {
+    Some(match crate::agent_mcp::install_agent_mcp(binary_path) {
         Ok(result) => StepDto {
-            label: Some("Agent skill".into()),
+            label: Some("Coding agents".into()),
             status: "success".into(),
             message: format!(
-                "Installed the Localify skill for {}.",
-                result.installed_agents.join(", ")
+                "Connected the Localify MCP server to {}.",
+                result
+                    .installed_agents
+                    .iter()
+                    .map(|agent| agent.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         },
         Err(error) => StepDto {
-            label: Some("Agent skill".into()),
+            label: Some("Coding agents".into()),
             status: "skipped".into(),
-            message: format!("Automatic skill installation skipped: {error}"),
+            message: format!("Coding agents were not connected: {error}"),
         },
     })
 }

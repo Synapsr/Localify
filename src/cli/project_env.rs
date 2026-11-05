@@ -9,12 +9,13 @@ use serde::Serialize;
 use super::context::{AppContext, direct_api, effective_current_dir, require_config_writable};
 use crate::branding::BRANDING;
 use crate::infrastructure::config::{ConfigStore, ConfiguredProject, ConfiguredProjectEnvironment};
+use crate::infrastructure::running_services::RunningServiceStore;
 use localify::desktop::DesktopApi;
 use localify::desktop::ProjectRootStore;
 use localify::desktop::dto::{
     DiscoverProjectWorktreesRequest, EnsureProjectEnvironmentRequest,
     EnsureProjectEnvironmentResultDto, EnvironmentFileCopyRequest, EnvironmentFileCopyStatusDto,
-    ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto,
+    ProjectEnvironmentInfoDto, ProjectEnvironmentServiceInfoDto, RemoveProjectEnvironmentRequest,
 };
 
 pub struct ListEnvArgs {
@@ -32,6 +33,18 @@ pub struct EnsureEnvArgs {
 pub struct DiscoverEnvArgs {
     pub project: String,
     pub json: bool,
+}
+
+pub struct RemoveEnvArgs {
+    pub environment: String,
+    pub project: Option<String>,
+    pub delete_worktree: bool,
+    pub force: bool,
+}
+
+pub struct PruneEnvArgs {
+    pub project: Option<String>,
+    pub dry_run: bool,
 }
 
 pub struct CopyEnvArgs {
@@ -247,32 +260,207 @@ pub fn copy_env(args: CopyEnvArgs, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Removes a worktree environment: stops its services, unregisters its domains and,
+/// with `delete_worktree`, deletes the Git worktree too. Uncommitted changes are
+/// checked first, so when they block the deletion nothing has changed yet.
+pub fn remove(args: RemoveEnvArgs, config_path: &Path, ctx: &AppContext) -> Result<()> {
+    require_config_writable(config_path)?;
+    let (project, slug) = resolve_environment(args.project.as_deref(), &args.environment, ctx)?;
+    let environment = ctx
+        .config_store
+        .list_project_environments(Some(&project.id))?
+        .into_iter()
+        .find(|environment| environment.slug == slug)
+        .ok_or_else(|| anyhow!("Project environment '{slug}' was not found."))?;
+    if environment.primary {
+        bail!(
+            "'{}' is the primary environment of '{}' and cannot be removed. To remove the whole project, use: {} remove-project {}",
+            environment.name,
+            project.name,
+            BRANDING.cli_command(),
+            project.id
+        );
+    }
+
+    let worktree = if args.delete_worktree {
+        deletable_worktree(&environment, &project, args.force)?
+    } else {
+        None
+    };
+    stop_environment_services(&project.id, &slug)?;
+    match worktree {
+        Some(root) => delete_worktree(&root, &environment, args.force)?,
+        None if args.delete_worktree => forget_missing_worktree(&environment, &project),
+        None => {}
+    }
+    remove_environment_config(&project.id, &environment, config_path)
+}
+
+/// Removes the environments whose folder no longer exists, such as a worktree an
+/// agent deleted with `git worktree remove`.
+pub fn prune(args: PruneEnvArgs, config_path: &Path, ctx: &AppContext) -> Result<()> {
+    require_config_writable(config_path)?;
+    let project_id = match args.project.as_deref() {
+        Some(project) => {
+            Some(resolve_project(&ctx.config_store, Some(project), &effective_current_dir()?)?.id)
+        }
+        None => None,
+    };
+    let missing = ctx
+        .config_store
+        .list_project_environments(project_id.as_deref())?
+        .into_iter()
+        .filter(|environment| !environment.primary)
+        .filter(|environment| {
+            environment
+                .root_path
+                .as_deref()
+                .is_some_and(|root| !Path::new(root).exists())
+        })
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        println!("Every project environment still has its folder. Nothing to remove.");
+        return Ok(());
+    }
+    for environment in missing {
+        let root = environment.root_path.clone().unwrap_or_default();
+        if args.dry_run {
+            println!(
+                "Would remove '{}' [{}] of '{}': {root} is gone.",
+                environment.name, environment.slug, environment.project_id
+            );
+            continue;
+        }
+        stop_environment_services(&environment.project_id, &environment.slug)?;
+        remove_environment_config(&environment.project_id, &environment, config_path)?;
+    }
+    Ok(())
+}
+
+fn stop_environment_services(project_id: &str, slug: &str) -> Result<()> {
+    let store = RunningServiceStore::new_default()?;
+    for service in store.list()? {
+        let key = &service.key;
+        if key.project_id != project_id || key.environment.as_deref() != Some(slug) {
+            continue;
+        }
+        if store.stop_and_forget(key)? {
+            println!("Stopped '{}' (PID {}).", key.service_id, service.pid);
+        }
+    }
+    Ok(())
+}
+
+/// The worktree folder `--delete-worktree` will delete, checked before anything
+/// changes. `None` when the folder is already gone.
+fn deletable_worktree(
+    environment: &ConfiguredProjectEnvironment,
+    project: &ConfiguredProject,
+    force: bool,
+) -> Result<Option<PathBuf>> {
+    let Some(root) = environment.root_path.as_deref().map(PathBuf::from) else {
+        bail!(
+            "Environment '{}' has no folder, so there is no worktree to delete. Run the command again without --delete-worktree.",
+            environment.slug
+        );
+    };
+    if !root.exists() {
+        return Ok(None);
+    }
+    if !is_non_primary_worktree(project, &root, &detect_git_metadata(&root)) {
+        bail!(
+            "{} is not a Git worktree of '{}', so {} does not delete it. Delete the folder yourself, or run the command again without --delete-worktree.",
+            root.display(),
+            project.name,
+            BRANDING.app_name
+        );
+    }
+    if !force {
+        let changes = git_output(&root, &["status", "--porcelain"]).unwrap_or_default();
+        if !changes.is_empty() {
+            bail!(
+                "The worktree {} has uncommitted changes:\n{changes}\nCommit or discard them first, or pass --force to discard them. Nothing was removed.",
+                root.display()
+            );
+        }
+    }
+    Ok(Some(root))
+}
+
+fn delete_worktree(
+    root: &Path,
+    environment: &ConfiguredProjectEnvironment,
+    force: bool,
+) -> Result<()> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(["worktree", "remove"]);
+    if force {
+        command.arg("--force");
+    }
+    let output = command
+        .arg(root)
+        .output()
+        .context("Failed to run git worktree remove")?;
+    if !output.status.success() {
+        bail!(
+            "Git did not delete the worktree {}: {}\nIts services are stopped; the environment and its domains are kept.",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    println!("Deleted the worktree {}.", root.display());
+    if let Some(branch) = &environment.git_branch {
+        println!("Kept its branch '{branch}'. Delete it with: git branch -d {branch}");
+    }
+    Ok(())
+}
+
+/// Git still lists a worktree whose folder was deleted by hand until it is pruned.
+fn forget_missing_worktree(
+    environment: &ConfiguredProjectEnvironment,
+    project: &ConfiguredProject,
+) {
+    if let Some(root) = &environment.root_path {
+        println!("The worktree folder {root} is already gone.");
+    }
+    if let Some(project_root) = project.root_path.as_deref() {
+        let _ = git_output(Path::new(project_root), &["worktree", "prune"]);
+    }
+}
+
+fn remove_environment_config(
+    project_id: &str,
+    environment: &ConfiguredProjectEnvironment,
+    config_path: &Path,
+) -> Result<()> {
+    let api = DesktopApi::for_cli(config_path.to_path_buf(), current_binary_path()?);
+    let result = api.remove_project_environment(RemoveProjectEnvironmentRequest {
+        project_id: project_id.to_string(),
+        environment_slug: environment.slug.clone(),
+    })?;
+    println!(
+        "Removed project environment '{}' [{}] of '{}'.",
+        environment.name, environment.slug, environment.project_name
+    );
+    for domain in result.removed_domains {
+        println!("  unregistered {domain}");
+    }
+    crate::cli::project::print_daemon_state(result.daemon_reloaded);
+    Ok(())
+}
+
 pub(crate) fn ensure_implicit_worktree_environment(
     project: Option<&str>,
     ctx: &AppContext,
 ) -> Result<Option<ProjectEnvironmentInfoDto>> {
-    let current_dir = effective_current_dir()?;
-    let root_path = absolute_existing_path(&current_dir, &current_dir);
-    let git = detect_git_metadata(&root_path);
-    let environment_root = git
-        .worktree_root
-        .clone()
-        .unwrap_or_else(|| root_path.clone());
-    let project = match resolve_project(&ctx.config_store, project, &environment_root) {
-        Ok(project) => project,
-        Err(_) if project.is_none() => return Ok(None),
-        Err(error) => return Err(error),
-    };
-
-    if !is_non_primary_worktree(&project, &environment_root, &git) {
+    let Some(worktree) = current_worktree(project, ctx)? else {
         return Ok(None);
-    }
-
-    if let Some(existing) =
-        existing_environment_for_root(&ctx.config_store, &project.id, &environment_root)?
-    {
+    };
+    if let Some(existing) = worktree.environment {
         return Ok(Some(environment_info(existing)));
     }
+    let (project, environment_root) = (worktree.project, worktree.root);
 
     let result = ensure_environment_backend(
         ctx,
@@ -284,6 +472,47 @@ pub(crate) fn ensure_implicit_worktree_environment(
         },
     )?;
     Ok(Some(result.environment))
+}
+
+/// The environment of the worktree the command runs in, without creating one.
+pub(crate) fn current_worktree_environment(
+    project: Option<&str>,
+    ctx: &AppContext,
+) -> Result<Option<ProjectEnvironmentInfoDto>> {
+    Ok(current_worktree(project, ctx)?
+        .and_then(|worktree| worktree.environment)
+        .map(environment_info))
+}
+
+struct CurrentWorktree {
+    project: ConfiguredProject,
+    root: PathBuf,
+    environment: Option<ConfiguredProjectEnvironment>,
+}
+
+/// The project worktree, other than the primary checkout, that the current folder is in.
+fn current_worktree(project: Option<&str>, ctx: &AppContext) -> Result<Option<CurrentWorktree>> {
+    let current_dir = effective_current_dir()?;
+    let root_path = absolute_existing_path(&current_dir, &current_dir);
+    let git = detect_git_metadata(&root_path);
+    let root = git
+        .worktree_root
+        .clone()
+        .unwrap_or_else(|| root_path.clone());
+    let project = match resolve_project(&ctx.config_store, project, &root) {
+        Ok(project) => project,
+        Err(_) if project.is_none() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !is_non_primary_worktree(&project, &root, &git) {
+        return Ok(None);
+    }
+    let environment = existing_environment_for_root(&ctx.config_store, &project.id, &root)?;
+    Ok(Some(CurrentWorktree {
+        project,
+        root,
+        environment,
+    }))
 }
 
 /// Resolves the project and the exact environment slug for a `--env` value,

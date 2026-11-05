@@ -131,7 +131,7 @@ pub struct DockerConfig {
     pub enabled: bool,
 }
 
-fn default_agent_install_skill() -> bool {
+fn default_agent_connect_agents() -> bool {
     true
 }
 
@@ -143,9 +143,10 @@ fn default_agent_promote_dev_script() -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
-    /// Offer/install the bundled Localify Agent Skill for detected coding agents.
-    #[serde(default = "default_agent_install_skill")]
-    pub install_skill: bool,
+    /// Connect detected coding agents to `localify mcp` during setup. Read from
+    /// `installSkill` too, its name when agents got a skill instead.
+    #[serde(default = "default_agent_connect_agents", alias = "installSkill")]
+    pub connect_agents: bool,
 
     /// Make Localify write and promote package dev scripts during project bootstrap.
     #[serde(default = "default_agent_promote_dev_script")]
@@ -155,7 +156,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            install_skill: default_agent_install_skill(),
+            connect_agents: default_agent_connect_agents(),
             promote_dev_script: default_agent_promote_dev_script(),
         }
     }

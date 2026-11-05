@@ -17,6 +17,8 @@ on your machine is free, with no limit on projects or domains.
 - Groups domains and services into projects with worktree-aware development
   commands.
 - Shows request logs, project controls, and diagnostics in the desktop app.
+- Gives coding agents every action through an MCP server (`localify mcp`), including
+  removing the worktrees they are done with. See [Coding agents](docs/README.md#coding-agents).
 
 ## Install
 
@@ -92,7 +94,6 @@ telemetry.
 - `desktop-ui/`: React, Vite, and TanStack desktop interface.
 - `apps/web/`: Next.js website, [localify.dev](https://localify.dev). See
   [apps/web/README.md](apps/web/README.md).
-- `skills/localify/`: bundled agent skill for working with Localify projects.
 
 ## Development
 

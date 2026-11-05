@@ -62,30 +62,27 @@ pub struct EnvironmentDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentSkillAgentDto {
+pub struct AgentMcpAgentDto {
     pub id: String,
     pub label: String,
     pub detected: bool,
     pub installed: bool,
-    pub skills_dir: String,
+    pub manual_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentSkillStatusDto {
-    pub skill_dir: String,
-    pub npx_available: bool,
-    pub detected_agents: Vec<AgentSkillAgentDto>,
-    pub install_command: String,
+pub struct AgentMcpStatusDto {
+    pub server_name: String,
+    pub server_command: String,
+    pub agents: Vec<AgentMcpAgentDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentSkillInstallResultDto {
-    pub status: AgentSkillStatusDto,
+pub struct AgentMcpInstallResultDto {
+    pub status: AgentMcpStatusDto,
     pub installed_agents: Vec<String>,
-    pub stdout: String,
-    pub stderr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,7 +179,9 @@ impl From<DockerConfigDto> for DockerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfigDto {
-    pub install_skill: bool,
+    /// Settings exported before agents got an MCP server call it `installSkill`.
+    #[serde(alias = "installSkill")]
+    pub connect_agents: bool,
     pub promote_dev_script: bool,
 }
 
@@ -195,7 +194,7 @@ impl Default for AgentConfigDto {
 impl From<AgentConfig> for AgentConfigDto {
     fn from(value: AgentConfig) -> Self {
         Self {
-            install_skill: value.install_skill,
+            connect_agents: value.connect_agents,
             promote_dev_script: value.promote_dev_script,
         }
     }
@@ -204,7 +203,7 @@ impl From<AgentConfig> for AgentConfigDto {
 impl From<AgentConfigDto> for AgentConfig {
     fn from(value: AgentConfigDto) -> Self {
         Self {
-            install_skill: value.install_skill,
+            connect_agents: value.connect_agents,
             promote_dev_script: value.promote_dev_script,
         }
     }

@@ -23,9 +23,9 @@
     "later": "以后再说",
     "download": "立即下载"
   },
-  "AgentSkill": {
+  "Agents": {
     "title": "让智能体搞定一切。",
-    "description": "用 Claude Code、Codex 或 Cursor 运行 /localify，它就会配置好整个项目。要修复任何问题，直接和它说就行。"
+    "description": "把 Claude Code、Codex 或 Cursor 连接到 Localify。智能体会配置项目、运行服务，完成后还会清理自己的 worktree。你只需要和它说话。"
   },
   "Problem": {
     "titleLine1": "真正改变的",

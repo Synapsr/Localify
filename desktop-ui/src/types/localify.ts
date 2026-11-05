@@ -21,26 +21,23 @@ export interface EnvironmentDto {
   nodeTrust: NodeTrustDto;
 }
 
-export interface AgentSkillAgentDto {
+export interface AgentMcpAgentDto {
   id: string;
   label: string;
   detected: boolean;
   installed: boolean;
-  skillsDir: string;
+  manualCommand: string;
 }
 
-export interface AgentSkillStatusDto {
-  skillDir: string;
-  npxAvailable: boolean;
-  detectedAgents: AgentSkillAgentDto[];
-  installCommand: string;
+export interface AgentMcpStatusDto {
+  serverName: string;
+  serverCommand: string;
+  agents: AgentMcpAgentDto[];
 }
 
-export interface AgentSkillInstallResultDto {
-  status: AgentSkillStatusDto;
+export interface AgentMcpInstallResultDto {
+  status: AgentMcpStatusDto;
   installedAgents: string[];
-  stdout: string;
-  stderr: string;
 }
 
 export interface DaemonConfigDto {
@@ -64,7 +61,7 @@ export interface DockerConfigDto {
 }
 
 export interface AgentConfigDto {
-  installSkill: boolean;
+  connectAgents: boolean;
   promoteDevScript: boolean;
 }
 

@@ -242,6 +242,10 @@ enum Commands {
         #[command(flatten)]
         launch_profile: LaunchProfileFlags,
 
+        /// Run in the background and return once the service listens. Its output goes to a file: read it with `services logs`, stop it with `services stop`.
+        #[arg(long)]
+        detach: bool,
+
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
@@ -268,6 +272,9 @@ enum Commands {
         #[command(subcommand)]
         command: AgentCommands,
     },
+
+    /// Serve every Localify action to a coding agent over MCP (stdio). Agents start it themselves; see `agent install`.
+    Mcp,
 
     /// Start the Localify daemon
     Start {
@@ -387,6 +394,28 @@ enum ProjectCommands {
         command: ProjectDomainCommands,
     },
 
+    /// Rename, enable or disable a project, or point it at the folder it moved to
+    Update {
+        /// Project ID or name
+        project: String,
+
+        /// New display name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Route the project's domains again
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+
+        /// Stop routing the project's domains without removing them
+        #[arg(long)]
+        disable: bool,
+
+        /// Folder the project moved to
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+
     /// Reapply local dev scripts and framework config for the current project
     ConfigureDev {
         /// Project ID when the current folder is ambiguous
@@ -440,6 +469,30 @@ enum ProjectDomainCommands {
         #[arg(long)]
         env: Option<String>,
     },
+
+    /// Move a registered domain into a project
+    Attach {
+        /// Domain name
+        domain: String,
+
+        /// Project ID or name
+        #[arg(long)]
+        project: String,
+
+        /// The wildcard registration of this domain
+        #[arg(long)]
+        wildcard: bool,
+    },
+
+    /// Take a registered domain out of its project, keeping the domain
+    Detach {
+        /// Domain name
+        domain: String,
+
+        /// The wildcard registration of this domain
+        #[arg(long)]
+        wildcard: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -485,6 +538,35 @@ enum ProjectEnvCommands {
         primary: bool,
     },
 
+    /// Remove a project environment: stop its services and unregister its domains. Run it when a worktree is done.
+    Remove {
+        /// Environment name or slug
+        env: String,
+
+        /// Project ID/name when the current folder is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Also delete the environment's Git worktree folder. Git refuses when it has uncommitted changes. The branch is kept.
+        #[arg(long)]
+        delete_worktree: bool,
+
+        /// With --delete-worktree, delete the worktree even with uncommitted changes
+        #[arg(long, requires = "delete_worktree")]
+        force: bool,
+    },
+
+    /// Remove the environments whose folder no longer exists, such as a worktree deleted with git
+    Prune {
+        /// Only this project (ID or name)
+        #[arg(long)]
+        project: Option<String>,
+
+        /// List what would be removed without removing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Copy environment files between project environments
     CopyEnv {
         /// Project ID/name
@@ -525,6 +607,45 @@ enum ServicesCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// List the services Localify started that are running now, in any environment
+    Running {
+        /// Print structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop a service started with `dev`, from any terminal
+    Stop {
+        /// Service name or ID
+        service: String,
+
+        /// Project ID/name when service resolution is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Project environment name/slug. Defaults to the current worktree environment.
+        #[arg(long)]
+        env: Option<String>,
+    },
+
+    /// Print the output of a service started with `dev --detach`
+    Logs {
+        /// Service name or ID
+        service: String,
+
+        /// Project ID/name when service resolution is ambiguous
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Project environment name/slug. Defaults to the current worktree environment.
+        #[arg(long)]
+        env: Option<String>,
+
+        /// Number of lines to show
+        #[arg(short = 'n', long, default_value = "100")]
+        lines: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -535,11 +656,11 @@ enum ProfileCommands {
 
 #[derive(Subcommand)]
 enum AgentCommands {
-    /// Install the bundled Localify skill for detected coding agents
-    InstallSkill,
+    /// Connect the Localify MCP server to the coding agents installed here (Claude Code, Codex, Cursor)
+    Install,
 
-    /// Show Localify skill installation status
-    SkillStatus,
+    /// Show which coding agents have the Localify MCP server
+    Status,
 }
 
 /// Load config from file, or return defaults if the file doesn't exist.
@@ -727,6 +848,26 @@ fn main() -> Result<()> {
                         },
                         &ctx,
                     ),
+                    ProjectEnvCommands::Remove {
+                        env,
+                        project,
+                        delete_worktree,
+                        force,
+                    } => cli::project_env::remove(
+                        cli::project_env::RemoveEnvArgs {
+                            environment: env,
+                            project,
+                            delete_worktree,
+                            force,
+                        },
+                        config_path,
+                        &ctx,
+                    ),
+                    ProjectEnvCommands::Prune { project, dry_run } => cli::project_env::prune(
+                        cli::project_env::PruneEnvArgs { project, dry_run },
+                        config_path,
+                        &ctx,
+                    ),
                     ProjectEnvCommands::CopyEnv {
                         project,
                         environment,
@@ -763,7 +904,37 @@ fn main() -> Result<()> {
                         },
                         &ctx,
                     ),
+                    ProjectDomainCommands::Attach {
+                        domain,
+                        project,
+                        wildcard,
+                    } => cli::project::assign_domain(
+                        domain,
+                        wildcard,
+                        Some(project),
+                        config_path,
+                        &ctx,
+                    ),
+                    ProjectDomainCommands::Detach { domain, wildcard } => {
+                        cli::project::assign_domain(domain, wildcard, None, config_path, &ctx)
+                    }
                 },
+                ProjectCommands::Update {
+                    project,
+                    name,
+                    enable,
+                    disable,
+                    root,
+                } => cli::project::update(
+                    cli::project::UpdateProjectArgs {
+                        project,
+                        name,
+                        enabled: (enable || disable).then_some(enable),
+                        root,
+                    },
+                    config_path,
+                    &ctx,
+                ),
                 ProjectCommands::ConfigureDev {
                     project,
                     write_scripts,
@@ -796,6 +967,18 @@ fn main() -> Result<()> {
         }
         Commands::Services { command } => match command {
             ServicesCommands::List { json } => cli::services::list(&ctx, json),
+            ServicesCommands::Running { json } => cli::background::running(json),
+            ServicesCommands::Stop {
+                service,
+                project,
+                env,
+            } => cli::background::stop(&service, project.as_deref(), env.as_deref(), &ctx),
+            ServicesCommands::Logs {
+                service,
+                project,
+                env,
+                lines,
+            } => cli::background::logs(&service, project.as_deref(), env.as_deref(), lines, &ctx),
         },
         Commands::Get {
             service,
@@ -826,12 +1009,14 @@ fn main() -> Result<()> {
             &ctx,
             &paths,
         ),
+        Commands::Dev { detach: true, .. } => cli::background::start_detached(),
         Commands::Dev {
             service,
             domain,
             project,
             env,
             launch_profile,
+            detach: false,
             command,
         } => cli::services::run(
             cli::services::RunArgs {
@@ -868,32 +1053,10 @@ fn main() -> Result<()> {
             ProfileCommands::Init => cli::profile_init::run(&ctx),
         },
         Commands::Agent { command } => match command {
-            AgentCommands::InstallSkill => {
-                let result = localify::agent_skill::install_agent_skill()?;
-                println!("Installed Localify skill for:");
-                for agent in result.installed_agents {
-                    println!("  {agent}");
-                }
-                Ok(())
-            }
-            AgentCommands::SkillStatus => {
-                let status = localify::agent_skill::agent_skill_status()?;
-                println!("Bundled skill: {}", status.skill_dir.display());
-                println!(
-                    "npx available: {}",
-                    if status.npx_available { "yes" } else { "no" }
-                );
-                println!("Detected agents:");
-                for agent in status.detected_agents {
-                    if agent.detected {
-                        println!("  {} ({})", agent.label, agent.id);
-                    }
-                }
-                println!("Install command:");
-                println!("  {}", status.install_command);
-                Ok(())
-            }
+            AgentCommands::Install => cli::agent::install(),
+            AgentCommands::Status => cli::agent::status(),
         },
+        Commands::Mcp => cli::mcp::serve(config_path),
         Commands::Start { foreground } => {
             cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
         }

@@ -15,7 +15,7 @@ use serde::Serialize;
 use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
-use super::project_env::ensure_implicit_worktree_environment;
+use super::project_env::{current_worktree_environment, ensure_implicit_worktree_environment};
 use super::service_supervisor::{self, LaunchOutcome, SessionReporter, SupervisedLaunch};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
@@ -31,6 +31,7 @@ use crate::infrastructure::local_dev::{
 };
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
+use crate::infrastructure::running_services::{DETACHED_LOG_ENV, RunningServiceStore, ServiceKey};
 use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
     find_existing_vite_config_path,
@@ -290,8 +291,11 @@ pub fn run(
     }
 
     // Backfill the marker for pre-marker projects so a future move can
-    // auto-heal. Never overwrites an existing marker.
-    if let Some(root) = service.project_root_path.as_deref() {
+    // auto-heal. Never overwrites an existing marker. A worktree gets none: it
+    // would show as a change there, and a moved project could heal to it.
+    if !is_worktree_environment(&service.project_id, effective_environment, ctx)
+        && let Some(root) = service.project_root_path.as_deref()
+    {
         let root = Path::new(root);
         if root.is_dir() && read_project_marker(root).is_none() {
             let _ = write_project_marker(root, &service.project_id);
@@ -370,6 +374,7 @@ pub fn run(
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
+    record_running_service(&service, effective_environment, &url, port, ctx);
 
     let Some(profile) = profile else {
         return run_plain(&service, &command, &workdir, &environment);
@@ -393,6 +398,54 @@ pub fn run(
         &environment,
         session,
     )
+}
+
+/// Lets `services stop` and `services logs` find this run. A failure only costs
+/// those two commands, so the service starts anyway.
+fn record_running_service(
+    service: &ConfiguredService,
+    environment: Option<&str>,
+    url: &str,
+    port: u16,
+    ctx: &AppContext,
+) {
+    let key = ServiceKey {
+        project_id: service.project_id.clone(),
+        environment: environment_slug(service, environment, ctx),
+        service_id: service.id.clone(),
+    };
+    let log_file = env::var_os(DETACHED_LOG_ENV).map(PathBuf::from);
+    let recorded = RunningServiceStore::new_default()
+        .and_then(|store| store.register(key, url.to_string(), port, log_file));
+    if let Err(error) = recorded {
+        eprintln!(
+            "Warning: '{} services stop' will not find this run: {error:#}",
+            BRANDING.cli_command()
+        );
+    }
+}
+
+/// Which run of a service `services stop` and `services logs` act on. Inside a
+/// worktree, the service of that worktree's environment, like `dev`.
+pub(crate) fn resolve_service_key(
+    service_name: &str,
+    project: Option<&str>,
+    environment: Option<&str>,
+    ctx: &AppContext,
+) -> Result<ServiceKey> {
+    let implicit = match environment {
+        Some(_) => None,
+        None => current_worktree_environment(project, ctx)?,
+    };
+    let project = project.or(implicit.as_ref().map(|env| env.project_id.as_str()));
+    let environment = environment.or(implicit.as_ref().map(|env| env.slug.as_str()));
+    let service = resolve_service(service_name, project, ctx)?;
+    let service = resolve_environment_service(service, environment, ctx)?;
+    Ok(ServiceKey {
+        project_id: service.project_id.clone(),
+        environment: environment_slug(&service, environment, ctx),
+        service_id: service.id.clone(),
+    })
 }
 
 fn run_plain(
@@ -1585,6 +1638,21 @@ fn resolve_environment_service(
     };
 
     service_for_environment(service, &environment, ctx)
+}
+
+fn is_worktree_environment(project_id: &str, environment: Option<&str>, ctx: &AppContext) -> bool {
+    let Some(environment) = environment else {
+        return false;
+    };
+    ctx.config_store
+        .list_project_environments(Some(project_id))
+        .ok()
+        .and_then(|environments| {
+            environments
+                .into_iter()
+                .find(|candidate| environment_matches(candidate, environment))
+        })
+        .is_some_and(|environment| !environment.primary)
 }
 
 fn environment_matches(environment: &ConfiguredProjectEnvironment, value: &str) -> bool {

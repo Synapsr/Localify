@@ -23,9 +23,9 @@
     "later": "Plus tard",
     "download": "Télécharger maintenant"
   },
-  "AgentSkill": {
+  "Agents": {
     "title": "Laisse ton agent tout gérer.",
-    "description": "Lance /localify avec Claude Code, Codex ou Cursor. Il configure tout le projet, et il te suffit de lui parler pour corriger ce qui coince."
+    "description": "Connecte Claude Code, Codex ou Cursor à Localify. Ton agent configure le projet, lance tes services et supprime ses worktrees quand il a fini. Toi, tu lui parles."
   },
   "Problem": {
     "titleLine1": "Ce qui change",
