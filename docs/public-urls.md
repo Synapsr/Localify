@@ -81,7 +81,7 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `GET /v1/public-urls` | — | `{publicUrls: [PublicUrl]}`, the user's URLs, deleted ones excluded |
 | `POST /v1/public-urls` | `{localDomain, wildcard, slug?, protection: {mode: "password", password?} \| {mode: "public"}}` | `201 {publicUrl, password?}`. The calling machine serves it. `password` is present only when the server generated it. `409 slug_taken`, `409 local_domain_taken`, `422 invalid_slug`, `422 invalid_local_domain`, `403 quota_exceeded`. |
 | `DELETE /v1/public-urls/{id}` | — | `204` |
-| `PUT /v1/public-urls/{id}/protection` | same `protection` object | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
+| `PUT /v1/public-urls/{id}/protection` | `{protection}`, the same object as in `POST` | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
 | `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine, in one update |
 | `GET /v1/machines/self/runtime` | — | `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}`, the URLs this machine serves |
 

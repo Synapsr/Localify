@@ -187,7 +187,7 @@ impl CloudClient {
             .send(
                 Method::PUT,
                 &url_path(id, "/protection"),
-                Some(protection.body()),
+                Some(serde_json::json!({ "protection": protection.body() })),
             )
             .await
     }
@@ -290,7 +290,7 @@ mod tests {
             head.to_ascii_lowercase()
                 .contains("authorization: bearer lfy_t")
         );
-        assert_eq!(body, r#"{"mode":"password","password":"p"}"#);
+        assert_eq!(body, r#"{"protection":{"mode":"password","password":"p"}}"#);
         assert_eq!(changed.public_url.protection.mode, ProtectionMode::Password);
         assert_eq!(changed.password, None);
     }
