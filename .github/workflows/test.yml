@@ -68,6 +68,12 @@ jobs:
       - name: Typecheck desktop UI
         run: pnpm run typecheck
 
+      - name: Typecheck Localify Cloud
+        run: pnpm cloud:typecheck
+
+      - name: Test Localify Cloud
+        run: pnpm cloud:test
+
 
   # macOS only: on Linux the Tauri shell needs the webkit system packages.
   desktop-shell:
