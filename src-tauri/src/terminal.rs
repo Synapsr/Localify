@@ -411,12 +411,8 @@ fn spawn_output_thread<R: Runtime + 'static>(
     output_file: Option<PathBuf>,
 ) {
     thread::spawn(move || {
-        let mut output = output_file.and_then(|path| {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(path)
-                .ok()
-        });
+        let mut output =
+            output_file.and_then(|path| std::fs::OpenOptions::new().append(true).open(path).ok());
         let mut buffer = [0_u8; 4096];
         loop {
             match reader.read(&mut buffer) {

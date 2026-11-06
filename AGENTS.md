@@ -5,6 +5,7 @@
 - **Rust**: `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` must pass.
 - **Desktop UI**: `pnpm run typecheck` must pass for any `desktop-ui/` change.
 - **Website**: `pnpm web:typecheck` and `pnpm web:build` must pass for any `apps/web/` change, with identical keys in all 9 `apps/web/messages/` locales.
+- **Cloud**: `pnpm cloud:typecheck` and `pnpm cloud:test` must pass for any `apps/cloud/` change.
 
 ## Project Snapshot
 

@@ -90,6 +90,11 @@ const CONFIRM_PROFILE: Param = param(
     "Repeats the profile name to start a danger = true profile. Pass it only when the user asked for that profile in this task.",
 );
 const LINES: Param = param("lines", Kind::Integer, "Number of lines to return.");
+const PUBLIC_URL: Param = required(
+    "url",
+    Kind::String,
+    "The public URL, its slug or its id, as public_url_list shows them.",
+);
 
 /// `stop` or `restart` of one service.
 fn service_command(verb: &str, args: &ToolArgs) -> Result<Vec<String>> {
@@ -805,6 +810,104 @@ pub const TOOLS: &[Tool] = &[
             ])
         },
     },
+    Tool {
+        name: "public_url_list",
+        description: "Lists the user's public URLs on Localify Cloud (JSON): https://<slug>.localify.fyi, the local domain each one serves, password or open, and which machine serves it (servedHere).",
+        params: &[],
+        uses_cwd: false,
+        read_only: true,
+        destructive: false,
+        build: |_| Ok(argv(&["public-url", "list", "--json"])),
+    },
+    Tool {
+        name: "public_url_create",
+        description: "Gives a project domain of this machine a public https://<slug>.localify.fyi URL, served from here and protected by a password. Returns the URL and the generated password (JSON), shown this once: pass both on to the user. Needs the machine signed in (a person runs `localify login`).",
+        params: &[
+            required(
+                "local_domain",
+                Kind::String,
+                "A project's domain as list_services shows it, or the project's namespace <project-id>.localify, which wildcard opens to every service and worktree under it.",
+            ),
+            param(
+                "wildcard",
+                Kind::Boolean,
+                "Also reach every environment (worktree) of the project, at https://<slug>--<label>.localify.fyi.",
+            ),
+            param(
+                "slug",
+                Kind::String,
+                "Slug of the URL, 3 to 32 characters of a-z, 0-9 and -. Generated from the domain by default.",
+            ),
+            param(
+                "password",
+                Kind::String,
+                "Only when the user chose the password. Otherwise Localify generates one and returns it.",
+            ),
+        ],
+        uses_cwd: false,
+        read_only: false,
+        destructive: false,
+        build: |args| {
+            Args::new(&["public-url", "create"])
+                .positional(args.required("local_domain")?)?
+                .flag("--json", true)
+                .flag("--wildcard", args.flag("wildcard")?)
+                .option("--slug", args.string("slug")?)
+                .option("--password", args.string("password")?)
+                .done()
+        },
+    },
+    Tool {
+        name: "public_url_remove",
+        description: "Removes a public URL: it stops working for everyone at once. Its slug stays reserved for the user for 30 days.",
+        params: &[PUBLIC_URL],
+        uses_cwd: false,
+        read_only: false,
+        destructive: true,
+        build: |args| {
+            Args::new(&["public-url", "remove"])
+                .positional(args.required("url")?)?
+                .flag("--json", true)
+                .flag("--yes", true)
+                .done()
+        },
+    },
+    Tool {
+        name: "public_url_protect",
+        description: "Puts a public URL behind a password, or replaces its password, which signs every browser out. Returns the generated password (JSON), shown this once: pass it on to the user.",
+        params: &[
+            PUBLIC_URL,
+            param(
+                "password",
+                Kind::String,
+                "Only when the user chose the password. Otherwise Localify generates one and returns it.",
+            ),
+        ],
+        uses_cwd: false,
+        read_only: false,
+        destructive: false,
+        build: |args| {
+            Args::new(&["public-url", "protect"])
+                .positional(args.required("url")?)?
+                .flag("--json", true)
+                .option("--password", args.string("password")?)
+                .done()
+        },
+    },
+    Tool {
+        name: "public_url_claim",
+        description: "Serves a public URL from this machine instead of the machine that served it, such as one that was reinstalled or is gone.",
+        params: &[PUBLIC_URL],
+        uses_cwd: false,
+        read_only: false,
+        destructive: false,
+        build: |args| {
+            Args::new(&["public-url", "claim"])
+                .positional(args.required("url")?)?
+                .flag("--json", true)
+                .done()
+        },
+    },
 ];
 
 impl Tool {
@@ -1071,6 +1174,71 @@ mod tests {
             .unwrap(),
             ["project", "update", "app", "--disable"]
         );
+    }
+
+    #[test]
+    fn an_agent_cannot_sign_in_or_open_a_url_to_everyone() {
+        for name in ["login", "logout", "public_url_unprotect"] {
+            assert!(TOOLS.iter().all(|tool| tool.name != name), "{name}");
+        }
+        let create = TOOLS
+            .iter()
+            .find(|tool| tool.name == "public_url_create")
+            .unwrap();
+        assert!(create.params.iter().all(|param| param.name != "public"));
+        assert!(
+            build(
+                "public_url_create",
+                json!({ "local_domain": "journal.localify", "public": true })
+            )
+            .unwrap()
+            .iter()
+            .all(|arg| arg != "--public")
+        );
+    }
+
+    #[test]
+    fn public_url_tools_print_json_and_remove_without_a_prompt() {
+        assert_eq!(
+            build(
+                "public_url_create",
+                json!({ "local_domain": "journal.localify", "wildcard": true })
+            )
+            .unwrap(),
+            [
+                "public-url",
+                "create",
+                "journal.localify",
+                "--json",
+                "--wildcard"
+            ]
+        );
+        assert_eq!(
+            build("public_url_remove", json!({ "url": "journal-a8f3" })).unwrap(),
+            ["public-url", "remove", "journal-a8f3", "--json", "--yes"]
+        );
+        assert!(
+            TOOLS
+                .iter()
+                .find(|tool| tool.name == "public_url_remove")
+                .unwrap()
+                .destructive
+        );
+        assert_eq!(
+            build(
+                "public_url_protect",
+                json!({ "url": "https://journal-a8f3.localify.fyi", "password": "--x" })
+            )
+            .unwrap(),
+            [
+                "public-url",
+                "protect",
+                "https://journal-a8f3.localify.fyi",
+                "--json",
+                "--password=--x"
+            ]
+        );
+        assert!(build("public_url_claim", json!({ "url": "--all" })).is_err());
     }
 
     #[test]

@@ -467,6 +467,43 @@ impl Config {
         Ok(())
     }
 
+    /// The project of each exposable local domain (`docs/public-urls.md`,
+    /// "Exposable local domain"): every domain a project registers, and every
+    /// project's namespace `<project-id><domain suffix>`, which a wildcard URL
+    /// targets in a monorepo where only `web.journal.localify` is registered.
+    /// Domains outside any project, Docker's included, are never exposed. The
+    /// CLI and the app check it before creating a URL, and the daemon before
+    /// serving public traffic.
+    pub fn exposable_domains(&self) -> HashMap<String, String> {
+        let namespaces = self.projects.keys().map(|id| {
+            let namespace = format!("{}{}", id.to_ascii_lowercase(), BRANDING.domain_suffix());
+            (namespace, id.clone())
+        });
+        let registered = self.configured_domains().into_iter().filter_map(|domain| {
+            let project_id = domain
+                .project_id
+                .filter(|id| self.projects.contains_key(id))?;
+            let name = domain
+                .registration
+                .pattern()
+                .base_domain()
+                .as_str()
+                .to_string();
+            Some((name, project_id))
+        });
+        namespaces.chain(registered).collect()
+    }
+
+    /// The project a public URL on `local_domain` belongs to, if the domain
+    /// is exposable (see `exposable_domains`).
+    pub fn public_url_project(&self, local_domain: &str) -> Option<String> {
+        let domain = local_domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        self.exposable_domains().remove(&domain)
+    }
+
     fn project_is_enabled(&self, project_id: Option<&str>) -> bool {
         project_id
             .and_then(|id| self.projects.get(id))
@@ -1906,6 +1943,43 @@ mod tests {
     }
 
     #[test]
+    fn a_public_url_belongs_to_the_project_that_registers_its_domain_or_owns_its_namespace() {
+        let (_dir, store) = temp_store();
+        let journal = store.create_project("Journal").unwrap();
+        let shop = store.create_project("Shop").unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration("web.journal.localify", 3000),
+                Some(journal.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration("shop.localify", 3001),
+                Some(shop.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain(proxy_registration("loose.localify", 3002))
+            .unwrap();
+        store
+            .add_domain(proxy_registration("api.other.localify", 3003))
+            .unwrap();
+        let config = store.load().unwrap();
+        let project = |domain: &str| {
+            config.public_url_project(&domain.replace(".localify", BRANDING.domain_suffix()))
+        };
+
+        assert_eq!(project("web.journal.localify"), Some(journal.id.clone()));
+        assert_eq!(project("journal.localify"), Some(journal.id.clone()));
+        assert_eq!(project(" Journal.localify. "), Some(journal.id));
+        assert_eq!(project("shop.localify"), Some(shop.id));
+        assert_eq!(project("loose.localify"), None);
+        assert_eq!(project("other.localify"), None);
+        assert_eq!(project("api.journal.localify"), None);
+    }
+
+    #[test]
     fn create_project_rejects_duplicate_normalized_slug() {
         let (_dir, store) = temp_store();
         store.create_project("Test 1").unwrap();
@@ -2866,5 +2940,28 @@ target = "127.0.0.1:61092"
             registration.pattern().display_pattern(),
             "*.store.example-app.io"
         );
+    }
+
+    #[test]
+    fn every_project_owns_its_namespace() {
+        let toml = r#"
+[projects.journal]
+name = "Journal"
+
+[projects.paused]
+name = "Paused"
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        let exposable = config.exposable_domains();
+
+        assert_eq!(
+            exposable.get(&format!("journal{}", BRANDING.domain_suffix())),
+            Some(&"journal".to_string())
+        );
+        // A paused project's URLs can be created; the daemon serves only
+        // enabled projects' domains.
+        assert_eq!(exposable.len(), 2);
     }
 }

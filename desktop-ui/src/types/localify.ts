@@ -834,3 +834,101 @@ export interface LogsDto {
   cleared: boolean;
   content: string;
 }
+
+/** "unknown" when the daemon is not running. */
+export type TunnelStateDto = "stopped" | "starting" | "connected" | "error" | "unknown";
+
+export interface TunnelStatusDto {
+  state: TunnelStateDto;
+  /** Connections the tunnel holds to Cloudflare. */
+  connections: number;
+  error: string | null;
+}
+
+export interface CloudAccountDto {
+  signedIn: boolean;
+  login: string | null;
+  machineName: string | null;
+  tunnel: TunnelStatusDto;
+}
+
+export interface CloudSignInStartDto {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  /** Seconds to wait between two polls. */
+  interval: number;
+  /** Seconds before the code expires. */
+  expiresIn: number;
+}
+
+export interface PollCloudSignInRequest {
+  deviceCode: string;
+}
+
+/** "denied": the person declined on GitHub. */
+export type CloudSignInPollStatusDto =
+  | "pending"
+  | "slowDown"
+  | "signedIn"
+  | "denied"
+  | "notAllowed"
+  | "expired";
+
+export interface CloudSignInPollDto {
+  status: CloudSignInPollStatusDto;
+  message: string | null;
+  /** With "slowDown": the seconds GitHub now asks between polls, when it says. */
+  interval: number | null;
+  account: CloudAccountDto | null;
+}
+
+/** Signing out always forgets the token; `warnings` says what did not follow. */
+export interface CloudSignOutDto {
+  account: CloudAccountDto;
+  warnings: string[];
+}
+
+export type PublicUrlProtectionModeDto = "password" | "public";
+
+export interface PublicUrlProtectionDto {
+  mode: PublicUrlProtectionModeDto;
+}
+
+export interface PublicUrlDto {
+  id: string;
+  slug: string;
+  url: string;
+  localDomain: string;
+  wildcard: boolean;
+  /** The machine that serves it, or null when none does. */
+  machineName: string | null;
+  servedHere: boolean;
+  protection: PublicUrlProtectionDto;
+  /** RFC 3339. */
+  createdAt: string;
+}
+
+export interface PublicUrlWithPasswordDto {
+  publicUrl: PublicUrlDto;
+  /** Present only when Localify generated the password. Shown once. */
+  password: string | null;
+}
+
+export interface CreatePublicUrlRequest {
+  localDomain: string;
+  wildcard: boolean;
+  slug?: string;
+  mode: PublicUrlProtectionModeDto;
+  password?: string;
+}
+
+export interface PublicUrlRequest {
+  id: string;
+}
+
+export interface SetPublicUrlProtectionRequest {
+  id: string;
+  mode: PublicUrlProtectionModeDto;
+  password?: string;
+}

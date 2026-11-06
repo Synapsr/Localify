@@ -1,6 +1,6 @@
 # Localify - fonctionnement technique
 
-Ce document explique le fonctionnement actuel de Localify, puis montre comment la future fonctionnalité de Public URLs doit naturellement se brancher dessus.
+Ce document explique le fonctionnement de Localify, puis comment les Public URLs se branchent dessus.
 
 Localify sert à remplacer des URLs de développement comme `http://localhost:3000` par des domaines locaux stables comme `https://app.localify`. L'application de développement continue de tourner sur son port habituel. Localify ajoute une couche locale devant elle: DNS, TLS, routage HTTP et logs.
 
@@ -197,7 +197,7 @@ api.app.localify       -> match
 a.b.app.localify       -> ne match pas
 ```
 
-Cette limite est volontaire. Elle garde le modèle simple et évite de créer une sémantique différente entre le local et les futures Public URLs.
+Cette limite est volontaire. Elle garde le modèle simple et évite de créer une sémantique différente entre le local et les Public URLs.
 
 Quand plusieurs registrations pourraient matcher, Localify trie par spécificité. Le domaine le plus spécifique gagne, et un exact gagne sur un wildcard équivalent.
 
@@ -246,94 +246,33 @@ flowchart LR
 
 La règle d'architecture est simple: l'UI affiche et déclenche des actions, mais elle ne réimplémente pas la logique de domaines, routes, DNS, certificats ou daemon.
 
-## Ce que ça implique pour les Public URLs
+## Public URLs
 
-Le bon modèle n'est pas de faire pointer une URL publique directement vers un port local. Le bon modèle est d'exposer un domaine Localify déjà configuré.
+Une Public URL n'expose pas un port local : elle expose un domaine Localify déjà configuré, et le trafic public passe par le même routeur que le trafic local. Le contrat complet est dans [public-urls.md](public-urls.md).
 
 ```mermaid
 flowchart LR
-  Internet["Utilisateur externe"]
-  PublicUrl["Public URL<br/>journal-a8f3.localify.dev<br/>ou preview.example.com"]
-  Edge["Localify Cloud<br/>Cloudflare edge"]
-  Endpoint["Public Endpoint<br/>Durable Object"]
-  Connector["Connector Localify<br/>daemon local"]
-  LocalDomain["Local Domain<br/>journal.localify"]
+  Internet["Navigateur externe"]
+  Worker["Localify Cloud<br/>Worker sur *.localify.fyi<br/>mot de passe, routage"]
+  Tunnel["Tunnel Cloudflare nommé<br/>de la machine"]
+  Cloudflared["cloudflared<br/>supervisé par le daemon"]
+  Ingress["Entrée publique du daemon<br/>127.0.0.1"]
   LocalRouter["Routage Localify existant"]
   Target["App locale<br/>127.0.0.1:3000"]
 
-  Internet --> PublicUrl --> Edge --> Endpoint --> Connector
-  Connector --> LocalDomain --> LocalRouter --> Target
+  Internet --> Worker --> Tunnel --> Cloudflared --> Ingress --> LocalRouter --> Target
 ```
 
-Cette architecture garde un seul endroit pour les règles importantes:
+Ce choix garde un seul endroit pour les règles importantes : activation du projet, domaines exacts ou wildcard, routes par préfixe, diagnostics et logs. Le cloud est une entrée publique vers un domaine local, pas un second routeur.
 
-- activation/désactivation du projet;
-- matching exact ou wildcard;
-- routes par préfixe;
-- diagnostics locaux;
-- logs;
-- erreurs lisibles quand la cible locale ne répond pas.
+Les points à retenir :
 
-Le cloud devient une entrée publique vers un domaine local, pas un deuxième routeur concurrent.
-
-## Modèle Public URLs recommandé
-
-Les termes importants:
-
-| Terme | Sens |
-| --- | --- |
-| Local Domain | Domaine `.localify` configuré dans un projet |
-| Public Endpoint | Exposition cloud d'un Local Domain |
-| Public URL | URL internet attachée au Public Endpoint |
-| Persistent Public URL | URL Localify-owned, par exemple `journal-a8f3.localify.dev` |
-| Custom Public URL | Hostname utilisateur, par exemple `preview.example.com` |
-
-Un endpoint cible un domaine local:
-
-```text
-Public URL -> Public Endpoint -> Local Domain -> Route Target
-```
-
-Pas:
-
-```text
-Public URL -> port local
-```
-
-## Custom domain public
-
-Pour une URL custom, le flux technique doit rester explicite:
-
-```mermaid
-sequenceDiagram
-  participant U as Utilisateur
-  participant C as Localify Cloud
-  participant DNS as DNS provider utilisateur
-  participant E as Edge
-  participant L as Local daemon
-
-  U->>C: Ajoute preview.example.com
-  C-->>U: Retourne l'enregistrement DNS requis
-  U->>DNS: Crée CNAME/TXT
-  C->>DNS: Vérifie DNS
-  C->>E: Provisionne TLS
-  L->>C: Ouvre connector authentifié
-  E-->>U: URL active
-```
-
-La vérification DNS, le certificat public et l'état du connector doivent être des états séparés. Un domaine custom peut être bien configuré côté DNS mais offline parce que la machine locale n'est pas connectée. À l'inverse, le connector peut être online alors que le DNS custom est encore en attente.
-
-## Contraintes importantes pour la v1 publique
-
-- Les Public Endpoints s'attachent aux domaines locaux configurés dans les projets.
-- Les domaines Docker ou externes ne sont pas dans le scope v1.
-- Un domaine local a au plus un Public Endpoint actif.
-- Un Public Endpoint peut avoir plusieurs Public URLs.
-- Le wildcard garde la même sémantique que le local: racine + un seul label.
-- L'access protection se fait côté cloud, avant d'atteindre le connector local.
-- Les exceptions d'access protection doivent rester des préfixes de chemin, comme les routes locales.
-- Les opérations desktop doivent aussi exister en CLI, sous `localify public-url`.
-- Le connector utilise des tokens courts liés à l'endpoint, la machine et l'identité cloud. Il ne doit pas envoyer d'identifiant de longue durée sur une session longue.
+- Une URL `journal-a8f3.localify.fyi` expose un domaine local d'un projet. Avec `--wildcard`, `journal-a8f3--feature.localify.fyi` atteint `feature.journal.localify`, donc chaque environnement du projet.
+- Le mot de passe est vérifié par le Worker, avant que rien n'atteigne la machine. Une URL est protégée par défaut.
+- Chaque machine connectée a son tunnel. Le Worker y envoie un secret propre à la machine, et l'entrée publique du daemon refuse toute requête sans lui.
+- L'app reçoit le domaine local dans `Host` et l'hôte public dans `X-Forwarded-Host`.
+- Le trafic public ne peut pas déclencher les actions `/.localify/`, et ses pages d'erreur ne montrent ni chemin ni commande.
+- Tout ce que fait l'app existe en CLI, sous `localify public-url`, et en outils MCP.
 
 ## Résumé
 
@@ -345,10 +284,10 @@ Domain -> Routes -> Targets
 
 Le DNS local fait arriver le trafic au daemon. Le TLS local rend les domaines utilisables dans un vrai navigateur. Le router choisit la bonne registration et la bonne route. Le proxy envoie ensuite la requête vers l'app locale sans que l'app ait besoin de connaître Localify.
 
-Les Public URLs doivent prolonger ce modèle au lieu de le dupliquer:
+Les Public URLs prolongent ce modèle au lieu de le dupliquer:
 
 ```text
-Public URL -> Cloud -> Connector -> Local Domain -> Routes -> Targets
+Public URL -> Worker -> Tunnel -> Local Domain -> Routes -> Targets
 ```
 
 C'est ce qui permet d'avoir des URLs publiques propres tout en conservant les mêmes diagnostics, les mêmes règles de routage, la même CLI et la même expérience desktop.

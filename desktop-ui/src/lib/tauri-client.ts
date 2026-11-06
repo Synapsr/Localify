@@ -14,9 +14,14 @@ import type {
   AppUpdateCheckDto,
   BootstrapDto,
   CliAccessDto,
+  CloudAccountDto,
+  CloudSignInPollDto,
+  CloudSignInStartDto,
+  CloudSignOutDto,
   ConfigUpdateRequest,
   CreateProjectRequest,
   CreateProjectWithDomainsRequest,
+  CreatePublicUrlRequest,
   DaemonLaunchDto,
   DaemonStatusDto,
   DetectProjectInitPlanDto,
@@ -42,9 +47,13 @@ import type {
   OpenEnvInEditorRequest,
   OpenInEditorRequest,
   OpenProjectUrlRequest,
+  PollCloudSignInRequest,
   PortConflictDto,
   ProjectInfoDto,
   ProjectWorktreeDiscoveryDto,
+  PublicUrlDto,
+  PublicUrlRequest,
+  PublicUrlWithPasswordDto,
   RegisterDomainRequest,
   RegisterDomainResultDto,
   RegistrationDto,
@@ -57,6 +66,7 @@ import type {
   RemoveRouteRequest,
   RunLocalDevServerRequest,
   SaveEnvironmentFileRequest,
+  SetPublicUrlProtectionRequest,
   StopLocalDevServerRequest,
   SettingsExportRequest,
   SettingsExportResultDto,
@@ -84,6 +94,12 @@ import type {
 
 import { addProjectServiceRequestSchema } from "./validators/validator.add-project-service";
 import { updateAutostartRequestSchema } from "./validators/validator.autostart";
+import {
+  createPublicUrlRequestSchema,
+  pollCloudSignInRequestSchema,
+  publicUrlRequestSchema,
+  setPublicUrlProtectionRequestSchema,
+} from "./validators/validator.cloud";
 import {
   createProjectWithDomainsRequestSchema,
   registerDomainRequestSchema,
@@ -190,6 +206,15 @@ export interface DesktopClient {
   getAgentMcpStatus(): Promise<AgentMcpStatusDto>;
   installAgentMcp(): Promise<AgentMcpInstallResultDto>;
   connectAgentsOnce(): Promise<AgentMcpInstallResultDto | null>;
+  getCloudAccount(): Promise<CloudAccountDto>;
+  startCloudSignIn(): Promise<CloudSignInStartDto>;
+  pollCloudSignIn(request: PollCloudSignInRequest): Promise<CloudSignInPollDto>;
+  signOutCloud(): Promise<CloudSignOutDto>;
+  listPublicUrls(): Promise<PublicUrlDto[]>;
+  createPublicUrl(request: CreatePublicUrlRequest): Promise<PublicUrlWithPasswordDto>;
+  removePublicUrl(request: PublicUrlRequest): Promise<void>;
+  setPublicUrlProtection(request: SetPublicUrlProtectionRequest): Promise<PublicUrlWithPasswordDto>;
+  claimPublicUrl(request: PublicUrlRequest): Promise<PublicUrlDto>;
   listPortConflicts(): Promise<PortConflictDto[]>;
   killPortConflict(request: KillPortConflictRequest): Promise<PortConflictDto>;
   getUninstallPreview(): Promise<UninstallPreviewDto>;
@@ -292,6 +317,30 @@ export function createDesktopClient(): DesktopClient {
     getAgentMcpStatus: () => tauriInvoke("get_agent_mcp_status"),
     installAgentMcp: () => tauriInvoke("install_agent_mcp"),
     connectAgentsOnce: () => tauriInvoke("connect_agents_once"),
+    getCloudAccount: () => tauriInvoke("get_cloud_account"),
+    startCloudSignIn: () => tauriInvoke("start_cloud_sign_in"),
+    pollCloudSignIn: (request) =>
+      tauriInvoke("poll_cloud_sign_in", {
+        request: pollCloudSignInRequestSchema.parse(request),
+      }),
+    signOutCloud: () => tauriInvoke("sign_out_cloud"),
+    listPublicUrls: () => tauriInvoke("list_public_urls"),
+    createPublicUrl: (request) =>
+      tauriInvoke("create_public_url", {
+        request: createPublicUrlRequestSchema.parse(request),
+      }),
+    removePublicUrl: (request) =>
+      tauriInvoke("remove_public_url", {
+        request: publicUrlRequestSchema.parse(request),
+      }),
+    setPublicUrlProtection: (request) =>
+      tauriInvoke("set_public_url_protection", {
+        request: setPublicUrlProtectionRequestSchema.parse(request),
+      }),
+    claimPublicUrl: (request) =>
+      tauriInvoke("claim_public_url", {
+        request: publicUrlRequestSchema.parse(request),
+      }),
     listPortConflicts: () => tauriInvoke("list_port_conflicts"),
     killPortConflict: (request) =>
       tauriInvoke("kill_port_conflict", {

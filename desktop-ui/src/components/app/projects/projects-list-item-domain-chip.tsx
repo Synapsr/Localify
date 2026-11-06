@@ -20,6 +20,7 @@ import {
   DotsIcon,
   EditIcon,
   ExternalLinkIcon,
+  GlobeIcon,
   PlayIcon,
   SpinnerIcon,
   TerminalIcon,
@@ -49,6 +50,9 @@ import { ProjectEnvironmentFileDialog } from "./project-environment-file-dialog"
 import { ProjectEnvironmentFileMenuItem } from "./project-environment-file-menu-item";
 import { ProjectDeleteDomainDialog } from "./projects-list-item-delete-domain-dialog";
 import { ProjectEditDomainDialog } from "./projects-list-item-edit-domain-dialog";
+import { PublicUrlBadge } from "./public-url/public-url-badge";
+import { PublicUrlDialog } from "./public-url/public-url-dialog";
+import { usePublicUrl } from "./public-url/use-public-url";
 
 interface ProjectDomainChipProps {
   domain: DomainInfoDto;
@@ -115,6 +119,7 @@ export const ProjectDomainChip = ({
   } = useTerminal();
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [publicUrlDialogOpen, setPublicUrlDialogOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] =
     useState(false);
@@ -126,6 +131,7 @@ export const ProjectDomainChip = ({
   const stopLocalDevServer = useMutation(
     projectMutations.stopLocalDevServer(queryClient),
   );
+  const publicUrl = usePublicUrl(domain.registration.domain);
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
@@ -348,6 +354,13 @@ export const ProjectDomainChip = ({
           </Tooltip>
         )}
 
+        {publicUrl ? (
+          <PublicUrlBadge
+            publicUrl={publicUrl}
+            onOpen={() => setPublicUrlDialogOpen(true)}
+          />
+        ) : null}
+
         {launchProfiles.session ? (
           <LaunchProfileBadge session={launchProfiles.session} />
         ) : null}
@@ -440,6 +453,15 @@ export const ProjectDomainChip = ({
               )}
               {urlCopied ? "URL copied" : "Copy URL"}
             </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={(event) => {
+                event.stopPropagation();
+                setPublicUrlDialogOpen(true);
+              }}
+            >
+              <GlobeIcon />
+              Public URL
+            </DropdownMenuItem>
             <ProjectEnvironmentFileMenuItem
               active={menuOpen}
               label={serviceTerminalTarget ? "Open .env" : "Open .env"}
@@ -484,6 +506,12 @@ export const ProjectDomainChip = ({
         domain={domain}
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}
+      />
+      <PublicUrlDialog
+        localDomain={domain.registration.domain}
+        projectId={domain.projectId}
+        open={publicUrlDialogOpen}
+        onOpenChange={setPublicUrlDialogOpen}
       />
       <ProjectEnvironmentFileDialog
         open={environmentFileDialogOpen}

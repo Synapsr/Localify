@@ -9,6 +9,7 @@ use crate::application::ports::{
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
 };
+use crate::infrastructure::cloud::types::PublicStatus;
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
 
 /// What the daemon should do after it stops serving.
@@ -110,6 +111,22 @@ impl MgmtSocketClient {
         let response = self.send_command("launch_sessions")?;
         serde_json::from_value(response["data"]["sessions"].clone())
             .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
+    }
+
+    /// Whether this machine is signed in to Localify Cloud and how its tunnel
+    /// is doing (`docs/public-urls.md`, section "Tunnel").
+    #[allow(dead_code)] // Used by the CLI and desktop through the library crate.
+    pub fn public_status(&self) -> Result<PublicStatus, DaemonConnectionError> {
+        let response = self.send_command(r#"{"cmd":"public_status"}"#)?;
+        serde_json::from_value(response["data"].clone())
+            .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
+    }
+
+    /// Asks the daemon to fetch this machine's public URLs again, after a
+    /// sign-in, a sign-out or any change to a public URL.
+    #[allow(dead_code)] // Used by the CLI and desktop through the library crate.
+    pub fn public_refresh(&self) -> Result<(), DaemonConnectionError> {
+        self.send_command(r#"{"cmd":"public_refresh"}"#).map(|_| ())
     }
 }
 

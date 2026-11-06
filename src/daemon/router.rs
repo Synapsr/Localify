@@ -12,20 +12,22 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use tracing::{debug, info};
+use tracing::{debug, field, info};
 
 use crate::branding::BRANDING;
-use crate::domain::{DomainRegistration, ProxyTarget, Route, RouteTarget};
+use crate::domain::{DomainRegistration, ProxyTarget, RegistrationSource, Route, RouteTarget};
 use crate::infrastructure::editor::open_in_editor;
 use crate::infrastructure::launch_sessions::LAUNCH_PROFILE_HEADER;
 
 use super::embedded_assets;
 use super::launch_sessions::LaunchSessions;
 use super::profile_indicator;
-use super::proxy::{ClientAddr, Scheme, proxy_request};
+use super::proxy::{ClientAddr, PublicSource, Scheme, proxy_request, public_error_response};
 use super::static_files::serve_static;
 use super::theme;
 
+/// Localify's own endpoints. Public traffic never reaches them.
+const LOCALIFY_PATH_PREFIX: &str = "/.localify/";
 const OPEN_IN_EDITOR_PATH: &str = "/.localify/open-in-editor";
 const RUN_DEV_SERVER_PATH: &str = "/.localify/run-dev-server";
 const DOMAIN_NOT_REGISTERED_TEMPLATE: &str = include_str!("templates/domain_not_registered.html");
@@ -37,6 +39,12 @@ pub struct RuntimeState {
     /// All registrations sorted by pattern specificity (most specific first).
     registrations: Vec<DomainRegistration>,
     project_roots: HashMap<String, String>,
+    /// Project id of each config domain that belongs to a project, by
+    /// pattern. Only these domains can be public.
+    domain_projects: HashMap<String, String>,
+    /// Project id of each exposable local domain, from
+    /// `Config::exposable_domains`.
+    exposable_domains: HashMap<String, String>,
     domain_accesses: DomainAccessLog,
     launch_sessions: LaunchSessions,
 }
@@ -76,9 +84,21 @@ impl RuntimeState {
         Self {
             registrations,
             project_roots,
+            domain_projects: HashMap::new(),
+            exposable_domains: HashMap::new(),
             domain_accesses,
             launch_sessions: LaunchSessions::default(),
         }
+    }
+
+    pub fn with_domain_projects(mut self, domain_projects: HashMap<String, String>) -> Self {
+        self.domain_projects = domain_projects;
+        self
+    }
+
+    pub fn with_exposable_domains(mut self, exposable_domains: HashMap<String, String>) -> Self {
+        self.exposable_domains = exposable_domains;
+        self
     }
 
     /// Keeps the launch session registry across config reloads.
@@ -99,6 +119,37 @@ impl RuntimeState {
 
     pub fn registrations(&self) -> &[DomainRegistration] {
         &self.registrations
+    }
+
+    /// The registration the router selects for `local_host`, when public
+    /// traffic for a URL on `url_local_domain` may reach it: a config domain
+    /// of the URL's project. Without the project check, a wildcard URL on
+    /// `app.localify` would reach another project's more specific
+    /// `private.app.localify`. Standalone, Docker and other external domains
+    /// are never public.
+    pub fn public_registration(
+        &self,
+        local_host: &str,
+        url_local_domain: &str,
+    ) -> Option<&DomainRegistration> {
+        let selected = self.get_domain(local_host)?;
+        let project = self.project_of(selected)?;
+        (self.url_project(url_local_domain) == Some(project)).then_some(selected)
+    }
+
+    /// The project of a public URL on `local_domain`
+    /// (`docs/public-urls.md`, "Exposable local domain").
+    fn url_project(&self, local_domain: &str) -> Option<&str> {
+        self.exposable_domains.get(local_domain).map(String::as_str)
+    }
+
+    fn project_of(&self, registration: &DomainRegistration) -> Option<&str> {
+        if registration.source() != RegistrationSource::Config {
+            return None;
+        }
+        self.domain_projects
+            .get(&registration.display_pattern())
+            .map(String::as_str)
     }
 
     pub fn project_root_for_registration(&self, registration: &DomainRegistration) -> Option<&str> {
@@ -129,6 +180,12 @@ impl RuntimeState {
 
 /// Shared, atomically-swappable runtime state. Lock-free reads.
 pub type SharedState = Arc<ArcSwap<RuntimeState>>;
+
+/// The runtime state a public request was admitted against. The router routes
+/// it with that same state, so a reload between the ingress checks and the
+/// routing cannot send it to a registration the checks never saw.
+#[derive(Clone)]
+pub struct AdmittedState(pub Arc<RuntimeState>);
 
 #[derive(Clone, Default)]
 pub struct DomainAccessLog {
@@ -228,13 +285,34 @@ async fn handle_request(
     client_addr: Option<Extension<ClientAddr>>,
     request: Request,
 ) -> Response {
-    let state = shared.load();
+    let state = request
+        .extensions()
+        .get::<AdmittedState>()
+        .map(|admitted| admitted.0.clone())
+        .unwrap_or_else(|| shared.load_full());
+    let public = request.extensions().get::<PublicSource>().cloned();
     let method = request.method().clone();
     let uri = request.uri().clone();
     let host_header = get_host(&request);
     let path = uri.path();
-    let proto = scheme.map(|Extension(s)| s.as_str()).unwrap_or("http");
-    let client_ip = client_addr.map(|Extension(a)| a.0);
+    // Public traffic reached the visitor over HTTPS, from their own address.
+    let (proto, client_ip) = match &public {
+        Some(public) => ("https", public.client_ip),
+        None => (
+            scheme.map(|Extension(s)| s.as_str()).unwrap_or("http"),
+            client_addr.map(|Extension(a)| a.0),
+        ),
+    };
+    // `source=public public_host=<host>` on the request log lines of public traffic.
+    let log_source = public.as_ref().map(|_| field::display("public"));
+    let log_public_host = public
+        .as_ref()
+        .map(|public| field::display(public.public_host.as_str()));
+
+    // The public ingress refuses these first; the router does not rely on it.
+    if public.is_some() && is_localify_path(path) {
+        return public_error_response(StatusCode::NOT_FOUND);
+    }
 
     if method == Method::GET && path == profile_indicator::SCRIPT_PATH {
         return profile_indicator::script_response();
@@ -266,7 +344,15 @@ async fn handle_request(
             (StatusCode::BAD_REQUEST, "Missing Host header").into_response()
         }
         RouteResolution::DomainNotRegistered { host } => {
-            info!(host = %host, "Domain not registered");
+            info!(
+                host = %host,
+                source = log_source,
+                public_host = log_public_host,
+                "Domain not registered"
+            );
+            if public.is_some() {
+                return public_error_response(StatusCode::NOT_FOUND);
+            }
             build_not_registered_response(&host)
         }
         RouteResolution::NoRouteForPath {
@@ -275,7 +361,16 @@ async fn handle_request(
             path,
         } => {
             state.record_access_for_registration(registration);
-            info!(host = %host, path = %path, "No route found");
+            info!(
+                host = %host,
+                path = %path,
+                source = log_source,
+                public_host = log_public_host,
+                "No route found"
+            );
+            if public.is_some() {
+                return public_error_response(StatusCode::NOT_FOUND);
+            }
             build_no_route_response(registration, &host, &path)
         }
         RouteResolution::Matched {
@@ -299,7 +394,12 @@ async fn handle_request(
                 }
                 RouteTarget::Proxy(target) => {
                     let launch_sessions = state.launch_sessions();
-                    let indicator = browser_indicator(&request, target, &launch_sessions);
+                    // Visitors get neither the indicator, whose script lives
+                    // under `/.localify/`, nor the profile header: both are local detail.
+                    let indicator = match public {
+                        Some(_) => None,
+                        None => browser_indicator(&request, target, &launch_sessions),
+                    };
                     let mut request = request;
                     if indicator.is_some() {
                         profile_indicator::request_identity_encoding(&mut request);
@@ -311,13 +411,17 @@ async fn handle_request(
                         proto,
                         client_ip,
                         state.project_root_for_registration(registration),
+                        public.as_ref(),
                     )
                     .await;
                     let response = match indicator {
                         Some(profile) => profile_indicator::inject(response, &profile),
                         None => response,
                     };
-                    with_launch_profile_header(response, target, &launch_sessions)
+                    match public {
+                        Some(_) => response,
+                        None => with_launch_profile_header(response, target, &launch_sessions),
+                    }
                 }
             };
 
@@ -326,12 +430,19 @@ async fn handle_request(
                 host = %host,
                 path = %path,
                 status = response.status().as_u16(),
+                source = log_source,
+                public_host = log_public_host,
                 "Request completed"
             );
 
             response
         }
     }
+}
+
+/// Whether a path is one of Localify's own endpoints rather than the app's.
+pub(super) fn is_localify_path(path: &str) -> bool {
+    path == LOCALIFY_PATH_PREFIX.trim_end_matches('/') || path.starts_with(LOCALIFY_PATH_PREFIX)
 }
 
 /// Profile to show in the page when this navigation reaches a service
@@ -1012,5 +1123,202 @@ mod tests {
             script.headers()[header::CONTENT_TYPE],
             "text/javascript; charset=utf-8"
         );
+    }
+
+    // --- public traffic ---
+
+    fn visitor() -> super::PublicSource {
+        super::PublicSource {
+            public_host: "journal-a8f3.localify.fyi".into(),
+            client_ip: Some("203.0.113.7".parse().unwrap()),
+        }
+    }
+
+    async fn send(
+        state: super::SharedState,
+        method: &str,
+        host: &str,
+        path: &str,
+        public: Option<super::PublicSource>,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, host)
+            .header(header::ORIGIN, format!("http://{host}"))
+            .body(Body::empty())
+            .unwrap();
+        if let Some(public) = public {
+            request.extensions_mut().insert(public);
+        }
+        let response = super::create_router(state)
+            .layer(axum::Extension(super::ClientAddr(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+            )))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, headers, String::from_utf8_lossy(&body).to_string())
+    }
+
+    fn shared(registrations: Vec<DomainRegistration>) -> super::SharedState {
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(RuntimeState::new(
+            registrations,
+        )))
+    }
+
+    #[tokio::test]
+    async fn public_traffic_is_routed_with_the_state_it_was_admitted_against() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let host = format!("app{}", BRANDING.domain_suffix());
+        let admitted = shared(vec![reg("app.localify", false)]).load_full();
+        // A reload removed the domain after the ingress admitted the request.
+        let reloaded = shared(Vec::new());
+        let request = |admitted: Option<std::sync::Arc<RuntimeState>>| {
+            let mut request = Request::builder()
+                .uri("/")
+                .header(header::HOST, host.as_str())
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(visitor());
+            if let Some(state) = admitted {
+                request.extensions_mut().insert(super::AdmittedState(state));
+            }
+            request
+        };
+
+        let routed = super::create_router(reloaded.clone())
+            .oneshot(request(Some(admitted)))
+            .await
+            .unwrap();
+        let unadmitted = super::create_router(reloaded)
+            .oneshot(request(None))
+            .await
+            .unwrap();
+
+        // The admitted state still has the domain, so the router tries its
+        // upstream (nothing listens there); the reloaded one does not.
+        assert_ne!(routed.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(unadmitted.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn public_traffic_never_reaches_localify_endpoints() {
+        let state = shared(vec![reg("app.localify", false)]);
+        for (method, path) in [
+            ("GET", "/.localify/launch-profile.js"),
+            ("POST", "/.localify/open-in-editor"),
+            ("POST", "/.localify/run-dev-server"),
+        ] {
+            let host = format!("app{}", BRANDING.domain_suffix());
+            let (status, _, body) = send(state.clone(), method, &host, path, Some(visitor())).await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{path}");
+            assert!(body.contains("Nothing is served at this address"), "{path}");
+        }
+
+        // Local traffic still reaches them.
+        let host = format!("app{}", BRANDING.domain_suffix());
+        let (status, _, _) = send(state, "GET", &host, "/.localify/launch-profile.js", None).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn public_errors_are_generic_and_local_errors_keep_their_help() {
+        let domain = DomainName::new(format!("app{}", BRANDING.domain_suffix())).unwrap();
+        let registration = DomainRegistration::new(
+            DomainPattern::Exact(domain.clone()),
+            vec![Route::parse("/api=3000").unwrap()],
+        );
+        let state = shared(vec![registration]);
+        let missing = format!("missing{}", BRANDING.domain_suffix());
+
+        for (host, path) in [(missing.as_str(), "/"), (domain.as_str(), "/other")] {
+            let (status, _, body) = send(state.clone(), "GET", host, path, Some(visitor())).await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+            assert!(
+                !body.contains(&format!("{} ", BRANDING.cli_command())),
+                "{body}"
+            );
+            assert!(!body.contains(host), "{body}");
+
+            let (status, _, body) = send(state.clone(), "GET", host, path, None).await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+            assert!(
+                body.contains(&format!("{} ", BRANDING.cli_command())),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn visitors_get_no_launch_profile_indicator_or_header() {
+        use std::sync::Arc;
+
+        use arc_swap::ArcSwap;
+
+        use crate::daemon::launch_sessions::LaunchSessions;
+        use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (port, upstream_request) = html_upstream().await;
+        let domain = DomainName::new(format!("app{}", BRANDING.domain_suffix())).unwrap();
+        let registration = DomainRegistration::new(
+            DomainPattern::Exact(domain.clone()),
+            vec![Route::parse(&format!("/={port}")).unwrap()],
+        );
+        let sessions = LaunchSessions::default();
+        sessions.apply(LaunchSessionUpdate::Running {
+            session: LaunchSessionDto {
+                id: "1".into(),
+                project_id: "acme".into(),
+                environment_slug: None,
+                service_id: "web".into(),
+                profile: "prod".into(),
+                danger: true,
+                target_port: port,
+                started_at: 1,
+                expires_at: None,
+                sources: vec![],
+                browser_indicator: true,
+            },
+        });
+        let state: super::SharedState = Arc::new(ArcSwap::from_pointee(
+            RuntimeState::new(vec![registration]).with_launch_sessions(sessions),
+        ));
+
+        let response = {
+            use axum::body::Body;
+            use axum::http::Request;
+            use tower::ServiceExt;
+            let mut request = Request::builder()
+                .uri("/")
+                .header(header::HOST, domain.as_str())
+                .header("sec-fetch-dest", "document")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(visitor());
+            super::create_router(state).oneshot(request).await.unwrap()
+        };
+
+        assert!(response.headers().get("x-localify-profile").is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("launch-profile.js"));
+        let upstream_request = upstream_request.await.unwrap().to_ascii_lowercase();
+        assert!(upstream_request.contains("x-forwarded-host: journal-a8f3.localify.fyi"));
+        assert!(upstream_request.contains("x-forwarded-for: 203.0.113.7"));
     }
 }

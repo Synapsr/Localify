@@ -3,7 +3,8 @@
 //! These are real implementations backed by simple data structures.
 //! No mock libraries, no magic — just `RefCell<Vec<..>>` and friends.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -15,10 +16,13 @@ use crate::domain::{
 };
 
 use super::ports::{
-    CertificateError, CertificateManager, ConfigLoadError, ConfigLoader, DaemonConnection,
-    DaemonConnectionError, DaemonControl, DaemonRuntimeInfo, DnsConfigError, DnsManager,
-    DomainRepository, IosSimulatorTrust, NetworkInfo, RegistrationProvider, RepositoryError,
-    SystemSetup,
+    CertificateError, CertificateManager, CloudAccount, CloudAccountStore, CloudApi, CloudApiError,
+    ConfigLoadError, ConfigLoader, DaemonConnection, DaemonConnectionError, DaemonControl,
+    DaemonRuntimeInfo, DeviceAuthorization, DeviceTokenPoll, DnsConfigError, DnsManager,
+    DomainRepository, IosSimulatorTrust, LocalDomainOwner, LocalDomains, NetworkInfo, NewPublicUrl,
+    Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlWithPassword,
+    RegistrationProvider, RepositoryError, ServingMachine, SignInRequest, SystemSetup, TunnelState,
+    TunnelStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -556,6 +560,363 @@ impl DaemonConnection for NotRunningDaemonConnection {
 
     fn list_registrations(&self) -> Result<Vec<DomainRegistration>, DaemonConnectionError> {
         Err(DaemonConnectionError::NotRunning)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Localify Cloud: InMemoryCloudApi, InMemoryCloudAccountStore,
+// InMemoryPublicTunnel, InMemoryLocalDomains
+// ---------------------------------------------------------------------------
+
+/// The account `InMemoryCloudAccountStore::signed_in` holds; its machine is `m1`.
+pub fn cloud_account() -> CloudAccount {
+    CloudAccount {
+        api_base: "https://api.localify.dev".into(),
+        token: "lfy_test".into(),
+        login: "teo-goulois".into(),
+        machine_id: "m1".into(),
+        machine_name: "laptop".into(),
+    }
+}
+
+/// A password-protected URL served by `cloud_account`'s machine.
+pub fn public_url(id: &str, slug: &str, wildcard: bool) -> PublicUrl {
+    PublicUrl {
+        id: id.into(),
+        slug: slug.into(),
+        url: format!("https://{slug}.localify.fyi"),
+        local_domain: format!("{}.localify", slug.split('-').next().unwrap_or(slug)),
+        wildcard,
+        machine: Some(ServingMachine {
+            id: "m1".into(),
+            name: "laptop".into(),
+        }),
+        protection: Protection {
+            mode: ProtectionMode::Password,
+        },
+        created_at: "2026-11-05T18:00:00Z".into(),
+    }
+}
+
+/// Localify Cloud for one user, signed in on machine `m1`. A generated
+/// password is always `four-random-words-here`.
+pub struct InMemoryCloudApi {
+    urls: RefCell<Vec<PublicUrl>>,
+    polls: RefCell<VecDeque<DeviceTokenPoll>>,
+    sign_out_error: RefCell<Option<CloudApiError>>,
+    next_error: RefCell<Option<CloudApiError>>,
+    last_sign_in: RefCell<Option<SignInRequest>>,
+    calls: RefCell<Vec<&'static str>>,
+}
+
+const GENERATED_PASSWORD: &str = "four-random-words-here";
+
+impl InMemoryCloudApi {
+    pub fn new() -> Self {
+        Self {
+            urls: RefCell::new(Vec::new()),
+            polls: RefCell::new(VecDeque::new()),
+            sign_out_error: RefCell::new(None),
+            next_error: RefCell::new(None),
+            last_sign_in: RefCell::new(None),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// What the device flow answers, poll after poll; then `Pending`.
+    pub fn with_polls(self, polls: Vec<DeviceTokenPoll>) -> Self {
+        *self.polls.borrow_mut() = polls.into();
+        self
+    }
+
+    pub fn with_sign_out_error(self, error: CloudApiError) -> Self {
+        *self.sign_out_error.borrow_mut() = Some(error);
+        self
+    }
+
+    /// The next call about public URLs fails with `error`.
+    pub fn with_error(self, error: CloudApiError) -> Self {
+        *self.next_error.borrow_mut() = Some(error);
+        self
+    }
+
+    pub fn insert(&self, url: PublicUrl) {
+        self.urls.borrow_mut().push(url);
+    }
+
+    pub fn public_urls(&self) -> Vec<PublicUrl> {
+        self.urls.borrow().clone()
+    }
+
+    pub fn calls(&self) -> Vec<&'static str> {
+        self.calls.borrow().clone()
+    }
+
+    pub fn last_sign_in_request(&self) -> Option<SignInRequest> {
+        self.last_sign_in.borrow().clone()
+    }
+
+    fn call(&self, name: &'static str) -> Result<(), CloudApiError> {
+        self.calls.borrow_mut().push(name);
+        match self.next_error.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn update(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut PublicUrl),
+    ) -> Result<PublicUrl, CloudApiError> {
+        let mut urls = self.urls.borrow_mut();
+        let url =
+            urls.iter_mut()
+                .find(|url| url.id == id)
+                .ok_or_else(|| CloudApiError::Rejected {
+                    status: 404,
+                    code: "not_found".into(),
+                    message: "No such public URL.".into(),
+                })?;
+        change(url);
+        Ok(url.clone())
+    }
+}
+
+fn generated_password(protection: &ProtectionChoice) -> Option<String> {
+    matches!(protection, ProtectionChoice::Password(None)).then(|| GENERATED_PASSWORD.into())
+}
+
+fn protection_mode(protection: &ProtectionChoice) -> ProtectionMode {
+    match protection {
+        ProtectionChoice::Password(_) => ProtectionMode::Password,
+        ProtectionChoice::Public => ProtectionMode::Public,
+    }
+}
+
+impl CloudApi for InMemoryCloudApi {
+    fn start_sign_in(&self) -> Result<DeviceAuthorization, CloudApiError> {
+        Ok(DeviceAuthorization {
+            device_code: "dc".into(),
+            user_code: "ABCD-1234".into(),
+            verification_uri: "https://github.com/login/device".into(),
+            interval: 5,
+            expires_in: 900,
+        })
+    }
+
+    fn poll_sign_in(&self, request: &SignInRequest) -> Result<DeviceTokenPoll, CloudApiError> {
+        *self.last_sign_in.borrow_mut() = Some(request.clone());
+        Ok(self
+            .polls
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(DeviceTokenPoll::Pending))
+    }
+
+    fn sign_out(&self, _account: &CloudAccount) -> Result<(), CloudApiError> {
+        self.calls.borrow_mut().push("sign_out");
+        match self.sign_out_error.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn list_public_urls(&self, _account: &CloudAccount) -> Result<Vec<PublicUrl>, CloudApiError> {
+        self.call("list")?;
+        Ok(self.public_urls())
+    }
+
+    fn create_public_url(
+        &self,
+        _account: &CloudAccount,
+        request: &NewPublicUrl,
+    ) -> Result<PublicUrlWithPassword, CloudApiError> {
+        self.call("create")?;
+        let label = request
+            .local_domain
+            .as_str()
+            .split('.')
+            .next()
+            .unwrap_or("app");
+        let slug = match &request.slug {
+            Some(slug) => slug.to_string(),
+            None => format!("{label}-a8f3"),
+        };
+        let mut url = public_url(
+            &format!("u{}", self.urls.borrow().len() + 1),
+            &slug,
+            request.wildcard,
+        );
+        url.local_domain = request.local_domain.to_string();
+        url.protection.mode = protection_mode(&request.protection);
+        self.insert(url.clone());
+        Ok(PublicUrlWithPassword {
+            public_url: url,
+            password: generated_password(&request.protection),
+        })
+    }
+
+    fn remove_public_url(&self, _account: &CloudAccount, id: &str) -> Result<(), CloudApiError> {
+        self.call("remove")?;
+        self.urls.borrow_mut().retain(|url| url.id != id);
+        Ok(())
+    }
+
+    fn set_protection(
+        &self,
+        _account: &CloudAccount,
+        id: &str,
+        protection: &ProtectionChoice,
+    ) -> Result<PublicUrlWithPassword, CloudApiError> {
+        self.call("set_protection")?;
+        let url = self.update(id, |url| url.protection.mode = protection_mode(protection))?;
+        Ok(PublicUrlWithPassword {
+            public_url: url,
+            password: generated_password(protection),
+        })
+    }
+
+    fn claim_public_url(
+        &self,
+        account: &CloudAccount,
+        id: &str,
+    ) -> Result<PublicUrl, CloudApiError> {
+        self.call("claim")?;
+        self.update(id, |url| {
+            url.machine = Some(ServingMachine {
+                id: account.machine_id.clone(),
+                name: account.machine_name.clone(),
+            })
+        })
+    }
+}
+
+pub struct InMemoryCloudAccountStore {
+    account: RefCell<Option<CloudAccount>>,
+}
+
+impl InMemoryCloudAccountStore {
+    /// Signed in with `cloud_account`.
+    pub fn signed_in() -> Self {
+        Self {
+            account: RefCell::new(Some(cloud_account())),
+        }
+    }
+
+    pub fn signed_out() -> Self {
+        Self {
+            account: RefCell::new(None),
+        }
+    }
+
+    pub fn account(&self) -> Option<CloudAccount> {
+        self.account.borrow().clone()
+    }
+}
+
+impl CloudAccountStore for InMemoryCloudAccountStore {
+    fn load(&self) -> anyhow::Result<Option<CloudAccount>> {
+        Ok(self.account())
+    }
+
+    fn save(&self, account: &CloudAccount) -> anyhow::Result<()> {
+        *self.account.borrow_mut() = Some(account.clone());
+        Ok(())
+    }
+
+    fn delete(&self) -> anyhow::Result<()> {
+        *self.account.borrow_mut() = None;
+        Ok(())
+    }
+}
+
+/// The daemon's tunnel: connected when the daemon runs.
+pub struct InMemoryPublicTunnel {
+    running: bool,
+    refreshes: Cell<usize>,
+}
+
+impl InMemoryPublicTunnel {
+    pub fn running() -> Self {
+        Self {
+            running: true,
+            refreshes: Cell::new(0),
+        }
+    }
+
+    pub fn stopped() -> Self {
+        Self {
+            running: false,
+            refreshes: Cell::new(0),
+        }
+    }
+
+    /// How many refreshes the running daemon took.
+    pub fn refreshes(&self) -> usize {
+        self.refreshes.get()
+    }
+}
+
+impl PublicTunnel for InMemoryPublicTunnel {
+    fn status(&self) -> Result<TunnelStatus, DaemonConnectionError> {
+        if !self.running {
+            return Err(DaemonConnectionError::NotRunning);
+        }
+        Ok(TunnelStatus {
+            state: TunnelState::Connected,
+            connections: 4,
+            error: None,
+        })
+    }
+
+    fn refresh(&self) -> Result<(), DaemonConnectionError> {
+        if !self.running {
+            return Err(DaemonConnectionError::NotRunning);
+        }
+        self.refreshes.set(self.refreshes.get() + 1);
+        Ok(())
+    }
+}
+
+pub struct InMemoryLocalDomains {
+    owners: Vec<(String, LocalDomainOwner)>,
+    labels: Vec<String>,
+}
+
+impl InMemoryLocalDomains {
+    /// Every domain is `NotRegistered` until given an owner.
+    pub fn new() -> Self {
+        Self {
+            owners: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+
+    pub fn with_owner(mut self, domain: &str, owner: LocalDomainOwner) -> Self {
+        self.owners.push((domain.into(), owner));
+        self
+    }
+
+    /// The labels under any domain.
+    pub fn with_labels(mut self, labels: Vec<String>) -> Self {
+        self.labels = labels;
+        self
+    }
+}
+
+impl LocalDomains for InMemoryLocalDomains {
+    fn owner(&self, domain: &crate::domain::DomainName) -> anyhow::Result<LocalDomainOwner> {
+        Ok(self
+            .owners
+            .iter()
+            .find(|(name, _)| name == domain.as_str())
+            .map(|(_, owner)| owner.clone())
+            .unwrap_or(LocalDomainOwner::NotRegistered))
+    }
+
+    fn labels_under(&self, _domain: &crate::domain::DomainName) -> anyhow::Result<Vec<String>> {
+        Ok(self.labels.clone())
     }
 }
 

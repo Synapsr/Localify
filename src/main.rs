@@ -351,6 +351,37 @@ enum Commands {
         command: LanCommands,
     },
 
+    /// Sign this machine in to Localify Cloud with GitHub, to give project domains public URLs
+    Login {
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Sign this machine out of Localify Cloud. The public URLs it serves go offline.
+    Logout {
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show who is signed in to Localify Cloud on this machine, and how its tunnel is doing
+    Whoami {
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Share a project domain at https://<slug>.localify.fyi, behind a password unless opened
+    PublicUrl {
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long, global = true)]
+        json: bool,
+
+        #[command(subcommand)]
+        command: PublicUrlCommands,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -368,6 +399,74 @@ enum LanCommands {
 
     /// Show who can reach Localify
     Status,
+}
+
+#[derive(Subcommand)]
+enum PublicUrlCommands {
+    /// List your public URLs, with the machine that serves each
+    List,
+
+    /// Give a project domain of this machine a public URL, served from here. It asks for a generated password unless --password or --public.
+    Create {
+        /// A project's domain, such as web.journal.localify, or its namespace <project-id>.localify, which --wildcard opens to every service and environment under it
+        local_domain: String,
+
+        /// Also reach every environment of the project, at https://<slug>--<label>.localify.fyi
+        #[arg(long)]
+        wildcard: bool,
+
+        /// Slug of the URL: 3 to 32 characters of a-z, 0-9 and -. Generated from the domain by default.
+        #[arg(long)]
+        slug: Option<String>,
+
+        /// Password to ask for, instead of a generated one
+        #[arg(long, conflicts_with = "public")]
+        password: Option<String>,
+
+        /// Open the URL to everyone, without a password
+        #[arg(long)]
+        public: bool,
+    },
+
+    /// Remove a public URL. Its slug stays reserved for you for 30 days.
+    Remove {
+        /// The public URL, its slug or its id
+        #[arg(value_name = "URL_OR_SLUG_OR_ID")]
+        reference: String,
+
+        /// Remove without asking (required when no terminal is attached)
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Ask for a password, or change it. Generates one unless --password is given. Browsers signed in before must sign in again.
+    Protect {
+        /// The public URL, its slug or its id
+        #[arg(value_name = "URL_OR_SLUG_OR_ID")]
+        reference: String,
+
+        /// Password to ask for, instead of a generated one
+        #[arg(long)]
+        password: Option<String>,
+    },
+
+    /// Open a public URL to everyone, without a password
+    Unprotect {
+        /// The public URL, its slug or its id
+        #[arg(value_name = "URL_OR_SLUG_OR_ID")]
+        reference: String,
+
+        /// Open it without asking (required when no terminal is attached)
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Serve a public URL from this machine instead of the machine that serves it now
+    Claim {
+        /// The public URL, its slug or its id
+        #[arg(value_name = "URL_OR_SLUG_OR_ID")]
+        reference: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -661,6 +760,13 @@ enum AgentCommands {
 
     /// Show which coding agents have the Localify MCP server
     Status,
+}
+
+fn cloud_adapters(
+    config_path: &Path,
+    paths: &LocalifyPaths,
+) -> infrastructure::cloud_adapters::CloudAdapters {
+    infrastructure::cloud_adapters::CloudAdapters::new(config_path, paths)
 }
 
 /// Load config from file, or return defaults if the file doesn't exist.
@@ -1132,6 +1238,45 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Login { json } => cli::cloud::login(json, &cloud_adapters(config_path, &paths)),
+        Commands::Logout { json } => cli::cloud::logout(json, &cloud_adapters(config_path, &paths)),
+        Commands::Whoami { json } => cli::cloud::whoami(json, &cloud_adapters(config_path, &paths)),
+        Commands::PublicUrl { json, command } => {
+            let cloud = cloud_adapters(config_path, &paths);
+            match command {
+                PublicUrlCommands::List => cli::public_url::list(json, &cloud),
+                PublicUrlCommands::Create {
+                    local_domain,
+                    wildcard,
+                    slug,
+                    password,
+                    public,
+                } => cli::public_url::create(
+                    cli::public_url::CreateArgs {
+                        local_domain,
+                        wildcard,
+                        slug,
+                        password,
+                        public,
+                    },
+                    json,
+                    &cloud,
+                ),
+                PublicUrlCommands::Remove { reference, yes } => {
+                    cli::public_url::remove(&reference, yes, json, &cloud)
+                }
+                PublicUrlCommands::Protect {
+                    reference,
+                    password,
+                } => cli::public_url::protect(&reference, password, json, &cloud),
+                PublicUrlCommands::Unprotect { reference, yes } => {
+                    cli::public_url::unprotect(&reference, yes, json, &cloud)
+                }
+                PublicUrlCommands::Claim { reference } => {
+                    cli::public_url::claim(&reference, json, &cloud)
+                }
+            }
+        }
         Commands::Completions { .. } => unreachable!(),
     }
 }

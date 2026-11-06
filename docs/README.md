@@ -61,6 +61,9 @@ run them as root, and start the daemon yourself with `localify start`.
 | `localify project domain attach\|detach <domain>` | Move a domain into or out of a project |
 | `localify project env remove <env> [--delete-worktree]` | Remove a worktree environment, and the worktree |
 | `localify project env prune`       | Remove environments whose folder is gone |
+| `localify login` / `logout` / `whoami` | Sign this machine in to Localify Cloud with GitHub, or out |
+| `localify public-url create <domain> ...` | Give a project domain a [public URL](#public-urls) |
+| `localify public-url list\|remove\|protect\|unprotect\|claim` | Manage your public URLs |
 | `localify agent install`           | Connect coding agents to Localify's MCP server |
 | `localify mcp`                     | The MCP server agents start |
 | `localify completions <shell>`     | Generate completions   |
@@ -612,6 +615,45 @@ every interface on that port, as Tailscale can on 443.
 
 Run as root on Linux, or with no systemd, the daemon listens on every interface, as it
 does in a container. Set `lan_access = false` to keep it on this machine.
+
+## Public URLs
+
+A public URL opens a project domain of this machine from anywhere, such as your
+laptop or phone on another network: `https://<slug>.localify.fyi` reaches
+`web.journal.localify` on the machine that serves it. It needs a Localify Cloud
+account. Accounts are invite-only for now.
+
+```bash
+localify login                                   # shows a code to enter on github.com
+localify public-url create web.journal.localify  # prints the URL and its password, once
+localify public-url create journal.localify --wildcard
+localify public-url list
+```
+
+- **Protected by default.** Each URL asks for a password, generated unless you pass
+  `--password`, and shown once. A browser that enters it stays signed in for 7 days on that host; each wildcard
+  host asks once.
+  `protect` sets a new password and signs every browser out. `unprotect`, or
+  `--public` at creation, opens the URL to everyone.
+- **Wildcard.** `--wildcard` on a project's namespace, such as `journal.localify`,
+  reaches every service and environment under it: `<slug>--web.localify.fyi` opens
+  `web.journal.localify`, and `<slug>--web--feature.localify.fyi` opens
+  `web--feature.journal.localify`. Only domains of that project are reached.
+- **One machine serves each URL.** `create` serves it from this machine. `claim`
+  moves it here from another of your machines. The machine needs Localify running;
+  it downloads Cloudflare's `cloudflared` on first use and runs it while it serves
+  at least one URL.
+- **What is never public:** domains outside a project, Docker domains, and
+  Localify's own `/.localify/` pages.
+- `remove` deletes a URL and keeps its slug for you for 30 days. `logout` takes
+  this machine's URLs offline; after you sign in again, `claim` serves them again.
+
+The desktop app does the same in Settings → Localify Cloud and in each domain's
+Public URL section. Coding agents get the same tools over MCP, except signing in and
+opening a URL to everyone, which stay yours: an agent always creates a protected URL
+and hands you its password.
+
+How it works, for contributors: [public-urls.md](public-urls.md).
 
 ## HTTPS Trust That Is Still Pending
 

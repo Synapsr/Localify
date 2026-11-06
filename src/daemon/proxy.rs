@@ -26,7 +26,11 @@ const X_FORWARDED_HOST: &str = "x-forwarded-host";
 const X_FORWARDED_PORT: &str = "x-forwarded-port";
 const X_FORWARDED_PROTO: &str = "x-forwarded-proto";
 const KEEP_ALIVE: &str = "keep-alive";
+/// Tells the upstream which local domain a public request was for, since
+/// `X-Forwarded-Host` carries the public host (ADR 0023).
+const X_LOCALIFY_LOCAL_DOMAIN: &str = "x-localify-local-domain";
 const PROXY_ERROR_TEMPLATE: &str = include_str!("templates/proxy_error.html");
+const PUBLIC_ERROR_TEMPLATE: &str = include_str!("templates/public_error.html");
 const PROXY_ERROR_CSS: &str = include_str!("templates/proxy_error.css");
 type ProxyConnector =
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
@@ -58,6 +62,17 @@ impl Scheme {
 /// Client IP address (injected by server layers).
 #[derive(Clone, Copy)]
 pub struct ClientAddr(pub IpAddr);
+
+/// Marks a request that came through the public ingress, which sets it only
+/// after the ingress secret matched (`docs/public-urls.md`, "Public ingress").
+#[derive(Clone, Debug)]
+pub struct PublicSource {
+    /// The host the visitor asked for, such as `journal-a8f3.localify.fyi`.
+    pub public_host: String,
+    /// The visitor's address as Cloudflare saw it. Never loopback in practice,
+    /// and never trusted for the loopback-only actions either way.
+    pub client_ip: Option<IpAddr>,
+}
 
 /// Build the `X-Forwarded-For` value by appending the client IP to any existing chain.
 fn build_xff_value(existing: Option<&str>, client_ip: IpAddr) -> String {
@@ -109,6 +124,7 @@ fn build_upgrade_request(
     host: &str,
     forwarded_scheme: &str,
     client_ip: Option<IpAddr>,
+    public: Option<&PublicSource>,
 ) -> String {
     let path = request.uri().path();
     let query = request
@@ -119,20 +135,9 @@ fn build_upgrade_request(
 
     let mut req = format!("GET {}{} HTTP/1.1\r\nHost: {}\r\n", path, query, host);
 
-    // Forwarding headers
-    req.push_str(&format!("X-Forwarded-Host: {}\r\n", host));
-    req.push_str(&format!(
-        "X-Forwarded-Port: {}\r\n",
-        forwarded_port_for_scheme(forwarded_scheme)
-    ));
-    req.push_str(&format!("X-Forwarded-Proto: {}\r\n", forwarded_scheme));
-    if let Some(ip) = client_ip {
-        let existing = request
-            .headers()
-            .get(X_FORWARDED_FOR)
-            .and_then(|v| v.to_str().ok());
-        let xff = build_xff_value(existing, ip);
-        req.push_str(&format!("X-Forwarded-For: {}\r\n", xff));
+    match public {
+        Some(public) => push_public_forwarding_lines(&mut req, host, public),
+        None => push_forwarding_lines(&mut req, request, host, forwarded_scheme, client_ip),
     }
 
     // Collect any extra hop-by-hop header names declared in the Connection header
@@ -163,6 +168,7 @@ fn build_upgrade_request(
             || name == header::TRAILER
             || name == header::TRANSFER_ENCODING
             || name.as_str() == KEEP_ALIVE
+            || (public.is_some() && name.as_str() == X_LOCALIFY_LOCAL_DOMAIN)
             || dynamic_hop_by_hop.contains(&name.as_str().to_ascii_lowercase())
         {
             continue;
@@ -173,6 +179,46 @@ fn build_upgrade_request(
     }
     req.push_str("\r\n");
     req
+}
+
+/// The forwarding lines of a local WebSocket handshake, which describe the
+/// client's own request.
+fn push_forwarding_lines(
+    req: &mut String,
+    request: &Request,
+    host: &str,
+    forwarded_scheme: &str,
+    client_ip: Option<IpAddr>,
+) {
+    req.push_str(&format!("X-Forwarded-Host: {}\r\n", host));
+    req.push_str(&format!(
+        "X-Forwarded-Port: {}\r\n",
+        forwarded_port_for_scheme(forwarded_scheme)
+    ));
+    req.push_str(&format!("X-Forwarded-Proto: {}\r\n", forwarded_scheme));
+    if let Some(ip) = client_ip {
+        let existing = request
+            .headers()
+            .get(X_FORWARDED_FOR)
+            .and_then(|v| v.to_str().ok());
+        let xff = build_xff_value(existing, ip);
+        req.push_str(&format!("X-Forwarded-For: {}\r\n", xff));
+    }
+}
+
+/// The forwarding lines of a public WebSocket handshake, the same values
+/// `set_public_forwarding_headers` gives an HTTP request.
+fn push_public_forwarding_lines(req: &mut String, local_host: &str, public: &PublicSource) {
+    req.push_str(&format!("X-Forwarded-Host: {}\r\n", public.public_host));
+    req.push_str(&format!(
+        "X-Forwarded-Port: {}\r\n",
+        forwarded_port_for_scheme("https")
+    ));
+    req.push_str("X-Forwarded-Proto: https\r\n");
+    if let Some(ip) = public.client_ip {
+        req.push_str(&format!("X-Forwarded-For: {ip}\r\n"));
+    }
+    req.push_str(&format!("X-Localify-Local-Domain: {local_host}\r\n"));
 }
 
 /// Extract a header negotiated by the backend during the WebSocket handshake.
@@ -193,6 +239,7 @@ async fn proxy_websocket(
     forwarded_scheme: &str,
     client_ip: Option<IpAddr>,
     project_root_path: Option<&str>,
+    public: Option<&PublicSource>,
 ) -> Response {
     if target.scheme() == ProxyTargetScheme::Https {
         return build_proxy_error_response(
@@ -202,6 +249,7 @@ async fn proxy_websocket(
             ProxyErrorKind::WebSocketUpgrade,
             "WebSocket routes to HTTPS targets are not supported yet. Use an HTTP target for WebSocket dev servers.",
             project_root_path,
+            public,
         );
     }
 
@@ -219,13 +267,15 @@ async fn proxy_websocket(
                 ProxyErrorKind::Connect,
                 &e.to_string(),
                 project_root_path,
+                public,
             );
         }
     };
     let start_time = Instant::now();
 
     // Build and send the upgrade request to backend
-    let upgrade_request = build_upgrade_request(&request, host, forwarded_scheme, client_ip);
+    let upgrade_request =
+        build_upgrade_request(&request, host, forwarded_scheme, client_ip, public);
 
     if let Err(e) = backend.write_all(upgrade_request.as_bytes()).await {
         return build_proxy_error_response(
@@ -235,6 +285,7 @@ async fn proxy_websocket(
             ProxyErrorKind::UpstreamIo,
             &format!("Backend write error: {e}"),
             project_root_path,
+            public,
         );
     }
     debug!(target = %target, "WebSocket upgrade request sent to backend");
@@ -251,6 +302,7 @@ async fn proxy_websocket(
                 ProxyErrorKind::UpstreamIo,
                 &format!("Backend read error: {e}"),
                 project_root_path,
+                public,
             );
         }
     };
@@ -270,6 +322,7 @@ async fn proxy_websocket(
             ProxyErrorKind::WebSocketUpgrade,
             "Backend rejected WebSocket upgrade",
             project_root_path,
+            public,
         );
     }
 
@@ -409,6 +462,57 @@ fn set_forwarding_headers(
     );
 }
 
+/// Public traffic: the upstream sees the visitor's host, HTTPS and address,
+/// while `Host` stays the local domain its dev server allows (ADR 0023).
+fn set_public_forwarding_headers(headers: &mut HeaderMap, local_host: &str, public: &PublicSource) {
+    // Only the Worker's word about the visitor counts, not a chain added on the way.
+    headers.remove(X_FORWARDED_FOR);
+    set_forwarding_headers(headers, &public.public_host, "https", public.client_ip);
+    if let Ok(value) = HeaderValue::from_str(local_host) {
+        headers.insert(X_LOCALIFY_LOCAL_DOMAIN, value);
+    }
+}
+
+/// What a public visitor sees when a request fails: the status in words,
+/// and nothing about this machine's paths, ports, commands or config.
+pub fn public_error_response(status: StatusCode) -> Response {
+    let (title, message) = match status {
+        StatusCode::BAD_REQUEST => (
+            "This request could not be read",
+            "Check the address and try again.",
+        ),
+        StatusCode::FORBIDDEN => (
+            "Access denied",
+            "This address does not accept direct requests.",
+        ),
+        StatusCode::NOT_FOUND => ("Nothing here", "Nothing is served at this address."),
+        _ => (
+            "This app is not answering",
+            "The app behind this address cannot be reached right now. Try again in a moment.",
+        ),
+    };
+    let eyebrow = format!(
+        "{} · {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("Error")
+    );
+    let body = theme::render_template(
+        PUBLIC_ERROR_TEMPLATE,
+        &[
+            ("{{EYEBROW}}", &theme::html_escape(&eyebrow)),
+            ("{{TITLE}}", title),
+            ("{{MESSAGE}}", message),
+        ],
+    );
+    let html = theme::render_page(title, &body, theme::ERROR_PAGE_CSS, "");
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(html))
+        .unwrap_or_else(|_| status.into_response())
+}
+
 fn forwarded_port_for_scheme(scheme: &str) -> &'static str {
     match scheme {
         "https" => "443",
@@ -452,6 +556,7 @@ pub async fn proxy_request(
     client_scheme: &str,
     client_ip: Option<IpAddr>,
     project_root_path: Option<&str>,
+    public: Option<&PublicSource>,
 ) -> Response {
     // Check for WebSocket upgrade
     if is_websocket_upgrade(&request) {
@@ -463,6 +568,7 @@ pub async fn proxy_request(
             client_scheme,
             client_ip,
             project_root_path,
+            public,
         )
         .await;
     }
@@ -484,6 +590,7 @@ pub async fn proxy_request(
                 ProxyErrorKind::InvalidTargetUri,
                 &e,
                 project_root_path,
+                public,
             );
         }
     };
@@ -499,7 +606,10 @@ pub async fn proxy_request(
     }
 
     // Set forwarding headers before stripping hop-by-hop headers.
-    set_forwarding_headers(request.headers_mut(), host, client_scheme, client_ip);
+    match public {
+        Some(public) => set_public_forwarding_headers(request.headers_mut(), host, public),
+        None => set_forwarding_headers(request.headers_mut(), host, client_scheme, client_ip),
+    }
 
     // Strip hop-by-hop headers
     strip_hop_by_hop_headers(request.headers_mut());
@@ -522,6 +632,7 @@ pub async fn proxy_request(
                     ProxyErrorKind::Connect,
                     &e.to_string(),
                     project_root_path,
+                    public,
                 )
             } else {
                 warn!(target = %target, error = %e, "Proxy failed");
@@ -532,6 +643,7 @@ pub async fn proxy_request(
                     ProxyErrorKind::UpstreamIo,
                     &format!("Proxy error: {e}"),
                     project_root_path,
+                    public,
                 )
             }
         }
@@ -545,7 +657,11 @@ fn build_proxy_error_response(
     kind: ProxyErrorKind,
     error: &str,
     project_root_path: Option<&str>,
+    public: Option<&PublicSource>,
 ) -> Response {
+    if public.is_some() {
+        return public_error_response(status);
+    }
     let html = render_proxy_error_page(host, target, kind, error, project_root_path);
 
     Response::builder()
@@ -802,6 +918,7 @@ mod tests {
             client_scheme,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1034,7 +1151,7 @@ mod tests {
     fn upgrade_request_contains_forwarding_headers() {
         let req = ws_request("/ws");
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", Some(LOCALHOST));
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", Some(LOCALHOST), None);
 
         assert!(raw.contains("X-Forwarded-Host: myapp.localify\r\n"));
         assert!(raw.contains("X-Forwarded-Port: 443\r\n"));
@@ -1046,7 +1163,7 @@ mod tests {
     fn upgrade_request_omits_xff_without_client_ip() {
         let req = ws_request("/ws");
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", None, None);
 
         assert!(raw.contains("X-Forwarded-Host: myapp.localify\r\n"));
         assert!(raw.contains("X-Forwarded-Port: 443\r\n"));
@@ -1065,7 +1182,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", Some(LOCALHOST));
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", Some(LOCALHOST), None);
 
         assert!(raw.contains("X-Forwarded-For: 10.0.0.1, 127.0.0.1\r\n"));
     }
@@ -1074,7 +1191,7 @@ mod tests {
     fn upgrade_request_preserves_public_host() {
         let req = ws_request("/ws");
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", Some(LOCALHOST));
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", Some(LOCALHOST), None);
 
         assert!(raw.contains("Host: myapp.localify\r\n"));
         assert!(!raw.contains("Host: 127.0.0.1:3000\r\n"));
@@ -1088,7 +1205,7 @@ mod tests {
     fn upgrade_request_preserves_connection_and_upgrade() {
         let req = ws_request("/ws");
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", None, None);
 
         assert!(raw.contains("upgrade: websocket\r\n"));
         assert!(raw.contains("connection: Upgrade\r\n"));
@@ -1109,7 +1226,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", None, None);
 
         assert!(!raw.contains("proxy-authorization:"));
         assert!(!raw.contains("te:"));
@@ -1130,7 +1247,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", None, None);
 
         assert!(!raw.contains("x-secret:"));
         assert!(raw.contains("x-safe: kept\r\n"));
@@ -1140,7 +1257,7 @@ mod tests {
     fn upgrade_request_includes_query_string() {
         let req = ws_request("/ws?token=abc");
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", None, None);
 
         assert!(raw.starts_with("GET /ws?token=abc HTTP/1.1\r\n"));
     }
@@ -1149,7 +1266,7 @@ mod tests {
     fn upgrade_request_ends_with_blank_line() {
         let req = ws_request("/ws");
 
-        let raw = build_upgrade_request(&req, "myapp.localify", "https", None);
+        let raw = build_upgrade_request(&req, "myapp.localify", "https", None, None);
 
         assert!(raw.ends_with("\r\n\r\n"));
     }
@@ -1239,5 +1356,185 @@ mod tests {
         assert!(html.contains("localify://action/open-in-editor?domain=demo.localify"));
         assert!(html.contains("Open in app"));
         assert!(html.contains("/tmp/demo"));
+    }
+
+    // --- public traffic ---
+
+    fn visitor() -> PublicSource {
+        PublicSource {
+            public_host: "journal-a8f3--web.localify.fyi".into(),
+            client_ip: Some("203.0.113.7".parse().unwrap()),
+        }
+    }
+
+    #[test]
+    fn public_forwarding_headers_describe_the_visitor() {
+        let mut headers = HeaderMap::new();
+        // What cloudflared adds on its way to the ingress.
+        headers.insert(X_FORWARDED_FOR, HeaderValue::from_static("104.28.0.1"));
+        headers.insert(
+            X_FORWARDED_HOST,
+            HeaderValue::from_static("m-1.localify.dev"),
+        );
+
+        set_public_forwarding_headers(&mut headers, "web.journal.localify", &visitor());
+
+        assert_eq!(headers[X_FORWARDED_HOST], "journal-a8f3--web.localify.fyi");
+        assert_eq!(headers[X_FORWARDED_PROTO], "https");
+        assert_eq!(headers[X_FORWARDED_PORT], "443");
+        assert_eq!(headers[X_FORWARDED_FOR], "203.0.113.7");
+        assert_eq!(headers[X_LOCALIFY_LOCAL_DOMAIN], "web.journal.localify");
+    }
+
+    #[test]
+    fn public_forwarding_without_a_client_ip_drops_the_chain() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_FORWARDED_FOR, HeaderValue::from_static("104.28.0.1"));
+        let public = PublicSource {
+            client_ip: None,
+            ..visitor()
+        };
+
+        set_public_forwarding_headers(&mut headers, "journal.localify", &public);
+
+        assert!(headers.get(X_FORWARDED_FOR).is_none());
+    }
+
+    #[test]
+    fn local_forwarding_headers_set_no_local_domain() {
+        let mut headers = HeaderMap::new();
+
+        set_forwarding_headers(&mut headers, "myapp.localify", "https", Some(LOCALHOST));
+
+        assert!(headers.get(X_LOCALIFY_LOCAL_DOMAIN).is_none());
+    }
+
+    #[test]
+    fn public_upgrade_request_carries_the_public_host() {
+        let req = Request::builder()
+            .uri("/hmr")
+            .header(header::HOST, "web.journal.localify")
+            .header(header::UPGRADE, "websocket")
+            .header(header::CONNECTION, "Upgrade")
+            .header(X_FORWARDED_FOR, "104.28.0.1")
+            .header(X_LOCALIFY_LOCAL_DOMAIN, "spoofed.localify")
+            .body(Body::empty())
+            .unwrap();
+
+        let raw = build_upgrade_request(
+            &req,
+            "web.journal.localify",
+            "http",
+            Some(LOCALHOST),
+            Some(&visitor()),
+        );
+
+        assert!(raw.contains("Host: web.journal.localify\r\n"));
+        assert!(raw.contains("X-Forwarded-Host: journal-a8f3--web.localify.fyi\r\n"));
+        assert!(raw.contains("X-Forwarded-Proto: https\r\n"));
+        assert!(raw.contains("X-Forwarded-Port: 443\r\n"));
+        assert!(raw.contains("X-Forwarded-For: 203.0.113.7\r\n"));
+        assert!(raw.contains("X-Localify-Local-Domain: web.journal.localify\r\n"));
+        assert!(!raw.contains("104.28.0.1"));
+        assert!(!raw.contains("127.0.0.1"));
+        assert!(!raw.contains("spoofed"));
+    }
+
+    #[test]
+    fn local_upgrade_request_has_no_local_domain_header() {
+        let raw = build_upgrade_request(
+            &ws_request("/ws"),
+            "myapp.localify",
+            "https",
+            Some(LOCALHOST),
+            None,
+        );
+
+        assert!(!raw.contains("X-Localify-Local-Domain"));
+    }
+
+    #[tokio::test]
+    async fn proxy_sends_the_public_host_upstream_with_the_local_host() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target = ProxyTarget::parse(&listener.local_addr().unwrap().to_string()).unwrap();
+        let (headers_tx, headers_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            let read = stream.read(&mut buffer).await.unwrap();
+            let _ = headers_tx.send(String::from_utf8_lossy(&buffer[..read]).to_string());
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+        let request = Request::builder().uri("/").body(Body::empty()).unwrap();
+
+        let response = proxy_request(
+            &target,
+            request,
+            "journal.localify",
+            "http",
+            Some(LOCALHOST),
+            Some("/Users/me/journal"),
+            Some(&visitor()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = headers_rx.await.unwrap();
+        assert!(headers.contains("host: journal.localify\r\n"), "{headers}");
+        assert!(headers.contains("x-forwarded-host: journal-a8f3--web.localify.fyi\r\n"));
+        assert!(headers.contains("x-forwarded-proto: https\r\n"));
+        assert!(headers.contains("x-forwarded-for: 203.0.113.7\r\n"));
+        assert!(headers.contains("x-localify-local-domain: journal.localify\r\n"));
+    }
+
+    #[tokio::test]
+    async fn a_public_error_page_names_no_target_path_or_command() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        // Bound then dropped, so nothing listens there.
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let target = ProxyTarget::parse(&port.to_string()).unwrap();
+
+        for upgrade in [false, true] {
+            let mut request = Request::builder().uri("/");
+            if upgrade {
+                request = request
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::CONNECTION, "Upgrade");
+            }
+            let response = proxy_request(
+                &target,
+                request.body(Body::empty()).unwrap(),
+                "journal.localify",
+                "http",
+                None,
+                Some("/Users/me/journal"),
+                Some(&visitor()),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains("This app is not answering"));
+            for detail in [
+                &port.to_string(),
+                "127.0.0.1",
+                "/Users/me",
+                "lsof",
+                "journal.localify",
+            ] {
+                assert!(!body.contains(detail), "the page shows {detail}");
+            }
+        }
     }
 }

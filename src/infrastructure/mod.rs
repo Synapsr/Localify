@@ -1,5 +1,8 @@
 pub mod binary_identity;
 pub mod certs;
+pub mod cloud;
+pub mod cloud_adapters;
+pub mod cloudflared;
 pub mod config;
 pub mod dns;
 pub mod docker;

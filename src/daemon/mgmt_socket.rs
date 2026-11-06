@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use super::lifecycle::ShutdownHandle;
+use super::public_tunnel::PublicTunnel;
 use super::router::SharedState;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 
@@ -31,6 +32,12 @@ enum MgmtCommand {
     /// Exit so the supervisor starts the binary at its path again.
     #[serde(rename = "restart")]
     Restart,
+    /// This machine's sign-in and tunnel (`docs/public-urls.md`, "Tunnel").
+    #[serde(rename = "public_status")]
+    PublicStatus,
+    /// Fetch this machine's public URLs again, in the background.
+    #[serde(rename = "public_refresh")]
+    PublicRefresh,
 }
 
 /// Response sent back to the management client.
@@ -81,6 +88,8 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "launch_sessions" => Some(MgmtCommand::LaunchSessions),
         "shutdown" => Some(MgmtCommand::Shutdown),
         "restart" => Some(MgmtCommand::Restart),
+        "public_status" => Some(MgmtCommand::PublicStatus),
+        "public_refresh" => Some(MgmtCommand::PublicRefresh),
         _ => None,
     }
 }
@@ -105,6 +114,7 @@ pub async fn serve(
     reload_tx: mpsc::Sender<()>,
     shutdown: ShutdownHandle,
     ports: DaemonPorts,
+    tunnel: PublicTunnel,
 ) -> anyhow::Result<()> {
     let cancel = shutdown.token();
 
@@ -131,6 +141,7 @@ pub async fn serve(
         let state = state.clone();
         let reload_tx = reload_tx.clone();
         let shutdown = shutdown.clone();
+        let tunnel = tunnel.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -210,6 +221,17 @@ pub async fn serve(
                     exit_after_reply = Some(true);
                     MgmtResponse::success(serde_json::json!({ "restarting": true }))
                 }
+                Some(MgmtCommand::PublicStatus) => {
+                    match serde_json::to_value(tunnel.status().await) {
+                        Ok(status) => MgmtResponse::success(status),
+                        Err(error) => MgmtResponse::error(error.to_string()),
+                    }
+                }
+                // Answers at once: the client waits 2 s and a cloud call may take 20.
+                Some(MgmtCommand::PublicRefresh) => {
+                    tunnel.refresh();
+                    MgmtResponse::success(serde_json::json!({ "refreshing": true }))
+                }
                 None => MgmtResponse::error(format!("Unknown command: {}", line.trim())),
             };
 
@@ -276,7 +298,15 @@ mod tests {
             dns: 1053,
         };
         tokio::spawn(async move {
-            let _ = serve(sock_clone, state, reload_tx, serve_shutdown, test_ports).await;
+            let _ = serve(
+                sock_clone,
+                state,
+                reload_tx,
+                serve_shutdown,
+                test_ports,
+                PublicTunnel::new(1),
+            )
+            .await;
         });
 
         // Give the listener time to bind
