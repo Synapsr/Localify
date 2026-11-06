@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::proxy::{PublicSource, public_error_response};
-use super::router::{RuntimeState, SharedState, create_router, is_localify_path};
+use super::router::{AdmittedState, RuntimeState, SharedState, create_router, is_localify_path};
 use crate::infrastructure::cloud::types::PublicUrl;
 
 const INGRESS_HEADER: &str = "x-localify-ingress";
@@ -208,7 +208,7 @@ impl Claims {
 /// Steps 1 to 5 of the contract: the request to hand to the router, or the
 /// status that refuses it.
 fn admit(
-    state: &RuntimeState,
+    state: Arc<RuntimeState>,
     access: &IngressAccess,
     mut request: Request,
 ) -> Result<Request, StatusCode> {
@@ -223,7 +223,7 @@ fn admit(
     if is_localify_path(request.uri().path()) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let Some(local_host) = claims.local_host(&grant, state) else {
+    let Some(local_host) = claims.local_host(&grant, &state) else {
         debug!(
             public_host = claims.public_host.as_deref().unwrap_or(""),
             "Public request refused: not a public URL this machine serves"
@@ -238,6 +238,7 @@ fn admit(
         public_host: claims.public_host.unwrap_or_default(),
         client_ip: claims.client_ip,
     });
+    request.extensions_mut().insert(AdmittedState(state));
     Ok(request)
 }
 
@@ -249,7 +250,7 @@ struct Ingress {
 }
 
 async fn ingress(State(ingress): State<Ingress>, request: Request, next: Next) -> Response {
-    let request = match admit(&ingress.state.load(), &ingress.access, request) {
+    let request = match admit(ingress.state.load_full(), &ingress.access, request) {
         Ok(request) => request,
         Err(status) => return public_error_response(status),
     };
@@ -461,7 +462,7 @@ mod tests {
 
     fn check(request: axum::http::request::Builder) -> Result<Request, StatusCode> {
         admit(
-            &state(3000).load(),
+            state(3000).load_full(),
             &access(),
             request.body(Body::empty()).unwrap(),
         )
@@ -473,7 +474,8 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let refusal = admit(&state(3000).load(), &IngressAccess::default(), request).unwrap_err();
+        let refusal =
+            admit(state(3000).load_full(), &IngressAccess::default(), request).unwrap_err();
 
         assert_eq!(refusal, StatusCode::FORBIDDEN);
     }

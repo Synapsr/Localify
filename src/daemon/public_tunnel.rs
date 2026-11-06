@@ -304,7 +304,10 @@ fn serve(
                 .is_some_and(|machine| machine.id == credentials.machine_id)
         })
         .collect();
-    let wanted = if urls.is_empty() {
+    // Without Localify's own ingress on its port, the tunnel would hand
+    // public traffic, and the ingress secret, to whatever program holds it.
+    let ingress_down = tunnel.parts().ingress_error.is_some();
+    let wanted = if urls.is_empty() || ingress_down {
         access.revoke();
         None
     } else {
@@ -616,6 +619,22 @@ mod tests {
         assert!(status.signed_in);
         // u2 belongs to another machine and is left out.
         assert_eq!(status.served_urls, vec!["u1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn no_tunnel_runs_when_the_ingress_could_not_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = sign_in(dir.path(), &fake_api("200 OK", RUNTIME).await);
+        let fixture = Fixture::new();
+        fixture.tunnel.ingress_failed("port taken".into());
+
+        assert!(fixture.check(&store).await);
+
+        assert!(!fixture.access.accepts_secret("s3cret"));
+        assert_eq!(fixture.wanted(), None);
+        let status = fixture.status().await;
+        assert_eq!(status.tunnel, TunnelState::Error);
+        assert_eq!(status.error.as_deref(), Some("port taken"));
     }
 
     #[tokio::test]

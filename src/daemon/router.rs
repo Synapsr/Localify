@@ -181,6 +181,12 @@ impl RuntimeState {
 /// Shared, atomically-swappable runtime state. Lock-free reads.
 pub type SharedState = Arc<ArcSwap<RuntimeState>>;
 
+/// The runtime state a public request was admitted against. The router routes
+/// it with that same state, so a reload between the ingress checks and the
+/// routing cannot send it to a registration the checks never saw.
+#[derive(Clone)]
+pub struct AdmittedState(pub Arc<RuntimeState>);
+
 #[derive(Clone, Default)]
 pub struct DomainAccessLog {
     entries: Arc<Mutex<HashMap<String, u64>>>,
@@ -279,7 +285,11 @@ async fn handle_request(
     client_addr: Option<Extension<ClientAddr>>,
     request: Request,
 ) -> Response {
-    let state = shared.load();
+    let state = request
+        .extensions()
+        .get::<AdmittedState>()
+        .map(|admitted| admitted.0.clone())
+        .unwrap_or_else(|| shared.load_full());
     let public = request.extensions().get::<PublicSource>().cloned();
     let method = request.method().clone();
     let uri = request.uri().clone();
@@ -1164,6 +1174,44 @@ mod tests {
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(RuntimeState::new(
             registrations,
         )))
+    }
+
+    #[tokio::test]
+    async fn public_traffic_is_routed_with_the_state_it_was_admitted_against() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let host = format!("app{}", BRANDING.domain_suffix());
+        let admitted = shared(vec![reg("app.localify", false)]).load_full();
+        // A reload removed the domain after the ingress admitted the request.
+        let reloaded = shared(Vec::new());
+        let request = |admitted: Option<std::sync::Arc<RuntimeState>>| {
+            let mut request = Request::builder()
+                .uri("/")
+                .header(header::HOST, host.as_str())
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(visitor());
+            if let Some(state) = admitted {
+                request.extensions_mut().insert(super::AdmittedState(state));
+            }
+            request
+        };
+
+        let routed = super::create_router(reloaded.clone())
+            .oneshot(request(Some(admitted)))
+            .await
+            .unwrap();
+        let unadmitted = super::create_router(reloaded)
+            .oneshot(request(None))
+            .await
+            .unwrap();
+
+        // The admitted state still has the domain, so the router tries its
+        // upstream (nothing listens there); the reloaded one does not.
+        assert_ne!(routed.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(unadmitted.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
