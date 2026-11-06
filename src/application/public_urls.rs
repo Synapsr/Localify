@@ -307,9 +307,18 @@ impl<'a> PublicUrls<'a> {
     }
 
     /// Saves the password the URL now asks for, or forgets the old one.
+    /// A password saved for a newer version stays: this answer arrived
+    /// after a later change, and then gives no link.
     fn remember(&self, url: &PublicUrl, password: Option<&str>) -> SavedPasswords {
+        let version = url.protection.version;
         self.change_passwords(|saved| {
-            match (url.protection.mode, url.protection.version, password) {
+            let newer_saved = saved
+                .get(&url.id)
+                .is_some_and(|saved| version.is_some_and(|version| saved.version > version));
+            if newer_saved {
+                return;
+            }
+            match (url.protection.mode, version, password) {
                 (ProtectionMode::Password, Some(version), Some(password)) => {
                     let password = SavedPassword {
                         version,
@@ -906,6 +915,38 @@ mod tests {
         assert_eq!(urls.find(&id).unwrap().password_link, None);
         assert_eq!(urls.list().unwrap()[0].password_link, None);
         assert!(world.passwords.saved().is_empty());
+    }
+
+    #[test]
+    fn a_late_answer_never_replaces_a_newer_password() {
+        let world = World::new();
+        let urls = world.urls();
+        let id = urls
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value
+            .public_url
+            .url
+            .id;
+        // A later change saved its password first.
+        world
+            .passwords
+            .update(&mut |saved| {
+                let password = SavedPassword {
+                    version: 50,
+                    password: "newer".into(),
+                };
+                saved.insert(id.clone(), password);
+            })
+            .unwrap();
+
+        let rotated = urls
+            .set_protection(&id, ProtectionChoice::Password(None))
+            .unwrap();
+        assert_eq!(rotated.value.public_url.password_link, None);
+        let opened = urls.set_protection(&id, ProtectionChoice::Public).unwrap();
+        assert_eq!(opened.value.public_url.password_link, None);
+        assert_eq!(world.passwords.saved()[&id].password, "newer");
     }
 
     #[test]

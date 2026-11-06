@@ -86,25 +86,36 @@ impl PasswordStore {
             .with_context(|| format!("{} is not valid", self.path.display()))
     }
 
-    /// Replaces the file; with no password left, deletes it.
+    /// Replaces the file; with no password left, deletes it, and any
+    /// temporary copy an interrupted write left.
     fn save(&self, passwords: &BTreeMap<String, StoredPassword>) -> Result<()> {
+        let temporary = self.dir.join(TEMPORARY_FILE_NAME);
         if passwords.is_empty() {
-            return match fs::remove_file(&self.path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => {
-                    Err(error).with_context(|| format!("Could not delete {}", self.path.display()))
-                }
-            };
+            remove_if_present(&temporary)?;
+            return remove_if_present(&self.path);
         }
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("Could not create {}", self.dir.display()))?;
         let contents = serde_json::to_vec_pretty(passwords)?;
-        let temporary = self.dir.join(TEMPORARY_FILE_NAME);
-        write_private_file(&temporary, &contents)
-            .with_context(|| format!("Could not write {}", temporary.display()))?;
-        fs::rename(&temporary, &self.path)
-            .with_context(|| format!("Could not write {}", self.path.display()))
+        let written = write_private_file(&temporary, &contents)
+            .with_context(|| format!("Could not write {}", temporary.display()))
+            .and_then(|()| {
+                fs::rename(&temporary, &self.path)
+                    .with_context(|| format!("Could not write {}", self.path.display()))
+            });
+        if written.is_err() {
+            // It holds passwords too.
+            let _ = fs::remove_file(&temporary);
+        }
+        written
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Could not delete {}", path.display())),
     }
 }
 
@@ -172,6 +183,19 @@ mod tests {
 
         assert_eq!(updated.len(), 2);
         assert_eq!(store.load().unwrap(), updated);
+        assert!(!dir.path().join(TEMPORARY_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn clearing_also_deletes_what_an_interrupted_write_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PasswordStore::in_data_dir(dir.path());
+        store.save(&passwords()).unwrap();
+        fs::write(dir.path().join(TEMPORARY_FILE_NAME), "{}").unwrap();
+
+        store.update(|all| all.clear()).unwrap();
+
+        assert!(!store.path.exists());
         assert!(!dir.path().join(TEMPORARY_FILE_NAME).exists());
     }
 
