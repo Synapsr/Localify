@@ -30,7 +30,9 @@ use crate::infrastructure::local_dev::{
     resolve_portable_local_dev_launch,
 };
 use crate::infrastructure::paths::LocalifyPaths;
-use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
+use crate::infrastructure::project_marker::{
+    ensure_marker_is_excluded, read_project_marker, write_project_marker,
+};
 use crate::infrastructure::running_services::{
     NewRun, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
     ServiceKey, ServiceOrigin,
@@ -427,15 +429,16 @@ pub(crate) fn resolve_runnable_service(
         ctx,
     )?;
 
-    let service = service_with_launch_for_mode(
-        resolve_run_service(
-            target.service,
-            effective_project,
-            effective_environment,
-            ctx,
-        )?,
-        mode,
-    );
+    let service = resolve_run_service(
+        target.service,
+        effective_project,
+        effective_environment,
+        ctx,
+    )?;
+    let worktree = effective_environment
+        .filter(|_| is_worktree_environment(&service.project_id, effective_environment, ctx));
+    ensure_service_folder_exists(&service, worktree)?;
+    let service = service_with_launch_for_mode(service, mode);
     if !service.project_enabled {
         bail!(
             "Service '{}' belongs to disabled project '{}'. Enable the project before running it.",
@@ -445,18 +448,45 @@ pub(crate) fn resolve_runnable_service(
     }
 
     // Backfill the marker for pre-marker projects so a future move can
-    // auto-heal. Never overwrites an existing marker. A worktree gets none: it
-    // would show as a change there, and a moved project could heal to it.
+    // auto-heal. Never overwrites an existing marker, but keeps it out of Git
+    // again, for a project that became a repository after it got its marker.
+    // A worktree gets none: it would show as a change there, and a moved
+    // project could heal to it.
     if !is_worktree_environment(&service.project_id, effective_environment, ctx)
         && let Some(root) = service.project_root_path.as_deref()
     {
         let root = Path::new(root);
-        if root.is_dir() && read_project_marker(root).is_none() {
-            let _ = write_project_marker(root, &service.project_id);
+        if root.is_dir() {
+            let _ = match read_project_marker(root) {
+                None => write_project_marker(root, &service.project_id),
+                Some(_) => ensure_marker_is_excluded(root),
+            };
         }
     }
 
     Ok((service, effective_environment.map(str::to_string)))
+}
+
+/// A project or worktree folder that is gone leaves nothing to run: says so,
+/// with the fix, instead of failing later on a command it cannot find there.
+/// `worktree` names the environment when the service runs in a worktree.
+fn ensure_service_folder_exists(service: &ConfiguredService, worktree: Option<&str>) -> Result<()> {
+    let Some(root) = service.project_root_path.as_deref() else {
+        return Ok(());
+    };
+    if Path::new(root).is_dir() {
+        return Ok(());
+    }
+    let cli = BRANDING.cli_command();
+    let project = &service.project_id;
+    match worktree {
+        Some(environment) => bail!(
+            "Environment '{environment}' of project '{project}' is in {root}, which no longer exists. If the worktree was deleted, remove the environment with: {cli} project env prune --project {project}"
+        ),
+        None => bail!(
+            "Project '{project}' is in {root}, which no longer exists. If the project moved, point Localify at its new folder: {cli} project update {project} --root <folder>"
+        ),
+    }
 }
 
 /// A service resolved for a launch somewhere else than this process: the app's
@@ -2324,6 +2354,44 @@ mod tests {
             primary_target: None,
             inferred: false,
         }
+    }
+
+    #[test]
+    fn a_project_folder_that_is_gone_says_how_to_point_at_the_new_one() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let gone = temp_dir.path().join("moved-away");
+        let service = test_service("web", &gone.display().to_string(), Some("apps/web"));
+
+        let error = ensure_service_folder_exists(&service, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&gone.display().to_string()), "{error}");
+        assert!(error.contains("no longer exists"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "{} project update demo --root <folder>",
+                BRANDING.cli_command()
+            )),
+            "{error}"
+        );
+
+        let error = ensure_service_folder_exists(&service, Some("feature-x"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Environment 'feature-x'"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "{} project env prune --project demo",
+                BRANDING.cli_command()
+            )),
+            "{error}"
+        );
+
+        let here = test_service("web", &temp_dir.path().display().to_string(), None);
+        assert!(ensure_service_folder_exists(&here, None).is_ok());
+        assert!(
+            ensure_service_folder_exists(&test_service_without_root("web", None), None).is_ok()
+        );
     }
 
     #[test]

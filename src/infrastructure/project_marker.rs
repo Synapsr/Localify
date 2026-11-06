@@ -33,42 +33,78 @@ fn marker_path(root: &Path) -> PathBuf {
     root.join(project_marker_relative_path())
 }
 
-fn ensure_marker_is_gitignored(root: &Path) -> Result<()> {
-    let gitignore_path = root.join(".gitignore");
-    let entry = format!(".{}/project.json", BRANDING.slug());
-    let existing = match fs::read(&gitignore_path) {
+/// The repository's own exclude file, shared by all its worktrees: the marker
+/// never shows as a change, and nothing the project tracks, such as its
+/// `.gitignore`, changes. A folder outside Git needs nothing yet; callers run
+/// this again later, so a project that becomes a repository gets the rule.
+pub fn ensure_marker_is_excluded(root: &Path) -> Result<()> {
+    let Some(common_dir) = git_common_dir(root) else {
+        return Ok(());
+    };
+    let exclude_path = common_dir.join("info").join("exclude");
+    // `**/` also covers a project in a subfolder of the repository.
+    let entry = format!("**/.{}/project.json", BRANDING.slug());
+    let existing = match fs::read(&exclude_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("Failed to read '{}'", gitignore_path.display()));
+                .with_context(|| format!("Failed to read '{}'", exclude_path.display()));
         }
     };
-    let is_already_ignored = String::from_utf8_lossy(&existing)
+    if String::from_utf8_lossy(&existing)
         .lines()
-        .any(|line| line.trim() == entry);
-
-    if is_already_ignored {
+        .any(|line| line.trim() == entry)
+    {
         return Ok(());
     }
 
-    let mut gitignore = OpenOptions::new()
+    if let Some(info) = exclude_path.parent() {
+        fs::create_dir_all(info)
+            .with_context(|| format!("Failed to create '{}'", info.display()))?;
+    }
+    let mut exclude = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&gitignore_path)
-        .with_context(|| format!("Failed to open '{}'", gitignore_path.display()))?;
+        .open(&exclude_path)
+        .with_context(|| format!("Failed to open '{}'", exclude_path.display()))?;
     if !existing.is_empty() && !existing.ends_with(b"\n") {
-        writeln!(gitignore)
-            .with_context(|| format!("Failed to update '{}'", gitignore_path.display()))?;
+        writeln!(exclude)
+            .with_context(|| format!("Failed to update '{}'", exclude_path.display()))?;
     }
-    writeln!(gitignore, "{entry}")
-        .with_context(|| format!("Failed to update '{}'", gitignore_path.display()))?;
+    writeln!(exclude, "{entry}")
+        .with_context(|| format!("Failed to update '{}'", exclude_path.display()))?;
     Ok(())
 }
 
+/// The Git directory every worktree of the repository holding `root` shares,
+/// found the way Git finds it, without running Git: the nearest `.git`, which
+/// in a worktree is a file naming its own Git directory, whose `commondir`
+/// names the shared one. A layout set only through `GIT_DIR` and
+/// `GIT_WORK_TREE`, with no `.git` in the folder, is not found: the marker is
+/// then left as it is.
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let dot_git = root
+        .ancestors()
+        .map(|folder| folder.join(".git"))
+        .find(|path| path.exists())?;
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let content = fs::read_to_string(&dot_git).ok()?;
+    let git_dir = dot_git
+        .parent()?
+        .join(content.strip_prefix("gitdir:")?.trim());
+    match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => Some(git_dir.join(common.trim())),
+        Err(_) => Some(git_dir),
+    }
+}
+
 /// Records the project id inside the project folder. Overwrites any existing
-/// marker and keeps the machine-local file out of Git. Re-initializing a
-/// folder must always point it at the new project.
+/// marker and keeps the machine-local file out of Git, through the
+/// repository's exclude file. Re-initializing a folder must always point it
+/// at the new project.
 pub fn write_project_marker(root: &Path, project_id: &str) -> Result<()> {
     let path = marker_path(root);
     if let Some(parent) = path.parent() {
@@ -82,7 +118,7 @@ pub fn write_project_marker(root: &Path, project_id: &str) -> Result<()> {
     .context("Failed to serialize the project marker")?;
     fs::write(&path, format!("{content}\n"))
         .with_context(|| format!("Failed to write project marker '{}'", path.display()))?;
-    ensure_marker_is_gitignored(root)?;
+    ensure_marker_is_excluded(root)?;
     Ok(())
 }
 
@@ -112,20 +148,21 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn exclude_entry() -> String {
+        format!("**/.{}/project.json", BRANDING.slug())
+    }
+
     #[test]
-    fn write_then_read_round_trips() {
+    fn write_then_read_round_trips_without_touching_the_project() {
         let temp = tempdir().unwrap();
         write_project_marker(temp.path(), "proj-123").unwrap();
-        let expected_entry = format!(".{}/project.json\n", BRANDING.slug());
 
         assert_eq!(
             read_project_marker(temp.path()),
             Some("proj-123".to_string())
         );
-        assert_eq!(
-            fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
-            expected_entry
-        );
+        // Outside Git there is nothing to keep it out of.
+        assert!(!temp.path().join(".gitignore").exists());
     }
 
     #[test]
@@ -133,26 +170,68 @@ mod tests {
         let temp = tempdir().unwrap();
         write_project_marker(temp.path(), "old").unwrap();
         write_project_marker(temp.path(), "new").unwrap();
-        let expected_entry = format!(".{}/project.json\n", BRANDING.slug());
 
         assert_eq!(read_project_marker(temp.path()), Some("new".to_string()));
+    }
+
+    #[test]
+    fn a_repository_excludes_the_marker_once_and_keeps_its_gitignore() {
+        let temp = tempdir().unwrap();
+        let info = temp.path().join(".git").join("info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(info.join("exclude"), "# local patterns").unwrap();
+        fs::write(temp.path().join(".gitignore"), "node_modules\n").unwrap();
+        let app = temp.path().join("apps/web");
+        fs::create_dir_all(&app).unwrap();
+
+        write_project_marker(temp.path(), "proj-123").unwrap();
+        write_project_marker(&app, "proj-456").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(info.join("exclude")).unwrap(),
+            format!("# local patterns\n{}\n", exclude_entry())
+        );
         assert_eq!(
             fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
-            expected_entry
+            "node_modules\n"
         );
     }
 
     #[test]
-    fn write_preserves_existing_gitignore_without_trailing_newline() {
+    fn a_worktree_excludes_the_marker_for_the_whole_repository() {
         let temp = tempdir().unwrap();
-        fs::write(temp.path().join(".gitignore"), "node_modules").unwrap();
+        let common = temp.path().join("repo").join(".git");
+        let worktree_git = common.join("worktrees").join("feature");
+        fs::create_dir_all(&worktree_git).unwrap();
+        fs::write(worktree_git.join("commondir"), "../..\n").unwrap();
+        let worktree = temp.path().join("feature");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git.display()),
+        )
+        .unwrap();
 
+        write_project_marker(&worktree, "proj-123").unwrap();
+
+        let exclude = fs::read_to_string(common.join("info").join("exclude")).unwrap();
+        assert_eq!(exclude, format!("{}\n", exclude_entry()));
+        assert!(!worktree_git.join("info").exists());
+    }
+
+    #[test]
+    fn a_project_that_becomes_a_repository_gets_the_rule_later() {
+        let temp = tempdir().unwrap();
         write_project_marker(temp.path(), "proj-123").unwrap();
-        let expected = format!("node_modules\n.{}/project.json\n", BRANDING.slug());
+        let info = temp.path().join(".git").join("info");
+        fs::create_dir_all(&info).unwrap();
+
+        ensure_marker_is_excluded(temp.path()).unwrap();
+        ensure_marker_is_excluded(temp.path()).unwrap();
 
         assert_eq!(
-            fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
-            expected
+            fs::read_to_string(info.join("exclude")).unwrap(),
+            format!("{}\n", exclude_entry())
         );
     }
 

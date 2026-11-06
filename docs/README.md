@@ -11,9 +11,25 @@ directory, and open `https://myapp.localify` in your browser.
 
 ## Quick Start
 
+Install the command line on macOS (Apple Silicon) or Linux (x86_64), then set it up:
+
 ```bash
-# Initial setup: creates the Root CA, configures DNS, trusts the
-# certificate in the system trust store, and trusts booted iOS
+curl -fsSL https://localify.dev/install.sh | sh
+```
+
+The script downloads the latest release from GitHub, checks its SHA-256, puts `localify`
+in `~/.local/bin`, then runs `localify install`, which asks for your administrator
+password once. Run it again to update: the background service restarts on the new
+binary. Over SSH, keep a terminal so `sudo` can ask:
+`ssh -t <host> 'curl -fsSL https://localify.dev/install.sh | sh'`.
+`LOCALIFY_VERSION`, `LOCALIFY_INSTALL_DIR` and `LOCALIFY_NO_SETUP=1` change what it does;
+the [script](../apps/web/public/install.sh) says how. On a Mac you can also use the app,
+<https://downloads.localify.dev/latest/localify.dmg>, which updates itself; the script
+leaves a Mac with the app alone.
+
+```bash
+# Initial setup, which the script runs for you: creates the Root CA, configures
+# DNS, trusts the certificate in the system trust store, and trusts booted iOS
 # Simulators when available. On macOS it also starts the daemon.
 localify install
 
@@ -415,6 +431,13 @@ through the local DNS server.
 All paths are configurable via the `[paths]` section in
 `config.toml` (see [Configuration](#configuration)).
 
+Each project folder holds `.localify/project.json`, which names its project on this
+machine, so Localify can find a project again after you move its folder. It belongs to
+this machine only: Localify adds `**/.localify/project.json` to the repository's
+`.git/info/exclude`, shared by its worktrees, so it is never committed. A marker committed
+before that stays tracked; stop tracking it with
+`git rm --cached .localify/project.json`.
+
 ## Auto-Start on Boot
 
 ### macOS
@@ -657,6 +680,31 @@ opening a URL to everyone, which stay yours: an agent always creates a protected
 and hands you its password.
 
 How it works, for contributors: [public-urls.md](public-urls.md).
+
+### Apps That Check Origin
+
+Through a public URL, your app gets the local host in `Host` and the public host in
+`X-Forwarded-Host` ([ADR 0023](adr/0023-public-traffic-reaches-upstream-with-the-local-host.md)).
+Writes such as a `POST` keep the browser's public `Origin`; only Next.js's own dev files
+and hot reload get the local origin. An app that checks `Origin` against its own URL
+therefore refuses them, as Better Auth does with `Invalid origin`. In development, also
+trust your own public URL and the hosts of its services and worktrees, so a new worktree
+needs no change. With Better Auth 1.6 and the project URL `https://journal.localify.fyi`:
+
+```ts
+const publicUrls = ["https://journal.localify.fyi", "https://journal--*.localify.fyi"];
+trustedOrigins: [env.AUTH_URL, ...(isDev ? publicUrls : [])],
+```
+
+or `BETTER_AUTH_TRUSTED_ORIGINS=https://journal.localify.fyi,https://journal--*.localify.fyi`.
+For links Better Auth builds, such as OAuth redirects, give it a base URL that follows
+`X-Forwarded-Host`, from an allowlist:
+`baseURL: { allowedHosts: ["journal.localify", "*.journal.localify", "journal.localify.fyi", "journal--*.localify.fyi"], fallback: "https://journal.localify" }`.
+
+Do not trust every `*.localify.fyi` origin. Localify Cloud refuses a write whose `Origin`
+belongs to another public URL ([public-urls.md](public-urls.md), "Public traffic",
+step 2), but your app also answers on its local domain, where nothing checks that: a
+page on someone else's public URL, open in your browser, could post to it.
 
 ## HTTPS Trust That Is Still Pending
 

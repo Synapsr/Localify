@@ -5,7 +5,7 @@ import Image from "next/image";
 import { Link } from "@/i18n/navigation";
 
 import { AppleGlyph } from "@/app/_components/apple-glyph";
-import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
+import { CLI_INSTALL_COMMAND, MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { sourceUrl } from "@/app/site-metadata";
 import { sectionClass } from "@/app/site-ui";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -96,6 +96,13 @@ export const FinalCta = async () => {
             <RiGithubFill className="h-4 w-4" />
             {t("source")}
           </a>
+        </motion.div>
+
+        <motion.div className="w-full max-w-md space-y-2" variants={item}>
+          <p className="text-[13px] text-muted-foreground">{t("terminal")}</p>
+          <code className="block overflow-x-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2 font-mono text-[13px] whitespace-nowrap text-foreground select-all">
+            {CLI_INSTALL_COMMAND}
+          </code>
         </motion.div>
 
         <motion.p className="text-[13px] text-muted-foreground" variants={item}>

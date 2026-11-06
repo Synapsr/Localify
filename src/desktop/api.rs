@@ -96,7 +96,9 @@ use crate::infrastructure::pid::{DaemonHandle, PidFile};
 use crate::infrastructure::port_check::{
     ensure_daemon_ports_available, ensure_lan_ports_available,
 };
-use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
+use crate::infrastructure::project_marker::{
+    project_marker_relative_path, read_project_marker, write_project_marker,
+};
 use crate::infrastructure::system_service;
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
@@ -1490,11 +1492,15 @@ impl DesktopApi {
                 .iter()
                 .find(|project| project.id == marker_project_id)
         {
+            let marker = project_marker_relative_path();
             bail!(
-                "'{}' already belongs to project '{}'. Pick the folder for '{}' instead.",
+                "'{}' already belongs to project '{}': its {} says so. Pick the folder for '{}' instead, or, if this is the folder of '{}', delete that file and try again; if Git tracks it, also run: git rm --cached {}",
                 root_path.display(),
                 other.name,
-                project.name
+                marker.display(),
+                project.name,
+                project.name,
+                marker.display()
             );
         }
 
@@ -6343,7 +6349,17 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(error.to_string().contains("already belongs to"));
+        let error = error.to_string();
+        assert!(error.contains("already belongs to"), "{error}");
+        // It names the file that says so, and how to fix a committed one.
+        let marker = crate::infrastructure::project_marker::project_marker_relative_path()
+            .display()
+            .to_string();
+        assert!(error.contains(&format!("its {marker} says so")), "{error}");
+        assert!(
+            error.contains(&format!("git rm --cached {marker}")),
+            "{error}"
+        );
     }
 
     #[test]

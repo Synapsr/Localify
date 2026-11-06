@@ -3,6 +3,26 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.3.3 - unreleased
+
+### New
+
+- **Install the command line in one line.** `curl -fsSL https://localify.dev/install.sh | sh`
+  installs Localify on macOS (Apple Silicon) or Linux (x86_64), checks the download, and
+  sets it up. Run it again to update. Coding agents find it, with the first steps,
+  agents and public URLs, at <https://localify.dev/llms.txt>.
+  [Quick Start](https://github.com/Synapsr/Localify/blob/main/docs/README.md#quick-start)
+
+### Improved
+
+- **A project whose folder moved says how to find it again.** `localify dev` used to
+  answer "has no detected command". It now says the folder no longer exists and gives
+  the command that points the project at its new one. When a folder already belongs to
+  another project, the message names the file that says so and how to remove it.
+- **Localify no longer edits your project's `.gitignore`.** The file that links a folder
+  to its project on your machine stays out of Git through the repository's own exclude
+  file, which covers every worktree.
+
 ## 1.3.2 - 2026-11-06
 
 ### Fixed

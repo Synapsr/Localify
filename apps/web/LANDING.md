@@ -92,7 +92,8 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 ### Facts copy can use
 
 - **License**: free and open source under AGPL-3.0-only. No account, and no limit on projects or domains.
-- **Platforms**: the desktop app runs on macOS on Apple Silicon for now. The CLI and daemon also build from source on Linux. Windows and a Linux desktop app are planned for later, with no date to promise.
+- **Platforms**: the desktop app runs on macOS on Apple Silicon for now. The CLI and daemon install on macOS on Apple Silicon and Linux x86_64 with `curl -fsSL https://localify.dev/install.sh | sh` (`public/install.sh`, which downloads the GitHub release and checks its SHA-256), and build from source elsewhere. Windows and a Linux desktop app are planned for later, with no date to promise.
+- **For agents**: `public/llms.txt` sums up install, first steps, MCP and public URLs. Keep it in step with this file and `docs/README.md`.
 - **Architecture**: Rust daemon plus Tauri desktop UI.
 - **Offline**: the proxy, DNS, and TLS need no internet after install.
 - **Telemetry**: official desktop builds send product analytics and error reports to PostHog. A filter removes URLs, file paths, `.localify` domains, and quoted names from error reports before sending, but don't promise it catches everything. The CLI and daemon send nothing. On the website, Umami runs for every visitor and PostHog only after consent in the cookie banner. The privacy policy has the details.

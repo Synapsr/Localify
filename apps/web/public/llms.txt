@@ -1,0 +1,34 @@
+# Localify
+
+> Localify is a local development proxy for macOS and Linux. It gives each project stable `https://<name>.localify` domains with trusted HTTPS, through a local DNS server and proxy, so parallel dev servers stop fighting over localhost ports. Free and open source under AGPL-3.0-only. A Rust daemon and CLI, plus a desktop app for macOS on Apple Silicon.
+
+## Install
+
+- Command line, macOS (Apple Silicon) or Linux (x86_64): `curl -fsSL https://localify.dev/install.sh | sh`. It downloads the latest GitHub release, checks its SHA-256, puts `localify` in `~/.local/bin`, then runs `localify install`, which asks for the administrator password once (DNS and background service). Run it again to update. Over SSH, keep a terminal so sudo can ask: `ssh -t <host> 'curl -fsSL https://localify.dev/install.sh | sh'`. `LOCALIFY_NO_SETUP=1` installs the command without setting it up.
+- Desktop app for macOS, which updates itself: https://downloads.localify.dev/latest/localify.dmg
+- Releases and checksums: https://github.com/Synapsr/Localify/releases
+
+## First steps
+
+- `localify dev` in a project folder sets the project up (a domain per app, free ports, framework config) and starts its dev server behind its `.localify` URL.
+- `localify register myapp.localify --route "/=3000"` points a domain at a port by hand.
+- `localify status` shows what runs; `localify logs <service>` shows a service's output.
+
+## Coding agents
+
+- `localify mcp` is an MCP server that gives Claude Code, Codex and Cursor every Localify action as a tool. `localify install` connects the agents installed at that time; `localify agent install` connects them later.
+
+## Public URLs
+
+- A public URL opens a project domain from another device, at `https://<slug>.localify.fyi`, behind a password by default. It needs a Localify Cloud account, invite-only for now.
+- `localify login` prints a GitHub device code; the person enters it at https://github.com/login/device from any device, so an agent can sign in a remote machine without anyone at its screen.
+- `localify public-url create <project-domain>` prints the URL, its password and a link that carries the password. `--wildcard` on a project's namespace (`<project>.localify`) also reaches every service and worktree, at `<slug>--<label>.localify.fyi`.
+- Apps that check `Origin`, such as Better Auth, must also trust their own public URL in development, for example `https://<slug>.localify.fyi` and `https://<slug>--*.localify.fyi`: writes keep the public origin. Not every `*.localify.fyi` origin, which would let other people's public URLs post to the app's local domain.
+
+## Docs
+
+- [Documentation](https://github.com/Synapsr/Localify/blob/main/docs/README.md): commands, routes, configuration, public URLs, troubleshooting
+- [Linux](https://github.com/Synapsr/Localify/blob/main/docs/linux.md)
+- [Public URLs, how they work](https://github.com/Synapsr/Localify/blob/main/docs/public-urls.md)
+- [Install script](https://github.com/Synapsr/Localify/blob/main/apps/web/public/install.sh)
+- [Source](https://github.com/Synapsr/Localify)

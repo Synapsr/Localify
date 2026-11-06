@@ -100,7 +100,7 @@
       },
       {
         "question": "它支持哪些平台？",
-        "answer": "桌面应用目前运行在 Apple Silicon 的 macOS 上。CLI 和守护进程也可以在 Linux 上从源代码构建。Windows 和 Linux 桌面应用计划在以后提供。"
+        "answer": "桌面应用目前运行在 Apple Silicon 的 macOS 上。CLI 和守护进程也可以在 Linux x86_64 上用 curl -fsSL https://localify.dev/install.sh | sh 安装，其他平台可从源代码构建。Windows 和 Linux 桌面应用计划在以后提供。"
       },
       {
         "question": "需要编辑 /etc/hosts 或安装 mkcert 吗？",
@@ -124,7 +124,8 @@
     "description": "别再和 localhost 较劲。Localify 是采用 AGPL 许可的免费开源软件。",
     "download": "下载 macOS 版",
     "source": "查看源代码",
-    "requirements": "Apple Silicon 的 macOS · 可在 Linux 上从源代码构建 CLI"
+    "terminal": "或在终端中安装（macOS 和 Linux）：",
+    "requirements": "Apple Silicon 的 macOS · 命令行也支持 Linux x86_64"
   },
   "Footer": {
     "resources": "资源",

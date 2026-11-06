@@ -100,7 +100,7 @@
       },
       {
         "question": "Which platforms does it run on?",
-        "answer": "The desktop app runs on macOS on Apple Silicon for now. The CLI and daemon also build from source on Linux. Windows and a Linux desktop app are planned for later."
+        "answer": "The desktop app runs on macOS on Apple Silicon for now. The CLI and daemon also install on Linux x86_64 with curl -fsSL https://localify.dev/install.sh | sh, and build from source elsewhere. Windows and a Linux desktop app are planned for later."
       },
       {
         "question": "Do I need to edit /etc/hosts or install mkcert?",
@@ -124,7 +124,8 @@
     "description": "Stop fighting localhost. Localify is free and open source under the AGPL.",
     "download": "Download for macOS",
     "source": "View source",
-    "requirements": "macOS on Apple Silicon · CLI builds from source on Linux"
+    "terminal": "Or from a terminal, on macOS and Linux:",
+    "requirements": "macOS on Apple Silicon · Command line also on Linux x86_64"
   },
   "Footer": {
     "resources": "Resources",

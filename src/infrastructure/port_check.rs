@@ -145,11 +145,16 @@ mod tests {
 
     #[test]
     fn a_port_that_refuses_connections_is_free_for_the_lan_opt_in() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // A test running alongside can take a freed port before the check:
+        // any one of a few fresh ports shows the rule.
+        let free = (0..10).any(|_| {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            ensure_no_listener_at(Ipv4Addr::LOCALHOST, port, port).is_ok()
+        });
 
-        ensure_no_listener_at(Ipv4Addr::LOCALHOST, port, port).unwrap();
+        assert!(free, "every freed port was taken again, or reported taken");
     }
 
     #[test]
