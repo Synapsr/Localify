@@ -17,6 +17,7 @@ import type {
   CloudAccountDto,
   CloudSignInPollDto,
   CloudSignInStartDto,
+  CloudSignOutDto,
   ConfigUpdateRequest,
   CreateProjectRequest,
   CreateProjectWithDomainsRequest,
@@ -208,7 +209,7 @@ export interface DesktopClient {
   getCloudAccount(): Promise<CloudAccountDto>;
   startCloudSignIn(): Promise<CloudSignInStartDto>;
   pollCloudSignIn(request: PollCloudSignInRequest): Promise<CloudSignInPollDto>;
-  signOutCloud(): Promise<CloudAccountDto>;
+  signOutCloud(): Promise<CloudSignOutDto>;
   listPublicUrls(): Promise<PublicUrlDto[]>;
   createPublicUrl(request: CreatePublicUrlRequest): Promise<PublicUrlWithPasswordDto>;
   removePublicUrl(request: PublicUrlRequest): Promise<void>;

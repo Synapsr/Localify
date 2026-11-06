@@ -4,6 +4,7 @@ import type {
   CloudAccountDto,
   CloudSignInPollDto,
   CloudSignInStartDto,
+  CloudSignOutDto,
   CreatePublicUrlRequest,
   PollCloudSignInRequest,
   PublicUrlDto,
@@ -30,7 +31,13 @@ export const cloudQueries = {
     queryOptions<CloudAccountDto, Error>({
       queryKey: cloudQueryKeys.account(),
       queryFn: () => tauriClient.getCloudAccount(),
-      refetchInterval: (query) => (query.state.data?.tunnel.state === "starting" ? 3000 : false),
+      // The daemon retries the tunnel by itself and starts it after the first
+      // URL, so keep looking while signed in, faster while it starts.
+      refetchInterval: (query) => {
+        const account = query.state.data;
+        if (!account?.signedIn) return false;
+        return account.tunnel.state === "starting" ? 3000 : 10_000;
+      },
     }),
   /** Calls Localify Cloud: only while signed in. */
   publicUrls: () =>
@@ -56,7 +63,7 @@ export const cloudMutations = {
       },
     }),
   signOut: (queryClient: QueryClient) =>
-    mutationOptions<CloudAccountDto, Error, void>({
+    mutationOptions<CloudSignOutDto, Error, void>({
       mutationFn: () => tauriClient.signOutCloud(),
       onSuccess: async () => invalidateQueries(queryClient, cloudMutationInvalidations),
     }),

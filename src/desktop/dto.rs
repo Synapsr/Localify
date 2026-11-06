@@ -1292,8 +1292,21 @@ pub struct CloudSignInPollDto {
     pub status: CloudSignInStatusDto,
     /// Why, for `notAllowed`, `expired` and `denied`.
     pub message: Option<String>,
+    /// With `slowDown`: the seconds GitHub now asks between polls, when it
+    /// says.
+    pub interval: Option<u64>,
     /// Set with `signedIn`.
     pub account: Option<CloudAccountDto>,
+}
+
+/// Signing out always forgets the token here; `warnings` says what did not
+/// follow, such as the cloud not revoking it or the daemon not stopping the
+/// tunnel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSignOutDto {
+    pub account: CloudAccountDto,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

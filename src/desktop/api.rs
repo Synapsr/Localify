@@ -14,7 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::application::StepOutcome;
-use crate::application::cloud_account::{AccountStatus, SignInPoll};
+use crate::application::cloud_account::{AccountStatus, SignInPoll, TunnelRefresh};
 use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::install::Install;
 use crate::application::manage_routes::ManageRoutes;
@@ -62,9 +62,9 @@ use crate::desktop::dto::{
 };
 use crate::desktop::dto::{
     CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CloudSignInStatusDto,
-    CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest,
-    PublicUrlProtectionDto, PublicUrlProtectionModeDto, PublicUrlWithPasswordDto,
-    SetPublicUrlProtectionRequest, TunnelStateDto, TunnelStatusDto,
+    CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto,
+    PublicUrlIdRequest, PublicUrlProtectionDto, PublicUrlProtectionModeDto,
+    PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest, TunnelStateDto, TunnelStatusDto,
 };
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
@@ -288,6 +288,10 @@ impl DesktopApi {
             .cloud()?
             .accounts()
             .poll_sign_in(&request.device_code, &computer_name())?;
+        let interval = match &poll {
+            SignInPoll::SlowDown { interval } => *interval,
+            _ => None,
+        };
         let (status, message, account) = match poll {
             SignInPoll::Pending => (CloudSignInStatusDto::Pending, None, None),
             SignInPoll::SlowDown { .. } => (CloudSignInStatusDto::SlowDown, None, None),
@@ -305,15 +309,25 @@ impl DesktopApi {
         Ok(CloudSignInPollDto {
             status,
             message,
+            interval,
             account,
         })
     }
 
     /// Signs out even when Localify Cloud cannot be reached.
-    pub fn sign_out_cloud(&self) -> Result<CloudAccountDto> {
+    pub fn sign_out_cloud(&self) -> Result<CloudSignOutDto> {
         let cloud = self.cloud()?;
-        cloud.accounts().sign_out()?;
-        Ok(map_cloud_account(cloud.accounts().status()?))
+        let signed_out = cloud.accounts().sign_out()?;
+        let mut warnings: Vec<String> = signed_out.warning.into_iter().collect();
+        if let TunnelRefresh::Failed(reason) = signed_out.refresh {
+            warnings.push(format!(
+                "The daemon did not stop this Mac's tunnel ({reason}). Restart the daemon to stop it."
+            ));
+        }
+        Ok(CloudSignOutDto {
+            account: map_cloud_account(cloud.accounts().status()?),
+            warnings,
+        })
     }
 
     pub fn list_public_urls(&self) -> Result<Vec<PublicUrlDto>> {

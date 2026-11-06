@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 
 import { SettingsCard } from "./settings-card";
 
+/** RFC 8628: add 5 seconds after `slow_down` when GitHub gives no interval. */
 const SLOW_DOWN_SECONDS = 5;
 
 type SignInStopReason = "denied" | "notAllowed" | "expired" | "error";
@@ -75,7 +76,10 @@ export const SettingsCloud = () => {
             setFlow({ ...flow });
             return;
           case "slowDown":
-            setFlow({ ...flow, intervalSeconds: flow.intervalSeconds + SLOW_DOWN_SECONDS });
+            setFlow({
+              ...flow,
+              intervalSeconds: result.interval ?? flow.intervalSeconds + SLOW_DOWN_SECONDS,
+            });
             return;
           case "signedIn":
             if (result.account) {
@@ -131,9 +135,15 @@ export const SettingsCloud = () => {
   const handleSignOut = async () => {
     try {
       const result = await signOut.mutateAsync();
-      queryClient.setQueryData(cloudQueries.account().queryKey, result);
+      queryClient.setQueryData(cloudQueries.account().queryKey, result.account);
       setSignOutOpen(false);
-      toast.success("Signed out of Localify Cloud");
+      if (result.warnings.length > 0) {
+        toast.warning("Signed out of Localify Cloud, with a problem", {
+          description: result.warnings.join(" "),
+        });
+      } else {
+        toast.success("Signed out of Localify Cloud");
+      }
     } catch (error) {
       const description = error instanceof Error ? error.message : String(error);
       toast.error("Could not sign out", { description });

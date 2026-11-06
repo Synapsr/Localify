@@ -377,14 +377,32 @@ fn label_under(name: &DomainName, parent: &DomainName) -> Option<String> {
 /// The name this machine shows on Localify Cloud: the computer's name on
 /// macOS, as in System Settings, and the host name elsewhere.
 pub fn computer_name() -> String {
-    macos_computer_name()
+    let name = macos_computer_name()
         .or_else(|| {
             std::fs::read_to_string("/proc/sys/kernel/hostname")
                 .ok()
                 .and_then(non_empty)
         })
         .or_else(|| command_output("hostname", &[]))
-        .unwrap_or_else(|| "Unnamed machine".to_string())
+        .unwrap_or_else(|| "Unnamed machine".to_string());
+    machine_name(&name, crate::branding::BRANDING.is_dev_profile())
+}
+
+/// The API's limit, in UTF-16 units as JavaScript counts them.
+const MAX_MACHINE_NAME: usize = 64;
+
+/// Signing in with a name already in use replaces that machine, so the dev
+/// profile, which runs next to the installed app, gets a name of its own.
+fn machine_name(computer: &str, dev_profile: bool) -> String {
+    let suffix = if dev_profile { " (dev)" } else { "" };
+    let mut kept = String::new();
+    for c in computer.trim().chars() {
+        if kept.encode_utf16().count() + c.len_utf16() + suffix.len() > MAX_MACHINE_NAME {
+            break;
+        }
+        kept.push(c);
+    }
+    format!("{}{suffix}", kept.trim_end())
 }
 
 #[cfg(target_os = "macos")]
@@ -412,6 +430,21 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_dev_profile_signs_in_as_a_machine_of_its_own() {
+        assert_eq!(
+            machine_name("Téo's MacBook Pro", false),
+            "Téo's MacBook Pro"
+        );
+        assert_eq!(
+            machine_name("Téo's MacBook Pro", true),
+            "Téo's MacBook Pro (dev)"
+        );
+        let long = machine_name(&"m".repeat(80), true);
+        assert_eq!(long.encode_utf16().count(), MAX_MACHINE_NAME);
+        assert!(long.ends_with(" (dev)"));
+    }
+
     use super::*;
     use crate::application::ports::CloudAccountStore;
 

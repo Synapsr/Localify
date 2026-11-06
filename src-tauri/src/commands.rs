@@ -22,9 +22,9 @@ use localify::desktop::dto::{
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use localify::desktop::dto::{
-    CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CreatePublicUrlRequest,
-    PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest, PublicUrlWithPasswordDto,
-    SetPublicUrlProtectionRequest,
+    CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CloudSignOutDto,
+    CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest,
+    PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -599,7 +599,7 @@ pub async fn poll_cloud_sign_in(
 }
 
 #[tauri::command]
-pub async fn sign_out_cloud(state: tauri::State<'_, AppState>) -> Result<CloudAccountDto, String> {
+pub async fn sign_out_cloud(state: tauri::State<'_, AppState>) -> Result<CloudSignOutDto, String> {
     let api = state.api.clone();
     async_runtime::spawn_blocking(move || api.sign_out_cloud().map_err(map_error))
         .await

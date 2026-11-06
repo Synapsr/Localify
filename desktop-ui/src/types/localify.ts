@@ -878,7 +878,15 @@ export type CloudSignInPollStatusDto =
 export interface CloudSignInPollDto {
   status: CloudSignInPollStatusDto;
   message: string | null;
+  /** With "slowDown": the seconds GitHub now asks between polls, when it says. */
+  interval: number | null;
   account: CloudAccountDto | null;
+}
+
+/** Signing out always forgets the token; `warnings` says what did not follow. */
+export interface CloudSignOutDto {
+  account: CloudAccountDto;
+  warnings: string[];
 }
 
 export type PublicUrlProtectionModeDto = "password" | "public";
