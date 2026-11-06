@@ -9,6 +9,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "scripts/web-cloudflare.mjs"
+      - "scripts/test-install-script.sh"
       - ".github/workflows/web.yml"
   pull_request:
     types: [opened, synchronize, reopened]
@@ -18,6 +19,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "scripts/web-cloudflare.mjs"
+      - "scripts/test-install-script.sh"
       - ".github/workflows/web.yml"
 
 permissions:
@@ -30,6 +32,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # The site serves install.sh, and this workflow runs when either changes.
+      - name: Test the install script
+        run: sh scripts/test-install-script.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

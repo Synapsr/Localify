@@ -38,6 +38,7 @@ esac
 if [ "$system" = Darwin ] && [ -d "$app" ]; then
   echo "The Localify app is installed and updates itself."
   echo "Its command is localify, or $app/Contents/MacOS/localify."
+  echo "If it is not set up yet, open it, or run: $app/Contents/MacOS/localify install"
   exit 0
 fi
 

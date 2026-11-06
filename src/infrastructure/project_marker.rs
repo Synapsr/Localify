@@ -35,8 +35,9 @@ fn marker_path(root: &Path) -> PathBuf {
 
 /// The repository's own exclude file, shared by all its worktrees: the marker
 /// never shows as a change, and nothing the project tracks, such as its
-/// `.gitignore`, changes. A folder outside Git needs nothing.
-fn ensure_marker_is_excluded(root: &Path) -> Result<()> {
+/// `.gitignore`, changes. A folder outside Git needs nothing yet; callers run
+/// this again later, so a project that becomes a repository gets the rule.
+pub fn ensure_marker_is_excluded(root: &Path) -> Result<()> {
     let Some(common_dir) = git_common_dir(root) else {
         return Ok(());
     };
@@ -79,7 +80,9 @@ fn ensure_marker_is_excluded(root: &Path) -> Result<()> {
 /// The Git directory every worktree of the repository holding `root` shares,
 /// found the way Git finds it, without running Git: the nearest `.git`, which
 /// in a worktree is a file naming its own Git directory, whose `commondir`
-/// names the shared one.
+/// names the shared one. A layout set only through `GIT_DIR` and
+/// `GIT_WORK_TREE`, with no `.git` in the folder, is not found: the marker is
+/// then left as it is.
 fn git_common_dir(root: &Path) -> Option<PathBuf> {
     let dot_git = root
         .ancestors()
@@ -214,6 +217,22 @@ mod tests {
         let exclude = fs::read_to_string(common.join("info").join("exclude")).unwrap();
         assert_eq!(exclude, format!("{}\n", exclude_entry()));
         assert!(!worktree_git.join("info").exists());
+    }
+
+    #[test]
+    fn a_project_that_becomes_a_repository_gets_the_rule_later() {
+        let temp = tempdir().unwrap();
+        write_project_marker(temp.path(), "proj-123").unwrap();
+        let info = temp.path().join(".git").join("info");
+        fs::create_dir_all(&info).unwrap();
+
+        ensure_marker_is_excluded(temp.path()).unwrap();
+        ensure_marker_is_excluded(temp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(info.join("exclude")).unwrap(),
+            format!("{}\n", exclude_entry())
+        );
     }
 
     #[test]

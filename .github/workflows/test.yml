@@ -74,9 +74,6 @@ jobs:
       - name: Test Localify Cloud
         run: pnpm cloud:test
 
-      - name: Test the install script
-        run: pnpm test:install-script
-
 
   # macOS only: on Linux the Tauri shell needs the webkit system packages.
   desktop-shell:

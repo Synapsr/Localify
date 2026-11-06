@@ -687,20 +687,24 @@ Through a public URL, your app gets the local host in `Host` and the public host
 `X-Forwarded-Host` ([ADR 0023](adr/0023-public-traffic-reaches-upstream-with-the-local-host.md)).
 Writes such as a `POST` keep the browser's public `Origin`; only Next.js's own dev files
 and hot reload get the local origin. An app that checks `Origin` against its own URL
-therefore refuses them, as Better Auth does with `Invalid origin`. In development, trust
-the public URLs too. With Better Auth 1.6:
+therefore refuses them, as Better Auth does with `Invalid origin`. In development, also
+trust your own public URL and the hosts of its services and worktrees, so a new worktree
+needs no change. With Better Auth 1.6 and the project URL `https://journal.localify.fyi`:
 
 ```ts
-trustedOrigins: [env.AUTH_URL, ...(isDev ? ["https://*.localify.fyi"] : [])],
+const publicUrls = ["https://journal.localify.fyi", "https://journal--*.localify.fyi"];
+trustedOrigins: [env.AUTH_URL, ...(isDev ? publicUrls : [])],
 ```
 
-or `BETTER_AUTH_TRUSTED_ORIGINS=https://*.localify.fyi`. For OAuth from the public URL,
-give it a base URL that follows `X-Forwarded-Host`:
-`baseURL: { allowedHosts: ["*.<project>.localify", "*.localify.fyi"], fallback: "https://<project>.localify" }`.
+or `BETTER_AUTH_TRUSTED_ORIGINS=https://journal.localify.fyi,https://journal--*.localify.fyi`.
+For links Better Auth builds, such as OAuth redirects, give it a base URL that follows
+`X-Forwarded-Host`, from an allowlist:
+`baseURL: { allowedHosts: ["journal.localify", "*.journal.localify", "journal.localify.fyi", "journal--*.localify.fyi"], fallback: "https://journal.localify" }`.
 
-Trusting every `*.localify.fyi` origin is safe in development: Localify Cloud refuses
-a write whose `Origin` belongs to another public URL before it reaches your machine
-([public-urls.md](public-urls.md), "Public traffic", step 2).
+Do not trust every `*.localify.fyi` origin. Localify Cloud refuses a write whose `Origin`
+belongs to another public URL ([public-urls.md](public-urls.md), "Public traffic",
+step 2), but your app also answers on its local domain, where nothing checks that: a
+page on someone else's public URL, open in your browser, could post to it.
 
 ## HTTPS Trust That Is Still Pending
 

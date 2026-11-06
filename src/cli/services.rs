@@ -30,7 +30,9 @@ use crate::infrastructure::local_dev::{
     resolve_portable_local_dev_launch,
 };
 use crate::infrastructure::paths::LocalifyPaths;
-use crate::infrastructure::project_marker::{read_project_marker, write_project_marker};
+use crate::infrastructure::project_marker::{
+    ensure_marker_is_excluded, read_project_marker, write_project_marker,
+};
 use crate::infrastructure::running_services::{
     NewRun, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
     ServiceKey, ServiceOrigin,
@@ -446,14 +448,19 @@ pub(crate) fn resolve_runnable_service(
     }
 
     // Backfill the marker for pre-marker projects so a future move can
-    // auto-heal. Never overwrites an existing marker. A worktree gets none: it
-    // would show as a change there, and a moved project could heal to it.
+    // auto-heal. Never overwrites an existing marker, but keeps it out of Git
+    // again, for a project that became a repository after it got its marker.
+    // A worktree gets none: it would show as a change there, and a moved
+    // project could heal to it.
     if !is_worktree_environment(&service.project_id, effective_environment, ctx)
         && let Some(root) = service.project_root_path.as_deref()
     {
         let root = Path::new(root);
-        if root.is_dir() && read_project_marker(root).is_none() {
-            let _ = write_project_marker(root, &service.project_id);
+        if root.is_dir() {
+            let _ = match read_project_marker(root) {
+                None => write_project_marker(root, &service.project_id),
+                Some(_) => ensure_marker_is_excluded(root),
+            };
         }
     }
 
