@@ -9,8 +9,9 @@ and the desktop app share the same version.
 
 - **Next.js dev servers work through a public URL.** Hot reload, fonts and some scripts
   failed with a 403, because the browser sent the public origin, which Next.js does not
-  list in `allowedDevOrigins`. Localify now passes the local origin for the page's own
-  reads and hot reload connection, so no project needs to list `localify.fyi`.
+  list in `allowedDevOrigins`. Localify now passes the local origin to Next.js's own dev
+  files and hot reload connection, so no project needs to list `localify.fyi`. Your
+  app's own requests keep the public origin.
 
 ## 1.3.1 - 2026-11-06
 
