@@ -1,7 +1,7 @@
 "use client";
 
 import { RiDraggable, RiMoreLine } from "@remixicon/react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { Reorder, useDragControls } from "motion/react";
@@ -17,7 +17,7 @@ import type {
   TerminalTargetRequest,
 } from "@/types/localify";
 
-import { CodeIcon, PinIcon, PinSolidIcon, TerminalIcon } from "@/components/icons";
+import { CodeIcon, GlobeIcon, PinIcon, PinSolidIcon, TerminalIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -35,7 +35,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { projectMutations } from "@/lib/queries";
+import { bootstrapQueries, projectMutations } from "@/lib/queries";
+import { projectNamespaceDomain } from "@/lib/util.cloud";
 import { cn } from "@/lib/utils";
 import { terminalTargetRequestMatches, useTerminal } from "@/providers/terminal-provider";
 
@@ -45,6 +46,9 @@ import { ProjectWorktreesDialog } from "./project-worktrees-dialog";
 import { ProjectAddServiceDialog } from "./projects-list-item-add-service-dialog";
 import { ProjectsListItemDevDx } from "./projects-list-item-dev-dx";
 import { ProjectDomainList } from "./projects-list-item-domains";
+import { PublicUrlBadge } from "./public-url/public-url-badge";
+import { PublicUrlDialog } from "./public-url/public-url-dialog";
+import { usePublicUrl } from "./public-url/use-public-url";
 
 interface ProjectsListItemProps {
   project: ProjectInfoDto;
@@ -81,6 +85,7 @@ export const ProjectsListItem = ({
   );
   const [worktreesDialogOpen, setWorktreesDialogOpen] = useState(false);
   const [addServiceDialogOpen, setAddServiceDialogOpen] = useState(false);
+  const [publicUrlDialogOpen, setPublicUrlDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [relinkError, setRelinkError] = useState<string | null>(null);
@@ -103,6 +108,13 @@ export const ProjectsListItem = ({
         } satisfies TerminalTargetRequest)
       : null;
   const selected = terminalTargetRequestMatches(selectedTarget, projectTerminalTarget);
+  const { data: bootstrap } = useQuery(bootstrapQueries.read());
+  // The namespace can be exposed even when no service registers it, as in a monorepo.
+  const namespaceDomain = projectNamespaceDomain(
+    project.id,
+    bootstrap?.environment.fixedDomainSuffix ?? "",
+  );
+  const namespacePublicUrl = usePublicUrl(namespaceDomain);
 
   const containerClassName = cn(
     "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
@@ -219,6 +231,12 @@ export const ProjectsListItem = ({
               className="size-4 shrink-0 text-muted-foreground"
             />
           ) : null}
+          {namespacePublicUrl ? (
+            <PublicUrlBadge
+              publicUrl={namespacePublicUrl}
+              onOpen={() => setPublicUrlDialogOpen(true)}
+            />
+          ) : null}
         </div>
         <ProjectDomainList
           project={project}
@@ -310,6 +328,13 @@ export const ProjectsListItem = ({
           >
             <CodeIcon className="size-4" />
             Manage worktrees
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => setPublicUrlDialogOpen(true)}
+            disabled={removeProject.isPending}
+          >
+            <GlobeIcon className="size-4" />
+            Public URL
           </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => void handleOpenTerminal()}
@@ -449,6 +474,13 @@ export const ProjectsListItem = ({
         services={services}
         open={addServiceDialogOpen}
         onOpenChange={setAddServiceDialogOpen}
+      />
+      <PublicUrlDialog
+        localDomain={namespaceDomain}
+        projectId={project.id}
+        wildcardByDefault
+        open={publicUrlDialogOpen}
+        onOpenChange={setPublicUrlDialogOpen}
       />
     </>
   );
