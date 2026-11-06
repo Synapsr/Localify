@@ -4,4 +4,5 @@
 pub mod api;
 pub mod credentials;
 pub mod http;
+pub mod runtime;
 pub mod types;

@@ -322,7 +322,7 @@ impl LocalDomains for ConfigLocalDomains {
                 .configured_projects()
                 .into_iter()
                 .find(|project| project.id == project_id)
-                .map_or_else(|| project_id.to_string(), |project| project.name);
+                .map_or(project_id, |project| project.name);
             return Ok(if config.configured_domains().iter().any(registered) {
                 LocalDomainOwner::Project(name)
             } else {
@@ -356,7 +356,7 @@ impl LocalDomains for ConfigLocalDomains {
         let mut labels = config
             .configured_domains()
             .iter()
-            .filter(|found| found.project_id.as_deref() == Some(project_id))
+            .filter(|found| found.project_id.as_ref() == Some(&project_id))
             .filter_map(|found| label_under(found.registration.pattern().base_domain(), domain))
             .collect::<Vec<_>>();
         labels.sort();

@@ -143,7 +143,7 @@ Signing out calls the API, then deletes the file, then sends `public_refresh`. W
 
 ### Public ingress
 
-A listener on `127.0.0.1:<ingress port>`. The port is fixed per brand: 7381 for Localify, 7382 for Localify (Dev). The ingress secret is a bearer secret for this machine: whoever holds it can send any public host and URL id to this listener, so it travels only between the Worker and the tunnel, never in logs, and the daemon trusts nothing it carries beyond the checks below. For each request it:
+A listener on `127.0.0.1:<ingress port>`. The port is fixed per brand: 7381 for Localify, 7382 for Localify (Dev); `LOCALIFY_PUBLIC_INGRESS_PORT` moves it, so a test can run a daemon next to an installed one. When the port is taken, the daemon runs without public traffic and `public_status` says why. The ingress secret is a bearer secret for this machine: whoever holds it can send any public host and URL id to this listener, so it travels only between the Worker and the tunnel, never in logs, and the daemon trusts nothing it carries beyond the checks below. For each request it:
 
 1. Compares `X-Localify-Ingress` with the ingress secret in constant time. A mismatch, or no secret yet because the machine is signed out or the runtime has not loaded: 403 with a generic body.
 2. Reads and removes every `X-Localify-*` header.
@@ -152,7 +152,7 @@ A listener on `127.0.0.1:<ingress port>`. The port is fixed per brand: 7381 for 
 5. Hands the request to the router with `Host` set to the local host and a public source carrying the public host and client IP. The proxy then sets `X-Forwarded-Host` to the public host, `X-Forwarded-Proto: https`, `X-Forwarded-Port: 443`, `X-Forwarded-For` to the client IP and `X-Localify-Local-Domain` to the local host, for HTTP and WebSocket alike. The client address the router sees is the public client IP, never loopback.
 6. Holds one of 32 permits from the moment the request is admitted until its response head arrives. Over HTTP/2 a browser sends a whole module graph at once, and the proxy opens one upstream connection per request; without the cap the dev server's accept backlog overflows. Releasing at the head keeps SSE and other long responses from starving the rest.
 
-Errors on public traffic use generic pages: no project paths, no commands, no config details. Request log lines for public traffic add `source=public public_host=<host>`.
+Errors on public traffic use generic pages: no project paths, no commands, no config details. Public responses get neither the launch profile indicator, whose script lives under `/.localify/`, nor the `X-Localify-Profile` header. Request log lines for public traffic add `source=public public_host=<host>`.
 
 ### Tunnel
 
@@ -160,7 +160,7 @@ When signed in and this machine serves at least one public URL, the daemon runs 
 
 `cloudflared` is downloaded on first use from its GitHub release, at a version pinned in the code, into `<data dir>/bin/cloudflared-<version>`, and its SHA-256 is checked against a value pinned next to the version before it is made executable. A mismatch deletes the file and reports an error. Supported: macOS arm64 and x86_64, Linux x86_64 and arm64.
 
-The daemon fetches `GET /v1/machines/self/runtime` at start, every 5 minutes, and when the management socket receives `public_refresh`. That command answers at once and the fetch runs in the background, because the management client waits 2 seconds and a cloud call may take 20. The CLI and the app send it after every change. The management command `public_status` describes this machine only:
+The daemon fetches `GET /v1/machines/self/runtime` at start, every 5 minutes, and when the management socket receives `public_refresh`; after a failed fetch it retries sooner, from 10 seconds doubling up to 5 minutes, and keeps serving the URLs it already had. `public_refresh` answers at once and the fetch runs in the background, because the management client waits 2 seconds and a cloud call may take 20. The CLI and the app send it after every change. The management command `public_status` describes this machine only:
 
 ```json
 { "signedIn": true, "tunnel": "stopped" | "starting" | "connected" | "error", "connections": 4,

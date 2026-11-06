@@ -467,30 +467,34 @@ impl Config {
         Ok(())
     }
 
-    /// The project a public URL on `local_domain` belongs to
-    /// (`docs/public-urls.md`, "Exposable local domain"): the project whose
-    /// registration it is, or, when nothing registers it, the project whose
-    /// namespace `<project-id><domain suffix>` it is, as in a monorepo where
-    /// only `web.journal.localify` is registered. `None` for a domain
-    /// registered outside any project and for any other domain, Docker's
-    /// included: those are never exposed. The CLI and the app check it before
-    /// creating a URL, and the daemon before serving public traffic.
-    pub fn public_url_project(&self, local_domain: &str) -> Option<&str> {
+    /// The project of each exposable local domain (`docs/public-urls.md`,
+    /// "Exposable local domain"): every domain a project registers, and every
+    /// project's namespace `<project-id><domain suffix>`, which a wildcard URL
+    /// targets in a monorepo where only `web.journal.localify` is registered.
+    /// Domains outside any project, Docker's included, are never exposed. The
+    /// CLI and the app check it before creating a URL, and the daemon before
+    /// serving public traffic.
+    pub fn exposable_domains(&self) -> HashMap<String, String> {
+        let namespaces = self.projects.keys().map(|id| {
+            let namespace = format!("{}{}", id.to_ascii_lowercase(), BRANDING.domain_suffix());
+            (namespace, id.clone())
+        });
+        let registered = self.configured_domains().into_iter().filter_map(|domain| {
+            let project_id = domain.project_id.filter(|id| self.projects.contains_key(id))?;
+            let name = domain.registration.pattern().base_domain().as_str().to_string();
+            Some((name, project_id))
+        });
+        namespaces.chain(registered).collect()
+    }
+
+    /// The project a public URL on `local_domain` belongs to, if the domain
+    /// is exposable (see `exposable_domains`).
+    pub fn public_url_project(&self, local_domain: &str) -> Option<String> {
         let domain = local_domain
             .trim()
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        if let Some(registration) = self.registration_for_domain(&domain) {
-            let project_id = registration.project.as_deref()?;
-            return self
-                .projects
-                .get_key_value(project_id)
-                .map(|(id, _)| id.as_str());
-        }
-        let namespace = domain.strip_suffix(BRANDING.domain_suffix())?;
-        self.projects
-            .get_key_value(namespace)
-            .map(|(id, _)| id.as_str())
+        self.exposable_domains().remove(&domain)
     }
 
     fn project_is_enabled(&self, project_id: Option<&str>) -> bool {
@@ -1958,7 +1962,6 @@ mod tests {
         let project = |domain: &str| {
             config
                 .public_url_project(&domain.replace(".localify", BRANDING.domain_suffix()))
-                .map(str::to_string)
         };
 
         assert_eq!(project("web.journal.localify"), Some(journal.id.clone()));
@@ -2931,5 +2934,28 @@ target = "127.0.0.1:61092"
             registration.pattern().display_pattern(),
             "*.store.example-app.io"
         );
+    }
+
+    #[test]
+    fn every_project_owns_its_namespace() {
+        let toml = r#"
+[projects.journal]
+name = "Journal"
+
+[projects.paused]
+name = "Paused"
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        let exposable = config.exposable_domains();
+
+        assert_eq!(
+            exposable.get(&format!("journal{}", BRANDING.domain_suffix())),
+            Some(&"journal".to_string())
+        );
+        // A paused project's URLs can be created; the daemon serves only
+        // enabled projects' domains.
+        assert_eq!(exposable.len(), 2);
     }
 }

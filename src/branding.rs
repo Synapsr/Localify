@@ -63,8 +63,13 @@ impl Branding {
     /// Loopback port where the daemon takes public traffic from `cloudflared`.
     /// Each brand has its own, so `Localify (Dev)` can run next to the
     /// installed app (`docs/public-urls.md`, section "Public ingress").
+    /// `LOCALIFY_PUBLIC_INGRESS_PORT` moves it, so a test can run a daemon
+    /// next to an installed one.
     pub fn public_ingress_port(&self) -> u16 {
-        if self.is_dev_profile() { 7382 } else { 7381 }
+        std::env::var(self.env_var("PUBLIC_INGRESS_PORT"))
+            .ok()
+            .and_then(|port| port.trim().parse().ok())
+            .unwrap_or(if self.is_dev_profile() { 7382 } else { 7381 })
     }
 
     pub fn domain_suffix(&self) -> &'static str {
