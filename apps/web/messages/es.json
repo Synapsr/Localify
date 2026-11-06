@@ -84,7 +84,7 @@
       },
       {
         "question": "¿Es gratis?",
-        "answer": "Sí. Localify es gratis y open source bajo la AGPL, sin cuenta y sin límite de proyectos o dominios. El código fuente está en GitHub."
+        "answer": "Sí. Localify es gratis y open source bajo la AGPL, sin cuenta y sin límite de proyectos o dominios. Las URLs públicas también son gratis, pero necesitan una cuenta con invitación y, por ahora, están limitadas a 10 por persona. El código fuente está en GitHub."
       },
       {
         "question": "¿Para quién es?",
@@ -92,11 +92,11 @@
       },
       {
         "question": "¿Pone mi trabajo en internet?",
-        "answer": "No. Localify no es un túnel público. Tus servicios locales se quedan en tu máquina — ni el tráfico de aplicación ni los logs de peticiones se envían a Localify."
+        "answer": "Solo si lo pides. Tus servicios locales se quedan en tu máquina, y ni el tráfico de aplicación ni los logs de peticiones se envían a Localify. La excepción es una URL pública, una opción solo con invitación que activas para un dominio cada vez: las peticiones a esa URL pasan por Cloudflare hasta tu máquina, protegidas con contraseña por defecto."
       },
       {
         "question": "¿Localify recopila analytics?",
-        "answer": "La app de escritorio oficial sí: flujos de producto (onboarding, navegación, creación de proyecto), contadores de uso e informes de errores. Estos eventos no incluyen logs de peticiones, nombres de proyecto, dominios, rutas locales ni contenido de tráfico. Un filtro elimina URLs, rutas de archivo, dominios .localify y nombres entre comillas de los informes de errores antes de enviarlos, aunque no puede detectarlo todo. El CLI y el daemon no envían nada."
+        "answer": "La app de escritorio oficial sí: flujos de producto (onboarding, navegación, creación de proyecto), contadores de uso e informes de errores. Estos eventos no incluyen logs de peticiones, nombres de proyecto, dominios, rutas locales ni contenido de tráfico. Un filtro elimina URLs, rutas de archivo, dominios .localify y nombres entre comillas de los informes de errores antes de enviarlos, aunque no puede detectarlo todo. El CLI y el daemon no envían analytics."
       },
       {
         "question": "¿En qué plataformas funciona?",
@@ -112,7 +112,7 @@
       },
       {
         "question": "¿En qué se diferencia de ngrok o Cloudflare Tunnel?",
-        "answer": "ngrok y Cloudflare Tunnel exponen tus servicios a internet. Localify se queda local: sin nube, sin túnel público, solo URLs limpias para el desarrollo diario."
+        "answer": "ngrok y Cloudflare Tunnel están hechos para poner servicios en internet. Localify está hecho para el desarrollo local: URLs limpias y HTTPS confiable en tu máquina, sin nube. Cuando necesitas abrir un dev server desde tu teléfono u otro equipo, una URL pública lo hace, con contraseña por defecto. Por ahora, las URLs públicas son solo con invitación."
       },
       {
         "question": "¿Funciona con Cursor, Claude Code, o varios agentes de IA en paralelo?",
@@ -152,7 +152,7 @@
   },
   "Terms": {
     "title": "Términos de servicio",
-    "updatedAt": "4 de noviembre de 2026",
+    "updatedAt": "6 de noviembre de 2026",
     "intro": "Localify es gratis y open source. Estos términos son breves porque la licencia hace casi todo el trabajo. Si algo no está claro, escribe a support@localify.dev.",
     "sections": [
       {
@@ -174,7 +174,7 @@
       {
         "title": "3. Nada que comprar",
         "body": [
-          "No hay compra, ni clave de licencia, ni límite de activación. No necesitas una cuenta para usar Localify."
+          "No hay compra, ni clave de licencia, ni límite de activación. No necesitas una cuenta para usar Localify, salvo para las URLs públicas."
         ]
       },
       {
@@ -190,24 +190,31 @@
         ]
       },
       {
-        "title": "6. Uso del sitio web",
+        "title": "6. Localify Cloud",
+        "body": [
+          "Las URLs públicas funcionan sobre Localify Cloud, que por ahora es gratis y solo con invitación. Úsalas para acceder a tus propios dev servers o para mostrar trabajo en curso, no para alojar un sitio para el público. No las uses para nada ilegal, para phishing o malware, ni para contenido que infrinja los derechos de otros.",
+          "Podemos eliminar una URL pública o cerrar una cuenta que incumpla estos términos, y podemos cambiar o detener el servicio. Igual que el software, se ofrece sin garantía de ningún tipo, tampoco de que siga disponible."
+        ]
+      },
+      {
+        "title": "7. Uso del sitio web",
         "body": [
           "Estos términos también cubren el sitio localify.dev. No lo uses para nada ilegal, y no intentes romperlo, sobrecargarlo ni entrar en sus partes no públicas."
         ]
       },
       {
-        "title": "7. Cambios en estos términos",
+        "title": "8. Cambios en estos términos",
         "body": [
           "Podemos actualizar esta página a medida que cambie el proyecto. Cuando lo hagamos, cambiaremos la fecha de arriba."
         ]
       }
     ],
     "contact": {
-      "title": "8. Contacto",
+      "title": "9. Contacto",
       "prefix": "¿Preguntas sobre estos términos? Escribe a"
     },
     "legalNotice": {
-      "title": "9. Aviso legal",
+      "title": "10. Aviso legal",
       "publisher": "Edición y dirección de la publicación: Téo Goulois",
       "contact": "Contacto:",
       "host": "Alojamiento: Cloudflare, Inc., 101 Townsend Street, San Francisco, CA 94107, EE. UU., +1 888-993-5273"
@@ -215,13 +222,13 @@
   },
   "Privacy": {
     "title": "Política de privacidad",
-    "updatedAt": "4 de noviembre de 2026",
+    "updatedAt": "6 de noviembre de 2026",
     "intro": "Tu entorno de desarrollo local se queda en tu máquina. La app de escritorio y el CLI guardan allí DNS, TLS, enrutamiento, proyectos y logs de peticiones. Esta página cubre los casos en que los datos salen de tu dispositivo y lo que recoge el sitio web.",
     "sections": [
       {
         "title": "1. La versión corta",
         "body": [
-          "Localify no recoge logs de peticiones ni nada sobre el tráfico de los servicios que ejecutas. Sus analytics no incluyen rutas locales, y un filtro las elimina de los informes de errores. El proxy funciona en local después de la instalación. Nos llegan datos en cuatro casos: visitas el sitio, la app de escritorio oficial envía analytics de producto e informes de errores, la app busca actualizaciones o nos escribes."
+          "Localify no guarda logs de peticiones ni nada sobre el tráfico de los servicios que ejecutas. Las peticiones a una URL pública pasan por Cloudflare y Localify Cloud de camino a tu máquina, sin que se guarden. Sus analytics no incluyen rutas locales, y un filtro las elimina de los informes de errores. El proxy funciona en local después de la instalación. Nos llegan datos en cinco casos: visitas el sitio, la app de escritorio oficial envía analytics de producto e informes de errores, la app busca actualizaciones, inicias sesión en Localify Cloud y usas URLs públicas o nos escribes."
         ]
       },
       {
@@ -233,7 +240,7 @@
       {
         "title": "3. La app de escritorio y el CLI",
         "body": [
-          "El daemon, la app de escritorio y el CLI de Localify se ejecutan en tu máquina. DNS, certificados TLS, enrutamiento, configuración de proyectos y logs de peticiones se gestionan allí. Nuestros analytics no incluyen los hostnames que creas, y el filtro descrito más abajo elimina los dominios .localify de los informes de errores. Nunca recibimos las peticiones que pasan por el proxy ni los logs que muestra la app. El CLI y el daemon no envían analytics.",
+          "El daemon, la app de escritorio y el CLI de Localify se ejecutan en tu máquina. DNS, certificados TLS, enrutamiento, configuración de proyectos y logs de peticiones se gestionan allí. Nuestros analytics no incluyen los hostnames que creas, y el filtro descrito más abajo elimina los dominios .localify de los informes de errores. Las peticiones que pasan por el proxy en tu máquina y los logs que muestra la app se quedan allí. Las URLs públicas se tratan en la sección siguiente. El CLI y el daemon no envían analytics.",
           "Las builds oficiales de la app de escritorio envían analytics de producto a PostHog: pantallas vistas, pasos de onboarding, acciones como crear un proyecto o añadir un dominio, y contadores como cuántos proyectos y dominios tienes. Estos eventos no incluyen nombres de proyecto, dominios, rutas locales, URLs proxificadas ni tráfico. El autocapture está desactivado. Una build compilada desde el código fuente sin token de PostHog no envía nada.",
           "La app también informa de errores a PostHog: el nombre y el mensaje del error, más hashes que agrupan errores idénticos. Antes de enviarlos, un filtro elimina URLs, rutas de archivo, dominios .localify y nombres entre comillas. Funciona por patrones, así que puede dejar pasar algo en un mensaje poco habitual.",
           "El session replay está desactivado por defecto y solo empieza si lo activas en los ajustes de la app. Enmascara textos y campos de entrada, y no graba logs de consola ni tiempos de red.",
@@ -241,14 +248,22 @@
         ]
       },
       {
-        "title": "4. Versiones antiguas de la app",
+        "title": "4. Localify Cloud y URLs públicas",
+        "body": [
+          "Las URLs públicas son opcionales y solo con invitación. Requieren una cuenta de Localify Cloud, que creas al iniciar sesión con GitHub. Entonces guardamos el ID numérico y el nombre de usuario de tu cuenta de GitHub y, para cada equipo desde el que inicias sesión, su nombre, el puerto local al que se conecta su túnel y un token de inicio de sesión guardado solo como hash. Nunca vemos tu contraseña de GitHub, y el token de GitHub que se usa al iniciar sesión sirve una sola vez para leer tu nombre de usuario y después se descarta. Un equipo con la sesión iniciada pregunta a Localify Cloud cada 5 minutos qué URLs públicas sirve; sus peticiones incluyen su versión de Localify.",
+          "Para cada URL pública, guardamos su dirección, el dominio local que abre (por ejemplo, web.journal.localify), el equipo que la sirve, su configuración y, cuando está protegida, un hash con sal de su contraseña. La contraseña pasa por Localify Cloud cuando la defines, pero nunca se guarda. También guardamos identificadores técnicos, estados y fechas. Una URL eliminada se conserva 30 días, para que su dirección no pueda servir la página de otra persona, y después la borra la siguiente limpieza, que se ejecuta cada hora. Hasta entonces, puedes recuperar la dirección.",
+          "Las peticiones a una URL pública pasan por Cloudflare, donde funciona Localify Cloud, y después por un Cloudflare Tunnel hasta tu equipo. Localify Cloud comprueba el acceso y reenvía cada petición, con la dirección IP del visitante, sin registrarla ni guardarla. Para frenar los intentos de adivinar contraseñas y el abuso del inicio de sesión, Cloudflare limita los intentos de contraseña por URL y dirección IP, y las peticiones de inicio de sesión por dirección IP, en ventanas de un minuto. Una URL protegida pone una sola cookie en su propia dirección, válida durante 7 días, que solo registra que escribiste la contraseña. Localify Cloud registra sus errores, no cada petición. Un mensaje de error puede incluir detalles de la petición que lo causó, y Cloudflare conserva estos logs hasta 7 días."
+        ]
+      },
+      {
+        "title": "5. Versiones antiguas de la app",
         "body": [
           "Las versiones antiguas de la app usaban claves de licencia. Si activaste una clave en alguna de ellas, esa versión aún puede contactar con licences.localify.dev para validarla, enviando la clave y una huella de la máquina. La huella es un identificador no reversible derivado de un identificador estable de la máquina. La versión actual no tiene comprobación de licencia y no hace esta petición.",
           "Keygen, el proveedor de licencias, guarda los registros de esas activaciones, incluidos la plataforma, el nombre de host y el nombre del dispositivo enviados al activar, cuando estaban disponibles. Permanecen allí hasta que se eliminen a petición. Para solicitarlo, escribe a support@localify.dev."
         ]
       },
       {
-        "title": "5. El sitio web",
+        "title": "6. El sitio web",
         "body": [
           "En producción, el sitio usa dos herramientas de analytics, Umami y PostHog. Registran visitas a páginas y clics en botones como el de descarga. No usamos rastreadores publicitarios ni retargeting entre sitios.",
           "Umami funciona para todos los visitantes. Se carga desde analytics.teogoulois.com y no usa cookies.",
@@ -257,14 +272,18 @@
         ]
       },
       {
-        "title": "6. Proveedores",
+        "title": "7. Proveedores",
         "body": [
           "Usamos estos proveedores:"
         ],
         "list": [
           {
             "name": "Cloudflare",
-            "description": "alojamiento del sitio, las descargas y los archivos de actualización."
+            "description": "alojamiento del sitio, las descargas, los archivos de actualización y Localify Cloud, incluidas las peticiones a URLs públicas."
+          },
+          {
+            "name": "GitHub",
+            "description": "inicio de sesión en Localify Cloud."
           },
           {
             "name": "PostHog",
@@ -281,37 +300,37 @@
         ]
       },
       {
-        "title": "7. Por qué tratamos estos datos",
+        "title": "8. Por qué tratamos estos datos",
         "body": [
-          "Para PostHog en el sitio nos basamos en tu consentimiento, y puedes retirarlo en cualquier momento desde el enlace Cookies del pie de página. Tratamos las analytics de Umami, las analytics de la app de escritorio y los informes de errores porque tenemos un interés legítimo en entender cómo se usa Localify y en arreglar lo que falla. Tratamos las peticiones de actualización para entregar actualizaciones, y los correos de soporte para responderte."
+          "Para PostHog en el sitio nos basamos en tu consentimiento, y puedes retirarlo en cualquier momento desde el enlace Cookies del pie de página. Tratamos las analytics de Umami, las analytics de la app de escritorio y los informes de errores porque tenemos un interés legítimo en entender cómo se usa Localify y en arreglar lo que falla. Tratamos las peticiones de actualización para entregar actualizaciones, los datos de Localify Cloud para ofrecer las URLs públicas para las que iniciaste sesión, y los correos de soporte para responderte."
         ]
       },
       {
-        "title": "8. Conservación",
+        "title": "9. Conservación",
         "body": [
-          "Guardamos los correos de soporte mientras sean útiles para el soporte y después los eliminamos. PostHog conserva los eventos de analytics hasta 7 años, el periodo que fija nuestro plan y que no podemos acortar, y las grabaciones de sesión, si las activas, hasta 3 meses. Los datos de Umami se conservan mientras exista el proyecto, salvo que los eliminemos antes. Los logs de servidor permanecen en los proveedores mencionados, según los ajustes de conservación de cada servicio. Los registros de licencia existentes permanecen en el proveedor hasta que se eliminen a petición."
+          "Guardamos los correos de soporte mientras sean útiles para el soporte y después los eliminamos. PostHog conserva los eventos de analytics hasta 7 años, el periodo que fija nuestro plan y que no podemos acortar, y las grabaciones de sesión, si las activas, hasta 3 meses. Los datos de Umami se conservan mientras exista el proyecto, salvo que los eliminemos antes. Localify Cloud conserva tu cuenta y tus equipos hasta que nos pidas eliminarlos, y las URLs públicas eliminadas durante 30 días. Los logs de servidor permanecen en los proveedores mencionados, según los ajustes de conservación de cada servicio. Los registros de licencia existentes permanecen en el proveedor hasta que se eliminen a petición."
         ]
       },
       {
-        "title": "9. Tus derechos",
+        "title": "10. Tus derechos",
         "body": [
           "Puedes pedirnos una copia de los datos que tenemos sobre ti, corregirlos o solicitar que los eliminemos. Cuando se aplique el RGPD o una ley similar, también puedes oponerte a ciertos tratamientos o limitarlos, solicitar la portabilidad o reclamar ante tu autoridad local de protección de datos. Escribe a support@localify.dev y responderemos en un plazo razonable."
         ]
       },
       {
-        "title": "10. Transferencias internacionales",
+        "title": "11. Transferencias internacionales",
         "body": [
           "Nosotros y nuestros proveedores podemos tratar datos fuera de tu país, incluido en Estados Unidos. Cuando es necesario, nos apoyamos en mecanismos de transferencia como decisiones de adecuación o cláusulas contractuales tipo."
         ]
       },
       {
-        "title": "11. Menores",
+        "title": "12. Menores",
         "body": [
           "Localify es una herramienta de desarrollo dirigida a adultos. No está pensada para menores de 16 años, y no recogemos a sabiendas datos personales suyos."
         ]
       },
       {
-        "title": "12. Cambios en esta política",
+        "title": "13. Cambios en esta política",
         "body": [
           "Si cambiamos cómo tratamos los datos, actualizaremos esta página y la fecha de arriba. Si el cambio es importante, lo señalaremos en el sitio."
         ]
