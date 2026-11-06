@@ -1,6 +1,7 @@
 //! Connects the Localify Cloud use cases to the API, the credentials file,
 //! the daemon and the config. The CLI and `DesktopApi` build them the same way.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::process::Command;
@@ -323,33 +324,39 @@ impl CloudAccountStore for CredentialsStore {
 
 impl PublicUrlPasswords for PasswordStore {
     fn load(&self) -> Result<SavedPasswords> {
-        Ok(PasswordStore::load(self)?
-            .into_iter()
-            .map(|(id, stored)| {
-                let saved = SavedPassword {
-                    version: stored.version,
-                    password: stored.password,
-                };
-                (id, saved)
-            })
-            .collect())
+        Ok(saved_passwords(PasswordStore::load(self)?))
     }
 
-    fn store(&self, passwords: &SavedPasswords) -> Result<()> {
-        PasswordStore::save(
-            self,
-            &passwords
-                .iter()
+    fn update(&self, change: &mut dyn FnMut(&mut SavedPasswords)) -> Result<SavedPasswords> {
+        let stored = PasswordStore::update(self, |stored| {
+            let mut saved = saved_passwords(std::mem::take(stored));
+            change(&mut saved);
+            *stored = saved
+                .into_iter()
                 .map(|(id, saved)| {
                     let stored = StoredPassword {
                         version: saved.version,
-                        password: saved.password.clone(),
+                        password: saved.password,
                     };
-                    (id.clone(), stored)
+                    (id, stored)
                 })
-                .collect(),
-        )
+                .collect();
+        })?;
+        Ok(saved_passwords(stored))
     }
+}
+
+fn saved_passwords(stored: BTreeMap<String, StoredPassword>) -> SavedPasswords {
+    stored
+        .into_iter()
+        .map(|(id, stored)| {
+            let saved = SavedPassword {
+                version: stored.version,
+                password: stored.password,
+            };
+            (id, saved)
+        })
+        .collect()
 }
 
 impl PublicTunnel for MgmtSocketClient {
@@ -545,9 +552,10 @@ mod tests {
             },
         )]);
 
-        PublicUrlPasswords::store(&store, &saved).unwrap();
+        let updated = PublicUrlPasswords::update(&store, &mut |all| all.extend(saved.clone()));
+        assert_eq!(updated.unwrap(), saved);
         assert_eq!(PublicUrlPasswords::load(&store).unwrap(), saved);
-        PublicUrlPasswords::store(&store, &SavedPasswords::new()).unwrap();
+        PublicUrlPasswords::update(&store, &mut |all| all.clear()).unwrap();
         assert!(PublicUrlPasswords::load(&store).unwrap().is_empty());
     }
 

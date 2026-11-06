@@ -436,7 +436,12 @@ async function createUrl(request: Request, env: Env, caller: Caller): Promise<Re
     }
   }
 
-  return json(withPassword(await requireUrl(env, caller, id), protection), 201);
+  // The protection this request wrote, even if another one changed it since.
+  const created = {
+    ...(await requireUrl(env, caller, id)),
+    protection: { mode: protection.mode, version: 1 },
+  };
+  return json(withPassword(created, protection), 201);
 }
 
 async function deleteUrl(
@@ -469,13 +474,19 @@ async function setProtection(
     `UPDATE public_urls
      SET protected = ?3, password_hash = ?4, password_salt = ?5, password_version = password_version + 1
      WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL
-     RETURNING slug`,
+     RETURNING slug, password_version`,
   )
     .bind(id, caller.userId, secret ? 1 : 0, secret?.hash ?? null, secret?.salt ?? null)
-    .first<{ slug: string }>();
+    .first<{ slug: string; password_version: number }>();
   if (!updated) throw urlNotFound();
   forgetSite(updated.slug);
-  return json(withPassword(await requireUrl(env, caller, id), protection));
+  // The version of this very change, so a client never pairs its password
+  // with the version of a change made at the same time elsewhere.
+  const changed = {
+    ...(await requireUrl(env, caller, id)),
+    protection: { mode: protection.mode, version: updated.password_version },
+  };
+  return json(withPassword(changed, protection));
 }
 
 async function claimUrl(

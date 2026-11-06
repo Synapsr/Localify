@@ -62,9 +62,15 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  // 3. Check access.
+  // 3. Check access. The access path is Localify's on every URL: a link shared
+  // while the URL had a password still carries it after `#`, and redirecting
+  // to `/#` empties the fragment, which the browser would carry to the app.
+  if (url.pathname === ACCESS_PATH) {
+    if (site.protected) return handleAccess(request, env, site, host);
+    await request.body?.cancel();
+    return redirect("/#");
+  }
   if (site.protected) {
-    if (url.pathname === ACCESS_PATH) return handleAccess(request, env, site, host);
     if (!(await hasAccess(request, env, site, host))) {
       if ((method === "GET" || method === "HEAD") && !webSocket) {
         return passwordPage({ host, next: url.pathname + url.search, method });

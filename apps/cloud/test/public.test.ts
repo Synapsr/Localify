@@ -237,6 +237,23 @@ describe("the password", () => {
     });
     expect((await visit(context, `https://${host()}/`)).status).toBe(200);
   });
+
+  it("keeps the access path from the app once the URL is public", async () => {
+    await api(context, "PUT", `/v1/public-urls/${urlId}/protection`, {
+      token,
+      body: { protection: { mode: "public" } },
+    });
+    // A link shared while it had a password: `/#` empties its fragment.
+    for (const method of ["GET", "POST"]) {
+      const response = await visit(context, `https://${host("web")}/__localify/access`, {
+        method,
+        body: method === "POST" ? "password=x" : undefined,
+      });
+      expect(response.status, method).toBe(303);
+      expect(response.headers.get("location"), method).toBe("/#");
+    }
+    expect(machineCalls()).toHaveLength(0);
+  });
 });
 
 describe("cross-origin requests", () => {

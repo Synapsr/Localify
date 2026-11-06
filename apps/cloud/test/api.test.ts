@@ -558,7 +558,7 @@ describe("public URLs", () => {
       body: { protection: { mode: "public" } },
     });
     const openedBody = (await opened.json()) as { publicUrl: PublicUrlBody; password?: string };
-    expect(openedBody.publicUrl.protection).toEqual({ mode: "public" });
+    expect(openedBody.publicUrl.protection).toEqual({ mode: "public", version: 3 });
     expect(openedBody.password).toBeUndefined();
     expect(version()).toBe(3);
     const row = context.sqlite

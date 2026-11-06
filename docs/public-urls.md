@@ -98,8 +98,10 @@ type PublicUrl = {
   wildcard: boolean;
   machine: Machine | null;     // null when no machine serves it
   // version: the D1 password_version, bumped by every protection change,
-  // so a client knows whether a password it saved is still the current one
-  protection: { mode: "password"; version: number } | { mode: "public" };
+  // so a client knows whether a password it saved is still the current one.
+  // After a create or a protection change, it is the version of that very
+  // change, even if another one landed since.
+  protection: { mode: "password" | "public"; version: number };
   createdAt: string;           // RFC 3339
 };
 ```
@@ -116,7 +118,7 @@ For a request to `*.localify.fyi`, the Worker:
 
 1. Parses the host into slug and label, and loads the public URL with its machine and its owner's GitHub id. Unknown or deleted slug, a label on a non-wildcard URL, an invalid label, or an owner no longer on the allowlist: a 404 page. No serving machine: a 503 "offline" page. Lookups are cached in the isolate for 10 seconds, so a deleted URL, a new password or a claim reaches every location within that time. These changes apply to new requests: a WebSocket or an SSE stream already open stays open until it closes.
 2. Refuses cross-origin requests that could change state. Every URL under `localify.fyi` is the same site for a browser, so `SameSite` does not stop another user's page from posting to this one. For any method other than `GET`, `HEAD` and `OPTIONS`, and for every WebSocket handshake, an `Origin` header that is present must belong to the same public URL: `<slug>.localify.fyi` or `<slug>--<label>.localify.fyi` with this URL's slug. A page whose referrer policy is `no-referrer` sends `Origin: null` even to itself; that passes only with `Sec-Fetch-Site: same-origin`, which the browser sets and a page cannot. Otherwise: 403. A request without `Origin` is not a browser's cross-origin request and goes on to the access check. The Worker's own pages use `Referrer-Policy: same-origin`, so their form sends its origin.
-3. Checks access when the URL is protected. Access is the cookie `__Host-localify-access` = `<expiry>.<password version>.<hex HMAC-SHA-256(COOKIE_KEY, host|url id|version|expiry)>`, valid 7 days, `Secure; HttpOnly; SameSite=Lax; Path=/`, set for the exact host (each wildcard label signs in separately). Without it, `GET` and `HEAD` return the password page (401, HTML) and other methods a plain 401, WebSocket handshakes included. The page posts to `/__localify/access` with the password and a same-host relative `next` path; a correct password sets the cookie and redirects with 303. Attempts are rate limited per URL and client IP. A link that carries the password is `https://<host>/__localify/access#<password, percent-encoded>`: the fragment never reaches a server or the app, and link previews see only the password page. `GET /__localify/access` serves that page with `next=/` and one inline script, allowed by a per-response CSP nonce, which reads the fragment, removes it from the address bar and history, and submits the form. That path never redirects, since a browser would carry the fragment to the app's page.
+3. Checks access when the URL is protected. Access is the cookie `__Host-localify-access` = `<expiry>.<password version>.<hex HMAC-SHA-256(COOKIE_KEY, host|url id|version|expiry)>`, valid 7 days, `Secure; HttpOnly; SameSite=Lax; Path=/`, set for the exact host (each wildcard label signs in separately). Without it, `GET` and `HEAD` return the password page (401, HTML) and other methods a plain 401, WebSocket handshakes included. The page posts to `/__localify/access` with the password and a same-host relative `next` path; a correct password sets the cookie and redirects with 303. Attempts are rate limited per URL and client IP. A link that carries the password is `https://<host>/__localify/access#<password, percent-encoded>`: the fragment never reaches a server or the app, and link previews see only the password page. On a URL without a password, `/__localify/access` answers `303` to `/#`, whose empty fragment replaces the one an old link carries; the path never reaches the app. `GET /__localify/access` on a protected URL serves that page with `next=/` and one inline script, allowed by a per-response CSP nonce, which reads the fragment, removes it from the address bar and history, and submits the form. That path never redirects, since a browser would carry the fragment to the app's page.
 4. Forwards to `https://m-<machine-id>.localify.dev<path>?<query>` with the method, body and headers, after removing `Host`, `Forwarded`, `X-Real-IP`, every `X-Forwarded-*`, `X-Localify-*` and `CF-*` header, and the access cookie from `Cookie`. It adds:
 
 | Header | Value |
@@ -143,17 +145,17 @@ For a request to `*.localify.fyi`, the Worker:
 
 A signed-in machine always talks to the `apiBase` it signed in with, so its token never goes to another endpoint by accident. `LOCALIFY_CLOUD_API` only chooses the API for a new sign-in, for development against `wrangler dev`; plain `http://` is accepted only for a loopback host.
 
-Signing out calls the API, then deletes the saved passwords (below) and the file, then sends `public_refresh`. When the API is unreachable, both are deleted anyway after a warning, and the cloud's hourly cleanup never needs them.
+Signing out calls the API, then deletes the saved passwords (below) and the file, then sends `public_refresh`. When the API is unreachable, both are deleted anyway after a warning, and the cloud's hourly cleanup never needs them. Saved passwords that cannot be deleted add a warning and do not stop the sign-out.
 
 ### Saved passwords
 
-When the CLI or the app sets a password, generated or chosen, it keeps it with the URL's `protection.version` in `public-url-passwords.json` next to `cloud.json`, written with `write_private_file` (0600):
+When the CLI or the app sets a password, generated or chosen, it keeps it with the URL's `protection.version` in `public-url-passwords.json` next to `cloud.json`, written with `write_private_file` (0600) to a temporary file renamed over it, so a reader never sees half a file:
 
 ```json
 { "<url id>": { "version": 3, "password": "…" } }
 ```
 
-Localify Cloud keeps only a hash, so this copy is what lets the CLI, the MCP and the app give the link with the password (see "Public traffic") after the moment it was set. Whoever can read the file can read `cloud.json` too, whose token can change the password anyway. A saved password counts only while its version is the URL's current one, so a password changed or removed from another machine gives no link. Turning protection off or removing the URL forgets its password, listing forgets those that no longer open a URL, and signing out deletes the file. A file that cannot be read or written costs the links, with a warning in the log, never the change itself.
+Localify Cloud keeps only a hash, so this copy is what lets the CLI, the MCP and the app give the link with the password (see "Public traffic") after the moment it was set. Whoever can read the file can read `cloud.json` too, whose token can change the password anyway. A saved password counts only while its version is the URL's current one, so a password changed or removed from another machine gives no link. Every change of the file reads, changes and writes it while holding a lock (`flock`) on the data directory, so the app, the CLI and the MCP server never undo each other's change. Turning protection off or removing the URL forgets its password. Listing forgets a password only when its URL's version is newer, since the list may be older than a change being saved at that moment; the password of a URL removed from another machine stays until sign-out. Signing out deletes the file. A file that cannot be read or written costs the links, with a warning, never the change itself, nor a sign-out. A file that is not valid JSON starts over empty.
 
 ### Public ingress
 

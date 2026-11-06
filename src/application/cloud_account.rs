@@ -3,8 +3,7 @@ use serde::Serialize;
 
 use super::ports::{
     CloudAccountStore, CloudApi, CloudApiError, DaemonConnectionError, DeviceAuthorization,
-    DeviceTokenPoll, PublicTunnel, PublicUrlPasswords, SavedPasswords, SignInRequest, TunnelState,
-    TunnelStatus,
+    DeviceTokenPoll, PublicTunnel, PublicUrlPasswords, SignInRequest, TunnelState, TunnelStatus,
 };
 use crate::branding::BRANDING;
 
@@ -149,10 +148,9 @@ impl<'a> CloudAccounts<'a> {
     /// signed in helps nobody.
     pub fn sign_out(&self) -> Result<SignedOut> {
         let Some(account) = self.store.load()? else {
-            self.passwords.store(&SavedPasswords::new())?;
             return Ok(SignedOut {
                 login: None,
-                warning: None,
+                warning: self.forget_passwords(),
                 refresh: refresh_tunnel(self.tunnel),
             });
         };
@@ -168,13 +166,27 @@ impl<'a> CloudAccounts<'a> {
                 BRANDING.cli_command()
             ),
         };
-        self.passwords.store(&SavedPasswords::new())?;
+        // Signing out goes on without them: staying signed in would be worse.
+        let warning = [warning, self.forget_passwords()]
+            .into_iter()
+            .flatten()
+            .reduce(|first, second| format!("{first} {second}"));
         self.store.delete()?;
         Ok(SignedOut {
             login: Some(account.login),
             warning,
             refresh: refresh_tunnel(self.tunnel),
         })
+    }
+
+    /// A warning when the saved passwords of public URLs stay on disk.
+    fn forget_passwords(&self) -> Option<String> {
+        self.passwords
+            .update(&mut |saved| saved.clear())
+            .err()
+            .map(|error| {
+                format!("The saved passwords of public URLs could not be deleted: {error:#}")
+            })
     }
 }
 
@@ -362,16 +374,38 @@ mod tests {
     }
 
     #[test]
+    fn passwords_that_cannot_be_deleted_do_not_keep_the_machine_signed_in() {
+        let passwords = InMemoryPublicUrlPasswords::failing();
+        let (api, store, tunnel) = (
+            InMemoryCloudApi::new(),
+            InMemoryCloudAccountStore::signed_in(),
+            InMemoryPublicTunnel::running(),
+        );
+
+        let signed_out = CloudAccounts::new(&api, &store, &passwords, &tunnel)
+            .sign_out()
+            .unwrap();
+
+        assert_eq!(store.account(), None);
+        assert_eq!(tunnel.refreshes(), 1);
+        let warning = signed_out.warning.unwrap();
+        assert!(
+            warning.contains("passwords of public URLs could not be deleted"),
+            "{warning}"
+        );
+    }
+
+    #[test]
     fn signing_out_forgets_the_saved_passwords() {
         let passwords = InMemoryPublicUrlPasswords::new();
         passwords
-            .store(&SavedPasswords::from([(
-                "u1".to_string(),
-                crate::application::ports::SavedPassword {
+            .update(&mut |saved| {
+                let password = crate::application::ports::SavedPassword {
                     version: 1,
                     password: "open sesame".into(),
-                },
-            )]))
+                };
+                saved.insert("u1".to_string(), password);
+            })
             .unwrap();
         let (api, store, tunnel) = (
             InMemoryCloudApi::new(),

@@ -28,6 +28,9 @@ pub type SavedPasswords = BTreeMap<String, SavedPassword>;
 pub trait PublicUrlPasswords {
     /// Empty when none were saved.
     fn load(&self) -> anyhow::Result<SavedPasswords>;
-    /// Replaces them all; saving none removes them.
-    fn store(&self, passwords: &SavedPasswords) -> anyhow::Result<()>;
+    /// Changes them under a lock every process of this machine takes, so the
+    /// app and the CLI never undo each other's change, and returns them as
+    /// saved. Leaving none removes them.
+    fn update(&self, change: &mut dyn FnMut(&mut SavedPasswords))
+    -> anyhow::Result<SavedPasswords>;
 }

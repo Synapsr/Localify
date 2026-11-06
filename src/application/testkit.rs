@@ -674,7 +674,7 @@ impl InMemoryCloudApi {
             },
             ProtectionChoice::Public => Protection {
                 mode: ProtectionMode::Public,
-                version: None,
+                version: Some(version),
             },
         }
     }
@@ -919,12 +919,15 @@ impl PublicUrlPasswords for InMemoryPublicUrlPasswords {
         Ok(self.saved())
     }
 
-    fn store(&self, passwords: &SavedPasswords) -> anyhow::Result<()> {
+    fn update(
+        &self,
+        change: &mut dyn FnMut(&mut SavedPasswords),
+    ) -> anyhow::Result<SavedPasswords> {
         if self.failing {
             anyhow::bail!("The disk is full.");
         }
-        *self.saved.borrow_mut() = passwords.clone();
-        Ok(())
+        change(&mut self.saved.borrow_mut());
+        Ok(self.saved())
     }
 }
 

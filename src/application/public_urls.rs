@@ -116,22 +116,29 @@ impl<'a> PublicUrls<'a> {
         }
     }
 
-    /// Also forgets the saved passwords that no longer open a URL: changed
-    /// from another machine, or of a URL removed there.
+    /// Also forgets the saved passwords whose URL changed its protection
+    /// since, from another machine. Only a newer version proves that: the
+    /// list may be older than a change this machine is saving right now. The
+    /// password of a URL removed from another machine stays until sign-out.
     pub fn list(&self) -> Result<Vec<PublicUrlView>> {
         let account = self.account()?;
         let urls = self
             .api
             .list_public_urls(&account)
             .map_err(with_next_step)?;
+        let replaced = |id: &String, saved: &SavedPassword| {
+            urls.iter().any(|url| {
+                url.id == *id
+                    && url
+                        .protection
+                        .version
+                        .is_some_and(|version| version > saved.version)
+            })
+        };
         let mut saved = self.saved_passwords();
-        let before = saved.len();
-        saved.retain(|id, password| {
-            urls.iter()
-                .any(|url| url.id == *id && current_password(url, password).is_some())
-        });
-        if saved.len() != before {
-            self.store_passwords(&saved);
+        if saved.iter().any(|(id, password)| replaced(id, password)) {
+            saved =
+                self.change_passwords(|saved| saved.retain(|id, password| !replaced(id, password)));
         }
         Ok(urls
             .into_iter()
@@ -248,9 +255,10 @@ impl<'a> PublicUrls<'a> {
         self.api
             .remove_public_url(&account, id)
             .map_err(with_next_step)?;
-        let mut saved = self.saved_passwords();
-        if saved.remove(id).is_some() {
-            self.store_passwords(&saved);
+        if self.saved_passwords().contains_key(id) {
+            self.change_passwords(|saved| {
+                saved.remove(id);
+            });
         }
         Ok(self.changed(()))
     }
@@ -299,24 +307,34 @@ impl<'a> PublicUrls<'a> {
     }
 
     /// Saves the password the URL now asks for, or forgets the old one.
-    /// The URL has changed by then, so a file that cannot be written only
-    /// costs the link, with a warning in the log.
     fn remember(&self, url: &PublicUrl, password: Option<&str>) -> SavedPasswords {
-        let mut saved = self.saved_passwords();
-        match (url.protection.mode, url.protection.version, password) {
-            (ProtectionMode::Password, Some(version), Some(password)) => {
-                let password = SavedPassword {
-                    version,
-                    password: password.to_string(),
-                };
-                saved.insert(url.id.clone(), password);
+        self.change_passwords(|saved| {
+            match (url.protection.mode, url.protection.version, password) {
+                (ProtectionMode::Password, Some(version), Some(password)) => {
+                    let password = SavedPassword {
+                        version,
+                        password: password.to_string(),
+                    };
+                    saved.insert(url.id.clone(), password);
+                }
+                _ => {
+                    saved.remove(&url.id);
+                }
             }
-            _ => {
-                saved.remove(&url.id);
-            }
-        }
-        self.store_passwords(&saved);
-        saved
+        })
+    }
+
+    /// The URL has changed by then, so a file that cannot be written only
+    /// costs the link: this answer still has it, and the log a warning.
+    fn change_passwords(&self, change: impl Fn(&mut SavedPasswords)) -> SavedPasswords {
+        self.passwords
+            .update(&mut |saved| change(saved))
+            .unwrap_or_else(|error| {
+                warn!("Public URL passwords could not be saved: {error:#}");
+                let mut saved = self.saved_passwords();
+                change(&mut saved);
+                saved
+            })
     }
 
     /// A file that cannot be read counts as empty: it only costs the links.
@@ -325,12 +343,6 @@ impl<'a> PublicUrls<'a> {
             warn!("Public URL passwords could not be read: {error:#}");
             SavedPasswords::new()
         })
-    }
-
-    fn store_passwords(&self, saved: &SavedPasswords) {
-        if let Err(error) = self.passwords.store(saved) {
-            warn!("Public URL passwords could not be saved: {error:#}");
-        }
     }
 
     fn changed<T>(&self, value: T) -> Changed<T> {
@@ -894,6 +906,29 @@ mod tests {
         assert_eq!(urls.find(&id).unwrap().password_link, None);
         assert_eq!(urls.list().unwrap()[0].password_link, None);
         assert!(world.passwords.saved().is_empty());
+    }
+
+    #[test]
+    fn a_list_older_than_a_saved_password_keeps_it() {
+        let world = World::new();
+        world.api.insert(public_url("u1", "journal-a8f3", false));
+        // Saved by a change this list predates, and for a URL created since.
+        world
+            .passwords
+            .update(&mut |saved| {
+                for (id, version) in [("u1", 7), ("u-new", 1)] {
+                    let password = SavedPassword {
+                        version,
+                        password: "open sesame".into(),
+                    };
+                    saved.insert(id.to_string(), password);
+                }
+            })
+            .unwrap();
+
+        world.urls().list().unwrap();
+
+        assert_eq!(world.passwords.saved().len(), 2);
     }
 
     #[test]

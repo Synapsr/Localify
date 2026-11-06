@@ -20,8 +20,8 @@ export type PublicUrl = {
   localDomain: string;
   wildcard: boolean;
   machine: { id: string; name: string } | null;
-  /** `version` changes with every new password: a password saved before is stale. */
-  protection: { mode: "password"; version: number } | { mode: "public" };
+  /** `version` changes with every protection change: a password saved before is stale. */
+  protection: { mode: "password" | "public"; version: number };
   createdAt: string;
 };
 
@@ -84,10 +84,10 @@ export function toPublicUrl(row: PublicUrlRow, baseDomain: string): PublicUrl {
       row.machine_id !== null && row.machine_name !== null
         ? { id: row.machine_id, name: row.machine_name }
         : null,
-    protection:
-      row.protected === 1
-        ? { mode: "password", version: row.password_version }
-        : { mode: "public" },
+    protection: {
+      mode: row.protected === 1 ? "password" : "public",
+      version: row.password_version,
+    },
     createdAt: new Date(row.created_at).toISOString(),
   };
 }

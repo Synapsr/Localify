@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::infrastructure::file_security::write_private_file;
 
 const FILE_NAME: &str = "public-url-passwords.json";
+/// Written in full, then renamed over the file, so a reader never sees half.
+const TEMPORARY_FILE_NAME: &str = "public-url-passwords.json.tmp";
 
 /// One entry of the file.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,14 +35,39 @@ impl fmt::Debug for StoredPassword {
 /// passwords anyway.
 #[derive(Debug, Clone)]
 pub struct PasswordStore {
+    dir: PathBuf,
     path: PathBuf,
 }
 
 impl PasswordStore {
     pub fn in_data_dir(data_dir: &Path) -> Self {
         Self {
+            dir: data_dir.to_path_buf(),
             path: data_dir.join(FILE_NAME),
         }
+    }
+
+    /// Reads, changes and saves the passwords while holding a lock on the
+    /// data directory, which the app, the CLI and the MCP server all take.
+    /// A file that is not valid JSON starts over empty.
+    pub fn update(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<String, StoredPassword>),
+    ) -> Result<BTreeMap<String, StoredPassword>> {
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("Could not create {}", self.dir.display()))?;
+        let lock = File::open(&self.dir)
+            .with_context(|| format!("Could not open {}", self.dir.display()))?;
+        lock.lock()
+            .with_context(|| format!("Could not lock {}", self.dir.display()))?;
+        let mut passwords = match self.load() {
+            Ok(passwords) => passwords,
+            Err(error) if error.is::<serde_json::Error>() => BTreeMap::new(),
+            Err(error) => return Err(error),
+        };
+        change(&mut passwords);
+        self.save(&passwords)?;
+        Ok(passwords)
     }
 
     /// Passwords by public URL id; empty when the file does not exist.
@@ -60,7 +87,7 @@ impl PasswordStore {
     }
 
     /// Replaces the file; with no password left, deletes it.
-    pub fn save(&self, passwords: &BTreeMap<String, StoredPassword>) -> Result<()> {
+    fn save(&self, passwords: &BTreeMap<String, StoredPassword>) -> Result<()> {
         if passwords.is_empty() {
             return match fs::remove_file(&self.path) {
                 Ok(()) => Ok(()),
@@ -70,12 +97,13 @@ impl PasswordStore {
                 }
             };
         }
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Could not create {}", parent.display()))?;
-        }
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("Could not create {}", self.dir.display()))?;
         let contents = serde_json::to_vec_pretty(passwords)?;
-        write_private_file(&self.path, &contents)
+        let temporary = self.dir.join(TEMPORARY_FILE_NAME);
+        write_private_file(&temporary, &contents)
+            .with_context(|| format!("Could not write {}", temporary.display()))?;
+        fs::rename(&temporary, &self.path)
             .with_context(|| format!("Could not write {}", self.path.display()))
     }
 }
@@ -124,6 +152,38 @@ mod tests {
         store.save(&BTreeMap::new()).unwrap();
         assert!(!store.path.exists());
         store.save(&BTreeMap::new()).unwrap();
+    }
+
+    #[test]
+    fn an_update_changes_what_is_saved_and_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PasswordStore::in_data_dir(dir.path());
+        store.save(&passwords()).unwrap();
+
+        let updated = store
+            .update(|all| {
+                let password = StoredPassword {
+                    version: 1,
+                    password: "another".into(),
+                };
+                all.insert("u2".into(), password);
+            })
+            .unwrap();
+
+        assert_eq!(updated.len(), 2);
+        assert_eq!(store.load().unwrap(), updated);
+        assert!(!dir.path().join(TEMPORARY_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn an_unreadable_file_starts_over_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PasswordStore::in_data_dir(dir.path());
+        fs::write(&store.path, "{ not json").unwrap();
+        assert!(store.load().is_err());
+
+        let updated = store.update(|all| all.extend(passwords())).unwrap();
+        assert_eq!(updated, passwords());
     }
 
     #[test]
