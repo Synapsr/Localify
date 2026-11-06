@@ -308,14 +308,20 @@ fn public_traffic_reaches_the_upstream_through_the_ingress() {
     assert_eq!(status["data"]["signedIn"], true);
     assert_eq!(status["data"]["tunnel"], "starting");
 
-    // cloudflared runs with the token in its environment only.
+    // cloudflared runs with the token in its environment only, and with a
+    // config of its own instead of ~/.cloudflared/config.yml.
     let args = std::fs::read_to_string(setup.bin().join("args")).unwrap();
+    let config = setup.path("data").join("cloudflared.yml");
     let metrics = format!("127.0.0.1:{}", setup.ingress_port + 10);
     assert_eq!(
         args.lines().collect::<Vec<_>>(),
         [
+            "--config",
+            config.to_str().unwrap(),
             "tunnel",
             "--no-autoupdate",
+            "--protocol",
+            "http2",
             "--metrics",
             metrics.as_str(),
             "run"

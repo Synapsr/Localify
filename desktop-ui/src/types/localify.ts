@@ -905,6 +905,8 @@ export interface PublicUrlDto {
   machineName: string | null;
   servedHere: boolean;
   protection: PublicUrlProtectionDto;
+  /** The URL with its current password, which signs a browser in; set when this Mac set that password. */
+  passwordLink: string | null;
   /** RFC 3339. */
   createdAt: string;
 }
@@ -915,12 +917,33 @@ export interface PublicUrlWithPasswordDto {
   password: string | null;
 }
 
+/** A password is always generated at creation; it can be changed after. */
 export interface CreatePublicUrlRequest {
   localDomain: string;
   wildcard: boolean;
+  /** The suggested one when missing. */
   slug?: string;
   mode: PublicUrlProtectionModeDto;
-  password?: string;
+}
+
+export interface SuggestPublicUrlSlugRequest {
+  localDomain: string;
+}
+
+/** The first free slug that mirrors a local domain's name, and its URL: the public domain comes from it. */
+export interface PublicUrlSlugSuggestionDto {
+  slug: string;
+  url: string;
+}
+
+export interface CheckPublicUrlSlugRequest {
+  slug: string;
+}
+
+export interface PublicUrlSlugCheckDto {
+  /** Lower-cased. */
+  slug: string;
+  available: boolean;
 }
 
 export interface PublicUrlRequest {

@@ -11,14 +11,15 @@ import {
 import { hashPassword, hmacHex, verifyPassword } from "../src/crypto";
 import { upstreamHeaders, withHostOnlyCookies, withoutDomainAttribute } from "../src/headers";
 import {
-  generateSlug,
   isOriginOfUrl,
+  localName,
+  randomSlug,
+  slugCandidates,
   isValidLabel,
   isValidLocalDomain,
   isValidSlug,
   localHostFor,
   parsePublicHost,
-  slugBase,
 } from "../src/names";
 import { generatePassword, WORDS } from "../src/passwords";
 import { safeNext } from "../src/public";
@@ -114,24 +115,34 @@ describe("slugs and labels", () => {
     }
   });
 
-  it("generates a slug from the normalized first label and 4 hex characters", () => {
-    expect(generateSlug("journal.localify")).toMatch(/^journal-[0-9a-f]{4}$/);
-    for (let i = 0; i < 20; i++) expect(isValidSlug(generateSlug("journal.localify"))).toBe(true);
+  it("names a slug after the local domain, in its own order", () => {
+    expect(localName("journal.localify")).toBe("journal");
+    expect(localName("louez-customer-profiles.louez.localify")).toBe(
+      "louez-customer-profiles-louez",
+    );
+    expect(localName("My_App.localify")).toBe("my-app");
+    expect(localName("web--feature.app.localify")).toBe("web-feature-app");
+    expect(localName("2fa-app.localify")).toBe("fa-app");
+    expect(localName("--42--x.localify")).toBe("x");
+    expect(localName("42.localify")).toBe("");
+    // Cut to 32 characters, then no trailing hyphen.
+    expect(localName(`${"x".repeat(31)}-y.localify`)).toBe("x".repeat(31));
+    expect(localName(`${"x".repeat(60)}.localify`)).toBe("x".repeat(32));
   });
 
-  it("normalizes the first label as the contract says", () => {
-    expect(slugBase("journal.localify")).toBe("journal");
-    expect(slugBase("My_App.localify")).toBe("my-app");
-    expect(slugBase("web--feature.app.localify")).toBe("web-feature");
-    expect(slugBase("2fa-app.localify")).toBe("fa-app");
-    expect(slugBase("--42--x.localify")).toBe("x");
-    expect(slugBase("42.localify")).toBe("url");
-    expect(slugBase("---.localify")).toBe("url");
-    // Cut to 20 characters, then no trailing hyphen.
-    expect(slugBase("abcdefghijklmnopqrs-tuvwxyz.localify")).toBe("abcdefghijklmnopqrs");
-    expect(slugBase(`${"x".repeat(60)}.localify`)).toBe("x".repeat(20));
-    const longest = generateSlug(`${"x".repeat(60)}.localify`);
-    expect(longest).toHaveLength(25);
+  it("offers the local name, then with the login, leaving out invalid ones", () => {
+    expect(slugCandidates("louez.localify", "Teo-Goulois")).toEqual(["louez", "louez-teo-goulois"]);
+    expect(slugCandidates("ab.localify", "teo")).toEqual(["ab-teo"]);
+    expect(slugCandidates("42.localify", "teo")).toEqual([]);
+    expect(slugCandidates(`${"x".repeat(30)}.localify`, "teo")).toEqual(["x".repeat(30)]);
+  });
+
+  it("falls back to the local name and 4 random hex characters", () => {
+    expect(randomSlug("journal.localify")).toMatch(/^journal-[0-9a-f]{4}$/);
+    expect(randomSlug("42.localify")).toMatch(/^url-[0-9a-f]{4}$/);
+    const longest = randomSlug(`${"x".repeat(60)}.localify`);
+    expect(longest).toHaveLength(32);
+    for (let i = 0; i < 20; i++) expect(isValidSlug(randomSlug("a.localify"))).toBe(true);
     expect(isValidSlug(longest)).toBe(true);
   });
 });

@@ -110,6 +110,25 @@ struct PublicUrlBody {
     public_url: PublicUrl,
 }
 
+/// The slug a new URL would get, and its URL.
+#[allow(dead_code)] // Only the app asks; the CLI target does not build the app.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlugSuggestion {
+    pub slug: String,
+    pub url: String,
+}
+
+/// Whether a slug is free for the caller.
+#[allow(dead_code)] // Only the app asks.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlugAvailability {
+    /// Lower-cased by the API.
+    pub slug: String,
+    pub available: bool,
+}
+
 /// The routes of the Localify Cloud API, for the CLI and the app.
 pub struct CloudClient {
     http: CloudHttp,
@@ -154,6 +173,19 @@ impl CloudClient {
         self.http
             .send_no_content(Method::POST, "/v1/auth/logout", None)
             .await
+    }
+
+    /// The first free slug that mirrors the local domain's name.
+    #[allow(dead_code)] // Only the app asks.
+    pub async fn suggest_slug(&self, local_domain: &str) -> Result<SlugSuggestion, CloudError> {
+        let path = format!("/v1/slugs?localDomain={}", encode_component(local_domain));
+        self.http.send(Method::GET, &path, None).await
+    }
+
+    #[allow(dead_code)] // Only the app asks.
+    pub async fn slug_availability(&self, slug: &str) -> Result<SlugAvailability, CloudError> {
+        let path = format!("/v1/slugs/{}", encode_component(slug));
+        self.http.send(Method::GET, &path, None).await
     }
 
     pub async fn list_public_urls(&self) -> Result<Vec<PublicUrl>, CloudError> {
@@ -204,7 +236,12 @@ impl CloudClient {
 
 /// `/v1/public-urls/<id><suffix>`, with the id encoded as one path segment.
 fn url_path(id: &str, suffix: &str) -> String {
-    let id: String = id
+    format!("/v1/public-urls/{}{suffix}", encode_component(id))
+}
+
+/// Encodes a value as one path segment or query value.
+fn encode_component(value: &str) -> String {
+    value
         .bytes()
         .map(|byte| match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -212,8 +249,7 @@ fn url_path(id: &str, suffix: &str) -> String {
             }
             _ => format!("%{byte:02X}"),
         })
-        .collect();
-    format!("/v1/public-urls/{id}{suffix}")
+        .collect()
 }
 
 #[cfg(test)]
@@ -372,6 +408,50 @@ mod tests {
             protection: &ProtectionRequest::Public,
         };
         assert_eq!(request.body()["slug"], "shop");
+    }
+
+    #[test]
+    fn a_suggestion_asks_for_the_local_domain() {
+        let (address, server) = serve_once(
+            "200 OK",
+            r#"{"slug":"louez","url":"https://louez.localify.fyi"}"#,
+        );
+
+        let suggestion = block_on(client(&address).suggest_slug("web.louez.localify"))
+            .unwrap()
+            .unwrap();
+
+        let (head, _) = server.join().unwrap();
+        assert!(
+            head.starts_with("GET /v1/slugs?localDomain=web.louez.localify HTTP/1.1"),
+            "{head}"
+        );
+        assert_eq!(
+            suggestion,
+            SlugSuggestion {
+                slug: "louez".into(),
+                url: "https://louez.localify.fyi".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn availability_reads_the_slug_and_its_answer() {
+        let (address, server) = serve_once("200 OK", r#"{"slug":"louez","available":false}"#);
+
+        let answer = block_on(client(&address).slug_availability("louez"))
+            .unwrap()
+            .unwrap();
+
+        let (head, _) = server.join().unwrap();
+        assert!(head.starts_with("GET /v1/slugs/louez HTTP/1.1"), "{head}");
+        assert_eq!(
+            answer,
+            SlugAvailability {
+                slug: "louez".into(),
+                available: false
+            }
+        );
     }
 
     #[test]

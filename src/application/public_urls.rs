@@ -1,22 +1,48 @@
+use std::fmt;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
+use tracing::warn;
 
 use super::cloud_account::{TunnelRefresh, refresh_tunnel};
 use super::ports::{
     CloudAccount, CloudAccountStore, CloudApi, CloudApiError, LocalDomainOwner, LocalDomains,
-    NewPublicUrl, ProtectionChoice, PublicTunnel, PublicUrl, PublicUrlWithPassword,
+    NewPublicUrl, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
+    PublicUrlWithPassword, SavedPassword, SavedPasswords, SlugSuggestion,
 };
 use crate::branding::BRANDING;
 use crate::domain::{DomainName, PublicSlug};
 
+/// Where the password page of a public URL posts, and where a link with the
+/// password lands (`docs/public-urls.md`).
+const ACCESS_PATH: &str = "/__localify/access";
+
 /// A public URL as this machine sees it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicUrlView {
     #[serde(flatten)]
     pub url: PublicUrl,
     /// This machine serves it.
     pub served_here: bool,
+    /// The URL with its current password in the fragment, when this machine
+    /// set that password: opening it signs the browser in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_link: Option<String>,
+}
+
+/// Leaves the link out: it carries the password.
+impl fmt::Debug for PublicUrlView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicUrlView")
+            .field("url", &self.url)
+            .field("served_here", &self.served_here)
+            .field(
+                "password_link",
+                &self.password_link.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// A public URL after a change of password. Localify Cloud shows a password
@@ -40,6 +66,15 @@ pub struct CreatedPublicUrl {
     pub unservable_hosts: Vec<String>,
 }
 
+/// A slug, and whether the user may take it.
+#[allow(dead_code)] // Only the app checks slugs; the CLI target does not build the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlugCheck {
+    pub slug: String,
+    pub available: bool,
+}
+
 /// The result of a change, and whether the daemon took it.
 pub struct Changed<T> {
     pub value: T,
@@ -59,6 +94,7 @@ pub struct CreatePublicUrl {
 pub struct PublicUrls<'a> {
     api: &'a dyn CloudApi,
     store: &'a dyn CloudAccountStore,
+    passwords: &'a dyn PublicUrlPasswords,
     tunnel: &'a dyn PublicTunnel,
     domains: &'a dyn LocalDomains,
 }
@@ -67,24 +103,40 @@ impl<'a> PublicUrls<'a> {
     pub fn new(
         api: &'a dyn CloudApi,
         store: &'a dyn CloudAccountStore,
+        passwords: &'a dyn PublicUrlPasswords,
         tunnel: &'a dyn PublicTunnel,
         domains: &'a dyn LocalDomains,
     ) -> Self {
         Self {
             api,
             store,
+            passwords,
             tunnel,
             domains,
         }
     }
 
+    /// Also forgets the saved passwords that no longer open a URL: changed
+    /// from another machine, or of a URL removed there.
     pub fn list(&self) -> Result<Vec<PublicUrlView>> {
         let account = self.account()?;
         let urls = self
             .api
             .list_public_urls(&account)
             .map_err(with_next_step)?;
-        Ok(urls.into_iter().map(|url| view(url, &account)).collect())
+        let mut saved = self.saved_passwords();
+        let before = saved.len();
+        saved.retain(|id, password| {
+            urls.iter()
+                .any(|url| url.id == *id && current_password(url, password).is_some())
+        });
+        if saved.len() != before {
+            self.store_passwords(&saved);
+        }
+        Ok(urls
+            .into_iter()
+            .map(|url| view(url, &account, &saved))
+            .collect())
     }
 
     /// Finds a URL by its id, its slug, its URL, or the host of one of its
@@ -102,7 +154,35 @@ impl<'a> PublicUrls<'a> {
                 BRANDING.cli_command()
             )
         })?;
-        Ok(view(url.clone(), &account))
+        Ok(view(url.clone(), &account, &self.saved_passwords()))
+    }
+
+    /// The first free slug that mirrors the local domain's name, as `create`
+    /// without a slug would pick it: `louez` for `louez.localify`, or
+    /// `louez-<login>` when a teammate has `louez`.
+    #[allow(dead_code)] // Only the app calls it.
+    pub fn suggest_slug(&self, local_domain: &str) -> Result<SlugSuggestion> {
+        let account = self.account()?;
+        let local_domain = parse_local_domain(local_domain)?;
+        self.api
+            .suggest_slug(&account, &local_domain)
+            .map_err(with_next_step)
+    }
+
+    /// Checks the format here first, so a malformed slug never reaches
+    /// Localify Cloud.
+    #[allow(dead_code)] // Only the app calls it.
+    pub fn check_slug(&self, slug: &str) -> Result<SlugCheck> {
+        let slug = PublicSlug::new(slug)?;
+        let account = self.account()?;
+        let available = self
+            .api
+            .slug_available(&account, &slug)
+            .map_err(with_next_step)?;
+        Ok(SlugCheck {
+            slug: slug.to_string(),
+            available,
+        })
     }
 
     /// Gives an exposable local domain of this machine a public URL, served
@@ -112,15 +192,11 @@ impl<'a> PublicUrls<'a> {
     /// it.
     pub fn create(&self, request: CreatePublicUrl) -> Result<Changed<CreatedPublicUrl>> {
         let account = self.account()?;
-        let local_domain = DomainName::new(&request.local_domain).map_err(|error| {
-            anyhow!(
-                "'{}' is not a local domain: {error}",
-                request.local_domain.trim()
-            )
-        })?;
+        let local_domain = parse_local_domain(&request.local_domain)?;
         let slug = request.slug.as_deref().map(PublicSlug::new).transpose()?;
         check_password(&request.protection)?;
         let owner = self.check_owner(&local_domain)?;
+        let chosen = chosen_password(&request.protection);
 
         let created = self
             .api
@@ -152,9 +228,13 @@ impl<'a> PublicUrls<'a> {
                     .unwrap_or_default(),
             );
         }
+        let saved = self.remember(
+            &created.public_url,
+            created.password.as_deref().or(chosen.as_deref()),
+        );
         Ok(Changed {
             value: CreatedPublicUrl {
-                public_url: view(created.public_url, &account),
+                public_url: view(created.public_url, &account, &saved),
                 password: created.password,
                 unservable_hosts,
             },
@@ -164,9 +244,14 @@ impl<'a> PublicUrls<'a> {
 
     pub fn remove(&self, id: &str) -> Result<Changed<()>> {
         let account = self.account()?;
+        let id = required_id(id)?;
         self.api
-            .remove_public_url(&account, required_id(id)?)
+            .remove_public_url(&account, id)
             .map_err(with_next_step)?;
+        let mut saved = self.saved_passwords();
+        if saved.remove(id).is_some() {
+            self.store_passwords(&saved);
+        }
         Ok(self.changed(()))
     }
 
@@ -179,6 +264,7 @@ impl<'a> PublicUrls<'a> {
     ) -> Result<Changed<PublicUrlAndPassword>> {
         let account = self.account()?;
         check_password(&protection)?;
+        let chosen = chosen_password(&protection);
         let PublicUrlWithPassword {
             public_url,
             password,
@@ -186,8 +272,9 @@ impl<'a> PublicUrls<'a> {
             .api
             .set_protection(&account, required_id(id)?, &protection)
             .map_err(with_next_step)?;
+        let saved = self.remember(&public_url, password.as_deref().or(chosen.as_deref()));
         Ok(self.changed(PublicUrlAndPassword {
-            public_url: view(public_url, &account),
+            public_url: view(public_url, &account, &saved),
             password,
         }))
     }
@@ -199,7 +286,7 @@ impl<'a> PublicUrls<'a> {
             .api
             .claim_public_url(&account, required_id(id)?)
             .map_err(with_next_step)?;
-        Ok(self.changed(view(url, &account)))
+        Ok(self.changed(view(url, &account, &self.saved_passwords())))
     }
 
     fn account(&self) -> Result<CloudAccount> {
@@ -209,6 +296,41 @@ impl<'a> PublicUrls<'a> {
                 BRANDING.cli_command()
             )
         })
+    }
+
+    /// Saves the password the URL now asks for, or forgets the old one.
+    /// The URL has changed by then, so a file that cannot be written only
+    /// costs the link, with a warning in the log.
+    fn remember(&self, url: &PublicUrl, password: Option<&str>) -> SavedPasswords {
+        let mut saved = self.saved_passwords();
+        match (url.protection.mode, url.protection.version, password) {
+            (ProtectionMode::Password, Some(version), Some(password)) => {
+                let password = SavedPassword {
+                    version,
+                    password: password.to_string(),
+                };
+                saved.insert(url.id.clone(), password);
+            }
+            _ => {
+                saved.remove(&url.id);
+            }
+        }
+        self.store_passwords(&saved);
+        saved
+    }
+
+    /// A file that cannot be read counts as empty: it only costs the links.
+    fn saved_passwords(&self) -> SavedPasswords {
+        self.passwords.load().unwrap_or_else(|error| {
+            warn!("Public URL passwords could not be read: {error:#}");
+            SavedPasswords::new()
+        })
+    }
+
+    fn store_passwords(&self, saved: &SavedPasswords) {
+        if let Err(error) = self.passwords.store(saved) {
+            warn!("Public URL passwords could not be saved: {error:#}");
+        }
     }
 
     fn changed<T>(&self, value: T) -> Changed<T> {
@@ -255,12 +377,70 @@ impl<'a> PublicUrls<'a> {
     }
 }
 
-fn view(url: PublicUrl, account: &CloudAccount) -> PublicUrlView {
+fn view(url: PublicUrl, account: &CloudAccount, saved: &SavedPasswords) -> PublicUrlView {
     let served_here = url
         .machine
         .as_ref()
         .is_some_and(|machine| machine.id == account.machine_id);
-    PublicUrlView { url, served_here }
+    let password_link = saved
+        .get(&url.id)
+        .and_then(|saved| current_password(&url, saved))
+        .map(|password| password_link(&url.url, password));
+    PublicUrlView {
+        url,
+        served_here,
+        password_link,
+    }
+}
+
+/// The saved password, when the URL still asks for it: the protection has
+/// not changed since, from this machine or another.
+fn current_password<'s>(url: &PublicUrl, saved: &'s SavedPassword) -> Option<&'s str> {
+    (url.protection.mode == ProtectionMode::Password
+        && url.protection.version == Some(saved.version))
+    .then_some(saved.password.as_str())
+}
+
+/// `https://<host>/__localify/access#<password>`. The fragment never leaves
+/// the browser: the page there reads it and signs in.
+fn password_link(url: &str, password: &str) -> String {
+    format!(
+        "{}{ACCESS_PATH}#{}",
+        url.trim_end_matches('/'),
+        encode_uri_component(password)
+    )
+}
+
+/// Percent-encodes like JavaScript's `encodeURIComponent`, which the page
+/// reverses with `decodeURIComponent`.
+fn encode_uri_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => encoded.push(char::from(byte)),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// The password a person chose, which the API does not send back.
+fn chosen_password(protection: &ProtectionChoice) -> Option<String> {
+    match protection {
+        ProtectionChoice::Password(Some(password)) => Some(password.clone()),
+        _ => None,
+    }
 }
 
 /// Adds what to do next to the API's sentence, for the errors a person can
@@ -278,6 +458,11 @@ fn with_next_step(error: CloudApiError) -> anyhow::Error {
         "invalid_local_domain" => anyhow!("{message} Check the name with: {cli} list"),
         _ => error.into(),
     }
+}
+
+fn parse_local_domain(value: &str) -> Result<DomainName> {
+    DomainName::new(value)
+        .map_err(|error| anyhow!("'{}' is not a local domain: {error}", value.trim()))
 }
 
 fn required_id(id: &str) -> Result<&str> {
@@ -344,7 +529,6 @@ fn host_of(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::ports::ProtectionMode;
     use crate::application::testkit::*;
 
     fn create(domain: &str, wildcard: bool) -> CreatePublicUrl {
@@ -359,6 +543,7 @@ mod tests {
     struct World {
         api: InMemoryCloudApi,
         store: InMemoryCloudAccountStore,
+        passwords: InMemoryPublicUrlPasswords,
         tunnel: InMemoryPublicTunnel,
         domains: InMemoryLocalDomains,
     }
@@ -368,6 +553,7 @@ mod tests {
             Self {
                 api: InMemoryCloudApi::new(),
                 store: InMemoryCloudAccountStore::signed_in(),
+                passwords: InMemoryPublicUrlPasswords::new(),
                 tunnel: InMemoryPublicTunnel::running(),
                 domains: InMemoryLocalDomains::new().with_owner(
                     "journal.localify",
@@ -377,7 +563,13 @@ mod tests {
         }
 
         fn urls(&self) -> PublicUrls<'_> {
-            PublicUrls::new(&self.api, &self.store, &self.tunnel, &self.domains)
+            PublicUrls::new(
+                &self.api,
+                &self.store,
+                &self.passwords,
+                &self.tunnel,
+                &self.domains,
+            )
         }
     }
 
@@ -620,5 +812,166 @@ mod tests {
         assert!(!found.served_here);
         let claimed = world.urls().claim(&found.url.id).unwrap().value;
         assert!(claimed.served_here);
+    }
+
+    const LINK: &str = "https://journal-a8f3.localify.fyi/__localify/access#four-random-words-here";
+
+    #[test]
+    fn a_password_set_here_gives_a_link_that_carries_it() {
+        let world = World::new();
+        let urls = world.urls();
+
+        let created = urls
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value;
+        assert_eq!(created.public_url.password_link.as_deref(), Some(LINK));
+
+        let id = created.public_url.url.id;
+        assert_eq!(
+            urls.find("journal-a8f3").unwrap().password_link.as_deref(),
+            Some(LINK)
+        );
+        assert_eq!(urls.list().unwrap()[0].password_link.as_deref(), Some(LINK));
+
+        let chosen = urls
+            .set_protection(&id, ProtectionChoice::Password(Some("my own pass".into())))
+            .unwrap()
+            .value;
+        assert_eq!(chosen.password, None);
+        assert_eq!(
+            chosen.public_url.password_link.as_deref(),
+            Some("https://journal-a8f3.localify.fyi/__localify/access#my%20own%20pass")
+        );
+    }
+
+    #[test]
+    fn opening_or_removing_a_url_forgets_its_password() {
+        let world = World::new();
+        let urls = world.urls();
+        let id = urls
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value
+            .public_url
+            .url
+            .id;
+
+        let opened = urls.set_protection(&id, ProtectionChoice::Public).unwrap();
+        assert_eq!(opened.value.public_url.password_link, None);
+        assert!(world.passwords.saved().is_empty());
+
+        urls.set_protection(&id, ProtectionChoice::Password(None))
+            .unwrap();
+        assert_eq!(world.passwords.saved().len(), 1);
+        urls.remove(&id).unwrap();
+        assert!(world.passwords.saved().is_empty());
+    }
+
+    #[test]
+    fn a_password_changed_elsewhere_gives_no_link_and_is_forgotten() {
+        let world = World::new();
+        let urls = world.urls();
+        let id = urls
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value
+            .public_url
+            .url
+            .id;
+        // Another machine rotates it: same API, a passwords file of its own.
+        let elsewhere = InMemoryPublicUrlPasswords::new();
+        PublicUrls::new(
+            &world.api,
+            &world.store,
+            &elsewhere,
+            &world.tunnel,
+            &world.domains,
+        )
+        .set_protection(&id, ProtectionChoice::Password(None))
+        .unwrap();
+
+        assert_eq!(urls.find(&id).unwrap().password_link, None);
+        assert_eq!(urls.list().unwrap()[0].password_link, None);
+        assert!(world.passwords.saved().is_empty());
+    }
+
+    #[test]
+    fn a_password_that_cannot_be_saved_gives_the_link_this_once() {
+        let world = World {
+            passwords: InMemoryPublicUrlPasswords::failing(),
+            ..World::new()
+        };
+        let urls = world.urls();
+
+        let created = urls
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value;
+
+        assert_eq!(created.password.as_deref(), Some("four-random-words-here"));
+        assert_eq!(created.public_url.password_link.as_deref(), Some(LINK));
+        assert_eq!(urls.find("journal-a8f3").unwrap().password_link, None);
+    }
+
+    #[test]
+    fn the_link_encodes_the_password_like_encode_uri_component() {
+        assert_eq!(
+            password_link("https://shop-1b2c.localify.fyi/", "a b#c%d/é&*'()!~._-"),
+            "https://shop-1b2c.localify.fyi/__localify/access#a%20b%23c%25d%2F%C3%A9%26*'()!~._-"
+        );
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_link() {
+        let world = World::new();
+        let created = world
+            .urls()
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value;
+
+        let output = format!("{:?}", created.public_url);
+        assert!(!output.contains("four-random-words-here"), "{output}");
+    }
+
+    #[test]
+    fn a_suggestion_mirrors_the_local_name_and_avoids_taken_ones() {
+        let world = World::new();
+        let urls = world.urls();
+
+        assert_eq!(
+            urls.suggest_slug("Louez.localify").unwrap(),
+            SlugSuggestion {
+                slug: "louez".into(),
+                url: "https://louez.localify.fyi".into(),
+            }
+        );
+        world.api.insert(public_url("u9", "louez", true));
+        assert_eq!(
+            urls.suggest_slug("louez.localify").unwrap().slug,
+            "louez-teo-goulois"
+        );
+        assert!(urls.suggest_slug("not a domain").is_err());
+    }
+
+    #[test]
+    fn a_slug_is_checked_here_before_localify_cloud() {
+        let world = World::new();
+        world.api.insert(public_url("u9", "louez", true));
+        let urls = world.urls();
+
+        assert_eq!(
+            urls.check_slug(" Louez ").unwrap(),
+            SlugCheck {
+                slug: "louez".into(),
+                available: false
+            }
+        );
+        assert!(urls.check_slug("louez-shop").unwrap().available);
+
+        let error = urls.check_slug("my--app").unwrap_err().to_string();
+        assert!(error.contains("'--'"), "{error}");
+        assert_eq!(world.api.calls(), ["slug_available", "slug_available"]);
     }
 }

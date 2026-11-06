@@ -61,10 +61,11 @@ use crate::desktop::dto::{
     UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::dto::{
-    CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CloudSignInStatusDto,
-    CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto,
-    PublicUrlIdRequest, PublicUrlProtectionDto, PublicUrlProtectionModeDto,
-    PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest, TunnelStateDto, TunnelStatusDto,
+    CheckPublicUrlSlugRequest, CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto,
+    CloudSignInStatusDto, CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest,
+    PublicUrlDto, PublicUrlIdRequest, PublicUrlProtectionDto, PublicUrlProtectionModeDto,
+    PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto, PublicUrlWithPasswordDto,
+    SetPublicUrlProtectionRequest, SuggestPublicUrlSlugRequest, TunnelStateDto, TunnelStatusDto,
 };
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
@@ -351,12 +352,37 @@ impl DesktopApi {
                 local_domain: request.local_domain,
                 wildcard: request.wildcard,
                 slug: request.slug.filter(|slug| !slug.trim().is_empty()),
-                protection: protection_choice(request.mode, request.password),
+                protection: protection_choice(request.mode, None),
             })?
             .value;
         Ok(PublicUrlWithPasswordDto {
             public_url: map_public_url(created.public_url),
             password: created.password,
+        })
+    }
+
+    pub fn suggest_public_url_slug(
+        &self,
+        request: SuggestPublicUrlSlugRequest,
+    ) -> Result<PublicUrlSlugSuggestionDto> {
+        let suggestion = self
+            .cloud()?
+            .public_urls()
+            .suggest_slug(&request.local_domain)?;
+        Ok(PublicUrlSlugSuggestionDto {
+            slug: suggestion.slug,
+            url: suggestion.url,
+        })
+    }
+
+    pub fn check_public_url_slug(
+        &self,
+        request: CheckPublicUrlSlugRequest,
+    ) -> Result<PublicUrlSlugCheckDto> {
+        let check = self.cloud()?.public_urls().check_slug(&request.slug)?;
+        Ok(PublicUrlSlugCheckDto {
+            slug: check.slug,
+            available: check.available,
         })
     }
 
@@ -4022,6 +4048,7 @@ fn map_public_url(view: PublicUrlView) -> PublicUrlDto {
                 ProtectionMode::Public => PublicUrlProtectionModeDto::Public,
             },
         },
+        password_link: view.password_link,
         created_at: url.created_at,
     }
 }

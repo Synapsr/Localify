@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use super::ports::{
     CloudAccountStore, CloudApi, CloudApiError, DaemonConnectionError, DeviceAuthorization,
-    DeviceTokenPoll, PublicTunnel, SignInRequest, TunnelState, TunnelStatus,
+    DeviceTokenPoll, PublicTunnel, PublicUrlPasswords, SavedPasswords, SignInRequest, TunnelState,
+    TunnelStatus,
 };
 use crate::branding::BRANDING;
 
@@ -62,6 +63,7 @@ pub struct SignedOut {
 pub struct CloudAccounts<'a> {
     api: &'a dyn CloudApi,
     store: &'a dyn CloudAccountStore,
+    passwords: &'a dyn PublicUrlPasswords,
     tunnel: &'a dyn PublicTunnel,
 }
 
@@ -69,9 +71,15 @@ impl<'a> CloudAccounts<'a> {
     pub fn new(
         api: &'a dyn CloudApi,
         store: &'a dyn CloudAccountStore,
+        passwords: &'a dyn PublicUrlPasswords,
         tunnel: &'a dyn PublicTunnel,
     ) -> Self {
-        Self { api, store, tunnel }
+        Self {
+            api,
+            store,
+            passwords,
+            tunnel,
+        }
     }
 
     /// Reads the saved credentials and asks the daemon about the tunnel. It
@@ -134,12 +142,14 @@ impl<'a> CloudAccounts<'a> {
         })
     }
 
-    /// Revokes the token on Localify Cloud, forgets it here, then tells the
-    /// daemon, which stops the tunnel. When the API cannot be reached, it
-    /// forgets the token anyway, with a warning: Localify Cloud cleans up
-    /// without it, and being stuck signed in helps nobody.
+    /// Revokes the token on Localify Cloud, forgets it and the saved
+    /// passwords of public URLs here, then tells the daemon, which stops the
+    /// tunnel. When the API cannot be reached, it forgets them anyway, with a
+    /// warning: Localify Cloud cleans up without the token, and being stuck
+    /// signed in helps nobody.
     pub fn sign_out(&self) -> Result<SignedOut> {
         let Some(account) = self.store.load()? else {
+            self.passwords.store(&SavedPasswords::new())?;
             return Ok(SignedOut {
                 login: None,
                 warning: None,
@@ -158,6 +168,7 @@ impl<'a> CloudAccounts<'a> {
                 BRANDING.cli_command()
             ),
         };
+        self.passwords.store(&SavedPasswords::new())?;
         self.store.delete()?;
         Ok(SignedOut {
             login: Some(account.login),
@@ -205,12 +216,15 @@ mod tests {
 
     #[test]
     fn a_stopped_daemon_leaves_the_tunnel_unknown() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let (api, store, tunnel) = (
             InMemoryCloudApi::new(),
             InMemoryCloudAccountStore::signed_in(),
             InMemoryPublicTunnel::stopped(),
         );
-        let status = CloudAccounts::new(&api, &store, &tunnel).status().unwrap();
+        let status = CloudAccounts::new(&api, &store, &passwords, &tunnel)
+            .status()
+            .unwrap();
 
         assert!(status.signed_in);
         assert_eq!(status.login.as_deref(), Some("teo-goulois"));
@@ -220,10 +234,11 @@ mod tests {
 
     #[test]
     fn signing_in_saves_the_credentials_and_tells_the_daemon() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let api = InMemoryCloudApi::new().with_polls(vec![DeviceTokenPoll::Pending, granted()]);
         let store = InMemoryCloudAccountStore::signed_out();
         let tunnel = InMemoryPublicTunnel::running();
-        let accounts = CloudAccounts::new(&api, &store, &tunnel);
+        let accounts = CloudAccounts::new(&api, &store, &passwords, &tunnel);
 
         assert_eq!(
             accounts.poll_sign_in("dc", "laptop").unwrap(),
@@ -248,12 +263,13 @@ mod tests {
 
     #[test]
     fn a_signed_in_machine_signs_out_before_signing_in_again() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let (api, store, tunnel) = (
             InMemoryCloudApi::new(),
             InMemoryCloudAccountStore::signed_in(),
             InMemoryPublicTunnel::running(),
         );
-        let error = CloudAccounts::new(&api, &store, &tunnel)
+        let error = CloudAccounts::new(&api, &store, &passwords, &tunnel)
             .start_sign_in()
             .unwrap_err()
             .to_string();
@@ -269,13 +285,14 @@ mod tests {
 
     #[test]
     fn a_declined_or_slowed_sign_in_saves_nothing() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let api = InMemoryCloudApi::new().with_polls(vec![
             DeviceTokenPoll::SlowDown { interval: Some(10) },
             DeviceTokenPoll::Denied("You declined.".into()),
         ]);
         let store = InMemoryCloudAccountStore::signed_out();
         let tunnel = InMemoryPublicTunnel::running();
-        let accounts = CloudAccounts::new(&api, &store, &tunnel);
+        let accounts = CloudAccounts::new(&api, &store, &passwords, &tunnel);
 
         assert_eq!(
             accounts.poll_sign_in("dc", "laptop").unwrap(),
@@ -291,12 +308,13 @@ mod tests {
 
     #[test]
     fn signing_out_offline_forgets_the_token_with_a_warning() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let api = InMemoryCloudApi::new()
             .with_sign_out_error(CloudApiError::Unreachable("No network.".into()));
         let store = InMemoryCloudAccountStore::signed_in();
         let tunnel = InMemoryPublicTunnel::stopped();
 
-        let signed_out = CloudAccounts::new(&api, &store, &tunnel)
+        let signed_out = CloudAccounts::new(&api, &store, &passwords, &tunnel)
             .sign_out()
             .unwrap();
 
@@ -307,6 +325,7 @@ mod tests {
 
     #[test]
     fn a_revoked_token_is_simply_forgotten() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let api = InMemoryCloudApi::new().with_sign_out_error(CloudApiError::Rejected {
             status: 401,
             code: "unauthorized".into(),
@@ -315,7 +334,7 @@ mod tests {
         let store = InMemoryCloudAccountStore::signed_in();
         let tunnel = InMemoryPublicTunnel::running();
 
-        let signed_out = CloudAccounts::new(&api, &store, &tunnel)
+        let signed_out = CloudAccounts::new(&api, &store, &passwords, &tunnel)
             .sign_out()
             .unwrap();
 
@@ -325,6 +344,7 @@ mod tests {
 
     #[test]
     fn a_failing_api_keeps_the_machine_signed_in() {
+        let passwords = InMemoryPublicUrlPasswords::new();
         let api = InMemoryCloudApi::new().with_sign_out_error(CloudApiError::Rejected {
             status: 500,
             code: "internal".into(),
@@ -334,10 +354,36 @@ mod tests {
         let tunnel = InMemoryPublicTunnel::running();
 
         assert!(
-            CloudAccounts::new(&api, &store, &tunnel)
+            CloudAccounts::new(&api, &store, &passwords, &tunnel)
                 .sign_out()
                 .is_err()
         );
         assert_eq!(store.account(), Some(cloud_account()));
+    }
+
+    #[test]
+    fn signing_out_forgets_the_saved_passwords() {
+        let passwords = InMemoryPublicUrlPasswords::new();
+        passwords
+            .store(&SavedPasswords::from([(
+                "u1".to_string(),
+                crate::application::ports::SavedPassword {
+                    version: 1,
+                    password: "open sesame".into(),
+                },
+            )]))
+            .unwrap();
+        let (api, store, tunnel) = (
+            InMemoryCloudApi::new(),
+            InMemoryCloudAccountStore::signed_in(),
+            InMemoryPublicTunnel::running(),
+        );
+
+        CloudAccounts::new(&api, &store, &passwords, &tunnel)
+            .sign_out()
+            .unwrap();
+
+        assert!(passwords.saved().is_empty());
+        assert_eq!(store.account(), None);
     }
 }

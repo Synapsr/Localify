@@ -10,7 +10,13 @@ import { isUniqueViolation, urlOfUser, urlsOfMachine, urlsOfUser, type PublicUrl
 import { fetchGitHubUser, pollDeviceFlow, startDeviceFlow } from "./github";
 import { ApiError, errorResponse, json, noContent, readJson } from "./http";
 import { ingressSecret, newId, signInMachine, signOutMachine } from "./machines";
-import { generateSlug, isValidLocalDomain, isValidSlug, SLUG_RULES } from "./names";
+import {
+  isValidLocalDomain,
+  isValidSlug,
+  randomSlug,
+  slugCandidates,
+  SLUG_RULES,
+} from "./names";
 import { generatePassword } from "./passwords";
 import { forgetSite } from "./sites";
 
@@ -43,6 +49,8 @@ const ROUTES: Route[] = [
   { method: "POST", pattern: /^\/v1\/auth\/device\/token$/, handle: deviceToken },
   { method: "GET", pattern: /^\/v1\/me$/, handle: authed(me) },
   { method: "POST", pattern: /^\/v1\/auth\/logout$/, handle: authed(logout) },
+  { method: "GET", pattern: /^\/v1\/slugs$/, handle: authed(suggestSlug) },
+  { method: "GET", pattern: /^\/v1\/slugs\/([^/]+)$/, handle: authed(checkSlug) },
   { method: "GET", pattern: /^\/v1\/public-urls$/, handle: authed(listUrls) },
   { method: "POST", pattern: /^\/v1\/public-urls$/, handle: authed(createUrl) },
   { method: "DELETE", pattern: /^\/v1\/public-urls\/([^/]+)$/, handle: authed(deleteUrl) },
@@ -281,6 +289,65 @@ async function logout(_request: Request, env: Env, caller: Caller): Promise<Resp
   return noContent();
 }
 
+// --- Slugs ---
+
+/**
+ * `GET /v1/slugs?localDomain=`: the slug a new URL for it would get, and that
+ * URL, so a client never writes the public domain itself.
+ */
+async function suggestSlug(request: Request, env: Env, caller: Caller): Promise<Response> {
+  const localDomain = readLocalDomain(new URL(request.url).searchParams.get("localDomain"));
+  const slug = await freeSlug(env, caller, localDomain);
+  return json({ slug, url: `https://${slug}.${baseDomain(env)}` });
+}
+
+/** `GET /v1/slugs/<slug>`: whether the caller can create a URL with it. */
+async function checkSlug(
+  _request: Request,
+  env: Env,
+  caller: Caller,
+  [param]: string[],
+): Promise<Response> {
+  let slug: string;
+  try {
+    slug = decodeURIComponent(param ?? "")
+      .trim()
+      .toLowerCase();
+  } catch {
+    slug = "";
+  }
+  if (!isValidSlug(slug)) throw new ApiError(422, "invalid_slug", SLUG_RULES);
+  const taken = await takenSlugs(env, caller, [slug]);
+  return json({ slug, available: !taken.has(slug) });
+}
+
+/**
+ * The first free slug for a local domain: its local name, then with the
+ * owner's login, then with random characters. A create may still lose a
+ * race for it, and then retries with random characters.
+ */
+async function freeSlug(env: Env, caller: Caller, localDomain: string): Promise<string> {
+  const candidates = slugCandidates(localDomain, caller.login);
+  for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) candidates.push(randomSlug(localDomain));
+  const taken = await takenSlugs(env, caller, candidates);
+  return candidates.find((slug) => !taken.has(slug)) ?? randomSlug(localDomain);
+}
+
+/**
+ * Slugs held by a live URL, or by someone else's deleted one for 30 days.
+ * The caller's own deleted slugs are free: a create takes them back.
+ */
+async function takenSlugs(env: Env, caller: Caller, slugs: string[]): Promise<Set<string>> {
+  const placeholders = slugs.map((_, index) => `?${index + 2}`).join(", ");
+  const { results } = await env.DB.prepare(
+    `SELECT slug FROM public_urls
+     WHERE slug IN (${placeholders}) AND (deleted_at IS NULL OR user_id <> ?1)`,
+  )
+    .bind(caller.userId, ...slugs)
+    .all<{ slug: string }>();
+  return new Set(results.map((row) => row.slug));
+}
+
 // --- Public URLs ---
 
 async function listUrls(_request: Request, env: Env, caller: Caller): Promise<Response> {
@@ -289,15 +356,7 @@ async function listUrls(_request: Request, env: Env, caller: Caller): Promise<Re
 
 async function createUrl(request: Request, env: Env, caller: Caller): Promise<Response> {
   const body = await readJson(request);
-  const localDomain =
-    typeof body.localDomain === "string" ? body.localDomain.trim().toLowerCase() : "";
-  if (!isValidLocalDomain(localDomain)) {
-    throw new ApiError(
-      422,
-      "invalid_local_domain",
-      "localDomain must be a local domain such as journal.localify: lowercase letters, digits and hyphens, separated by dots.",
-    );
-  }
+  const localDomain = readLocalDomain(body.localDomain);
   if (body.wildcard !== undefined && typeof body.wildcard !== "boolean") {
     throw invalid("wildcard must be true or false.");
   }
@@ -314,7 +373,9 @@ async function createUrl(request: Request, env: Env, caller: Caller): Promise<Re
 
   const id = newId();
   for (let attempt = 1; ; attempt++) {
-    const slug = chosenSlug ?? generateSlug(localDomain);
+    const slug =
+      chosenSlug ??
+      (attempt === 1 ? await freeSlug(env, caller, localDomain) : randomSlug(localDomain));
     try {
       // The quota check is part of each statement, so concurrent creates
       // cannot both pass it. The owner may take back one of their own
@@ -444,6 +505,18 @@ async function runtime(_request: Request, env: Env, caller: Caller): Promise<Res
 }
 
 // --- Helpers ---
+
+function readLocalDomain(value: unknown): string {
+  const localDomain = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!isValidLocalDomain(localDomain)) {
+    throw new ApiError(
+      422,
+      "invalid_local_domain",
+      "localDomain must be a local domain such as journal.localify: lowercase letters, digits and hyphens, separated by dots.",
+    );
+  }
+  return localDomain;
+}
 
 function baseDomain(env: Env): string {
   return setting(env, "PUBLIC_BASE_DOMAIN");

@@ -10,8 +10,6 @@ import { ApiError } from "./http";
 export const MAX_ACTIVE_MACHINES = 5;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
 const DELETED_URL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-/** Stuck sign-ins revoked per run; this step only writes to D1. */
-const CLEANUP_BATCH = 25;
 /**
  * Cloudflare API calls one cleanup run may make, below the Workers Free limit
  * of 50 subrequests. A machine costs at most 5: two lookups by name, the

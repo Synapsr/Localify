@@ -21,17 +21,45 @@ button{margin-top:16px;width:100%;font:inherit;font-weight:600;padding:10px 12px
 footer{margin-top:20px;font-size:.85rem;color:var(--muted)}
 `;
 
+const CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
-  "content-security-policy":
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  "referrer-policy": "no-referrer",
+  "content-security-policy": CSP,
+  // `no-referrer` would make the browser send `Origin: null` with the form.
+  "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
   "x-robots-tag": "noindex",
 };
 
-function page(status: number, title: string, body: string, method = "GET"): Response {
+/**
+ * Signs in with the password a shared link carries after `#`. The fragment
+ * never reaches a server, so it is read here, then cleared from the address
+ * bar and history before the form posts it.
+ */
+const SUBMIT_LINK_PASSWORD = `const hash = location.hash.slice(1);
+if (hash) {
+  history.replaceState(null, "", location.pathname + location.search);
+  try {
+    const form = document.forms[0];
+    form.password.value = decodeURIComponent(hash);
+    form.submit();
+  } catch {}
+}`;
+
+function page(
+  status: number,
+  title: string,
+  body: string,
+  method = "GET",
+  script?: string,
+): Response {
+  const nonce = script ? crypto.randomUUID() : null;
+  const headers = nonce
+    ? { ...SECURITY_HEADERS, "content-security-policy": `${CSP}; script-src 'nonce-${nonce}'` }
+    : SECURITY_HEADERS;
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -46,10 +74,10 @@ function page(status: number, title: string, body: string, method = "GET"): Resp
 ${body}
 <footer>Shared with Localify</footer>
 </main>
-</body>
+${nonce ? `<script nonce="${nonce}">${script}</script>\n` : ""}</body>
 </html>
 `;
-  return new Response(method === "HEAD" ? null : html, { status, headers: SECURITY_HEADERS });
+  return new Response(method === "HEAD" ? null : html, { status, headers });
 }
 
 export type PasswordPageOptions = {
@@ -58,6 +86,8 @@ export type PasswordPageOptions = {
   error?: string;
   status?: number;
   method?: string;
+  /** The page a shared link opens: it posts the password the link carries. */
+  fromLink?: boolean;
 };
 
 export function passwordPage({
@@ -66,6 +96,7 @@ export function passwordPage({
   error,
   status = 401,
   method,
+  fromLink = false,
 }: PasswordPageOptions): Response {
   const errorId = error ? ` aria-describedby="password-error" aria-invalid="true"` : "";
   return page(
@@ -81,6 +112,7 @@ ${error ? `<p id="password-error" class="error" role="alert">${escapeHtml(error)
 <button type="submit">Continue</button>
 </form>`,
     method,
+    fromLink ? SUBMIT_LINK_PASSWORD : undefined,
   );
 }
 

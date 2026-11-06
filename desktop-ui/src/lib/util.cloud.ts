@@ -95,12 +95,125 @@ export const cloudStatusDotClassName: Record<CloudStatusTone, string> = {
   off: "bg-neutral-400",
 };
 
+/** The longest a DNS label may be. */
+const MAX_DNS_LABEL = 63;
+
+/** The public URL that serves a local domain, and what it opens for it. */
+export interface PublicUrlMatch {
+  publicUrl: PublicUrlDto;
+  /** The local domain's label under the URL's own domain; null when it is that domain. */
+  label: string | null;
+  /** The local domain's own public URL; null when this URL does not reach it. */
+  url: string | null;
+}
+
+/**
+ * A URL created for the local domain itself wins. Otherwise the closest parent that is a
+ * wildcard URL serves it at `<slug>--<label>`, and the project's own URL is shown even when
+ * it is not wildcard, so the dialog can say it does not reach this domain.
+ */
 export function findPublicUrl(
   publicUrls: PublicUrlDto[] | undefined,
   localDomain: string,
-): PublicUrlDto | null {
-  const wanted = localDomain.toLowerCase();
-  return publicUrls?.find((url) => url.localDomain.toLowerCase() === wanted) ?? null;
+  projectNamespace: string | null,
+): PublicUrlMatch | null {
+  if (!publicUrls) return null;
+  const domain = localDomain.toLowerCase();
+  const own = publicUrls.find((url) => url.localDomain.toLowerCase() === domain);
+  if (own) return { publicUrl: own, label: null, url: own.url };
+
+  let closest: PublicUrlMatch | null = null;
+  for (const publicUrl of publicUrls) {
+    const parent = publicUrl.localDomain.toLowerCase();
+    const label = labelUnder(domain, parent);
+    if (label === null || !(publicUrl.wildcard || parent === projectNamespace)) continue;
+    if (closest?.label && closest.label.length <= label.length) continue;
+    closest = {
+      publicUrl,
+      label,
+      url: publicUrl.wildcard ? publicUrlOf(publicUrl.url, publicUrl.slug, label) : null,
+    };
+  }
+  return closest;
+}
+
+/** What creating a URL for a local domain makes: one URL per project, as locally. */
+export interface PublicUrlTarget {
+  /** The local domain the URL is created for. */
+  localDomain: string;
+  wildcard: boolean;
+  /** The opened domain's label under it; null when it is that domain. */
+  label: string | null;
+}
+
+/**
+ * The project's namespace, wildcard, for the namespace and every domain under it; any other
+ * domain gets a URL of its own.
+ */
+export function publicUrlTarget(
+  localDomain: string,
+  projectNamespace: string | null,
+): PublicUrlTarget {
+  const domain = localDomain.toLowerCase();
+  if (projectNamespace !== null) {
+    if (domain === projectNamespace) {
+      return { localDomain: projectNamespace, wildcard: true, label: null };
+    }
+    const label = labelUnder(domain, projectNamespace);
+    if (label !== null) return { localDomain: projectNamespace, wildcard: true, label };
+  }
+  return { localDomain: domain, wildcard: false, label: null };
+}
+
+/** `web` for `web.journal.localify` under `journal.localify`; null when it is not under it. */
+function labelUnder(domain: string, parent: string): string | null {
+  const suffix = `.${parent.toLowerCase()}`;
+  const name = domain.toLowerCase();
+  if (!name.endsWith(suffix) || name.length === suffix.length) return null;
+  return name.slice(0, -suffix.length);
+}
+
+/** One DNS label: a-z, 0-9 and hyphens, not at either end. */
+export function isDnsLabel(label: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label);
+}
+
+/** The longest environment label a slug leaves room for in `<slug>--<label>`. */
+export function maxEnvironmentLabel(slug: string): number {
+  return MAX_DNS_LABEL - slug.length - 2;
+}
+
+/**
+ * `https://<slug>.<public domain>`, or `https://<slug>--<label>.<public domain>` for an
+ * environment, on the domain of `url`, a URL Localify Cloud gave: the clients never write
+ * the public domain themselves. Null when the label cannot be served under this slug.
+ * Mirrors `PublicSlug::environment_label`.
+ */
+export function publicUrlOf(url: string, slug: string, label: string | null): string | null {
+  if (label === null) return urlNamed(url, slug);
+  if (!isDnsLabel(label) || label.length > maxEnvironmentLabel(slug)) return null;
+  return urlNamed(url, `${slug}--${label}`);
+}
+
+/** `url` with its first host label replaced by `name`, kept as typed for a preview. */
+export function urlNamed(url: string, name: string): string {
+  return url.replace(/^https:\/\/[^./]+/, `https://${name}`);
+}
+
+/** `localify.fyi` for `https://journal.localify.fyi`. */
+export function publicDomainOf(url: string): string {
+  return url.replace(/^https:\/\/[^./]+\./, "").replace(/\/.*$/, "");
+}
+
+/** The same link on another host of the URL: each host asks for the password separately. */
+export function linkOnHost(link: string, url: string): string {
+  try {
+    const moved = new URL(link);
+    moved.host = new URL(url).host;
+    return moved.toString();
+  } catch {
+    return link;
+  }
 }
 
 /**
@@ -121,16 +234,4 @@ export function wildcardHostPattern(publicUrl: PublicUrlDto): string {
     // Keep the raw value; the cloud always sends a full URL.
   }
   return host.replace(/^[^.]+/, `${publicUrl.slug}--<label>`);
-}
-
-/** What a generated slug looks like for this domain (docs/public-urls.md, "Names"). */
-export function slugExample(localDomain: string): string {
-  const base =
-    (localDomain.split(".")[0] ?? "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^[0-9-]+/, "")
-      .slice(0, 20)
-      .replace(/-+$/, "") || "url";
-  return `${base}-a8f3`;
 }

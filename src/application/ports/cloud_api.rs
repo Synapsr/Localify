@@ -78,6 +78,10 @@ pub enum ProtectionMode {
 #[serde(rename_all = "camelCase")]
 pub struct Protection {
     pub mode: ProtectionMode,
+    /// Changes with every change of protection. Set for a password, by a
+    /// Localify Cloud recent enough to send it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 /// The machine that serves a public URL.
@@ -102,6 +106,16 @@ pub struct PublicUrl {
     pub protection: Protection,
     /// RFC 3339.
     pub created_at: String,
+}
+
+/// The slug a new public URL would get, and its URL. Localify Cloud owns the
+/// public domain, so a client takes it from here instead of writing it.
+#[allow(dead_code)] // Only the app asks; the CLI target does not build the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlugSuggestion {
+    pub slug: String,
+    pub url: String,
 }
 
 /// A public URL and the password Localify Cloud generated for it, which it
@@ -164,6 +178,21 @@ pub trait CloudApi {
     fn poll_sign_in(&self, request: &SignInRequest) -> Result<DeviceTokenPoll, CloudApiError>;
     /// Revokes the token and detaches the machine's public URLs.
     fn sign_out(&self, account: &CloudAccount) -> Result<(), CloudApiError>;
+    /// The first free slug that mirrors the local domain's name, as
+    /// creating a URL without a slug would pick it.
+    #[allow(dead_code)] // Only the app calls it; the CLI target does not build the app.
+    fn suggest_slug(
+        &self,
+        account: &CloudAccount,
+        local_domain: &DomainName,
+    ) -> Result<SlugSuggestion, CloudApiError>;
+    /// Whether the user may create a URL with this slug.
+    #[allow(dead_code)] // Only the app calls it.
+    fn slug_available(
+        &self,
+        account: &CloudAccount,
+        slug: &PublicSlug,
+    ) -> Result<bool, CloudApiError>;
     fn list_public_urls(&self, account: &CloudAccount) -> Result<Vec<PublicUrl>, CloudApiError>;
     /// The calling machine serves the new URL.
     fn create_public_url(

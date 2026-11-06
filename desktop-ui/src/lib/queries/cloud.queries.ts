@@ -9,6 +9,8 @@ import type {
   PollCloudSignInRequest,
   PublicUrlDto,
   PublicUrlRequest,
+  PublicUrlSlugCheckDto,
+  PublicUrlSlugSuggestionDto,
   PublicUrlWithPasswordDto,
   SetPublicUrlProtectionRequest,
 } from "../../types/localify";
@@ -20,6 +22,9 @@ const cloudQueryKeys = {
   all: () => ["cloud"] as const,
   account: () => [...cloudQueryKeys.all(), "account"] as const,
   publicUrls: () => [...cloudQueryKeys.all(), "public-urls"] as const,
+  slugSuggestion: (localDomain: string) =>
+    [...cloudQueryKeys.all(), "slug-suggestion", localDomain] as const,
+  slugCheck: (slug: string) => [...cloudQueryKeys.all(), "slug-check", slug] as const,
 } as const;
 
 /** The account and the public URL list both live under `all`. */
@@ -45,6 +50,21 @@ export const cloudQueries = {
       queryKey: cloudQueryKeys.publicUrls(),
       queryFn: () => tauriClient.listPublicUrls(),
       staleTime: 30_000,
+    }),
+  /** The name a new URL for `localDomain` gets by default. Calls Localify Cloud. */
+  slugSuggestion: (localDomain: string) =>
+    queryOptions<PublicUrlSlugSuggestionDto, Error>({
+      queryKey: cloudQueryKeys.slugSuggestion(localDomain),
+      queryFn: () => tauriClient.suggestPublicUrlSlug({ localDomain }),
+      staleTime: 30_000,
+    }),
+  /** Whether a well-formed slug is free. Calls Localify Cloud. */
+  slugCheck: (slug: string) =>
+    queryOptions<PublicUrlSlugCheckDto, Error>({
+      queryKey: cloudQueryKeys.slugCheck(slug),
+      queryFn: () => tauriClient.checkPublicUrlSlug({ slug }),
+      staleTime: 10_000,
+      retry: false,
     }),
 } as const;
 

@@ -12,7 +12,8 @@ use crate::application::StepOutcome;
 use crate::branding::BRANDING;
 use crate::config::{DaemonConfig, LocalifyPaths};
 use crate::domain::{
-    DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
+    DomainName, DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, PublicSlug, Route,
+    RouteTarget,
 };
 
 use super::ports::{
@@ -20,9 +21,9 @@ use super::ports::{
     ConfigLoadError, ConfigLoader, DaemonConnection, DaemonConnectionError, DaemonControl,
     DaemonRuntimeInfo, DeviceAuthorization, DeviceTokenPoll, DnsConfigError, DnsManager,
     DomainRepository, IosSimulatorTrust, LocalDomainOwner, LocalDomains, NetworkInfo, NewPublicUrl,
-    Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlWithPassword,
-    RegistrationProvider, RepositoryError, ServingMachine, SignInRequest, SystemSetup, TunnelState,
-    TunnelStatus,
+    Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
+    PublicUrlWithPassword, RegistrationProvider, RepositoryError, SavedPasswords, ServingMachine,
+    SignInRequest, SlugSuggestion, SystemSetup, TunnelState, TunnelStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -565,7 +566,7 @@ impl DaemonConnection for NotRunningDaemonConnection {
 
 // ---------------------------------------------------------------------------
 // Localify Cloud: InMemoryCloudApi, InMemoryCloudAccountStore,
-// InMemoryPublicTunnel, InMemoryLocalDomains
+// InMemoryPublicUrlPasswords, InMemoryPublicTunnel, InMemoryLocalDomains
 // ---------------------------------------------------------------------------
 
 /// The account `InMemoryCloudAccountStore::signed_in` holds; its machine is `m1`.
@@ -579,7 +580,8 @@ pub fn cloud_account() -> CloudAccount {
     }
 }
 
-/// A password-protected URL served by `cloud_account`'s machine.
+/// A password-protected URL served by `cloud_account`'s machine, at
+/// protection version 1.
 pub fn public_url(id: &str, slug: &str, wildcard: bool) -> PublicUrl {
     PublicUrl {
         id: id.into(),
@@ -593,13 +595,15 @@ pub fn public_url(id: &str, slug: &str, wildcard: bool) -> PublicUrl {
         }),
         protection: Protection {
             mode: ProtectionMode::Password,
+            version: Some(1),
         },
         created_at: "2026-11-05T18:00:00Z".into(),
     }
 }
 
 /// Localify Cloud for one user, signed in on machine `m1`. A generated
-/// password is always `four-random-words-here`.
+/// password is always `four-random-words-here`, and every change of
+/// protection bumps the URL's version, as the API does.
 pub struct InMemoryCloudApi {
     urls: RefCell<Vec<PublicUrl>>,
     polls: RefCell<VecDeque<DeviceTokenPoll>>,
@@ -607,6 +611,8 @@ pub struct InMemoryCloudApi {
     next_error: RefCell<Option<CloudApiError>>,
     last_sign_in: RefCell<Option<SignInRequest>>,
     calls: RefCell<Vec<&'static str>>,
+    /// `public_url` fixtures are at version 1.
+    last_version: Cell<u32>,
 }
 
 const GENERATED_PASSWORD: &str = "four-random-words-here";
@@ -620,6 +626,7 @@ impl InMemoryCloudApi {
             next_error: RefCell::new(None),
             last_sign_in: RefCell::new(None),
             calls: RefCell::new(Vec::new()),
+            last_version: Cell::new(1),
         }
     }
 
@@ -656,6 +663,22 @@ impl InMemoryCloudApi {
         self.last_sign_in.borrow().clone()
     }
 
+    /// The protection a choice leads to, with a version no URL had before.
+    fn protection(&self, choice: &ProtectionChoice) -> Protection {
+        let version = self.last_version.get() + 1;
+        self.last_version.set(version);
+        match choice {
+            ProtectionChoice::Password(_) => Protection {
+                mode: ProtectionMode::Password,
+                version: Some(version),
+            },
+            ProtectionChoice::Public => Protection {
+                mode: ProtectionMode::Public,
+                version: None,
+            },
+        }
+    }
+
     fn call(&self, name: &'static str) -> Result<(), CloudApiError> {
         self.calls.borrow_mut().push(name);
         match self.next_error.borrow_mut().take() {
@@ -687,13 +710,6 @@ fn generated_password(protection: &ProtectionChoice) -> Option<String> {
     matches!(protection, ProtectionChoice::Password(None)).then(|| GENERATED_PASSWORD.into())
 }
 
-fn protection_mode(protection: &ProtectionChoice) -> ProtectionMode {
-    match protection {
-        ProtectionChoice::Password(_) => ProtectionMode::Password,
-        ProtectionChoice::Public => ProtectionMode::Public,
-    }
-}
-
 impl CloudApi for InMemoryCloudApi {
     fn start_sign_in(&self) -> Result<DeviceAuthorization, CloudApiError> {
         Ok(DeviceAuthorization {
@@ -720,6 +736,44 @@ impl CloudApi for InMemoryCloudApi {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// The domain's first label, then `<label>-teo-goulois` when taken.
+    fn suggest_slug(
+        &self,
+        _account: &CloudAccount,
+        local_domain: &DomainName,
+    ) -> Result<SlugSuggestion, CloudApiError> {
+        self.call("suggest_slug")?;
+        let name = local_domain
+            .as_str()
+            .split('.')
+            .next()
+            .unwrap_or("app")
+            .to_string();
+        let taken = |slug: &str| self.urls.borrow().iter().any(|url| url.slug == slug);
+        let slug = if taken(&name) {
+            format!("{name}-teo-goulois")
+        } else {
+            name
+        };
+        Ok(SlugSuggestion {
+            url: format!("https://{slug}.localify.fyi"),
+            slug,
+        })
+    }
+
+    fn slug_available(
+        &self,
+        _account: &CloudAccount,
+        slug: &PublicSlug,
+    ) -> Result<bool, CloudApiError> {
+        self.call("slug_available")?;
+        Ok(!self
+            .urls
+            .borrow()
+            .iter()
+            .any(|url| url.slug == slug.as_str()))
     }
 
     fn list_public_urls(&self, _account: &CloudAccount) -> Result<Vec<PublicUrl>, CloudApiError> {
@@ -749,7 +803,7 @@ impl CloudApi for InMemoryCloudApi {
             request.wildcard,
         );
         url.local_domain = request.local_domain.to_string();
-        url.protection.mode = protection_mode(&request.protection);
+        url.protection = self.protection(&request.protection);
         self.insert(url.clone());
         Ok(PublicUrlWithPassword {
             public_url: url,
@@ -767,13 +821,14 @@ impl CloudApi for InMemoryCloudApi {
         &self,
         _account: &CloudAccount,
         id: &str,
-        protection: &ProtectionChoice,
+        choice: &ProtectionChoice,
     ) -> Result<PublicUrlWithPassword, CloudApiError> {
         self.call("set_protection")?;
-        let url = self.update(id, |url| url.protection.mode = protection_mode(protection))?;
+        let protection = self.protection(choice);
+        let url = self.update(id, |url| url.protection = protection)?;
         Ok(PublicUrlWithPassword {
             public_url: url,
-            password: generated_password(protection),
+            password: generated_password(choice),
         })
     }
 
@@ -827,6 +882,48 @@ impl CloudAccountStore for InMemoryCloudAccountStore {
 
     fn delete(&self) -> anyhow::Result<()> {
         *self.account.borrow_mut() = None;
+        Ok(())
+    }
+}
+
+/// The passwords this machine saved. A failing store reads and writes
+/// nothing.
+#[derive(Default)]
+pub struct InMemoryPublicUrlPasswords {
+    saved: RefCell<SavedPasswords>,
+    failing: bool,
+}
+
+impl InMemoryPublicUrlPasswords {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            failing: true,
+            ..Self::new()
+        }
+    }
+
+    pub fn saved(&self) -> SavedPasswords {
+        self.saved.borrow().clone()
+    }
+}
+
+impl PublicUrlPasswords for InMemoryPublicUrlPasswords {
+    fn load(&self) -> anyhow::Result<SavedPasswords> {
+        if self.failing {
+            anyhow::bail!("The disk is full.");
+        }
+        Ok(self.saved())
+    }
+
+    fn store(&self, passwords: &SavedPasswords) -> anyhow::Result<()> {
+        if self.failing {
+            anyhow::bail!("The disk is full.");
+        }
+        *self.saved.borrow_mut() = passwords.clone();
         Ok(())
     }
 }

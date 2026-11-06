@@ -131,7 +131,7 @@ export const ProjectDomainChip = ({
   const stopLocalDevServer = useMutation(
     projectMutations.stopLocalDevServer(queryClient),
   );
-  const publicUrl = usePublicUrl(domain.registration.domain);
+  const publicUrl = usePublicUrl(domain.registration.domain, domain.projectId);
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
   const reachable = domain.targetReachable;
@@ -354,9 +354,9 @@ export const ProjectDomainChip = ({
           </Tooltip>
         )}
 
-        {publicUrl ? (
+        {publicUrl?.url ? (
           <PublicUrlBadge
-            publicUrl={publicUrl}
+            url={publicUrl.url}
             onOpen={() => setPublicUrlDialogOpen(true)}
           />
         ) : null}

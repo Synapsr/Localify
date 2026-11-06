@@ -350,6 +350,7 @@ mod tests {
             }),
             protection: Protection {
                 mode: ProtectionMode::Password,
+                version: Some(1),
             },
             created_at: "2026-11-05T18:00:00Z".into(),
         }
