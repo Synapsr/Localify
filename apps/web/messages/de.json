@@ -84,7 +84,7 @@
       },
       {
         "question": "Ist es kostenlos?",
-        "answer": "Ja. Localify ist kostenlos und Open Source unter der AGPL, ohne Konto und ohne Limit bei Projekten oder Domains. Der Quellcode liegt auf GitHub."
+        "answer": "Ja. Localify ist kostenlos und Open Source unter der AGPL, ohne Konto und ohne Limit bei Projekten oder Domains. Öffentliche URLs sind ebenfalls kostenlos, brauchen aber ein Konto mit Einladung und sind vorerst auf 10 pro Person begrenzt. Der Quellcode liegt auf GitHub."
       },
       {
         "question": "Für wen ist es gedacht?",
@@ -112,7 +112,7 @@
       },
       {
         "question": "Wie unterscheidet es sich von ngrok oder Cloudflare Tunnel?",
-        "answer": "ngrok und Cloudflare Tunnel sind dafür gebaut, Services ins Internet zu stellen. Localify ist für die lokale Entwicklung gebaut: saubere URLs und vertrauenswürdiges HTTPS auf deiner Maschine, ohne Cloud. Wenn du einen Dev-Server von deinem Handy oder einem anderen Computer aus öffnen musst, erledigt das eine öffentliche URL, geschützt durch ein Passwort. Öffentliche URLs gibt es vorerst nur auf Einladung."
+        "answer": "ngrok und Cloudflare Tunnel sind dafür gebaut, Services ins Internet zu stellen. Localify ist für die lokale Entwicklung gebaut: saubere URLs und vertrauenswürdiges HTTPS auf deiner Maschine, ohne Cloud. Wenn du einen Dev-Server von deinem Handy oder einem anderen Computer aus öffnen musst, erledigt das eine öffentliche URL, standardmäßig passwortgeschützt. Öffentliche URLs gibt es vorerst nur auf Einladung."
       },
       {
         "question": "Funktioniert es mit Cursor, Claude Code oder mehreren KI-Agenten parallel?",
@@ -228,7 +228,7 @@
       {
         "title": "1. Kurzfassung",
         "body": [
-          "Localify erfasst keine Request-Logs und nichts über den Traffic der Services, die du betreibst. Die Analytics enthalten keine lokalen Pfade, und ein Filter entfernt sie aus Fehlerberichten. Der Proxy arbeitet nach der Einrichtung lokal. Daten erreichen uns in fünf Fällen: Du besuchst die Website, die offizielle Desktop-App sendet Produkt-Analytics und Fehlerberichte, die App sucht nach Updates, du meldest dich bei Localify Cloud an, um öffentliche URLs zu nutzen, oder du schreibst uns eine E-Mail."
+          "Localify speichert keine Request-Logs und nichts über den Traffic der Services, die du betreibst. Requests an eine öffentliche URL laufen auf dem Weg zu deinem Rechner über Cloudflare und Localify Cloud, ohne gespeichert zu werden. Die Analytics enthalten keine lokalen Pfade, und ein Filter entfernt sie aus Fehlerberichten. Der Proxy arbeitet nach der Einrichtung lokal. Daten erreichen uns in fünf Fällen: Du besuchst die Website, die offizielle Desktop-App sendet Produkt-Analytics und Fehlerberichte, die App sucht nach Updates, du meldest dich bei Localify Cloud an und nutzt öffentliche URLs, oder du schreibst uns eine E-Mail."
         ]
       },
       {
@@ -240,7 +240,7 @@
       {
         "title": "3. Desktop-App und CLI",
         "body": [
-          "Der Localify-Daemon, die Desktop-App und die CLI laufen auf deinem Rechner. DNS, TLS-Zertifikate, Routing, Projektkonfiguration und Request-Logs werden dort verarbeitet. Unsere Analytics enthalten die von dir angelegten Hostnamen nicht, und der unten beschriebene Filter entfernt .localify-Domains aus Fehlerberichten. Die Requests, die du über den Proxy leitest, und die Logs in der App erhalten wir nie. CLI und Daemon senden keine Analytics.",
+          "Der Localify-Daemon, die Desktop-App und die CLI laufen auf deinem Rechner. DNS, TLS-Zertifikate, Routing, Projektkonfiguration und Request-Logs werden dort verarbeitet. Unsere Analytics enthalten die von dir angelegten Hostnamen nicht, und der unten beschriebene Filter entfernt .localify-Domains aus Fehlerberichten. Die Requests, die du auf deinem Rechner über den Proxy leitest, und die Logs in der App bleiben dort. Öffentliche URLs behandelt der nächste Abschnitt. CLI und Daemon senden keine Analytics.",
           "Offizielle Desktop-Builds senden Produkt-Analytics an PostHog: aufgerufene Ansichten, Onboarding-Schritte, Aktionen wie das Anlegen eines Projekts oder das Hinzufügen einer Domain sowie Zähler wie die Anzahl deiner Projekte und Domains. Diese Events enthalten keine Projektnamen, Domains, lokalen Pfade, weitergeleiteten URLs oder Traffic. Autocapture ist aus. Ein aus dem Quellcode gebauter Build ohne PostHog-Token sendet nichts.",
           "Die App meldet außerdem Fehler an PostHog: Name und Meldung des Fehlers, dazu Hashes, die gleiche Fehler gruppieren. Vor dem Senden entfernt ein Filter URLs, Dateipfade, .localify-Domains und Namen in Anführungszeichen. Er arbeitet mit Mustern und kann deshalb in einer ungewöhnlichen Meldung etwas übersehen.",
           "Session Replay ist standardmäßig aus und startet nur, wenn du es in den Einstellungen der App einschaltest. Replay maskiert Texte und Eingaben und zeichnet weder Konsolen-Logs noch Netzwerk-Timings auf.",
@@ -250,9 +250,9 @@
       {
         "title": "4. Localify Cloud und öffentliche URLs",
         "body": [
-          "Öffentliche URLs sind optional und nur auf Einladung verfügbar. Sie erfordern ein Konto bei Localify Cloud, das du anlegst, indem du dich mit GitHub anmeldest. Wir speichern dann die numerische ID und den Benutzernamen deines GitHub-Kontos, den Namen jedes Rechners, an dem du dich anmeldest, und ein Anmeldetoken, das nur als Hash gespeichert wird. Dein GitHub-Passwort sehen wir nie, und das GitHub-Token aus der Anmeldung wird einmal verwendet, um deinen Benutzernamen zu lesen, und dann verworfen.",
-          "Für jede öffentliche URL speichern wir ihre Adresse, die lokale Domain, die sie öffnet (zum Beispiel web.journal.localify), den Rechner, der sie bereitstellt, und, wenn sie geschützt ist, einen gesalzenen Hash ihres Passworts. Eine entfernte URL wird 30 Tage lang aufbewahrt, damit ihre Adresse nicht die Seite einer anderen Person ausliefern kann, und dann gelöscht.",
-          "Requests an eine öffentliche URL laufen über Cloudflare, wo Localify Cloud betrieben wird, und dann durch einen Cloudflare Tunnel zu deinem Rechner. Wir protokollieren diese Requests nicht und speichern ihren Inhalt nicht. Um das Erraten von Passwörtern und Missbrauch bei der Anmeldung zu bremsen, zählt Cloudflare die Versuche pro IP-Adresse für etwa eine Minute. Eine geschützte URL setzt ein einziges Cookie auf ihrer eigenen Adresse, 7 Tage gültig, das nur festhält, dass du das Passwort eingegeben hast. Fehler in Localify Cloud werden ohne Request-Inhalte protokolliert und von Cloudflare bis zu 7 Tage aufbewahrt."
+          "Öffentliche URLs sind optional und nur auf Einladung verfügbar. Sie erfordern ein Konto bei Localify Cloud, das du anlegst, indem du dich mit GitHub anmeldest. Wir speichern dann die numerische ID und den Benutzernamen deines GitHub-Kontos und für jeden Rechner, an dem du dich anmeldest, seinen Namen, den lokalen Port, mit dem sich sein Tunnel verbindet, und ein Anmeldetoken, das nur als Hash gespeichert wird. Dein GitHub-Passwort sehen wir nie, und das GitHub-Token aus der Anmeldung wird einmal verwendet, um deinen Benutzernamen zu lesen, und dann verworfen. Ein angemeldeter Rechner fragt Localify Cloud alle 5 Minuten, welche öffentlichen URLs er bereitstellt; seine Anfragen enthalten seine Localify-Version.",
+          "Für jede öffentliche URL speichern wir ihre Adresse, die lokale Domain, die sie öffnet (zum Beispiel web.journal.localify), den Rechner, der sie bereitstellt, ihre Einstellungen und, wenn sie geschützt ist, einen gesalzenen Hash ihres Passworts. Das Passwort läuft beim Festlegen durch Localify Cloud, wird aber nie gespeichert. Außerdem speichern wir technische Kennungen, Statusangaben und Datumsangaben. Eine entfernte URL wird 30 Tage lang aufbewahrt, damit ihre Adresse nicht die Seite einer anderen Person ausliefern kann, und dann bei der nächsten stündlichen Bereinigung gelöscht. Bis dahin kannst du die Adresse zurückholen.",
+          "Requests an eine öffentliche URL laufen über Cloudflare, wo Localify Cloud betrieben wird, und dann durch einen Cloudflare Tunnel zu deinem Rechner. Localify Cloud prüft den Zugriff und leitet jeden Request mit der IP-Adresse des Besuchers weiter, ohne ihn zu protokollieren oder zu speichern. Um das Erraten von Passwörtern und Missbrauch bei der Anmeldung zu bremsen, begrenzt Cloudflare Passwortversuche pro URL und IP-Adresse sowie Anmeldeanfragen pro IP-Adresse, jeweils in Zeitfenstern von einer Minute. Eine geschützte URL setzt ein einziges Cookie auf ihrer eigenen Adresse, 7 Tage gültig, das nur festhält, dass du das Passwort eingegeben hast. Localify Cloud protokolliert Fehler, nicht jeden einzelnen Request. Eine Fehlermeldung kann Details des Requests enthalten, der sie ausgelöst hat, und Cloudflare bewahrt diese Logs bis zu 7 Tage auf."
         ]
       },
       {

@@ -84,7 +84,7 @@
       },
       {
         "question": "Is it free?",
-        "answer": "Yes. Localify is free and open source under the AGPL, with no account and no limit on projects or domains. The source code is on GitHub."
+        "answer": "Yes. Localify is free and open source under the AGPL, with no account and no limit on projects or domains. Public URLs are free too, but they need an invited account and are limited to 10 per person for now. The source code is on GitHub."
       },
       {
         "question": "Who is it for?",
@@ -112,7 +112,7 @@
       },
       {
         "question": "How is it different from ngrok or Cloudflare Tunnel?",
-        "answer": "ngrok and Cloudflare Tunnel are built to put services on the internet. Localify is built for local development: clean URLs and trusted HTTPS on your machine, with no cloud. When you need to open a dev server from your phone or another computer, a public URL does it behind a password. Public URLs are invite-only for now."
+        "answer": "ngrok and Cloudflare Tunnel are built to put services on the internet. Localify is built for local development: clean URLs and trusted HTTPS on your machine, with no cloud. When you need to open a dev server from your phone or another computer, a public URL does it, behind a password by default. Public URLs are invite-only for now."
       },
       {
         "question": "Does it work with Cursor, Claude Code, or multiple AI agents in parallel?",
@@ -228,7 +228,7 @@
       {
         "title": "1. The short version",
         "body": [
-          "Localify doesn't collect request logs or anything about the traffic of the services you run. Its analytics leave out local paths, and a filter removes them from error reports. The proxy works locally after setup. Data reaches us in five cases: you visit the website, the official desktop app sends product analytics and error reports, the app checks for updates, you sign in to Localify Cloud to use public URLs, or you email us."
+          "Localify doesn't keep request logs or anything about the traffic of the services you run. Requests to a public URL pass through Cloudflare and Localify Cloud on their way to your machine, without being stored. Localify's analytics leave out local paths, and a filter removes them from error reports. The proxy works locally after setup. Data reaches us in five cases: you visit the website, the official desktop app sends product analytics and error reports, the app checks for updates, you sign in to Localify Cloud and use public URLs, or you email us."
         ]
       },
       {
@@ -240,7 +240,7 @@
       {
         "title": "3. The desktop app and CLI",
         "body": [
-          "The Localify daemon, desktop app, and CLI run on your machine. DNS, TLS certificates, routing, project configuration, and request logs are handled there. Our analytics don't include the hostnames you create, and the filter described below removes .localify domains from error reports. We never receive the requests you proxy or the logs shown in the app. The CLI and the daemon send no analytics.",
+          "The Localify daemon, desktop app, and CLI run on your machine. DNS, TLS certificates, routing, project configuration, and request logs are handled there. Our analytics don't include the hostnames you create, and the filter described below removes .localify domains from error reports. The requests you proxy on your machine and the logs shown in the app stay there. Public URLs are covered in the next section. The CLI and the daemon send no analytics.",
           "Official desktop builds send product analytics to PostHog: screens viewed, onboarding steps, actions such as creating a project or adding a domain, and counts such as how many projects and domains you have. These events don't include project names, domains, local paths, proxied URLs, or traffic. Autocapture is off. A build made from source without a PostHog token sends nothing.",
           "The app also reports errors to PostHog: the error's name and message, plus hashes that group identical errors. Before sending, a filter removes URLs, file paths, .localify domains, and quoted names. It matches patterns, so it can miss something in an unusual message.",
           "Session replay is off by default and only starts if you turn it on in the app's settings. Replay masks text and inputs, and it doesn't record console logs or network timing.",
@@ -250,9 +250,9 @@
       {
         "title": "4. Localify Cloud and public URLs",
         "body": [
-          "Public URLs are optional and invite-only. They need a Localify Cloud account, which you create by signing in with GitHub. We then keep your GitHub account's numeric ID and username, the name of each computer you sign in from, and a sign-in token stored only as a hash. We never see your GitHub password, and the GitHub token used during sign-in is used once to read your username, then discarded.",
-          "For each public URL, we keep its address, the local domain it opens (such as web.journal.localify), the computer that serves it, and, when it's protected, a salted hash of its password. A removed URL is kept for 30 days so its address can't serve someone else's page, then deleted.",
-          "Requests to a public URL go through Cloudflare, which runs Localify Cloud, then through a Cloudflare Tunnel to your computer. We don't log these requests or keep their content. To slow down password guessing and sign-in abuse, Cloudflare counts attempts per IP address for about a minute. A protected URL sets one cookie on its own address, valid for 7 days, which only records that you entered the password. Errors in Localify Cloud are logged without request content and kept by Cloudflare for up to 7 days."
+          "Public URLs are optional and invite-only. They need a Localify Cloud account, which you create by signing in with GitHub. We then keep your GitHub account's numeric ID and username and, for each computer you sign in from, its name, the local port its tunnel connects to, and a sign-in token stored only as a hash. We never see your GitHub password, and the GitHub token used during sign-in is used once to read your username, then discarded. A signed-in computer asks Localify Cloud every 5 minutes which public URLs it serves; its requests include its Localify version.",
+          "For each public URL, we keep its address, the local domain it opens (such as web.journal.localify), the computer that serves it, its settings, and, when it's protected, a salted hash of its password. The password passes through Localify Cloud when you set it but is never stored. We also keep technical identifiers, statuses and dates. A removed URL is kept for 30 days, so its address can't serve someone else's page, then deleted by the next hourly cleanup. Until then, you can take the address back.",
+          "Requests to a public URL go through Cloudflare, which runs Localify Cloud, then through a Cloudflare Tunnel to your computer. Localify Cloud checks access and passes each request on, with the visitor's IP address, without logging or storing it. To slow down password guessing and sign-in abuse, Cloudflare limits password attempts per URL and IP address, and sign-in requests per IP address, over one-minute windows. A protected URL sets one cookie on its own address, valid for 7 days, which only records that you entered the password. Localify Cloud logs its errors, not each request. An error message can include details of the request that caused it, and Cloudflare keeps these logs for up to 7 days."
         ]
       },
       {

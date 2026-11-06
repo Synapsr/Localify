@@ -84,7 +84,7 @@
       },
       {
         "question": "É grátis?",
-        "answer": "Sim. O Localify é grátis e open source sob a AGPL, sem conta e sem limite de projetos ou domínios. O código-fonte está no GitHub."
+        "answer": "Sim. O Localify é grátis e open source sob a AGPL, sem conta e sem limite de projetos ou domínios. As URLs públicas também são grátis, mas exigem uma conta com convite e, por enquanto, são limitadas a 10 por pessoa. O código-fonte está no GitHub."
       },
       {
         "question": "Para quem é?",
@@ -112,7 +112,7 @@
       },
       {
         "question": "Qual a diferença para ngrok ou Cloudflare Tunnel?",
-        "answer": "ngrok e Cloudflare Tunnel são feitos para colocar serviços na internet. O Localify é feito para o desenvolvimento local: URLs limpas e HTTPS confiável na sua máquina, sem nuvem. Quando você precisa abrir um dev server pelo celular ou por outro computador, uma URL pública faz isso protegida por senha. Por enquanto, as URLs públicas são só por convite."
+        "answer": "ngrok e Cloudflare Tunnel são feitos para colocar serviços na internet. O Localify é feito para o desenvolvimento local: URLs limpas e HTTPS confiável na sua máquina, sem nuvem. Quando você precisa abrir um dev server pelo celular ou por outro computador, uma URL pública faz isso, protegida por senha por padrão. Por enquanto, as URLs públicas são só por convite."
       },
       {
         "question": "Funciona com Cursor, Claude Code, ou vários agentes de IA em paralelo?",
@@ -228,7 +228,7 @@
       {
         "title": "1. A versão curta",
         "body": [
-          "O Localify não coleta logs de requisição nem nada sobre o tráfego dos serviços que você roda. Os analytics não incluem caminhos locais, e um filtro os remove dos relatórios de erro. O proxy funciona localmente depois da instalação. Dados chegam até nós em cinco casos: você visita o site, o app desktop oficial envia analytics de produto e relatórios de erro, o app procura atualizações, você entra no Localify Cloud para usar URLs públicas ou você nos escreve."
+          "O Localify não guarda logs de requisição nem nada sobre o tráfego dos serviços que você roda. As requisições para uma URL pública passam pela Cloudflare e pelo Localify Cloud a caminho da sua máquina, sem serem armazenadas. Os analytics não incluem caminhos locais, e um filtro os remove dos relatórios de erro. O proxy funciona localmente depois da instalação. Dados chegam até nós em cinco casos: você visita o site, o app desktop oficial envia analytics de produto e relatórios de erro, o app procura atualizações, você entra no Localify Cloud e usa URLs públicas ou você nos escreve."
         ]
       },
       {
@@ -240,7 +240,7 @@
       {
         "title": "3. O app desktop e o CLI",
         "body": [
-          "O daemon, o app desktop e o CLI do Localify rodam na sua máquina. DNS, certificados TLS, roteamento, configuração de projetos e logs de requisição são tratados lá. Nossos analytics não incluem os hostnames que você cria, e o filtro descrito abaixo remove os domínios .localify dos relatórios de erro. Nunca recebemos as requisições que passam pelo proxy nem os logs mostrados no app. O CLI e o daemon não enviam analytics.",
+          "O daemon, o app desktop e o CLI do Localify rodam na sua máquina. DNS, certificados TLS, roteamento, configuração de projetos e logs de requisição são tratados lá. Nossos analytics não incluem os hostnames que você cria, e o filtro descrito abaixo remove os domínios .localify dos relatórios de erro. As requisições que passam pelo proxy na sua máquina e os logs mostrados no app ficam lá. As URLs públicas são tratadas na próxima seção. O CLI e o daemon não enviam analytics.",
           "Os builds oficiais do app desktop enviam analytics de produto para o PostHog: telas vistas, etapas de onboarding, ações como criar um projeto ou adicionar um domínio, e contadores como quantos projetos e domínios você tem. Esses eventos não incluem nomes de projeto, domínios, caminhos locais, URLs proxificadas nem tráfego. O autocapture fica desligado. Um build compilado a partir do código-fonte sem token do PostHog não envia nada.",
           "O app também reporta erros ao PostHog: o nome e a mensagem do erro, mais hashes que agrupam erros idênticos. Antes do envio, um filtro remove URLs, caminhos de arquivo, domínios .localify e nomes entre aspas. Ele funciona por padrões, então pode deixar passar algo em uma mensagem incomum.",
           "O session replay fica desligado por padrão e só começa se você o ativar nas configurações do app. Ele mascara textos e campos de entrada, e não grava logs de console nem tempos de rede.",
@@ -250,9 +250,9 @@
       {
         "title": "4. Localify Cloud e URLs públicas",
         "body": [
-          "As URLs públicas são opcionais e só por convite. Elas exigem uma conta no Localify Cloud, que você cria ao entrar com o GitHub. A partir daí, guardamos o ID numérico e o nome de usuário da sua conta do GitHub, o nome de cada computador em que você entra e um token de login armazenado só como hash. Nunca vemos sua senha do GitHub, e o token do GitHub usado no login serve uma única vez para ler seu nome de usuário e depois é descartado.",
-          "Para cada URL pública, guardamos o endereço, o domínio local que ela abre (como web.journal.localify), o computador que a serve e, quando ela é protegida, um hash com salt da senha. Uma URL removida fica guardada por 30 dias para que o endereço não possa servir a página de outra pessoa, e depois é excluída.",
-          "As requisições para uma URL pública passam pela Cloudflare, que roda o Localify Cloud, e depois por um Cloudflare Tunnel até o seu computador. Não registramos essas requisições nem guardamos o conteúdo delas. Para frear tentativas de adivinhar senhas e abusos no login, a Cloudflare conta as tentativas por endereço IP por cerca de um minuto. Uma URL protegida define um único cookie no próprio endereço, válido por 7 dias, que só registra que você digitou a senha. Os erros do Localify Cloud são registrados sem o conteúdo das requisições e guardados pela Cloudflare por até 7 dias."
+          "As URLs públicas são opcionais e só por convite. Elas exigem uma conta no Localify Cloud, que você cria ao entrar com o GitHub. A partir daí, guardamos o ID numérico e o nome de usuário da sua conta do GitHub e, para cada computador em que você entra, o nome dele, a porta local à qual o túnel dele se conecta e um token de login armazenado só como hash. Nunca vemos sua senha do GitHub, e o token do GitHub usado no login serve uma única vez para ler seu nome de usuário e depois é descartado. Um computador conectado pergunta ao Localify Cloud a cada 5 minutos quais URLs públicas ele serve; essas requisições incluem a versão do Localify instalada nele.",
+          "Para cada URL pública, guardamos o endereço, o domínio local que ela abre (como web.journal.localify), o computador que a serve, as configurações dela e, quando ela é protegida, um hash com salt da senha. A senha passa pelo Localify Cloud quando você a define, mas nunca é armazenada. Também guardamos identificadores técnicos, status e datas. Uma URL removida fica guardada por 30 dias, para que o endereço não possa servir a página de outra pessoa, e depois é excluída na limpeza seguinte, que roda a cada hora. Até lá, você pode recuperar o endereço.",
+          "As requisições para uma URL pública passam pela Cloudflare, que roda o Localify Cloud, e depois por um Cloudflare Tunnel até o seu computador. O Localify Cloud verifica o acesso e repassa cada requisição, com o endereço IP do visitante, sem registrá-la nem armazená-la. Para frear tentativas de adivinhar senhas e abusos no login, a Cloudflare limita as tentativas de senha por URL e endereço IP, e as requisições de login por endereço IP, em janelas de um minuto. Uma URL protegida define um único cookie no próprio endereço, válido por 7 dias, que só registra que você digitou a senha. O Localify Cloud registra os próprios erros, não cada requisição. Uma mensagem de erro pode incluir detalhes da requisição que a causou, e a Cloudflare guarda esses logs por até 7 dias."
         ]
       },
       {
