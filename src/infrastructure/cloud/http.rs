@@ -40,6 +40,8 @@ pub enum CloudError {
         status: u16,
         code: String,
         message: String,
+        /// Seconds to wait before the next poll, with `slow_down`.
+        interval: Option<u64>,
     },
     #[error(
         "Could not reach Localify Cloud at {api_base}: {reason}. Check the connection and try again."
@@ -213,6 +215,8 @@ fn check_api_base(api_base: &str) -> Result<(), CloudError> {
 struct ErrorBody {
     error: String,
     message: String,
+    #[serde(default)]
+    interval: Option<u64>,
 }
 
 fn api_error(status: StatusCode, body: &[u8]) -> CloudError {
@@ -221,11 +225,13 @@ fn api_error(status: StatusCode, body: &[u8]) -> CloudError {
             status: status.as_u16(),
             code: body.error,
             message: body.message,
+            interval: body.interval,
         },
         Err(_) => CloudError::Api {
             status: status.as_u16(),
             code: format!("http_{}", status.as_u16()),
             message: format!("Localify Cloud answered {status}. Try again in a moment."),
+            interval: None,
         },
     }
 }
@@ -268,6 +274,21 @@ mod tests {
             error.to_string(),
             "journal-a8f3 is taken. Choose another slug."
         );
+    }
+
+    #[test]
+    fn slow_down_keeps_the_new_interval() {
+        let error = api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":"slow_down","message":"Slow down.","interval":10}"#,
+        );
+        assert!(matches!(
+            error,
+            CloudError::Api {
+                interval: Some(10),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -21,6 +21,11 @@ use localify::desktop::dto::{
     UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
+use localify::desktop::dto::{
+    CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CreatePublicUrlRequest,
+    PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest, PublicUrlWithPasswordDto,
+    SetPublicUrlProtectionRequest,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -556,6 +561,101 @@ pub async fn connect_agents_once(
 ) -> Result<Option<AgentMcpInstallResultDto>, String> {
     let api = state.api.clone();
     async_runtime::spawn_blocking(move || api.connect_agents_once().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+// Localify Cloud calls the network or the daemon, so each runs off the main thread.
+
+#[tauri::command]
+pub async fn get_cloud_account(
+    state: tauri::State<'_, AppState>,
+) -> Result<CloudAccountDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.cloud_account().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn start_cloud_sign_in(
+    state: tauri::State<'_, AppState>,
+) -> Result<CloudSignInStartDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.start_cloud_sign_in().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn poll_cloud_sign_in(
+    state: tauri::State<'_, AppState>,
+    request: PollCloudSignInRequest,
+) -> Result<CloudSignInPollDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.poll_cloud_sign_in(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn sign_out_cloud(state: tauri::State<'_, AppState>) -> Result<CloudAccountDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.sign_out_cloud().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn list_public_urls(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PublicUrlDto>, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.list_public_urls().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn create_public_url(
+    state: tauri::State<'_, AppState>,
+    request: CreatePublicUrlRequest,
+) -> Result<PublicUrlWithPasswordDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.create_public_url(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn remove_public_url(
+    state: tauri::State<'_, AppState>,
+    request: PublicUrlIdRequest,
+) -> Result<(), String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.remove_public_url(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn set_public_url_protection(
+    state: tauri::State<'_, AppState>,
+    request: SetPublicUrlProtectionRequest,
+) -> Result<PublicUrlWithPasswordDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.set_public_url_protection(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn claim_public_url(
+    state: tauri::State<'_, AppState>,
+    request: PublicUrlIdRequest,
+) -> Result<PublicUrlDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.claim_public_url(request).map_err(map_error))
         .await
         .map_err(map_error)?
 }

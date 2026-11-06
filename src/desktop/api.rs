@@ -14,6 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::application::StepOutcome;
+use crate::application::cloud_account::{AccountStatus, SignInPoll};
 use crate::application::daemon_status::QueryDaemonStatus;
 use crate::application::install::Install;
 use crate::application::manage_routes::ManageRoutes;
@@ -21,6 +22,8 @@ use crate::application::ports::DaemonConnection;
 use crate::application::ports::DaemonControl;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
+use crate::application::ports::{ProtectionChoice, ProtectionMode, TunnelState};
+use crate::application::public_urls::{CreatePublicUrl, PublicUrlView};
 use crate::application::register_domain::RegisterDomain;
 use crate::application::restart_daemon::RestartDaemon;
 use crate::application::start_daemon::StartDaemon;
@@ -57,6 +60,12 @@ use crate::desktop::dto::{
     StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
     UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
+use crate::desktop::dto::{
+    CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CloudSignInStatusDto,
+    CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest,
+    PublicUrlProtectionDto, PublicUrlProtectionModeDto, PublicUrlWithPasswordDto,
+    SetPublicUrlProtectionRequest, TunnelStateDto, TunnelStatusDto,
+};
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
@@ -64,6 +73,7 @@ use crate::desktop::port_conflicts::{
 use crate::desktop::{LauncherPreferencesStore, ProjectRootStore};
 use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
 use crate::infrastructure::certs::CertificateService;
+use crate::infrastructure::cloud_adapters::{CloudAdapters, computer_name};
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredDomain, ConfiguredProject, ConfiguredProjectEnvironment,
     ConfiguredService, ProjectEnvironmentConfig, ProjectEnvironmentServiceConfig,
@@ -250,6 +260,126 @@ impl DesktopApi {
         }
         Ok(crate::agent_mcp::connect_agents_once(&self.binary_path)?
             .map(map_agent_mcp_install_result))
+    }
+
+    /// Who is signed in to Localify Cloud, and this machine's tunnel. Reads
+    /// the credentials and asks the daemon; it never calls Localify Cloud.
+    pub fn cloud_account(&self) -> Result<CloudAccountDto> {
+        Ok(map_cloud_account(self.cloud()?.accounts().status()?))
+    }
+
+    pub fn start_cloud_sign_in(&self) -> Result<CloudSignInStartDto> {
+        let device = self.cloud()?.accounts().start_sign_in()?;
+        Ok(CloudSignInStartDto {
+            device_code: device.device_code,
+            user_code: device.user_code,
+            verification_uri: device.verification_uri,
+            interval: device.interval,
+            expires_in: device.expires_in,
+        })
+    }
+
+    /// Polls the sign-in once; the app calls it every `interval` seconds.
+    pub fn poll_cloud_sign_in(
+        &self,
+        request: PollCloudSignInRequest,
+    ) -> Result<CloudSignInPollDto> {
+        let poll = self
+            .cloud()?
+            .accounts()
+            .poll_sign_in(&request.device_code, &computer_name())?;
+        let (status, message, account) = match poll {
+            SignInPoll::Pending => (CloudSignInStatusDto::Pending, None, None),
+            SignInPoll::SlowDown { .. } => (CloudSignInStatusDto::SlowDown, None, None),
+            SignInPoll::SignedIn { status, .. } => (
+                CloudSignInStatusDto::SignedIn,
+                None,
+                Some(map_cloud_account(status)),
+            ),
+            SignInPoll::Denied(message) => (CloudSignInStatusDto::Denied, Some(message), None),
+            SignInPoll::NotAllowed(message) => {
+                (CloudSignInStatusDto::NotAllowed, Some(message), None)
+            }
+            SignInPoll::Expired(message) => (CloudSignInStatusDto::Expired, Some(message), None),
+        };
+        Ok(CloudSignInPollDto {
+            status,
+            message,
+            account,
+        })
+    }
+
+    /// Signs out even when Localify Cloud cannot be reached.
+    pub fn sign_out_cloud(&self) -> Result<CloudAccountDto> {
+        let cloud = self.cloud()?;
+        cloud.accounts().sign_out()?;
+        Ok(map_cloud_account(cloud.accounts().status()?))
+    }
+
+    pub fn list_public_urls(&self) -> Result<Vec<PublicUrlDto>> {
+        Ok(self
+            .cloud()?
+            .public_urls()
+            .list()?
+            .into_iter()
+            .map(map_public_url)
+            .collect())
+    }
+
+    pub fn create_public_url(
+        &self,
+        request: CreatePublicUrlRequest,
+    ) -> Result<PublicUrlWithPasswordDto> {
+        let created = self
+            .cloud()?
+            .public_urls()
+            .create(CreatePublicUrl {
+                local_domain: request.local_domain,
+                wildcard: request.wildcard,
+                slug: request.slug.filter(|slug| !slug.trim().is_empty()),
+                protection: protection_choice(request.mode, request.password),
+            })?
+            .value;
+        Ok(PublicUrlWithPasswordDto {
+            public_url: map_public_url(created.public_url),
+            password: created.password,
+        })
+    }
+
+    pub fn remove_public_url(&self, request: PublicUrlIdRequest) -> Result<()> {
+        self.cloud()?.public_urls().remove(&request.id)?;
+        Ok(())
+    }
+
+    /// Sets, rotates or removes the password. Every browser signs in again.
+    pub fn set_public_url_protection(
+        &self,
+        request: SetPublicUrlProtectionRequest,
+    ) -> Result<PublicUrlWithPasswordDto> {
+        let changed = self
+            .cloud()?
+            .public_urls()
+            .set_protection(
+                &request.id,
+                protection_choice(request.mode, request.password),
+            )?
+            .value;
+        Ok(PublicUrlWithPasswordDto {
+            public_url: map_public_url(changed.public_url),
+            password: changed.password,
+        })
+    }
+
+    /// Serves the URL from this machine.
+    pub fn claim_public_url(&self, request: PublicUrlIdRequest) -> Result<PublicUrlDto> {
+        Ok(map_public_url(
+            self.cloud()?.public_urls().claim(&request.id)?.value,
+        ))
+    }
+
+    fn cloud(&self) -> Result<CloudAdapters> {
+        let (_, paths) = self.load_config_and_paths()?;
+        Ok(CloudAdapters::new(&self.config_path, &paths))
     }
 
     pub fn read_config(&self) -> Result<AppConfigDto> {
@@ -3840,6 +3970,58 @@ fn map_agent_mcp_install_result(
             .iter()
             .map(|path| path.display().to_string())
             .collect(),
+    }
+}
+
+fn map_cloud_account(status: AccountStatus) -> CloudAccountDto {
+    CloudAccountDto {
+        signed_in: status.signed_in,
+        login: status.login,
+        machine_name: status.machine_name,
+        tunnel: TunnelStatusDto {
+            state: match status.tunnel.state {
+                TunnelState::Stopped => TunnelStateDto::Stopped,
+                TunnelState::Starting => TunnelStateDto::Starting,
+                TunnelState::Connected => TunnelStateDto::Connected,
+                TunnelState::Error => TunnelStateDto::Error,
+                TunnelState::Unknown => TunnelStateDto::Unknown,
+            },
+            connections: status.tunnel.connections,
+            error: status.tunnel.error,
+        },
+    }
+}
+
+fn map_public_url(view: PublicUrlView) -> PublicUrlDto {
+    let url = view.url;
+    PublicUrlDto {
+        id: url.id,
+        slug: url.slug,
+        url: url.url,
+        local_domain: url.local_domain,
+        wildcard: url.wildcard,
+        machine_name: url.machine.map(|machine| machine.name),
+        served_here: view.served_here,
+        protection: PublicUrlProtectionDto {
+            mode: match url.protection.mode {
+                ProtectionMode::Password => PublicUrlProtectionModeDto::Password,
+                ProtectionMode::Public => PublicUrlProtectionModeDto::Public,
+            },
+        },
+        created_at: url.created_at,
+    }
+}
+
+/// An empty password from a form means "generate one".
+fn protection_choice(
+    mode: PublicUrlProtectionModeDto,
+    password: Option<String>,
+) -> ProtectionChoice {
+    match mode {
+        PublicUrlProtectionModeDto::Password => {
+            ProtectionChoice::Password(password.filter(|password| !password.trim().is_empty()))
+        }
+        PublicUrlProtectionModeDto::Public => ProtectionChoice::Public,
     }
 }
 

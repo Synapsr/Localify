@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod background;
+pub mod cloud;
 pub mod context;
 pub mod exec;
 pub mod init_project;
@@ -10,9 +11,11 @@ pub mod list;
 pub mod list_projects;
 pub mod logs;
 pub mod mcp;
+pub mod output;
 pub mod profile_init;
 pub mod project;
 pub mod project_env;
+pub mod public_url;
 pub mod register;
 pub mod reload;
 pub mod remove_project;

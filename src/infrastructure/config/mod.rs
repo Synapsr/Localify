@@ -467,6 +467,32 @@ impl Config {
         Ok(())
     }
 
+    /// The project a public URL on `local_domain` belongs to
+    /// (`docs/public-urls.md`, "Exposable local domain"): the project whose
+    /// registration it is, or, when nothing registers it, the project whose
+    /// namespace `<project-id><domain suffix>` it is, as in a monorepo where
+    /// only `web.journal.localify` is registered. `None` for a domain
+    /// registered outside any project and for any other domain, Docker's
+    /// included: those are never exposed. The CLI and the app check it before
+    /// creating a URL, and the daemon before serving public traffic.
+    pub fn public_url_project(&self, local_domain: &str) -> Option<&str> {
+        let domain = local_domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if let Some(registration) = self.registration_for_domain(&domain) {
+            let project_id = registration.project.as_deref()?;
+            return self
+                .projects
+                .get_key_value(project_id)
+                .map(|(id, _)| id.as_str());
+        }
+        let namespace = domain.strip_suffix(BRANDING.domain_suffix())?;
+        self.projects
+            .get_key_value(namespace)
+            .map(|(id, _)| id.as_str())
+    }
+
     fn project_is_enabled(&self, project_id: Option<&str>) -> bool {
         project_id
             .and_then(|id| self.projects.get(id))
@@ -1903,6 +1929,45 @@ mod tests {
 
         let persisted = store.list_projects().unwrap();
         assert_eq!(persisted[0].root_path.as_deref(), Some("/tmp/test-1"));
+    }
+
+    #[test]
+    fn a_public_url_belongs_to_the_project_that_registers_its_domain_or_owns_its_namespace() {
+        let (_dir, store) = temp_store();
+        let journal = store.create_project("Journal").unwrap();
+        let shop = store.create_project("Shop").unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration("web.journal.localify", 3000),
+                Some(journal.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain_with_project(
+                proxy_registration("shop.localify", 3001),
+                Some(shop.id.clone()),
+            )
+            .unwrap();
+        store
+            .add_domain(proxy_registration("loose.localify", 3002))
+            .unwrap();
+        store
+            .add_domain(proxy_registration("api.other.localify", 3003))
+            .unwrap();
+        let config = store.load().unwrap();
+        let project = |domain: &str| {
+            config
+                .public_url_project(&domain.replace(".localify", BRANDING.domain_suffix()))
+                .map(str::to_string)
+        };
+
+        assert_eq!(project("web.journal.localify"), Some(journal.id.clone()));
+        assert_eq!(project("journal.localify"), Some(journal.id.clone()));
+        assert_eq!(project(" Journal.localify. "), Some(journal.id));
+        assert_eq!(project("shop.localify"), Some(shop.id));
+        assert_eq!(project("loose.localify"), None);
+        assert_eq!(project("other.localify"), None);
+        assert_eq!(project("api.journal.localify"), None);
     }
 
     #[test]
