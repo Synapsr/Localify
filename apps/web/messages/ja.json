@@ -100,7 +100,7 @@
       },
       {
         "question": "どのプラットフォームで動きますか？",
-        "answer": "デスクトップアプリは現在、Apple Silicon の macOS で動きます。CLI とデーモンは Linux でもソースからビルドできます。Windows と Linux 向けデスクトップアプリは今後対応する予定です。"
+        "answer": "デスクトップアプリは現在、Apple Silicon の macOS で動きます。CLI とデーモンは Linux x86_64 にも curl -fsSL https://localify.dev/install.sh | sh でインストールでき、その他の環境ではソースからビルドできます。Windows と Linux 向けデスクトップアプリは今後対応する予定です。"
       },
       {
         "question": "/etc/hosts の編集や mkcert のインストールは必要ですか？",
@@ -124,7 +124,8 @@
     "description": "localhost との戦いをやめましょう。Localify は AGPL の無料オープンソースです。",
     "download": "macOS 版をダウンロード",
     "source": "ソースコードを見る",
-    "requirements": "Apple Silicon の macOS · CLI は Linux でソースからビルド可能"
+    "terminal": "またはターミナルから（macOS と Linux）：",
+    "requirements": "Apple Silicon の macOS · コマンドラインは Linux x86_64 にも対応"
   },
   "Footer": {
     "resources": "リソース",

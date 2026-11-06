@@ -100,7 +100,7 @@
       },
       {
         "question": "어떤 플랫폼에서 실행되나요?",
-        "answer": "데스크톱 앱은 현재 Apple Silicon 기반 macOS에서 실행됩니다. CLI와 데몬은 Linux에서도 소스로 빌드할 수 있습니다. Windows와 Linux용 데스크톱 앱은 추후 지원할 계획입니다."
+        "answer": "데스크톱 앱은 현재 Apple Silicon 기반 macOS에서 실행됩니다. CLI와 데몬은 Linux x86_64에도 curl -fsSL https://localify.dev/install.sh | sh 로 설치할 수 있고, 그 밖의 환경에서는 소스로 빌드할 수 있습니다. Windows와 Linux용 데스크톱 앱은 추후 지원할 계획입니다."
       },
       {
         "question": "/etc/hosts를 수정하거나 mkcert를 설치해야 하나요?",
@@ -124,7 +124,8 @@
     "description": "localhost와 싸우지 마세요. Localify는 AGPL 기반의 무료 오픈 소스입니다.",
     "download": "macOS용 다운로드",
     "source": "소스 코드 보기",
-    "requirements": "Apple Silicon 기반 macOS · Linux에서는 CLI를 소스로 빌드"
+    "terminal": "또는 터미널에서 (macOS, Linux):",
+    "requirements": "Apple Silicon 기반 macOS · 명령줄은 Linux x86_64도 지원"
   },
   "Footer": {
     "resources": "리소스",

@@ -100,7 +100,7 @@
       },
       {
         "question": "На каких платформах он работает?",
-        "answer": "Пока десктопное приложение работает на macOS с Apple Silicon. CLI и демон также собираются из исходников на Linux. Windows и десктопное приложение для Linux запланированы на будущее."
+        "answer": "Пока десктопное приложение работает на macOS с Apple Silicon. CLI и демон также устанавливаются на Linux x86_64 командой curl -fsSL https://localify.dev/install.sh | sh, а на других системах собираются из исходников. Windows и десктопное приложение для Linux запланированы на будущее."
       },
       {
         "question": "Нужно редактировать /etc/hosts или ставить mkcert?",
@@ -124,7 +124,8 @@
     "description": "Хватит бороться с localhost. Localify бесплатен и распространяется с открытым кодом под AGPL.",
     "download": "Скачать для macOS",
     "source": "Смотреть исходный код",
-    "requirements": "macOS с Apple Silicon · CLI собирается из исходников на Linux"
+    "terminal": "Или из терминала, на macOS и Linux:",
+    "requirements": "macOS с Apple Silicon · командная строка также для Linux x86_64"
   },
   "Footer": {
     "resources": "Ресурсы",

@@ -4,6 +4,17 @@ This guide covers Linux-specific setup details and
 troubleshooting. For general usage, see the
 [main documentation](README.md).
 
+## Install
+
+```bash
+curl -fsSL https://localify.dev/install.sh | sh
+```
+
+The script installs the x86_64 build of the latest release in `~/.local/bin`, after
+checking its SHA-256, then runs `localify install`. Run it again to update. Other
+architectures build from source. Over SSH, use `ssh -t` so `sudo` can ask for your
+password, or have passwordless `sudo` (see [No Root After the Install](#no-root-after-the-install)).
+
 ## Supported Distributions
 
 Localify is tested on **Ubuntu 22.04+** and **Debian 12+**.
