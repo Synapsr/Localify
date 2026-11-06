@@ -110,7 +110,8 @@ export const PublicUrlDetails = ({
 
   return (
     <>
-      <DialogBody className="space-y-5">
+      {/* min-w-0: as a grid item it would otherwise grow to fit a long URL. */}
+      <DialogBody className="min-w-0 space-y-5">
         <div className="space-y-2 rounded-xl border border-border/60 bg-background/70 p-3">
           <div className="flex items-center gap-1">
             <span className="min-w-0 flex-1 truncate px-1 font-mono text-sm text-foreground select-all">

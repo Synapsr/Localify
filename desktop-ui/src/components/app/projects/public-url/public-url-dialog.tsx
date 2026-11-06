@@ -121,7 +121,9 @@ export const PublicUrlDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      {/* Scrolls inside itself so its sticky footer stays at its bottom, and
+          hides while a confirmation or the password sits on top of it. */}
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-lg data-nested-dialog-open:invisible">
         <DialogHeader>
           <DialogTitle>Public URL</DialogTitle>
           <DialogDescription>
