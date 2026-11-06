@@ -28,6 +28,9 @@ pub enum ProtectionMode {
 #[serde(rename_all = "camelCase")]
 pub struct Protection {
     pub mode: ProtectionMode,
+    /// Set for a password; older versions of the API leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +106,15 @@ mod tests {
         }"#;
         let url: PublicUrl = serde_json::from_str(json).unwrap();
         assert_eq!(url.protection.mode, ProtectionMode::Password);
+        assert_eq!(url.protection.version, None);
         assert_eq!(url.machine.unwrap().name, "runner");
+
+        let versioned = json.replace(
+            r#"{"mode": "password"}"#,
+            r#"{"mode": "password", "version": 3}"#,
+        );
+        let url: PublicUrl = serde_json::from_str(&versioned).unwrap();
+        assert_eq!(url.protection.version, Some(3));
     }
 
     #[test]

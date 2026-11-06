@@ -22,9 +22,10 @@ use localify::desktop::dto::{
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use localify::desktop::dto::{
-    CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto, CloudSignOutDto,
-    CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest,
-    PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest,
+    CheckPublicUrlSlugRequest, CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto,
+    CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto,
+    PublicUrlIdRequest, PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto,
+    PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest, SuggestPublicUrlSlugRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -623,6 +624,28 @@ pub async fn create_public_url(
 ) -> Result<PublicUrlWithPasswordDto, String> {
     let api = state.api.clone();
     async_runtime::spawn_blocking(move || api.create_public_url(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn suggest_public_url_slug(
+    state: tauri::State<'_, AppState>,
+    request: SuggestPublicUrlSlugRequest,
+) -> Result<PublicUrlSlugSuggestionDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.suggest_public_url_slug(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn check_public_url_slug(
+    state: tauri::State<'_, AppState>,
+    request: CheckPublicUrlSlugRequest,
+) -> Result<PublicUrlSlugCheckDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.check_public_url_slug(request).map_err(map_error))
         .await
         .map_err(map_error)?
 }

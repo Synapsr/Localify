@@ -13,6 +13,7 @@ import type {
   DeepLinkPayloadDto,
   AppUpdateCheckDto,
   BootstrapDto,
+  CheckPublicUrlSlugRequest,
   CliAccessDto,
   CloudAccountDto,
   CloudSignInPollDto,
@@ -53,6 +54,8 @@ import type {
   ProjectWorktreeDiscoveryDto,
   PublicUrlDto,
   PublicUrlRequest,
+  PublicUrlSlugCheckDto,
+  PublicUrlSlugSuggestionDto,
   PublicUrlWithPasswordDto,
   RegisterDomainRequest,
   RegisterDomainResultDto,
@@ -76,6 +79,7 @@ import type {
   SettingsImportResultDto,
   StartDaemonRequest,
   StepDto,
+  SuggestPublicUrlSlugRequest,
   UninstallPreviewDto,
   UninstallResultDto,
   TerminalCreateSessionRequest,
@@ -95,10 +99,12 @@ import type {
 import { addProjectServiceRequestSchema } from "./validators/validator.add-project-service";
 import { updateAutostartRequestSchema } from "./validators/validator.autostart";
 import {
+  checkPublicUrlSlugRequestSchema,
   createPublicUrlRequestSchema,
   pollCloudSignInRequestSchema,
   publicUrlRequestSchema,
   setPublicUrlProtectionRequestSchema,
+  suggestPublicUrlSlugRequestSchema,
 } from "./validators/validator.cloud";
 import {
   createProjectWithDomainsRequestSchema,
@@ -212,6 +218,8 @@ export interface DesktopClient {
   signOutCloud(): Promise<CloudSignOutDto>;
   listPublicUrls(): Promise<PublicUrlDto[]>;
   createPublicUrl(request: CreatePublicUrlRequest): Promise<PublicUrlWithPasswordDto>;
+  suggestPublicUrlSlug(request: SuggestPublicUrlSlugRequest): Promise<PublicUrlSlugSuggestionDto>;
+  checkPublicUrlSlug(request: CheckPublicUrlSlugRequest): Promise<PublicUrlSlugCheckDto>;
   removePublicUrl(request: PublicUrlRequest): Promise<void>;
   setPublicUrlProtection(request: SetPublicUrlProtectionRequest): Promise<PublicUrlWithPasswordDto>;
   claimPublicUrl(request: PublicUrlRequest): Promise<PublicUrlDto>;
@@ -328,6 +336,14 @@ export function createDesktopClient(): DesktopClient {
     createPublicUrl: (request) =>
       tauriInvoke("create_public_url", {
         request: createPublicUrlRequestSchema.parse(request),
+      }),
+    suggestPublicUrlSlug: (request) =>
+      tauriInvoke("suggest_public_url_slug", {
+        request: suggestPublicUrlSlugRequestSchema.parse(request),
+      }),
+    checkPublicUrlSlug: (request) =>
+      tauriInvoke("check_public_url_slug", {
+        request: checkPublicUrlSlugRequestSchema.parse(request),
       }),
     removePublicUrl: (request) =>
       tauriInvoke("remove_public_url", {

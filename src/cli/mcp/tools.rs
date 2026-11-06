@@ -812,7 +812,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "public_url_list",
-        description: "Lists the user's public URLs on Localify Cloud (JSON): https://<slug>.localify.fyi, the local domain each one serves, password or open, and which machine serves it (servedHere).",
+        description: "Lists the user's public URLs on Localify Cloud (JSON): https://<slug>.localify.fyi, the local domain each one serves, password or open, which machine serves it (servedHere), and passwordLink, the link that signs a browser in, when this machine set the password.",
         params: &[],
         uses_cwd: false,
         read_only: true,
@@ -821,12 +821,12 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "public_url_create",
-        description: "Gives a project domain of this machine a public https://<slug>.localify.fyi URL, served from here and protected by a password. Returns the URL and the generated password (JSON), shown this once: pass both on to the user. Needs the machine signed in (a person runs `localify login`).",
+        description: "Gives a project domain of this machine a public https://<slug>.localify.fyi URL, served from here and protected by a password. Returns the URL, publicUrl.passwordLink (the link that signs a browser in) and the generated password (JSON): pass the link on to the user, or the URL and the password. Needs the machine signed in (a person runs `localify login`).",
         params: &[
             required(
                 "local_domain",
                 Kind::String,
-                "A project's domain as list_services shows it, or the project's namespace <project-id>.localify, which wildcard opens to every service and worktree under it.",
+                "A project's domain as list_services shows it, or, to reach several services or worktrees, the project's namespace <project-id>.localify with wildcard: one URL for the whole project.",
             ),
             param(
                 "wildcard",
@@ -836,7 +836,7 @@ pub const TOOLS: &[Tool] = &[
             param(
                 "slug",
                 Kind::String,
-                "Slug of the URL, 3 to 32 characters of a-z, 0-9 and -. Generated from the domain by default.",
+                "Slug of the URL, 3 to 32 characters of a-z, 0-9 and -. By default it mirrors the local name (louez for louez.localify), or adds the user's login when taken.",
             ),
             param(
                 "password",
@@ -874,7 +874,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "public_url_protect",
-        description: "Puts a public URL behind a password, or replaces its password, which signs every browser out. Returns the generated password (JSON), shown this once: pass it on to the user.",
+        description: "Puts a public URL behind a password, or replaces its password, which signs every browser out. Returns publicUrl.passwordLink, the link that signs a browser in, and the generated password (JSON): pass the link or the password on to the user.",
         params: &[
             PUBLIC_URL,
             param(

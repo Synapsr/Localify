@@ -1177,6 +1177,8 @@ pub fn run() {
             commands::sign_out_cloud,
             commands::list_public_urls,
             commands::create_public_url,
+            commands::suggest_public_url_slug,
+            commands::check_public_url_slug,
             commands::remove_public_url,
             commands::set_public_url_protection,
             commands::claim_public_url,

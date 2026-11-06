@@ -625,14 +625,17 @@ account. Accounts are invite-only for now.
 
 ```bash
 localify login                                   # shows a code to enter on github.com
-localify public-url create web.journal.localify  # prints the URL and its password, once
+localify public-url create web.journal.localify  # prints the URL, its password, and a link with it
 localify public-url create journal.localify --wildcard
 localify public-url list
 ```
 
 - **Protected by default.** Each URL asks for a password, generated unless you pass
-  `--password`, and shown once. A browser that enters it stays signed in for 7 days on that host; each wildcard
-  host asks once.
+  `--password`. A browser that enters it stays signed in for 7 days on that host; each wildcard
+  host asks once. The link with the password,
+  `https://<slug>.localify.fyi/__localify/access#<password>`, signs a browser in
+  without typing it; the machine that set the password keeps it to give that link
+  again, in the app and in `public-url list --json`.
   `protect` sets a new password and signs every browser out. `unprotect`, or
   `--public` at creation, opens the URL to everyone.
 - **Wildcard.** `--wildcard` on a project's namespace, such as `journal.localify`,

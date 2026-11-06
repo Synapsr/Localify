@@ -55,19 +55,22 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
 
   // 2. Refuse what another URL's pages could send with this URL's cookies.
   const webSocket = request.headers.get("upgrade")?.toLowerCase() === "websocket";
-  const origin = request.headers.get("origin");
-  if ((webSocket || !SAFE_METHODS.has(method)) && origin !== null) {
-    if (!isOriginOfUrl(origin, site.slug, site.wildcard, baseDomain)) {
-      return plain(
-        403,
-        "Requests to this public URL that can change something must come from its own pages.",
-      );
-    }
+  if ((webSocket || !SAFE_METHODS.has(method)) && !fromItsOwnPages(request, site, baseDomain)) {
+    return plain(
+      403,
+      "Requests to this public URL that can change something must come from its own pages.",
+    );
   }
 
-  // 3. Check access.
+  // 3. Check access. The access path is Localify's on every URL: a link shared
+  // while the URL had a password still carries it after `#`, and redirecting
+  // to `/#` empties the fragment, which the browser would carry to the app.
+  if (url.pathname === ACCESS_PATH) {
+    if (site.protected) return handleAccess(request, env, site, host);
+    await request.body?.cancel();
+    return redirect("/#");
+  }
   if (site.protected) {
-    if (url.pathname === ACCESS_PATH) return handleAccess(request, env, site, host);
     if (!(await hasAccess(request, env, site, host))) {
       if ((method === "GET" || method === "HEAD") && !webSocket) {
         return passwordPage({ host, next: url.pathname + url.search, method });
@@ -92,6 +95,18 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   );
 }
 
+/**
+ * A request without `Origin` is not a browser's cross-origin request. A page
+ * whose referrer policy is `no-referrer` sends `Origin: null`, even to its own
+ * origin, so the browser's `Sec-Fetch-Site` decides then.
+ */
+function fromItsOwnPages(request: Request, site: Site, baseDomain: string): boolean {
+  const origin = request.headers.get("origin");
+  if (origin === null) return true;
+  if (origin === "null") return request.headers.get("sec-fetch-site") === "same-origin";
+  return isOriginOfUrl(origin, site.slug, site.wildcard, baseDomain);
+}
+
 async function hasAccess(request: Request, env: Env, site: Site, host: string): Promise<boolean> {
   const key = setting(env, "COOKIE_KEY");
   const scope = { host, urlId: site.id, version: site.passwordVersion };
@@ -101,14 +116,23 @@ async function hasAccess(request: Request, env: Env, site: Site, host: string): 
   return false;
 }
 
-/** `POST /__localify/access`: checks the password, sets the cookie, and redirects to `next`. */
+/**
+ * `GET /__localify/access` is the page a shared link opens, with the password
+ * after `#`. Never a redirect: the browser would carry the fragment to the
+ * app's page. `POST` checks the password, sets the cookie, and redirects to
+ * `next`.
+ */
 async function handleAccess(
   request: Request,
   env: Env,
   site: Site,
   host: string,
 ): Promise<Response> {
-  if (request.method !== "POST") return redirect("/");
+  const method = request.method;
+  if (method === "GET" || method === "HEAD") {
+    return passwordPage({ host, next: "/", status: 200, method, fromLink: true });
+  }
+  if (method !== "POST") return redirect("/");
 
   const clientIp = request.headers.get("cf-connecting-ip") ?? "unknown";
   const { success } = await env.PASSWORD_LIMITER.limit({ key: `${site.id}:${clientIp}` });

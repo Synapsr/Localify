@@ -1,17 +1,16 @@
 "use client";
 
-import type { PublicUrlDto } from "@/types/localify";
-
 import { GlobeIcon } from "@/components/icons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface PublicUrlBadgeProps {
-  publicUrl: PublicUrlDto;
+  /** Where it opens publicly. */
+  url: string;
   onOpen: () => void;
 }
 
-/** The globe shown next to something that has a public URL; opens its dialog. */
-export const PublicUrlBadge = ({ publicUrl, onOpen }: PublicUrlBadgeProps) => (
+/** The globe shown next to something a public URL reaches; opens its dialog. */
+export const PublicUrlBadge = ({ url, onOpen }: PublicUrlBadgeProps) => (
   <Tooltip>
     <TooltipTrigger
       render={
@@ -21,13 +20,13 @@ export const PublicUrlBadge = ({ publicUrl, onOpen }: PublicUrlBadgeProps) => (
             event.stopPropagation();
             onOpen();
           }}
-          aria-label={`Public URL ${publicUrl.url}`}
+          aria-label={`Public URL ${url}`}
           className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
         />
       }
     >
       <GlobeIcon className="size-3.5" />
     </TooltipTrigger>
-    <TooltipContent>Public at {publicUrl.url}</TooltipContent>
+    <TooltipContent>Public at {url}</TooltipContent>
   </Tooltip>
 );

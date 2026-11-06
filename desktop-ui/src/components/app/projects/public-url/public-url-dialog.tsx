@@ -20,7 +20,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { bootstrapQueries, cloudQueries } from "@/lib/queries";
-import { findPublicUrl, projectNamespaceDomain, SETTINGS_CLOUD_ANCHOR } from "@/lib/util.cloud";
+import {
+  findPublicUrl,
+  linkOnHost,
+  projectNamespaceDomain,
+  publicUrlOf,
+  publicUrlTarget,
+  SETTINGS_CLOUD_ANCHOR,
+} from "@/lib/util.cloud";
 
 import { PublicUrlCreateForm } from "./public-url-create-form";
 import { PublicUrlDetails } from "./public-url-details";
@@ -30,16 +37,17 @@ interface PublicUrlDialogProps {
   /** A registered domain, or a project's namespace. */
   localDomain: string;
   projectId: string | null;
-  /** Start the create form with "Every environment" on. */
-  wildcardByDefault?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
+/**
+ * One URL per project, as locally: any domain under the project's namespace opens through the
+ * project's wildcard URL, so the dialog creates or shows that one.
+ */
 export const PublicUrlDialog = ({
   localDomain,
   projectId,
-  wildcardByDefault = false,
   open,
   onOpenChange,
 }: PublicUrlDialogProps) => {
@@ -48,15 +56,29 @@ export const PublicUrlDialog = ({
   const signedIn = account.data?.signedIn ?? false;
   const publicUrls = useQuery({ ...cloudQueries.publicUrls(), enabled: signedIn });
   const [revealed, setRevealed] = useState<RevealedPassword | null>(null);
-  const publicUrl = findPublicUrl(publicUrls.data, localDomain);
-  const allowWildcard =
-    projectId !== null &&
-    localDomain.toLowerCase() ===
-      projectNamespaceDomain(projectId, bootstrap?.environment.fixedDomainSuffix ?? "");
+  const namespace =
+    projectId === null
+      ? null
+      : projectNamespaceDomain(projectId, bootstrap?.environment.fixedDomainSuffix ?? "");
+  const match = findPublicUrl(publicUrls.data, localDomain, namespace);
+  const target = publicUrlTarget(localDomain, namespace);
+  const projectName =
+    bootstrap?.projects.find((project) => project.id === projectId)?.name ??
+    projectId ??
+    localDomain;
 
+  // The password and its link open the domain the dialog is about.
   const handleCreated = (result: PublicUrlWithPasswordDto) => {
     if (result.password) {
-      setRevealed({ url: result.publicUrl.url, password: result.password });
+      const url =
+        publicUrlOf(result.publicUrl.url, result.publicUrl.slug, target.label) ??
+        result.publicUrl.url;
+      const link = result.publicUrl.passwordLink;
+      setRevealed({
+        url,
+        password: result.password,
+        passwordLink: link ? linkOnHost(link, url) : null,
+      });
     } else {
       toast.success("Public URL created");
     }
@@ -100,19 +122,22 @@ export const PublicUrlDialog = ({
         </PublicUrlNotice>
       );
     }
-    if (!publicUrl) {
+    if (!match) {
       return (
         <PublicUrlCreateForm
           localDomain={localDomain}
-          allowWildcard={allowWildcard}
-          wildcardByDefault={wildcardByDefault}
+          target={target}
+          projectName={projectName}
           onCreated={handleCreated}
         />
       );
     }
     return (
       <PublicUrlDetails
-        publicUrl={publicUrl}
+        match={match}
+        localDomain={localDomain}
+        isProjectUrl={match.publicUrl.localDomain.toLowerCase() === namespace}
+        projectName={projectName}
         account={account.data}
         onPasswordRevealed={setRevealed}
       />
@@ -123,7 +148,7 @@ export const PublicUrlDialog = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* Scrolls inside itself so its sticky footer stays at its bottom, and
           hides while a confirmation or the password sits on top of it. */}
-      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-lg data-nested-dialog-open:invisible">
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto data-nested-dialog-open:invisible sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Public URL</DialogTitle>
           <DialogDescription>

@@ -9,6 +9,7 @@ export type PublicUrlRow = {
   machine_id: string | null;
   machine_name: string | null;
   protected: number;
+  password_version: number;
   created_at: number;
 };
 
@@ -19,12 +20,13 @@ export type PublicUrl = {
   localDomain: string;
   wildcard: boolean;
   machine: { id: string; name: string } | null;
-  protection: { mode: "password" | "public" };
+  /** `version` changes with every protection change: a password saved before is stale. */
+  protection: { mode: "password" | "public"; version: number };
   createdAt: string;
 };
 
 const SELECT_URLS = `
-  SELECT p.id, p.slug, p.local_domain, p.wildcard, p.machine_id, m.name AS machine_name, p.protected, p.created_at
+  SELECT p.id, p.slug, p.local_domain, p.wildcard, p.machine_id, m.name AS machine_name, p.protected, p.password_version, p.created_at
   FROM public_urls p LEFT JOIN machines m ON m.id = p.machine_id`;
 
 /** The user's public URLs, oldest first. */
@@ -82,7 +84,10 @@ export function toPublicUrl(row: PublicUrlRow, baseDomain: string): PublicUrl {
       row.machine_id !== null && row.machine_name !== null
         ? { id: row.machine_id, name: row.machine_name }
         : null,
-    protection: { mode: row.protected === 1 ? "password" : "public" },
+    protection: {
+      mode: row.protected === 1 ? "password" : "public",
+      version: row.password_version,
+    },
     createdAt: new Date(row.created_at).toISOString(),
   };
 }

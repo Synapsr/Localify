@@ -189,6 +189,7 @@ fn print_protection(changed: &PublicUrlAndPassword, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `password` is set when Localify Cloud generated it.
 fn print_access(url: &PublicUrlView, password: Option<&str>) {
     match (url.url.protection.mode, password) {
         (ProtectionMode::Public, _) => {
@@ -196,18 +197,31 @@ fn print_access(url: &PublicUrlView, password: Option<&str>) {
         }
         (ProtectionMode::Password, Some(password)) => {
             println!("Password: {password}");
-            println!(
-                "It is shown once only: copy it now. Get a new one with: {} public-url protect {}",
-                BRANDING.cli_command(),
-                url.url.slug
-            );
+            match &url.password_link {
+                Some(link) => print_password_link(link),
+                None => println!(
+                    "It is shown once only: copy it now. Get a new one with: {} public-url protect {}",
+                    BRANDING.cli_command(),
+                    url.url.slug
+                ),
+            }
         }
         (ProtectionMode::Password, None) => {
             println!("Protected by the password you chose.");
+            if let Some(link) = &url.password_link {
+                print_password_link(link);
+            }
         }
     }
 }
 
+fn print_password_link(link: &str) {
+    println!("Link with password: {link}");
+    println!("Opening it signs a browser in without typing the password.");
+}
+
+/// Leaves the link with the password out: a list may be on a shared screen.
+/// `--json` carries it.
 fn print_url(view: &PublicUrlView) {
     let url = &view.url;
     println!("{} -> {}", url.url, url.local_domain);

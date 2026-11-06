@@ -21,18 +21,18 @@ export const pollCloudSignInRequestSchema = z.object({
   deviceCode: z.string().trim().min(1, "Device code is required"),
 });
 
-export const createPublicUrlRequestSchema = z
-  .object({
-    localDomain: z.string().trim().min(1, "Local domain is required"),
-    wildcard: z.boolean(),
-    slug: publicUrlSlugSchema.optional(),
-    mode: protectionModeSchema,
-    password: publicUrlPasswordSchema.optional(),
-  })
-  .refine((request) => request.mode === "password" || request.password === undefined, {
-    message: "A URL open to anyone has no password.",
-    path: ["password"],
-  });
+const localDomainSchema = z.string().trim().min(1, "Local domain is required");
+
+export const createPublicUrlRequestSchema = z.object({
+  localDomain: localDomainSchema,
+  wildcard: z.boolean(),
+  slug: publicUrlSlugSchema.optional(),
+  mode: protectionModeSchema,
+});
+
+export const suggestPublicUrlSlugRequestSchema = z.object({ localDomain: localDomainSchema });
+
+export const checkPublicUrlSlugRequestSchema = z.object({ slug: publicUrlSlugSchema });
 
 export const publicUrlRequestSchema = z.object({ id: idSchema });
 
@@ -46,31 +46,6 @@ export const setPublicUrlProtectionRequestSchema = z
     message: "A URL open to anyone has no password.",
     path: ["password"],
   });
-
-/** Empty slug and password mean "generate one". */
-export const createPublicUrlFormSchema = z
-  .object({
-    wildcard: z.boolean(),
-    slug: z.string(),
-    mode: protectionModeSchema,
-    password: z.string(),
-    confirmPublic: z.boolean(),
-  })
-  .superRefine((value, ctx) => {
-    addOptionalIssue(ctx, ["slug"], publicUrlSlugSchema, value.slug);
-    if (value.mode === "password") {
-      addOptionalIssue(ctx, ["password"], publicUrlPasswordSchema, value.password);
-    }
-    if (value.mode === "public" && !value.confirmPublic) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["confirmPublic"],
-        message: "Confirm that anyone with the link may open it.",
-      });
-    }
-  });
-
-export type CreatePublicUrlFormInput = z.infer<typeof createPublicUrlFormSchema>;
 
 /** Empty means "generate one". */
 export const publicUrlPasswordFormSchema = z

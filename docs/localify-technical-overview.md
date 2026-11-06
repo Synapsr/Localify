@@ -267,7 +267,7 @@ Ce choix garde un seul endroit pour les règles importantes : activation du proj
 
 Les points à retenir :
 
-- Une URL `journal-a8f3.localify.fyi` expose un domaine local d'un projet. Avec `--wildcard`, `journal-a8f3--feature.localify.fyi` atteint `feature.journal.localify`, donc chaque environnement du projet.
+- Une URL `journal.localify.fyi` expose un domaine local d'un projet ; son nom suit le nom local. Avec `--wildcard`, `journal--feature.localify.fyi` atteint `feature.journal.localify`, donc chaque environnement du projet. L'app crée une seule URL par projet, sur son espace de noms `<projet>.localify`.
 - Le mot de passe est vérifié par le Worker, avant que rien n'atteigne la machine. Une URL est protégée par défaut.
 - Chaque machine connectée a son tunnel. Le Worker y envoie un secret propre à la machine, et l'entrée publique du daemon refuse toute requête sans lui.
 - L'app reçoit le domaine local dans `Host` et l'hôte public dans `X-Forwarded-Host`.

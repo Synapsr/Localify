@@ -20,7 +20,7 @@ V1 is invite-only: GitHub accounts on an allowlist. Out of v1: path exceptions (
 
 ## Names
 
-- **Slug:** 3 to 32 characters, `a-z`, `0-9` and `-`, starting with a letter, not ending with `-`, never containing `--`. Unique across all users, deleted ones included (see "Data"). When not chosen with `--slug`, it is generated from the first label of the local domain: lowercased, every run of characters outside `a-z0-9` replaced by one `-`, leading digits and `-` removed (`url` when nothing is left), cut to 20 characters without a trailing `-`, then `-` and 4 random hex characters (`journal-a8f3`).
+- **Slug:** 3 to 32 characters, `a-z`, `0-9` and `-`, starting with a letter, not ending with `-`, never containing `--`. Unique across all users, deleted ones included (see "Data"). When not chosen with `--slug`, it follows the local name, so the public URL reads like the local one. The local name is every label of the local domain but the last, in order, joined with `-`, lowercased, every run of characters outside `a-z0-9` replaced by one `-`, leading digits and `-` removed, cut to 32 characters without a trailing `-`: `louez.localify` gives `louez`, `web.louez.localify` gives `web-louez`. The Worker takes the first free of: the local name, the local name with `-` and the owner's GitHub login (`louez-ryan-ede`), then the local name cut to 27 characters with `-` and 4 random hex characters (`url` when the name is empty). A candidate that breaks the slug rules, such as one shorter than 3 characters, is skipped. A slug is free when no live URL has it and no other user's deleted URL holds it.
 - **Public host:** `<slug>.localify.fyi`, or `<slug>--<label>.localify.fyi` for a wildcard URL. The first `--` separates the slug from the label, so labels may contain `--` (`web--feature`). The slug comes first so that `--` never sits at positions 3–4 of the DNS label, which IDNA reserves (ADR 0022).
 - **Local host:** `<local-domain>` for `<slug>`, and `<label>.<local-domain>` for `<slug>--<label>`. A label is `a-z`, `0-9` and `-`, does not start or end with `-`, and is at most `61 − slug length` characters so the public DNS label fits in 63. Longer names cannot be served; the CLI says so instead of truncating.
 - **Exposable local domain:** a domain registered by a project in this machine's config, or a project's namespace `<project-id>.localify` even when no service uses it as its own domain. The namespace is what a wildcard URL usually targets: in a monorepo, `<slug>--web--feature.localify.fyi` reaches `web--feature.<project-id>.localify`. The project of a public URL is the one that registers its local domain or owns that namespace.
@@ -79,6 +79,8 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `GET /v1/me` | — | `{user, machine}` |
 | `POST /v1/auth/logout` | — | `204`, see "Signing out" |
 | `GET /v1/public-urls` | — | `{publicUrls: [PublicUrl]}`, the user's URLs, deleted ones excluded |
+| `GET /v1/slugs?localDomain=<domain>` | — | `{slug, url}`: the slug a new URL for that domain would get, and its URL, so clients never write the public domain themselves. `422 invalid_local_domain`. |
+| `GET /v1/slugs/<slug>` | — | `{slug, available}`, the slug lowercased; free for the caller as defined in "Names". `422 invalid_slug`. |
 | `POST /v1/public-urls` | `{localDomain, wildcard, slug?, protection: {mode: "password", password?} \| {mode: "public"}}` | `201 {publicUrl, password?}`. The calling machine serves it. `password` is present only when the server generated it. `409 slug_taken`, `409 local_domain_taken`, `422 invalid_slug`, `422 invalid_local_domain`, `403 quota_exceeded`. |
 | `DELETE /v1/public-urls/{id}` | — | `204` |
 | `PUT /v1/public-urls/{id}/protection` | `{protection}`, the same object as in `POST` | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
@@ -95,7 +97,11 @@ type PublicUrl = {
   localDomain: string;
   wildcard: boolean;
   machine: Machine | null;     // null when no machine serves it
-  protection: { mode: "password" | "public" };
+  // version: the D1 password_version, bumped by every protection change,
+  // so a client knows whether a password it saved is still the current one.
+  // After a create or a protection change, it is the version of that very
+  // change, even if another one landed since.
+  protection: { mode: "password" | "public"; version: number };
   createdAt: string;           // RFC 3339
 };
 ```
@@ -111,8 +117,8 @@ type PublicUrl = {
 For a request to `*.localify.fyi`, the Worker:
 
 1. Parses the host into slug and label, and loads the public URL with its machine and its owner's GitHub id. Unknown or deleted slug, a label on a non-wildcard URL, an invalid label, or an owner no longer on the allowlist: a 404 page. No serving machine: a 503 "offline" page. Lookups are cached in the isolate for 10 seconds, so a deleted URL, a new password or a claim reaches every location within that time. These changes apply to new requests: a WebSocket or an SSE stream already open stays open until it closes.
-2. Refuses cross-origin requests that could change state. Every URL under `localify.fyi` is the same site for a browser, so `SameSite` does not stop another user's page from posting to this one. For any method other than `GET`, `HEAD` and `OPTIONS`, and for every WebSocket handshake, an `Origin` header that is present must belong to the same public URL: `<slug>.localify.fyi` or `<slug>--<label>.localify.fyi` with this URL's slug. Otherwise: 403. A request without `Origin` is not a browser's cross-origin request and goes on to the access check.
-3. Checks access when the URL is protected. Access is the cookie `__Host-localify-access` = `<expiry>.<password version>.<hex HMAC-SHA-256(COOKIE_KEY, host|url id|version|expiry)>`, valid 7 days, `Secure; HttpOnly; SameSite=Lax; Path=/`, set for the exact host (each wildcard label signs in separately). Without it, `GET` and `HEAD` return the password page (401, HTML) and other methods a plain 401, WebSocket handshakes included. The page posts to `/__localify/access` with the password and a same-host relative `next` path; a correct password sets the cookie and redirects with 303. Attempts are rate limited per URL and client IP.
+2. Refuses cross-origin requests that could change state. Every URL under `localify.fyi` is the same site for a browser, so `SameSite` does not stop another user's page from posting to this one. For any method other than `GET`, `HEAD` and `OPTIONS`, and for every WebSocket handshake, an `Origin` header that is present must belong to the same public URL: `<slug>.localify.fyi` or `<slug>--<label>.localify.fyi` with this URL's slug. A page whose referrer policy is `no-referrer` sends `Origin: null` even to itself; that passes only with `Sec-Fetch-Site: same-origin`, which the browser sets and a page cannot. Otherwise: 403. A request without `Origin` is not a browser's cross-origin request and goes on to the access check. The Worker's own pages use `Referrer-Policy: same-origin`, so their form sends its origin.
+3. Checks access when the URL is protected. Access is the cookie `__Host-localify-access` = `<expiry>.<password version>.<hex HMAC-SHA-256(COOKIE_KEY, host|url id|version|expiry)>`, valid 7 days, `Secure; HttpOnly; SameSite=Lax; Path=/`, set for the exact host (each wildcard label signs in separately). Without it, `GET` and `HEAD` return the password page (401, HTML) and other methods a plain 401, WebSocket handshakes included. The page posts to `/__localify/access` with the password and a same-host relative `next` path; a correct password sets the cookie and redirects with 303. Attempts are rate limited per URL and client IP. A link that carries the password is `https://<host>/__localify/access#<password, percent-encoded>`: the fragment never reaches a server or the app, and link previews see only the password page. On a URL without a password, `/__localify/access` answers `303` to `/#`, whose empty fragment replaces the one an old link carries; the path never reaches the app. `GET /__localify/access` on a protected URL serves that page with `next=/` and one inline script, allowed by a per-response CSP nonce, which reads the fragment, removes it from the address bar and history, and submits the form. That path never redirects, since a browser would carry the fragment to the app's page.
 4. Forwards to `https://m-<machine-id>.localify.dev<path>?<query>` with the method, body and headers, after removing `Host`, `Forwarded`, `X-Real-IP`, every `X-Forwarded-*`, `X-Localify-*` and `CF-*` header, and the access cookie from `Cookie`. It adds:
 
 | Header | Value |
@@ -139,7 +145,17 @@ For a request to `*.localify.fyi`, the Worker:
 
 A signed-in machine always talks to the `apiBase` it signed in with, so its token never goes to another endpoint by accident. `LOCALIFY_CLOUD_API` only chooses the API for a new sign-in, for development against `wrangler dev`; plain `http://` is accepted only for a loopback host.
 
-Signing out calls the API, then deletes the file, then sends `public_refresh`. When the API is unreachable, the file is deleted anyway after a warning, and the cloud's hourly cleanup never needs it.
+Signing out calls the API, then deletes the saved passwords (below) and the file, then sends `public_refresh`. When the API is unreachable, both are deleted anyway after a warning, and the cloud's hourly cleanup never needs them. Saved passwords that cannot be deleted add a warning and do not stop the sign-out.
+
+### Saved passwords
+
+When the CLI or the app sets a password, generated or chosen, it keeps it with the URL's `protection.version` in `public-url-passwords.json` next to `cloud.json`, written with `write_private_file` (0600) to a temporary file renamed over it, so a reader never sees half a file:
+
+```json
+{ "<url id>": { "version": 3, "password": "…" } }
+```
+
+Localify Cloud keeps only a hash, so this copy is what lets the CLI, the MCP and the app give the link with the password (see "Public traffic") after the moment it was set. Whoever can read the file can read `cloud.json` too, whose token can change the password anyway. A saved password counts only while its version is the URL's current one, so a password changed or removed from another machine gives no link. Every change of the file reads, changes and writes it while holding a lock (`flock`) on the data directory, so the app, the CLI and the MCP server never undo each other's change. An answer that arrives after a newer change never replaces or forgets the newer password, and then gives no link. Turning protection off or removing the URL forgets its password. Listing forgets a password only when its URL's version is newer, since the list may be older than a change being saved at that moment; the password of a URL removed from another machine stays until sign-out. Signing out deletes the file, and the temporary copy an interrupted write may have left. A file that cannot be read or written costs the links, with a warning, never the change itself, nor a sign-out. A file that is not valid JSON starts over empty.
 
 ### Public ingress
 
@@ -156,7 +172,7 @@ Errors on public traffic use generic pages: no project paths, no commands, no co
 
 ### Tunnel
 
-When signed in, this machine serves at least one public URL, and the ingress listens on its port, the daemon runs `cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:<ingress port + 10> run` with the tunnel token in the `TUNNEL_TOKEN` environment variable, never on the command line. It restarts it with backoff when it exits, and stops it when the last URL leaves this machine, when the credentials are gone or the API answers 401, and on daemon shutdown; stopping also drops the ingress secret. Its output goes to `cloudflared.log` next to the daemon log, truncated at each start. Without the ingress, the tunnel would hand public traffic and the ingress secret to whatever program holds the port, so the status shows the error instead.
+When signed in, this machine serves at least one public URL, and the ingress listens on its port, the daemon runs `cloudflared --config <data dir>/cloudflared.yml tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:<ingress port + 10> run` with the tunnel token in the `TUNNEL_TOKEN` environment variable, never on the command line. It restarts it with backoff when it exits, and stops it when the last URL leaves this machine, when the credentials are gone or the API answers 401, and on daemon shutdown; stopping also drops the ingress secret. HTTP/2 rather than QUIC: on a network that blocks UDP, `cloudflared` would try QUIC for about two minutes before falling back. The config file holds only `{}`: without one, `cloudflared` would read `~/.cloudflared/config.yml`, which belongs to the person's other tunnels. Its output goes to `cloudflared.log` next to the daemon log, truncated at each start. Without the ingress, the tunnel would hand public traffic and the ingress secret to whatever program holds the port, so the status shows the error instead.
 
 `cloudflared` is downloaded on first use from its GitHub release, at a version pinned in the code, into `<data dir>/bin/cloudflared-<version>`, and its SHA-256 is checked against a value pinned next to the version before it is made executable. A mismatch deletes the file and reports an error. Supported: macOS arm64 and x86_64, Linux x86_64 and arm64.
 
@@ -185,15 +201,18 @@ localify public-url unprotect <url-or-slug-or-id> [--yes]
 localify public-url claim <url-or-slug-or-id>
 ```
 
-`create` checks that the local domain is exposable on this machine (see "Names") before calling the cloud, prints the URL and, when one was generated, the password with a note that it is shown once. A generated password is 4 lowercase words from a fixed list, joined by `-`.
+`create` checks that the local domain is exposable on this machine (see "Names") before calling the cloud; without `--slug`, Localify Cloud picks the suggested name, which mirrors the local one. It then prints the URL, the password when one was generated, and the link with the password. `protect` prints the same. A generated password is 4 lowercase words from a fixed list, joined by `-`. `list` leaves the link out, as it may be on a shared screen; JSON output carries it as `passwordLink` on every URL whose password this machine set.
 
 ## MCP
 
-One tool per command except `login`, `logout` and `unprotect`: signing in and opening a URL to everyone are for a person to decide (ADR 0018). `public_url_create` has no `public` option, so an agent always creates a protected URL and receives its password to pass on. `public_url_remove` is destructive.
+One tool per command except `login`, `logout` and `unprotect`: signing in and opening a URL to everyone are for a person to decide (ADR 0018). `public_url_create` has no `public` option, so an agent always creates a protected URL and receives the link with its password, and the password, to pass on. The instructions steer an agent that wants several services or worktrees of a project to one wildcard URL on the project's namespace. `public_url_remove` is destructive.
 
 ## Desktop app
 
 - **Settings → Localify Cloud:** sign in (shows the code, opens github.com), who is signed in, sign out, and this Mac's tunnel status.
-- **Domain detail → Public URL:** create (wildcard switch for a project's namespace domain; a project also offers its namespace when no service registers it, as in a monorepo), the URL with copy and open, the password shown once after create or rotate with a copy button, protection on and off, remove. When this Mac serves the URL, its state comes from this Mac's tunnel; when another machine serves it, the section says "Served by <machine>" with a button to serve it from this Mac, and claims nothing about whether it is online.
+- **Domain detail → Public URL:** one URL per project, as locally. Opened on the project's namespace or on any domain under it, the dialog creates or shows the project's wildcard URL on the namespace; any other domain gets a URL of its own. The project menu opens it on the namespace, even when no service registers it, as in a monorepo.
+  - **Create:** the exact public URL of the opened domain at the top (`https://<slug>--<label>.localify.fyi` under the namespace), with the project URL below it, from `GET /v1/slugs?localDomain=`. A pencil opens the name: an input with `.localify.fyi` after it, checked as `PublicSlug` checks it and then with `GET /v1/slugs/<slug>` 300 ms after the last key, showing Available, Taken or the format rule, and a button back to the suggestion. Creating waits for a free name; a name taken in the meantime reopens the editor on it. A domain whose label does not fit beside the chosen name (61 characters minus its length) is said inline. One Password switch, on by default: the password is generated and shown once with its link; off says that anyone with the link opens the project's services. There is no custom password at creation; it can be changed after.
+  - **Details:** for a domain under a project URL, its own host (`<slug>--<label>`) with copy, open and the link with the password on that host, since each host signs in separately, and the project URL below. A project URL made before this, without wildcard, says it opens only the namespace and that removing it and creating it again reaches every service and worktree. Then the password shown once after rotate with buttons to copy it and the link with it, protection on and off, remove. When this Mac serves the URL, its state comes from this Mac's tunnel; when another machine serves it, the section says "Served by <machine>" with a button to serve it from this Mac, and claims nothing about whether it is online.
+  - **Badges:** a globe beside each domain a URL reaches, its own or the project's wildcard one, opening the dialog.
 
 All of it goes through `DesktopApi`, which calls the same application use cases as the CLI. The app does no HTTP itself.

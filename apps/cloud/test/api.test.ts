@@ -20,7 +20,7 @@ type PublicUrlBody = {
   localDomain: string;
   wildcard: boolean;
   machine: { id: string; name: string } | null;
-  protection: { mode: string };
+  protection: { mode: string; version?: number };
   createdAt: string;
 };
 
@@ -381,10 +381,9 @@ describe("public URLs", () => {
       localDomain: "journal.localify",
       wildcard: true,
       machine: { id: machineId, name: "laptop" },
-      protection: { mode: "password" },
     });
-    expect(Object.keys(body.publicUrl.protection)).toEqual(["mode"]);
-    expect(body.publicUrl.slug).toMatch(/^journal-[0-9a-f]{4}$/);
+    expect(body.publicUrl.protection).toEqual({ mode: "password", version: 1 });
+    expect(body.publicUrl.slug).toBe("journal");
     expect(body.publicUrl.url).toBe(`https://${body.publicUrl.slug}.localify.fyi`);
     expect(new Date(body.publicUrl.createdAt).toISOString()).toBe(body.publicUrl.createdAt);
     const words = body.password!.split("-");
@@ -513,6 +512,19 @@ describe("public URLs", () => {
     expect(context.sqlite.prepare("SELECT COUNT(*) AS n FROM public_urls").get()).toEqual({ n: 1 });
   });
 
+  it("names a new URL after its local domain, then after its owner", async () => {
+    const teo = await signIn(context);
+    const ryan = await signIn(context, "ryan-ede", 2, "ryan");
+    const first = await createUrl(teo.token, { localDomain: "louez.localify" });
+    expect(first.body.publicUrl.slug).toBe("louez");
+    const second = await createUrl(ryan.token, { localDomain: "louez.localify" });
+    expect(second.body.publicUrl.slug).toBe("louez-ryan-ede");
+    const nested = await createUrl(teo.token, {
+      localDomain: "louez-customer-profiles.louez.localify",
+    });
+    expect(nested.body.publicUrl.slug).toBe("louez-customer-profiles-louez");
+  });
+
   it("lets a deleted URL's local domain have a new URL", async () => {
     const { token } = await signIn(context);
     const { body } = await createUrl(token, { localDomain: "a.localify" });
@@ -536,7 +548,9 @@ describe("public URLs", () => {
       token,
       body: { protection: { mode: "password" } },
     });
-    expect(((await rotated.json()) as { password?: string }).password).toBeDefined();
+    const rotatedBody = (await rotated.json()) as { publicUrl: PublicUrlBody; password?: string };
+    expect(rotatedBody.password).toBeDefined();
+    expect(rotatedBody.publicUrl.protection).toEqual({ mode: "password", version: 2 });
     expect(version()).toBe(2);
 
     const opened = await api(context, "PUT", `/v1/public-urls/${id}/protection`, {
@@ -544,7 +558,7 @@ describe("public URLs", () => {
       body: { protection: { mode: "public" } },
     });
     const openedBody = (await opened.json()) as { publicUrl: PublicUrlBody; password?: string };
-    expect(openedBody.publicUrl.protection).toEqual({ mode: "public" });
+    expect(openedBody.publicUrl.protection).toEqual({ mode: "public", version: 3 });
     expect(openedBody.password).toBeUndefined();
     expect(version()).toBe(3);
     const row = context.sqlite
@@ -556,7 +570,9 @@ describe("public URLs", () => {
       token,
       body: { protection: { mode: "password", password: "chosen password" } },
     });
-    expect(((await chosen.json()) as { password?: string }).password).toBeUndefined();
+    const chosenBody = (await chosen.json()) as { publicUrl: PublicUrlBody; password?: string };
+    expect(chosenBody.password).toBeUndefined();
+    expect(chosenBody.publicUrl.protection).toEqual({ mode: "password", version: 4 });
     expect(version()).toBe(4);
 
     expect(
@@ -588,6 +604,71 @@ describe("public URLs", () => {
   });
 });
 
+
+describe("slugs", () => {
+  async function suggestion(token: string, localDomain: string) {
+    const query = new URLSearchParams({ localDomain });
+    const response = await api(context, "GET", `/v1/slugs?${query}`, { token });
+    return {
+      status: response.status,
+      body: (await response.json()) as { slug?: string; url?: string },
+    };
+  }
+
+  async function check(token: string, slug: string) {
+    const response = await api(context, "GET", `/v1/slugs/${encodeURIComponent(slug)}`, { token });
+    return {
+      status: response.status,
+      body: (await response.json()) as { slug?: string; available?: boolean; error?: string },
+    };
+  }
+
+  it("suggests the local name, then with the login, then random characters", async () => {
+    const teo = await signIn(context);
+    const ryan = await signIn(context, "ryan-ede", 2, "ryan");
+    expect((await suggestion(teo.token, "louez.localify")).body).toEqual({
+      slug: "louez",
+      url: "https://louez.localify.fyi",
+    });
+    expect((await suggestion(teo.token, "web.louez.localify")).body.slug).toBe("web-louez");
+
+    await createUrl(teo.token, { localDomain: "louez.localify" });
+    expect((await suggestion(ryan.token, "louez.localify")).body.slug).toBe("louez-ryan-ede");
+    await createUrl(ryan.token, { localDomain: "other.localify", slug: "louez-ryan-ede" });
+    expect((await suggestion(ryan.token, "louez.localify")).body.slug).toMatch(
+      /^louez-[0-9a-f]{4}$/,
+    );
+
+    const invalid = await suggestion(teo.token, "Not a domain");
+    expect(invalid.status).toBe(422);
+    const missing = await api(context, "GET", "/v1/slugs", { token: teo.token });
+    expect(await errorCode(missing)).toBe("invalid_local_domain");
+    expect((await api(context, "GET", "/v1/slugs?localDomain=a.localify")).status).toBe(
+      401,
+    );
+  });
+
+  it("says whether a slug is free, keeping a deleted one for its owner", async () => {
+    const teo = await signIn(context);
+    const ryan = await signIn(context, "ryan-ede", 2, "ryan");
+    expect((await check(teo.token, "Free-One")).body).toEqual({ slug: "free-one", available: true });
+
+    const { body } = await createUrl(teo.token, { localDomain: "a.localify", slug: "kept" });
+    expect((await check(teo.token, "kept")).body.available).toBe(false);
+    expect((await check(ryan.token, "kept")).body.available).toBe(false);
+
+    await api(context, "DELETE", `/v1/public-urls/${body.publicUrl.id}`, { token: teo.token });
+    expect((await check(teo.token, "kept")).body.available).toBe(true);
+    expect((await check(ryan.token, "kept")).body.available).toBe(false);
+    expect((await suggestion(ryan.token, "kept.localify")).body.slug).toBe("kept-ryan-ede");
+
+    for (const slug of ["ab--c", "x", "-abc", "%E0%A4%A"]) {
+      const invalid = await check(teo.token, slug);
+      expect(invalid.status, slug).toBe(422);
+      expect(invalid.body.error, slug).toBe("invalid_slug");
+    }
+  });
+});
 describe("machine runtime", () => {
   it("returns the tunnel token, the ingress secret and the live URLs this machine serves", async () => {
     const laptop = await signIn(context, "teo-goulois", 1, "laptop");

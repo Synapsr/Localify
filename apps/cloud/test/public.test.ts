@@ -115,6 +115,8 @@ describe("the password", () => {
     expect(html).toContain('name="next" value="/docs?page=2"');
     expect(html).not.toMatch(/<(script|link|img)\b/);
     expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(page.headers.get("content-security-policy")).not.toContain("script-src");
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
 
     const head = await visit(context, `https://${host()}/`, { method: "HEAD" });
     expect(head.status).toBe(401);
@@ -135,6 +137,24 @@ describe("the password", () => {
         `^${ACCESS_COOKIE}=\\d+\\.1\\.[0-9a-f]{64}; Max-Age=604800; Path=/; Secure; HttpOnly; SameSite=Lax$`,
       ),
     );
+  });
+
+  it("opens the page a shared link leads to, which posts the password after #", async () => {
+    const page = await visit(context, `https://${host()}/__localify/access`);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('name="next" value="/"');
+    const nonce = /<script nonce="([0-9a-f-]{36})">/.exec(html)?.[1];
+    expect(nonce).toBeDefined();
+    expect(html).toContain("location.hash");
+    expect(page.headers.get("content-security-policy")).toContain(`script-src 'nonce-${nonce}'`);
+
+    const again = await visit(context, `https://${host()}/__localify/access`);
+    expect(again.headers.get("content-security-policy")).not.toContain(nonce);
+
+    const head = await visit(context, `https://${host()}/__localify/access`, { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(machineCalls()).toHaveLength(0);
   });
 
   it("redirects only to a path on the same host", async () => {
@@ -217,6 +237,23 @@ describe("the password", () => {
     });
     expect((await visit(context, `https://${host()}/`)).status).toBe(200);
   });
+
+  it("keeps the access path from the app once the URL is public", async () => {
+    await api(context, "PUT", `/v1/public-urls/${urlId}/protection`, {
+      token,
+      body: { protection: { mode: "public" } },
+    });
+    // A link shared while it had a password: `/#` empties its fragment.
+    for (const method of ["GET", "POST"]) {
+      const response = await visit(context, `https://${host("web")}/__localify/access`, {
+        method,
+        body: method === "POST" ? "password=x" : undefined,
+      });
+      expect(response.status, method).toBe(303);
+      expect(response.headers.get("location"), method).toBe("/#");
+    }
+    expect(machineCalls()).toHaveLength(0);
+  });
 });
 
 describe("cross-origin requests", () => {
@@ -235,6 +272,38 @@ describe("cross-origin requests", () => {
       expect(response.status, origin).toBe(403);
     }
     expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("take Origin: null only when the browser says the request is same-origin", async () => {
+    // A page with `Referrer-Policy: no-referrer` sends `Origin: null` even to itself.
+    const form = await visit(context, `https://${host()}/__localify/access`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "null",
+        "sec-fetch-site": "same-origin",
+      },
+      body: new URLSearchParams({ password: PASSWORD, next: "/" }).toString(),
+    });
+    expect(form.status).toBe(303);
+    const cookie = form.headers.get("set-cookie")!.split(";")[0]!;
+
+    const write = await visit(context, `https://${host()}/api`, {
+      method: "POST",
+      headers: { cookie, origin: "null", "sec-fetch-site": "same-origin" },
+      body: "x",
+    });
+    expect(write.status).toBe(200);
+
+    for (const site of ["same-site", "cross-site", "none"]) {
+      const response = await visit(context, `https://${host()}/api`, {
+        method: "POST",
+        headers: { cookie, origin: "null", "sec-fetch-site": site },
+        body: "x",
+      });
+      expect(response.status, site).toBe(403);
+    }
+    expect(machineCalls()).toHaveLength(1);
   });
 
   it("refuse the password form from another public URL", async () => {

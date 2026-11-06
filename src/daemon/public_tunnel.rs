@@ -35,6 +35,8 @@ const MAX_RESTART: Duration = Duration::from_secs(60);
 const STABLE_RUN: Duration = Duration::from_secs(60);
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
 const LOG_FILE_NAME: &str = "cloudflared.log";
+/// In the data directory: an empty config, so `cloudflared` reads no other.
+const CONFIG_FILE_NAME: &str = "cloudflared.yml";
 const SIGNED_OUT_BY_CLOUD: &str =
     "Localify Cloud no longer accepts this machine's sign-in. Sign in again with `localify login`.";
 
@@ -409,13 +411,21 @@ async fn start(
         _ = cancel.cancelled() => anyhow::bail!("The daemon is stopping"),
         binary = cloudflared::ensure_installed(&files.data_dir) => binary?,
     };
-    spawn_cloudflared(&binary, token, files.metrics_port, &files.log)
+    // Without a config of its own, `cloudflared` reads `~/.cloudflared/config.yml`,
+    // which belongs to the person's other tunnels.
+    let config = files.data_dir.join(CONFIG_FILE_NAME);
+    std::fs::write(&config, "{}\n")
+        .with_context(|| format!("Could not write {}", config.display()))?;
+    spawn_cloudflared(&binary, &config, token, files.metrics_port, &files.log)
 }
 
 /// The token goes through the environment only: a command line is visible
-/// to every user of the machine.
+/// to every user of the machine. HTTP/2 over TCP, because on a network that
+/// blocks UDP, `cloudflared` tries QUIC for about two minutes before it falls
+/// back.
 fn spawn_cloudflared(
     binary: &Path,
+    config: &Path,
     token: &TunnelToken,
     metrics_port: u16,
     log: &Path,
@@ -429,8 +439,12 @@ fn spawn_cloudflared(
         .try_clone()
         .with_context(|| format!("Could not write {}", log.display()))?;
     let child = Command::new(binary)
+        .arg("--config")
+        .arg(config)
         .arg("tunnel")
         .arg("--no-autoupdate")
+        .arg("--protocol")
+        .arg("http2")
         .arg("--metrics")
         .arg(format!("127.0.0.1:{metrics_port}"))
         .arg("run")
@@ -846,14 +860,22 @@ exec sleep 30
         assert_eq!(
             args.lines().collect::<Vec<_>>(),
             [
+                "--config",
+                dir.path().join(CONFIG_FILE_NAME).to_str().unwrap(),
                 "tunnel",
                 "--no-autoupdate",
+                "--protocol",
+                "http2",
                 "--metrics",
                 "127.0.0.1:7391",
                 "run"
             ]
         );
         assert!(!args.contains("tok-1"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(CONFIG_FILE_NAME)).unwrap(),
+            "{}\n"
+        );
         assert_eq!(std::fs::read_to_string(bin.join("token")).unwrap(), "yes\n");
         wait_until(|| std::fs::read_to_string(&log).is_ok_and(|text| text == "fresh output\n"))
             .await;

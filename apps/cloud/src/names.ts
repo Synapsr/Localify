@@ -6,7 +6,9 @@ const SLUG_PATTERN = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 const LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_DNS_LABEL = 63;
 const MAX_DOMAIN = 253;
-const SLUG_BASE_MAX = 20;
+const SLUG_MAX = 32;
+/** Leaves room for `-` and 4 hex characters. */
+const RANDOM_BASE_MAX = SLUG_MAX - 5;
 
 export const SLUG_RULES =
   "A slug has 3 to 32 characters: lowercase letters, digits and single hyphens, starting with a letter and not ending with a hyphen.";
@@ -58,22 +60,45 @@ export function localHostFor(localDomain: string, label: string | null): string 
   return host.length <= MAX_DOMAIN ? host : null;
 }
 
-/** A slug for a local domain: its normalized first label, `-`, and 4 random hex characters. */
-export function generateSlug(localDomain: string): string {
-  return `${slugBase(localDomain)}-${randomHex(2)}`;
+/**
+ * The slugs to offer for a local domain, most wanted first: its local name,
+ * then the local name and the owner's login. Either may be invalid, such as
+ * too short, and is then left out.
+ */
+export function slugCandidates(localDomain: string, login: string): string[] {
+  const name = localName(localDomain);
+  const owner = login
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return [name, `${name}-${owner}`].filter(isValidSlug);
+}
+
+/** The local name cut to leave room for `-` and 4 random hex characters. */
+export function randomSlug(localDomain: string): string {
+  const base = cutSlug(localName(localDomain), RANDOM_BASE_MAX);
+  return `${base === "" ? "url" : base}-${randomHex(2)}`;
 }
 
 /**
- * The first label of the local domain, lowercased, every run of characters
- * outside `a-z0-9` replaced by one `-`, leading digits and `-` removed (`url`
- * when nothing is left), cut to 20 characters without a trailing `-`.
+ * The local domain as one slug, in its own order: every label but the last
+ * (`localify`), joined with `-`, lowercased, every run of characters outside
+ * `a-z0-9` replaced by one `-`, leading digits and `-` removed, cut to 32
+ * characters without a trailing `-`. `web.journal.localify` gives
+ * `web-journal`.
  */
-export function slugBase(localDomain: string): string {
-  const cleaned = (localDomain.split(".")[0] ?? "")
+export function localName(localDomain: string): string {
+  const labels = localDomain.split(".");
+  const name = (labels.length > 1 ? labels.slice(0, -1) : labels)
+    .join("-")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^[0-9-]+/, "");
-  return cleaned === "" ? "url" : cleaned.slice(0, SLUG_BASE_MAX).replace(/-+$/, "");
+  return cutSlug(name, SLUG_MAX);
+}
+
+function cutSlug(name: string, max: number): string {
+  return name.slice(0, max).replace(/-+$/, "");
 }
 
 /**

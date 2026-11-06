@@ -1328,7 +1328,8 @@ pub struct PublicUrlProtectionDto {
     pub mode: PublicUrlProtectionModeDto,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// No `Debug`: it may carry a password, in `password_link`.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicUrlDto {
     pub id: String,
@@ -1340,6 +1341,9 @@ pub struct PublicUrlDto {
     pub machine_name: Option<String>,
     pub served_here: bool,
     pub protection: PublicUrlProtectionDto,
+    /// The URL with its current password, which signs a browser in; set
+    /// when this Mac set that password.
+    pub password_link: Option<String>,
     /// RFC 3339.
     pub created_at: String,
 }
@@ -1353,19 +1357,45 @@ pub struct PublicUrlWithPasswordDto {
     pub password: Option<String>,
 }
 
-/// No `Debug`: it may carry a password.
-#[derive(Clone, Serialize, Deserialize)]
+/// A password is always generated at creation; it can be changed after.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePublicUrlRequest {
     pub local_domain: String,
     pub wildcard: bool,
-    /// Generated from the domain when missing.
+    /// The suggested one when missing.
     #[serde(default)]
     pub slug: Option<String>,
     pub mode: PublicUrlProtectionModeDto,
-    /// With `password`: generated when missing.
-    #[serde(default)]
-    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestPublicUrlSlugRequest {
+    pub local_domain: String,
+}
+
+/// The first free slug that mirrors a local domain's name, and its URL: the
+/// app takes the public domain from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUrlSlugSuggestionDto {
+    pub slug: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckPublicUrlSlugRequest {
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUrlSlugCheckDto {
+    /// Lower-cased.
+    pub slug: String,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

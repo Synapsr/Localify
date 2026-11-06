@@ -7,7 +7,15 @@ import { toast } from "sonner";
 
 import type { CloudAccountDto, PublicUrlDto } from "@/types/localify";
 
-import { CheckIcon, CopyIcon, ExternalLinkIcon, LockIcon, LockOpenIcon } from "@/components/icons";
+import {
+  CheckIcon,
+  CopyIcon,
+  DangerTriangleIcon,
+  ExternalLinkIcon,
+  KeyIcon,
+  LockIcon,
+  LockOpenIcon,
+} from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -27,6 +35,9 @@ import { tauriClient } from "@/lib/tauri-client";
 import {
   cloudStatusDotClassName,
   describePublicUrlState,
+  isDnsLabel,
+  linkOnHost,
+  type PublicUrlMatch,
   wildcardHostPattern,
 } from "@/lib/util.cloud";
 import { cn } from "@/lib/utils";
@@ -39,22 +50,40 @@ import {
 import type { RevealedPassword } from "./public-url-password-dialog";
 
 interface PublicUrlDetailsProps {
-  publicUrl: PublicUrlDto;
+  match: PublicUrlMatch;
+  /** The domain the dialog opened for. */
+  localDomain: string;
+  /** The URL is its project's, on the project's namespace. */
+  isProjectUrl: boolean;
+  projectName: string;
   account: CloudAccountDto | undefined;
   onPasswordRevealed: (revealed: RevealedPassword) => void;
 }
 
+/**
+ * The URL that serves the opened domain. Under a project URL, the domain has a host of its
+ * own, which signs in separately, so the URL and the link with the password are that host's.
+ */
 export const PublicUrlDetails = ({
-  publicUrl,
+  match,
+  localDomain,
+  isProjectUrl,
+  projectName,
   account,
   onPasswordRevealed,
 }: PublicUrlDetailsProps) => {
+  const { publicUrl, label } = match;
+  // The URL itself when it does not reach the opened domain.
+  const openedUrl = match.url ?? publicUrl.url;
+  const passwordLink =
+    match.url && publicUrl.passwordLink ? linkOnHost(publicUrl.passwordLink, match.url) : null;
   const queryClient = useQueryClient();
   const { data: bootstrap } = useQuery(bootstrapQueries.read());
   const claim = useMutation(cloudMutations.claimPublicUrl(queryClient));
   const openToAnyone = useMutation(cloudMutations.setProtection(queryClient));
   const remove = useMutation(cloudMutations.removePublicUrl(queryClient));
   const { copy, copied } = useCopyToClipboard();
+  const linkCopy = useCopyToClipboard();
   const [confirming, setConfirming] = useState<"open" | "remove" | null>(null);
   const [passwordFormOpen, setPasswordFormOpen] = useState(false);
   const status = describePublicUrlState(publicUrl, account);
@@ -69,7 +98,7 @@ export const PublicUrlDetails = ({
   const handleOpen = async () => {
     try {
       await tauriClient.openProjectUrl({
-        url: publicUrl.url,
+        url: openedUrl,
         browser: bootstrap?.launcherPreferences.browser ?? "default",
       });
     } catch (error) {
@@ -115,7 +144,7 @@ export const PublicUrlDetails = ({
         <div className="space-y-2 rounded-xl border border-border/60 bg-background/70 p-3">
           <div className="flex items-center gap-1">
             <span className="min-w-0 flex-1 truncate px-1 font-mono text-sm text-foreground select-all">
-              {publicUrl.url}
+              {openedUrl}
             </span>
             <Tooltip>
               <TooltipTrigger
@@ -125,7 +154,7 @@ export const PublicUrlDetails = ({
                     size="icon-sm"
                     variant="ghost"
                     aria-label={copied ? "URL copied" : "Copy URL"}
-                    onClick={() => void copy(publicUrl.url)}
+                    onClick={() => void copy(openedUrl)}
                   >
                     {copied ? <CheckIcon className="text-emerald-500" /> : <CopyIcon />}
                   </Button>
@@ -150,11 +179,41 @@ export const PublicUrlDetails = ({
               <TooltipContent>Open in browser</TooltipContent>
             </Tooltip>
           </div>
-          {publicUrl.wildcard ? (
+          {isProtected && passwordLink ? (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1">
+              <Button
+                type="button"
+                size="xs"
+                variant="secondary"
+                onClick={() => void linkCopy.copy(passwordLink)}
+              >
+                {linkCopy.copied ? <CheckIcon className="text-emerald-500" /> : <KeyIcon />}
+                {linkCopy.copied ? "Link copied" : "Copy link with password"}
+              </Button>
+              <span className="text-xs leading-normal text-muted-foreground">
+                Opens it without typing the password.
+              </span>
+            </div>
+          ) : null}
+          {label !== null && match.url !== null ? (
+            <p className="flex min-w-0 gap-1.5 px-1 text-xs leading-normal text-muted-foreground">
+              <span className="shrink-0">
+                {isProjectUrl ? "Project URL" : `URL of ${publicUrl.localDomain}`}
+              </span>
+              <span className="min-w-0 truncate font-mono text-foreground select-all">
+                {publicUrl.url}
+              </span>
+            </p>
+          ) : label === null && publicUrl.wildcard ? (
             <p className="px-1 text-xs leading-normal text-muted-foreground">
-              Environments open at{" "}
-              <span className="font-mono text-foreground">{wildcardHostPattern(publicUrl)}</span>,
-              for{" "}
+              {isProjectUrl
+                ? `Every service and worktree of ${projectName}`
+                : "Every domain under it"}{" "}
+              opens at{" "}
+              <span className="font-mono whitespace-nowrap text-foreground">
+                {wildcardHostPattern(publicUrl)}
+              </span>
+              , for{" "}
               <span className="font-mono text-foreground">
                 &lt;label&gt;.{publicUrl.localDomain}
               </span>
@@ -162,6 +221,34 @@ export const PublicUrlDetails = ({
             </p>
           ) : null}
         </div>
+
+        {label !== null && match.url === null ? (
+          <p className="flex items-start gap-1.5 text-xs leading-normal text-amber-700 dark:text-amber-300">
+            <DangerTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              {!publicUrl.wildcard ? (
+                <>
+                  This URL opens only <span className="font-mono">{publicUrl.localDomain}</span>,
+                  not <span className="font-mono">{localDomain}</span>. Remove it and create it
+                  again to reach every service and worktree of {projectName}.
+                </>
+              ) : isDnsLabel(label) ? (
+                <>
+                  <span className="font-mono">{localDomain}</span> cannot open here:{" "}
+                  <span className="font-mono">
+                    {publicUrl.slug}--{label}
+                  </span>{" "}
+                  is longer than the 63 characters a DNS name allows.
+                </>
+              ) : (
+                <>
+                  <span className="font-mono">{localDomain}</span> cannot open here: it sits more
+                  than one level under <span className="font-mono">{publicUrl.localDomain}</span>.
+                </>
+              )}
+            </span>
+          </p>
+        ) : null}
 
         <div className="flex items-center gap-3">
           {status.tone ? (
@@ -241,6 +328,7 @@ export const PublicUrlDetails = ({
           {passwordFormOpen ? (
             <PublicUrlPasswordForm
               publicUrl={publicUrl}
+              openedUrl={openedUrl}
               isProtected={isProtected}
               onClose={() => setPasswordFormOpen(false)}
               onPasswordRevealed={onPasswordRevealed}
@@ -262,8 +350,12 @@ export const PublicUrlDetails = ({
         description={
           <>
             Anyone who has the link can open{" "}
-            <span className="font-mono text-foreground">{publicUrl.localDomain}</span>, with no
-            password.
+            {isProjectUrl && publicUrl.wildcard ? (
+              `every service and worktree of ${projectName}`
+            ) : (
+              <span className="font-mono text-foreground">{publicUrl.localDomain}</span>
+            )}
+            , with no password.
           </>
         }
         confirmLabel="Open to anyone"
@@ -277,8 +369,9 @@ export const PublicUrlDetails = ({
         title="Remove public URL?"
         description={
           <>
-            <span className="font-mono text-foreground">{publicUrl.url}</span> stops working for
-            everyone. The local domain does not change.
+            <span className="font-mono text-foreground">{publicUrl.url}</span>
+            {publicUrl.wildcard ? " and every URL under it stop" : " stops"} working for everyone.
+            The local domains do not change.
           </>
         }
         confirmLabel="Remove public URL"
@@ -293,6 +386,8 @@ export const PublicUrlDetails = ({
 
 interface PublicUrlPasswordFormProps {
   publicUrl: PublicUrlDto;
+  /** The host the new password and its link are shown for. */
+  openedUrl: string;
   isProtected: boolean;
   onClose: () => void;
   onPasswordRevealed: (revealed: RevealedPassword) => void;
@@ -301,6 +396,7 @@ interface PublicUrlPasswordFormProps {
 /** Sets a new password: changing it signs every browser out. */
 const PublicUrlPasswordForm = ({
   publicUrl,
+  openedUrl,
   isProtected,
   onClose,
   onPasswordRevealed,
@@ -323,7 +419,12 @@ const PublicUrlPasswordForm = ({
         });
         onClose();
         if (result.password) {
-          onPasswordRevealed({ url: result.publicUrl.url, password: result.password });
+          const link = result.publicUrl.passwordLink;
+          onPasswordRevealed({
+            url: openedUrl,
+            password: result.password,
+            passwordLink: link ? linkOnHost(link, openedUrl) : null,
+          });
         } else {
           toast.success(isProtected ? "Password changed" : "Password turned on");
         }

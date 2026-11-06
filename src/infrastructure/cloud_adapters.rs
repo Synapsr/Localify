@@ -1,6 +1,7 @@
 //! Connects the Localify Cloud use cases to the API, the credentials file,
 //! the daemon and the config. The CLI and `DesktopApi` build them the same way.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::process::Command;
@@ -12,14 +13,16 @@ use crate::application::ports::{
     CloudAccount, CloudAccountStore, CloudApi, CloudApiError, DaemonConnection,
     DaemonConnectionError, DeviceAuthorization, DeviceTokenPoll, LocalDomainOwner, LocalDomains,
     NewPublicUrl, Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl,
-    PublicUrlWithPassword, ServingMachine, SignInRequest, TunnelState, TunnelStatus,
+    PublicUrlPasswords, PublicUrlWithPassword, SavedPassword, SavedPasswords, ServingMachine,
+    SignInRequest, SlugSuggestion, TunnelState, TunnelStatus,
 };
 use crate::application::public_urls::PublicUrls;
 use crate::config::LocalifyPaths;
-use crate::domain::{DomainName, RegistrationSource};
+use crate::domain::{DomainName, PublicSlug, RegistrationSource};
 use crate::infrastructure::cloud::api::{CloudClient, CreatePublicUrlRequest, ProtectionRequest};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
 use crate::infrastructure::cloud::http::{self, CloudError, CloudHttp, block_on};
+use crate::infrastructure::cloud::passwords::{PasswordStore, StoredPassword};
 use crate::infrastructure::cloud::types;
 use crate::infrastructure::config::{ConfigStore, ConfiguredDomain};
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
@@ -28,6 +31,7 @@ use crate::infrastructure::mgmt_client::MgmtSocketClient;
 pub struct CloudAdapters {
     pub api: HttpCloudApi,
     pub credentials: CredentialsStore,
+    pub passwords: PasswordStore,
     pub daemon: MgmtSocketClient,
     pub domains: ConfigLocalDomains,
 }
@@ -37,6 +41,7 @@ impl CloudAdapters {
         Self {
             api: HttpCloudApi,
             credentials: CredentialsStore::in_data_dir(&paths.data_dir),
+            passwords: PasswordStore::in_data_dir(&paths.data_dir),
             daemon: MgmtSocketClient::new(&paths.socket_path),
             domains: ConfigLocalDomains {
                 config: ConfigStore::new(config_path.to_path_buf()),
@@ -46,11 +51,17 @@ impl CloudAdapters {
     }
 
     pub fn accounts(&self) -> CloudAccounts<'_> {
-        CloudAccounts::new(&self.api, &self.credentials, &self.daemon)
+        CloudAccounts::new(&self.api, &self.credentials, &self.passwords, &self.daemon)
     }
 
     pub fn public_urls(&self) -> PublicUrls<'_> {
-        PublicUrls::new(&self.api, &self.credentials, &self.daemon, &self.domains)
+        PublicUrls::new(
+            &self.api,
+            &self.credentials,
+            &self.passwords,
+            &self.daemon,
+            &self.domains,
+        )
     }
 }
 
@@ -137,6 +148,31 @@ impl CloudApi for HttpCloudApi {
 
     fn sign_out(&self, account: &CloudAccount) -> Result<(), CloudApiError> {
         Self::signed_in(account, |client| async move { client.logout().await })
+    }
+
+    fn suggest_slug(
+        &self,
+        account: &CloudAccount,
+        local_domain: &DomainName,
+    ) -> Result<SlugSuggestion, CloudApiError> {
+        Self::signed_in(account, |client| async move {
+            client.suggest_slug(local_domain.as_str()).await
+        })
+        .map(|suggestion| SlugSuggestion {
+            slug: suggestion.slug,
+            url: suggestion.url,
+        })
+    }
+
+    fn slug_available(
+        &self,
+        account: &CloudAccount,
+        slug: &PublicSlug,
+    ) -> Result<bool, CloudApiError> {
+        Self::signed_in(account, |client| async move {
+            client.slug_availability(slug.as_str()).await
+        })
+        .map(|answer| answer.available)
     }
 
     fn list_public_urls(&self, account: &CloudAccount) -> Result<Vec<PublicUrl>, CloudApiError> {
@@ -249,6 +285,7 @@ fn public_url(url: types::PublicUrl) -> PublicUrl {
                 types::ProtectionMode::Password => ProtectionMode::Password,
                 types::ProtectionMode::Public => ProtectionMode::Public,
             },
+            version: url.protection.version,
         },
         created_at: url.created_at,
     }
@@ -283,6 +320,43 @@ impl CloudAccountStore for CredentialsStore {
     fn delete(&self) -> Result<()> {
         CredentialsStore::delete(self)
     }
+}
+
+impl PublicUrlPasswords for PasswordStore {
+    fn load(&self) -> Result<SavedPasswords> {
+        Ok(saved_passwords(PasswordStore::load(self)?))
+    }
+
+    fn update(&self, change: &mut dyn FnMut(&mut SavedPasswords)) -> Result<SavedPasswords> {
+        let stored = PasswordStore::update(self, |stored| {
+            let mut saved = saved_passwords(std::mem::take(stored));
+            change(&mut saved);
+            *stored = saved
+                .into_iter()
+                .map(|(id, saved)| {
+                    let stored = StoredPassword {
+                        version: saved.version,
+                        password: saved.password,
+                    };
+                    (id, stored)
+                })
+                .collect();
+        })?;
+        Ok(saved_passwords(stored))
+    }
+}
+
+fn saved_passwords(stored: BTreeMap<String, StoredPassword>) -> SavedPasswords {
+    stored
+        .into_iter()
+        .map(|(id, stored)| {
+            let saved = SavedPassword {
+                version: stored.version,
+                password: stored.password,
+            };
+            (id, saved)
+        })
+        .collect()
 }
 
 impl PublicTunnel for MgmtSocketClient {
@@ -464,6 +538,25 @@ mod tests {
         assert_eq!(CloudAccountStore::load(&store).unwrap(), Some(account));
         CloudAccountStore::delete(&store).unwrap();
         assert_eq!(CloudAccountStore::load(&store).unwrap(), None);
+    }
+
+    #[test]
+    fn saved_passwords_round_trip_through_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PasswordStore::in_data_dir(dir.path());
+        let saved = SavedPasswords::from([(
+            "u1".to_string(),
+            SavedPassword {
+                version: 3,
+                password: "open sesame".into(),
+            },
+        )]);
+
+        let updated = PublicUrlPasswords::update(&store, &mut |all| all.extend(saved.clone()));
+        assert_eq!(updated.unwrap(), saved);
+        assert_eq!(PublicUrlPasswords::load(&store).unwrap(), saved);
+        PublicUrlPasswords::update(&store, &mut |all| all.clear()).unwrap();
+        assert!(PublicUrlPasswords::load(&store).unwrap().is_empty());
     }
 
     #[test]

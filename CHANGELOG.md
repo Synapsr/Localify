@@ -3,6 +3,35 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.3.1 - 2026-11-06
+
+### New
+
+- **One public URL per project, named like your local domains.** In the app, Public URL
+  on any domain of a project creates the project's URL: `louez.localify` opens at
+  `https://louez.localify.fyi`, and each service and worktree under it, such as
+  `web.louez.localify`, at `https://louez--web.localify.fyi`. The window shows the exact
+  URL before you create it, lets you change its name with a live check that it is free,
+  and generates the password. `localify public-url create` also names a new URL after
+  its local domain instead of adding random characters.
+  [Public URLs](https://github.com/Synapsr/Localify/blob/main/docs/README.md#public-urls)
+- **Share a link that opens a public URL without typing the password.** Copy the link
+  with the password from the Public URL window in the app, from `localify public-url
+  create` and `protect`, or ask your coding agent. The password sits after `#` in the
+  link, so it never reaches a server, and chat apps that preview links show only the
+  password page. The link stays available on the Mac that set the password, until the
+  password changes.
+  [Public URLs](https://github.com/Synapsr/Localify/blob/main/docs/README.md#public-urls)
+
+### Fixed
+
+- **The password page lets you in.** In Chrome, a correct password could answer
+  "Requests to this public URL that can change something must come from its own
+  pages." Apps that send no referrer can also post to their own public URL now.
+- **This Mac's tunnel starts in seconds on networks that block UDP,** instead of about
+  two minutes.
+- **Localify's tunnel no longer reads your own `~/.cloudflared/config.yml`.**
+
 ## 1.3.0 - 2026-11-06
 
 Open your dev servers from another network, behind a password.

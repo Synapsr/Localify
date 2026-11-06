@@ -114,7 +114,7 @@ export const ProjectsListItem = ({
     project.id,
     bootstrap?.environment.fixedDomainSuffix ?? "",
   );
-  const namespacePublicUrl = usePublicUrl(namespaceDomain);
+  const namespacePublicUrl = usePublicUrl(namespaceDomain, project.id);
 
   const containerClassName = cn(
     "group/card items- relative flex gap-3 rounded-xl border border-border/30  bg-neutral-50/50 px-3 py-3 transition-colors dark:bg-neutral-800/50",
@@ -231,9 +231,9 @@ export const ProjectsListItem = ({
               className="size-4 shrink-0 text-muted-foreground"
             />
           ) : null}
-          {namespacePublicUrl ? (
+          {namespacePublicUrl?.url ? (
             <PublicUrlBadge
-              publicUrl={namespacePublicUrl}
+              url={namespacePublicUrl.url}
               onOpen={() => setPublicUrlDialogOpen(true)}
             />
           ) : null}
@@ -478,7 +478,6 @@ export const ProjectsListItem = ({
       <PublicUrlDialog
         localDomain={namespaceDomain}
         projectId={project.id}
-        wildcardByDefault
         open={publicUrlDialogOpen}
         onOpenChange={setPublicUrlDialogOpen}
       />
