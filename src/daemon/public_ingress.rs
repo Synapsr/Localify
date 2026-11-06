@@ -9,7 +9,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use sha2::{Digest, Sha256};
@@ -234,12 +234,37 @@ fn admit(
         return Err(StatusCode::NOT_FOUND);
     };
     request.headers_mut().insert(header::HOST, host);
+    let public_host = claims.public_host.unwrap_or_default();
+    localize_own_origin(&mut request, &public_host, &local_host);
     request.extensions_mut().insert(PublicSource {
-        public_host: claims.public_host.unwrap_or_default(),
+        public_host,
         client_ip: claims.client_ip,
     });
     request.extensions_mut().insert(AdmittedState(state));
     Ok(request)
+}
+
+/// A page on the public URL sends its public origin, which the dev server does
+/// not know: Next.js answers 403 to its own scripts, fonts and HMR WebSocket
+/// from an origin missing from `allowedDevOrigins`. Reads and WebSocket
+/// handshakes from the page's own host get the local origin, as they would
+/// locally. Writes keep the public one, which Next.js Server Actions compare
+/// with `X-Forwarded-Host`, also public.
+fn localize_own_origin(request: &mut Request, public_host: &str, local_host: &str) {
+    if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        return;
+    }
+    let own = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|origin| origin.to_str().ok())
+        .is_some_and(|origin| origin.eq_ignore_ascii_case(&format!("https://{public_host}")));
+    if !own {
+        return;
+    }
+    if let Ok(origin) = HeaderValue::from_str(&format!("https://{local_host}")) {
+        request.headers_mut().insert(header::ORIGIN, origin);
+    }
 }
 
 #[derive(Clone)]
@@ -513,6 +538,44 @@ mod tests {
         let source = request.extensions().get::<PublicSource>().unwrap();
         assert_eq!(source.public_host, "blog-1b2c.localify.fyi");
         assert_eq!(source.client_ip, Some("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn reads_and_websockets_from_the_page_itself_carry_the_local_origin() {
+        let origin = |method: Method, origin: &str| {
+            let request = public_request(
+                "u-journal",
+                "journal-a8f3--web.localify.fyi",
+                "web.journal.localify",
+            )
+            .method(method)
+            .header(header::ORIGIN, origin);
+            check(request).unwrap().headers()[header::ORIGIN].clone()
+        };
+
+        // A font, a module script or the HMR handshake from the page.
+        assert_eq!(
+            origin(Method::GET, "https://journal-a8f3--web.localify.fyi"),
+            "https://web.journal.localify"
+        );
+        assert_eq!(
+            origin(Method::HEAD, "https://Journal-a8f3--web.localify.fyi"),
+            "https://web.journal.localify"
+        );
+        // Another site stays another site, and the dev server can refuse it.
+        assert_eq!(
+            origin(Method::GET, "https://other-site.localify.fyi"),
+            "https://other-site.localify.fyi"
+        );
+        assert_eq!(
+            origin(Method::GET, "http://journal-a8f3--web.localify.fyi"),
+            "http://journal-a8f3--web.localify.fyi"
+        );
+        // A Server Action compares Origin with the public X-Forwarded-Host.
+        assert_eq!(
+            origin(Method::POST, "https://journal-a8f3--web.localify.fyi"),
+            "https://journal-a8f3--web.localify.fyi"
+        );
     }
 
     #[test]
