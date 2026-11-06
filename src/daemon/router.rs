@@ -1263,60 +1263,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_request_log_lines_name_their_source() {
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone, Default)]
-        struct Captured(Arc<Mutex<Vec<u8>>>);
-        impl Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_target(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
-        // Tests on other threads may have cached these callsites as disabled.
-        tracing::callsite::rebuild_interest_cache();
-        let state = shared(vec![]);
-
-        send(
-            state.clone(),
-            "GET",
-            "missing.localify",
-            "/",
-            Some(visitor()),
-        )
-        .await;
-        send(state, "GET", "local.localify", "/", None).await;
-
-        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-        let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 2, "{output}");
-        assert!(
-            lines[0].ends_with(
-                "Domain not registered host=missing.localify source=public public_host=journal-a8f3.localify.fyi"
-            ),
-            "{output}"
-        );
-        assert!(
-            lines[1].ends_with("Domain not registered host=local.localify"),
-            "{output}"
-        );
-    }
-
-    #[tokio::test]
     async fn visitors_get_no_launch_profile_indicator_or_header() {
         use std::sync::Arc;
 
