@@ -61,7 +61,12 @@
   "secrets": {
     "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY"]
   },
+  // Error logs only: invocation logs would keep the URL of every request to a
+  // public URL, and Localify keeps nothing about that traffic.
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "logs": {
+      "invocation_logs": false
+    }
   }
 }
