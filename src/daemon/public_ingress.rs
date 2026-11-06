@@ -9,7 +9,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use sha2::{Digest, Sha256};
@@ -234,12 +234,46 @@ fn admit(
         return Err(StatusCode::NOT_FOUND);
     };
     request.headers_mut().insert(header::HOST, host);
+    let public_host = claims.public_host.unwrap_or_default();
+    localize_own_origin(&mut request, &public_host, &local_host);
     request.extensions_mut().insert(PublicSource {
-        public_host: claims.public_host.unwrap_or_default(),
+        public_host,
         client_ip: claims.client_ip,
     });
     request.extensions_mut().insert(AdmittedState(state));
     Ok(request)
+}
+
+/// Paths Next.js keeps for its dev server: scripts, fonts and the HMR socket.
+const NEXT_DEV_PATHS: [&str; 2] = ["/_next/", "/__nextjs"];
+
+/// A page on the public URL sends its public origin, which Next.js does not
+/// list in `allowedDevOrigins`: it answers 403 to its own scripts and fonts
+/// and refuses its HMR WebSocket. A read on one of its dev paths from the
+/// page's own host gets the local host's origin instead, whose host name is
+/// in that list. The app's own requests keep the public origin, which its
+/// checks compare with `X-Forwarded-Host`, also public: Server Actions, or a
+/// Socket.IO server that allows only its public origin.
+fn localize_own_origin(request: &mut Request, public_host: &str, local_host: &str) {
+    let path = request.uri().path();
+    if !matches!(*request.method(), Method::GET | Method::HEAD)
+        || !NEXT_DEV_PATHS.iter().any(|prefix| path.starts_with(prefix))
+    {
+        return;
+    }
+    let mut origins = request.headers().get_all(header::ORIGIN).iter();
+    let own = match (origins.next(), origins.next()) {
+        (Some(origin), None) => origin
+            .to_str()
+            .is_ok_and(|origin| origin.eq_ignore_ascii_case(&format!("https://{public_host}"))),
+        _ => false,
+    };
+    if !own {
+        return;
+    }
+    if let Ok(origin) = HeaderValue::from_str(&format!("https://{local_host}")) {
+        request.headers_mut().insert(header::ORIGIN, origin);
+    }
 }
 
 #[derive(Clone)]
@@ -513,6 +547,66 @@ mod tests {
         let source = request.extensions().get::<PublicSource>().unwrap();
         assert_eq!(source.public_host, "blog-1b2c.localify.fyi");
         assert_eq!(source.client_ip, Some("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn next_dev_reads_from_the_page_itself_carry_the_local_origin() {
+        const OWN: &str = "https://journal-a8f3--web.localify.fyi";
+        let origins = |method: Method, path: &str, origins: &[&str]| {
+            let mut request = public_request(
+                "u-journal",
+                "journal-a8f3--web.localify.fyi",
+                "web.journal.localify",
+            )
+            .method(method)
+            .uri(path);
+            for origin in origins {
+                request = request.header(header::ORIGIN, *origin);
+            }
+            let admitted = check(request).unwrap();
+            admitted
+                .headers()
+                .get_all(header::ORIGIN)
+                .iter()
+                .map(|origin| origin.to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // The HMR handshake, a chunk and a font from the page.
+        for path in [
+            "/_next/hmr?id=1",
+            "/_next/static/chunks/a.js",
+            "/__nextjs_font/geist.woff2",
+        ] {
+            assert_eq!(
+                origins(Method::GET, path, &[OWN]),
+                ["https://web.journal.localify"],
+                "{path}"
+            );
+        }
+        assert_eq!(
+            origins(
+                Method::HEAD,
+                "/_next/x",
+                &["https://Journal-a8f3--web.localify.fyi"]
+            ),
+            ["https://web.journal.localify"]
+        );
+        // The app's own requests and sockets keep it, like its writes, so
+        // its checks still match the public X-Forwarded-Host.
+        assert_eq!(origins(Method::GET, "/socket.io/?EIO=4", &[OWN]), [OWN]);
+        assert_eq!(origins(Method::POST, "/_next/x", &[OWN]), [OWN]);
+        // Another site, another scheme, or an ambiguous pair stays as it is.
+        for sent in [
+            &["https://other-site.localify.fyi"][..],
+            &["https://journal-a8f3--api.localify.fyi"],
+            &["http://journal-a8f3--web.localify.fyi"],
+            &["null"],
+            &[OWN, "https://evil.example"],
+        ] {
+            assert_eq!(origins(Method::GET, "/_next/hmr", sent), sent, "{sent:?}");
+        }
+        assert!(origins(Method::GET, "/_next/hmr", &[]).is_empty());
     }
 
     #[test]

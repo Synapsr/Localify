@@ -372,17 +372,23 @@ fn public_traffic_reaches_the_upstream_through_the_ingress() {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let handshake = format!(
-        "GET /hmr HTTP/1.1\r\nHost: m-m1.localify.dev\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+        "GET /_next/hmr HTTP/1.1\r\nHost: m-m1.localify.dev\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
          Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
          X-Localify-Ingress: {SECRET}\r\nX-Localify-Public-Host: {PUBLIC_HOST}\r\n\
          X-Localify-Local-Host: {LOCAL_HOST}\r\nX-Localify-Url-Id: u1\r\n\
-         X-Localify-Client-Ip: {VISITOR}\r\n\r\n"
+         X-Localify-Client-Ip: {VISITOR}\r\nOrigin: https://{PUBLIC_HOST}\r\n\r\n"
     );
     socket.write_all(handshake.as_bytes()).unwrap();
     let switched = read_head(&mut socket);
     assert!(switched.starts_with("HTTP/1.1 101"), "{switched}");
     let head = heads.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(head.contains(&format!("Host: {LOCAL_HOST}\r\n")), "{head}");
+    // Next.js's HMR gets the page's own origin as the local host's.
+    assert!(
+        head.to_ascii_lowercase()
+            .contains(&format!("origin: https://{LOCAL_HOST}\r\n")),
+        "{head}"
+    );
     assert!(
         head.contains(&format!("X-Forwarded-Host: {PUBLIC_HOST}\r\n")),
         "{head}"
