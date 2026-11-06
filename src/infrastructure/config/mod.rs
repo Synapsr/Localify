@@ -480,8 +480,15 @@ impl Config {
             (namespace, id.clone())
         });
         let registered = self.configured_domains().into_iter().filter_map(|domain| {
-            let project_id = domain.project_id.filter(|id| self.projects.contains_key(id))?;
-            let name = domain.registration.pattern().base_domain().as_str().to_string();
+            let project_id = domain
+                .project_id
+                .filter(|id| self.projects.contains_key(id))?;
+            let name = domain
+                .registration
+                .pattern()
+                .base_domain()
+                .as_str()
+                .to_string();
             Some((name, project_id))
         });
         namespaces.chain(registered).collect()
@@ -1960,8 +1967,7 @@ mod tests {
             .unwrap();
         let config = store.load().unwrap();
         let project = |domain: &str| {
-            config
-                .public_url_project(&domain.replace(".localify", BRANDING.domain_suffix()))
+            config.public_url_project(&domain.replace(".localify", BRANDING.domain_suffix()))
         };
 
         assert_eq!(project("web.journal.localify"), Some(journal.id.clone()));

@@ -140,9 +140,7 @@ impl RuntimeState {
     /// The project of a public URL on `local_domain`
     /// (`docs/public-urls.md`, "Exposable local domain").
     fn url_project(&self, local_domain: &str) -> Option<&str> {
-        self.exposable_domains
-            .get(local_domain)
-            .map(String::as_str)
+        self.exposable_domains.get(local_domain).map(String::as_str)
     }
 
     fn project_of(&self, registration: &DomainRegistration) -> Option<&str> {

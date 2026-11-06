@@ -53,6 +53,7 @@ pub enum CloudError {
     InvalidResponse(String),
 }
 
+#[cfg(test)]
 impl CloudError {
     /// The API's error code, such as `authorization_pending`.
     pub fn code(&self) -> Option<&str> {
@@ -93,10 +94,6 @@ impl CloudHttp {
             token,
             client: Client::builder(TokioExecutor::new()).build(connector),
         })
-    }
-
-    pub fn api_base(&self) -> &str {
-        &self.api_base
     }
 
     /// Sends a request and reads a JSON response.

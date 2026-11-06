@@ -48,10 +48,6 @@ impl CredentialsStore {
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// `None` when this machine is not signed in.
     pub fn load(&self) -> Result<Option<CloudCredentials>> {
         let contents = match fs::read_to_string(&self.path) {
@@ -124,7 +120,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(store.path()).unwrap().permissions().mode();
+            let mode = fs::metadata(&store.path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }
@@ -149,7 +145,7 @@ mod tests {
     fn a_corrupt_file_says_how_to_recover() {
         let dir = tempfile::tempdir().unwrap();
         let store = CredentialsStore::in_data_dir(dir.path());
-        fs::write(store.path(), "not json").unwrap();
+        fs::write(&store.path, "not json").unwrap();
         let error = store.load().unwrap_err().to_string();
         assert!(error.contains("sign in again"), "{error}");
     }
