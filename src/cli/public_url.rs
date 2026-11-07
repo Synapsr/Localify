@@ -7,7 +7,8 @@ use serde::Serialize;
 
 use super::cloud::print_refresh;
 use super::output::{can_prompt, note, print_json, wants_json};
-use crate::application::ports::{ProtectionChoice, ProtectionMode};
+use crate::application::cloud_errors::ABUSE_CONTACT;
+use crate::application::ports::{ProtectionChoice, ProtectionMode, PublicUrlState};
 use crate::application::public_urls::{CreatePublicUrl, PublicUrlAndPassword, PublicUrlView};
 use crate::branding::BRANDING;
 use crate::infrastructure::cloud_adapters::CloudAdapters;
@@ -251,6 +252,16 @@ fn print_url(view: &PublicUrlView) {
         ),
     };
     println!("  {access}, {serving}");
+    match url.state {
+        Some(PublicUrlState::Suspended) => println!(
+            "  Suspended: the plan does not cover it right now, so it does not serve. See the plan with: {} whoami",
+            BRANDING.cli_command()
+        ),
+        Some(PublicUrlState::TakenDown) => println!(
+            "  Taken down: it was removed for abuse and cannot serve again. To appeal, write to {ABUSE_CONTACT}."
+        ),
+        Some(PublicUrlState::Serving) | None => {}
+    }
 }
 
 /// `https://<slug>--<label>.localify.fyi` from `https://<slug>.localify.fyi`.

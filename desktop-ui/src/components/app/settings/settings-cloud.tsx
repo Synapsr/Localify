@@ -33,6 +33,7 @@ import { cloudStatusDotClassName, describeTunnel, SETTINGS_CLOUD_ANCHOR } from "
 import { cn } from "@/lib/utils";
 
 import { SettingsCard } from "./settings-card";
+import { SettingsCloudPlan } from "./settings-cloud-plan";
 
 /** RFC 8628: add 5 seconds after `slow_down` when GitHub gives no interval. */
 const SLOW_DOWN_SECONDS = 5;
@@ -203,6 +204,7 @@ export const SettingsCloud = () => {
         ) : null}
 
         {signedIn && account.data ? <AccountDetails account={account.data} /> : null}
+        {signedIn ? <SettingsCloudPlan /> : null}
       </SettingsCard>
 
       <Dialog open={signOutOpen} onOpenChange={setSignOutOpen}>

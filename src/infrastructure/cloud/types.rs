@@ -44,26 +44,114 @@ pub struct PublicUrl {
     /// `None` when no machine serves it.
     pub machine: Option<CloudMachine>,
     pub protection: Protection,
+    /// Left out by a cloud older than the paid plan.
+    #[serde(default)]
+    pub state: Option<PublicUrlState>,
     /// RFC 3339.
     pub created_at: String,
 }
 
-/// What the daemon needs to serve this machine's public URLs.
+/// Whether a public URL carries traffic (`docs/public-urls.md`, "Plans").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicUrlState {
+    Serving,
+    /// Beyond the plan's limits, or without a plan.
+    Suspended,
+    /// Removed for abuse.
+    TakenDown,
+}
+
+/// `GET /v1/machines/self/runtime`, which a cloud without `/v2` answers.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MachineRuntime {
+pub struct RuntimeV1 {
     pub tunnel_token: String,
     pub ingress_secret: String,
     pub public_urls: Vec<PublicUrl>,
 }
 
 /// Leaves both secrets out, so the runtime can appear in logs.
-impl fmt::Debug for MachineRuntime {
+impl fmt::Debug for RuntimeV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MachineRuntime")
+        f.debug_struct("RuntimeV1")
             .field("tunnel_token", &"<redacted>")
             .field("ingress_secret", &"<redacted>")
             .field("public_urls", &self.public_urls)
+            .finish()
+    }
+}
+
+/// `GET /v2/machines/self/runtime` (`docs/public-urls.md`, "Runtime").
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeV2 {
+    pub state: RuntimeV2State,
+    #[serde(default)]
+    pub blocked: Option<RuntimeBlock>,
+    #[serde(default)]
+    pub tunnel: Option<RuntimeTunnel>,
+    #[serde(default)]
+    pub ingress_secret: Option<String>,
+    #[serde(default)]
+    pub public_urls: Vec<PublicUrl>,
+    /// Seconds.
+    #[serde(default)]
+    pub retry_after: Option<u64>,
+}
+
+/// Leaves both secrets out, so the runtime can appear in logs.
+impl fmt::Debug for RuntimeV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeV2")
+            .field("state", &self.state)
+            .field("blocked", &self.blocked)
+            .field("tunnel", &self.tunnel)
+            .field(
+                "ingress_secret",
+                &self.ingress_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("public_urls", &self.public_urls)
+            .field("retry_after", &self.retry_after)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeV2State {
+    Idle,
+    Provisioning,
+    Ready,
+    Blocked,
+}
+
+/// Why a machine with something to serve may not. `reason` is
+/// `subscription_required`, `serving_slots_full` or `capacity`; `message` is
+/// for a person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeBlock {
+    pub reason: String,
+    pub message: String,
+}
+
+/// The tunnel generation to serve with. The token comes only when the
+/// generation differs from the one the daemon said it runs.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTunnel {
+    pub generation: u64,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// Leaves the token out.
+impl fmt::Debug for RuntimeTunnel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeTunnel")
+            .field("generation", &self.generation)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -80,6 +168,13 @@ pub struct PublicStatus {
     pub error: Option<String>,
     /// Ids of the public URLs this machine serves.
     pub served_urls: Vec<String>,
+    /// `None` before the first answer, and from a daemon older than the
+    /// runtime states.
+    #[serde(default)]
+    pub runtime: Option<RuntimeStatus>,
+    /// Set when `runtime` is `Blocked`.
+    #[serde(default)]
+    pub blocked: Option<RuntimeBlock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +184,18 @@ pub enum TunnelState {
     Starting,
     Connected,
     Error,
+}
+
+/// What the daemon last learned from the runtime, for `public_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeStatus {
+    Idle,
+    Provisioning,
+    Ready,
+    Blocked,
+    /// The API answered `403 banned`.
+    Banned,
 }
 
 #[cfg(test)]
@@ -107,24 +214,44 @@ mod tests {
         let url: PublicUrl = serde_json::from_str(json).unwrap();
         assert_eq!(url.protection.mode, ProtectionMode::Password);
         assert_eq!(url.protection.version, None);
+        assert_eq!(url.state, None);
         assert_eq!(url.machine.unwrap().name, "runner");
 
         let versioned = json.replace(
             r#"{"mode": "password"}"#,
-            r#"{"mode": "password", "version": 3}"#,
+            r#"{"mode": "password", "version": 3}, "state": "taken_down""#,
         );
         let url: PublicUrl = serde_json::from_str(&versioned).unwrap();
         assert_eq!(url.protection.version, Some(3));
+        assert_eq!(url.state, Some(PublicUrlState::TakenDown));
     }
 
     #[test]
     fn runtime_debug_output_hides_the_secrets() {
-        let runtime = MachineRuntime {
+        let runtime = RuntimeV1 {
             tunnel_token: "tunnel-secret".into(),
             ingress_secret: "ingress-secret".into(),
             public_urls: Vec::new(),
         };
         let output = format!("{runtime:?}");
         assert!(!output.contains("tunnel-secret") && !output.contains("ingress-secret"));
+
+        let runtime: RuntimeV2 = serde_json::from_str(
+            r#"{"state":"ready","blocked":null,"tunnel":{"generation":2,"token":"tunnel-secret"},
+                "ingressSecret":"ingress-secret","publicUrls":[],"retryAfter":null}"#,
+        )
+        .unwrap();
+        let output = format!("{runtime:?}");
+        assert!(!output.contains("tunnel-secret") && !output.contains("ingress-secret"));
+        assert!(output.contains("generation: 2"), "{output}");
+    }
+
+    #[test]
+    fn a_status_from_an_older_daemon_reads_without_the_runtime() {
+        let status: PublicStatus = serde_json::from_str(
+            r#"{"signedIn":true,"tunnel":"connected","connections":4,"error":null,"servedUrls":["u1"]}"#,
+        )
+        .unwrap();
+        assert_eq!((status.runtime, status.blocked), (None, None));
     }
 }

@@ -1250,6 +1250,94 @@ pub struct TunnelStatusDto {
     pub state: TunnelStateDto,
     pub connections: u32,
     pub error: Option<String>,
+    /// What Localify Cloud last told the daemon; `None` before its first
+    /// answer.
+    pub runtime: Option<CloudRuntimeStateDto>,
+    /// Why this Mac may not serve, when `runtime` is `blocked`.
+    pub blocked: Option<CloudRuntimeBlockDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudRuntimeStateDto {
+    Idle,
+    Provisioning,
+    Ready,
+    Blocked,
+    Banned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRuntimeBlockDto {
+    /// `subscription_required`, `serving_slots_full` or `capacity`.
+    pub reason: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudPlanStatusDto {
+    None,
+    Trialing,
+    Active,
+    PastDue,
+    Canceling,
+    Override,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudPlanIntervalDto {
+    Month,
+    Year,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudPlanCountsDto {
+    pub serving_machines: u32,
+    pub public_urls: u32,
+}
+
+/// The account's plan, from `GET /v1/me`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudPlanDto {
+    pub status: CloudPlanStatusDto,
+    pub entitled: bool,
+    pub interval: Option<CloudPlanIntervalDto>,
+    /// RFC 3339, while trialing.
+    pub trial_ends_at: Option<String>,
+    /// RFC 3339: the next charge.
+    pub renews_at: Option<String>,
+    /// RFC 3339: when a canceled plan or a team access ends.
+    pub ends_at: Option<String>,
+    pub trial_available: bool,
+    pub limits: CloudPlanCountsDto,
+    pub usage: CloudPlanCountsDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartCloudCheckoutRequest {
+    pub interval: CloudPlanIntervalDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudBillingPageKindDto {
+    Checkout,
+    /// The plan was already active: the customer portal opened instead.
+    Portal,
+}
+
+/// The page `DesktopApi` opened in the browser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudBillingPageDto {
+    pub kind: CloudBillingPageKindDto,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1344,8 +1432,20 @@ pub struct PublicUrlDto {
     /// The URL with its current password, which signs a browser in; set
     /// when this Mac set that password.
     pub password_link: Option<String>,
+    /// `None` from a Localify Cloud older than the paid plan.
+    pub state: Option<PublicUrlStateDto>,
     /// RFC 3339.
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicUrlStateDto {
+    Serving,
+    /// The plan does not cover it right now.
+    Suspended,
+    /// Removed for abuse.
+    TakenDown,
 }
 
 /// No `Debug`: it carries a password.

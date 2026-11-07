@@ -1,4 +1,6 @@
 pub mod cloud_account;
+pub mod cloud_billing;
+pub mod cloud_errors;
 pub mod daemon_status;
 pub mod install;
 pub mod list_all_domains;

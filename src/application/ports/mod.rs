@@ -16,9 +16,10 @@ pub mod system_setup;
 pub use certificate_manager::{CertificateError, CertificateManager};
 pub use cloud_account_store::CloudAccountStore;
 pub use cloud_api::{
-    CloudAccount, CloudApi, CloudApiError, DeviceAuthorization, DeviceTokenPoll, NewPublicUrl,
-    Protection, ProtectionChoice, ProtectionMode, PublicUrl, PublicUrlWithPassword, ServingMachine,
-    SignInRequest, SlugSuggestion,
+    BillingPage, BillingPageKind, CloudAccount, CloudApi, CloudApiError, DeviceAuthorization,
+    DeviceTokenPoll, NewPublicUrl, Plan, PlanCounts, PlanInterval, PlanStatus, Protection,
+    ProtectionChoice, ProtectionMode, PublicUrl, PublicUrlState, PublicUrlWithPassword,
+    ServingMachine, SignInRequest, SlugSuggestion,
 };
 pub use config_loader::{ConfigLoadError, ConfigLoader};
 pub use daemon_connection::{
@@ -29,7 +30,7 @@ pub use dns_manager::{DnsConfigError, DnsManager};
 pub use domain_repository::{DomainRepository, RepositoryError};
 pub use local_domains::{LocalDomainOwner, LocalDomains};
 pub use network_info::NetworkInfo;
-pub use public_tunnel::{PublicTunnel, TunnelState, TunnelStatus};
+pub use public_tunnel::{PublicTunnel, RuntimeBlock, RuntimeState, TunnelState, TunnelStatus};
 pub use public_url_passwords::{PublicUrlPasswords, SavedPassword, SavedPasswords};
 pub use registration_provider::RegistrationProvider;
 pub use system_setup::{IosSimulatorTrust, SystemSetup};

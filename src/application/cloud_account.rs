@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 
+use super::cloud_errors::with_next_step;
 use super::ports::{
     CloudAccountStore, CloudApi, CloudApiError, DaemonConnectionError, DeviceAuthorization,
     DeviceTokenPoll, PublicTunnel, PublicUrlPasswords, SignInRequest, TunnelState, TunnelStatus,
@@ -123,7 +124,7 @@ impl<'a> CloudAccounts<'a> {
             Err(CloudApiError::Rejected { code, message, .. }) if code == "provisioning_failed" => {
                 bail!("{message} Nothing was saved on this machine: sign in again in a moment.")
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(with_next_step(error)),
         };
         Ok(match poll {
             DeviceTokenPoll::Pending => SignInPoll::Pending,
@@ -196,6 +197,8 @@ pub fn tunnel_status(tunnel: &dyn PublicTunnel) -> TunnelStatus {
         state: TunnelState::Unknown,
         connections: 0,
         error,
+        runtime: None,
+        blocked: None,
     };
     match tunnel.status() {
         Ok(status) => status,

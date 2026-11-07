@@ -1,5 +1,5 @@
 export { bootstrapQueries } from "./bootstrap.queries";
-export { cloudMutations, cloudQueries } from "./cloud.queries";
+export { cloudMutations, cloudQueries, planBecameEntitled } from "./cloud.queries";
 export { configMutations, configQueries } from "./config.queries";
 export { daemonMutations, daemonQueries } from "./daemon.queries";
 export { domainMutations, domainQueries } from "./domain.queries";

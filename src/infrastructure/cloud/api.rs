@@ -1,6 +1,5 @@
 //! Typed calls to the Localify Cloud API (`docs/public-urls.md`, section
-//! "API"). The daemon's own route, `GET /v1/machines/self/runtime`, lives with
-//! the daemon.
+//! "API"). The daemon's own route, the machine runtime, lives in `runtime.rs`.
 
 use std::fmt;
 
@@ -47,6 +46,53 @@ impl fmt::Debug for DeviceToken {
 pub struct Me {
     pub user: CloudUser,
     pub machine: CloudMachine,
+    /// Left out by a cloud older than the paid plan.
+    #[serde(default)]
+    pub plan: Option<Plan>,
+}
+
+/// The `Plan` of `GET /v1/me` (`docs/public-urls.md`, "API").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Plan {
+    /// `none`, `trialing`, `active`, `past_due`, `canceling` or `override`.
+    pub status: String,
+    pub entitled: bool,
+    /// `month` or `year`.
+    #[serde(default)]
+    pub interval: Option<String>,
+    #[serde(default)]
+    pub trial_ends_at: Option<String>,
+    #[serde(default)]
+    pub renews_at: Option<String>,
+    #[serde(default)]
+    pub ends_at: Option<String>,
+    #[serde(default)]
+    pub trial_available: bool,
+    pub limits: PlanCounts,
+    pub usage: PlanCounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCounts {
+    pub serving_machines: u32,
+    pub public_urls: u32,
+}
+
+/// `POST /v1/billing/checkout`: a checkout, or the portal when the plan is
+/// already entitled.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutPage {
+    /// `checkout` or `portal`.
+    pub kind: String,
+    pub url: String,
+}
+
+#[derive(Deserialize)]
+struct PortalPage {
+    url: String,
 }
 
 /// A public URL, and the password Localify Cloud generated for it, if it did.
@@ -163,9 +209,29 @@ impl CloudClient {
             .await
     }
 
-    #[allow(dead_code)] // No caller yet: `whoami` reads the saved credentials offline.
+    /// Who is signed in, and the account's plan.
     pub async fn me(&self) -> Result<Me, CloudError> {
         self.http.send(Method::GET, "/v1/me", None).await
+    }
+
+    /// `product` is `pro_monthly` or `pro_yearly`.
+    pub async fn checkout(&self, product: &str) -> Result<CheckoutPage, CloudError> {
+        self.http
+            .send(
+                Method::POST,
+                "/v1/billing/checkout",
+                Some(json!({ "product": product })),
+            )
+            .await
+    }
+
+    /// A Polar customer portal session.
+    pub async fn billing_portal(&self) -> Result<String, CloudError> {
+        let page: PortalPage = self
+            .http
+            .send(Method::POST, "/v1/billing/portal", None)
+            .await?;
+        Ok(page.url)
     }
 
     /// Revokes the token, deletes the machine's tunnel and detaches its URLs.
@@ -452,6 +518,66 @@ mod tests {
                 available: false
             }
         );
+    }
+
+    #[test]
+    fn me_reads_the_plan_and_tolerates_its_absence() {
+        let plan = r#"{"user":{"login":"teo"},"machine":{"id":"m1","name":"laptop"},
+            "plan":{"status":"trialing","entitled":true,"interval":"month",
+            "trialEndsAt":"2026-11-14T10:00:00Z","renewsAt":null,"endsAt":null,
+            "trialAvailable":false,"limits":{"servingMachines":2,"publicUrls":10},
+            "usage":{"servingMachines":1,"publicUrls":3},"addons":{"machines":0,"urlPacks":0}}}"#;
+        let (address, server) = serve_once("200 OK", plan);
+
+        let me = block_on(client(&address).me()).unwrap().unwrap();
+
+        let (head, _) = server.join().unwrap();
+        assert!(head.starts_with("GET /v1/me HTTP/1.1"), "{head}");
+        let plan = me.plan.unwrap();
+        assert_eq!((plan.status.as_str(), plan.entitled), ("trialing", true));
+        assert_eq!(plan.usage.public_urls, 3);
+
+        let older: Me = serde_json::from_str(
+            r#"{"user":{"login":"teo"},"machine":{"id":"m1","name":"laptop"}}"#,
+        )
+        .unwrap();
+        assert_eq!(older.plan, None);
+    }
+
+    #[test]
+    fn a_checkout_posts_the_product() {
+        let (address, server) = serve_once(
+            "200 OK",
+            r#"{"kind":"checkout","url":"https://polar.sh/checkout/x"}"#,
+        );
+
+        let page = block_on(client(&address).checkout("pro_yearly"))
+            .unwrap()
+            .unwrap();
+
+        let (head, body) = server.join().unwrap();
+        assert!(
+            head.starts_with("POST /v1/billing/checkout HTTP/1.1"),
+            "{head}"
+        );
+        assert_eq!(body, r#"{"product":"pro_yearly"}"#);
+        assert_eq!(page.kind, "checkout");
+    }
+
+    #[test]
+    fn the_portal_returns_its_url() {
+        let (address, server) = serve_once("200 OK", r#"{"url":"https://polar.sh/portal/x"}"#);
+
+        let url = block_on(client(&address).billing_portal())
+            .unwrap()
+            .unwrap();
+
+        let (head, _) = server.join().unwrap();
+        assert!(
+            head.starts_with("POST /v1/billing/portal HTTP/1.1"),
+            "{head}"
+        );
+        assert_eq!(url, "https://polar.sh/portal/x");
     }
 
     #[test]

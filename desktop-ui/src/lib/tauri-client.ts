@@ -16,6 +16,8 @@ import type {
   CheckPublicUrlSlugRequest,
   CliAccessDto,
   CloudAccountDto,
+  CloudBillingPageDto,
+  CloudPlanDto,
   CloudSignInPollDto,
   CloudSignInStartDto,
   CloudSignOutDto,
@@ -77,6 +79,7 @@ import type {
   SettingsImportPreviewRequest,
   SettingsImportRequest,
   SettingsImportResultDto,
+  StartCloudCheckoutRequest,
   StartDaemonRequest,
   StepDto,
   SuggestPublicUrlSlugRequest,
@@ -104,6 +107,7 @@ import {
   pollCloudSignInRequestSchema,
   publicUrlRequestSchema,
   setPublicUrlProtectionRequestSchema,
+  startCloudCheckoutRequestSchema,
   suggestPublicUrlSlugRequestSchema,
 } from "./validators/validator.cloud";
 import {
@@ -216,6 +220,13 @@ export interface DesktopClient {
   startCloudSignIn(): Promise<CloudSignInStartDto>;
   pollCloudSignIn(request: PollCloudSignInRequest): Promise<CloudSignInPollDto>;
   signOutCloud(): Promise<CloudSignOutDto>;
+  /** Null from a Localify Cloud that does not report plans yet. */
+  getCloudPlan(): Promise<CloudPlanDto | null>;
+  /** Opens the Polar checkout, or the portal when the plan is active, in the browser. */
+  startCloudCheckout(request: StartCloudCheckoutRequest): Promise<CloudBillingPageDto>;
+  openCloudBillingPortal(): Promise<void>;
+  /** Makes the daemon fetch what this Mac may serve, after a plan change. */
+  refreshPublicTunnel(): Promise<void>;
   listPublicUrls(): Promise<PublicUrlDto[]>;
   createPublicUrl(request: CreatePublicUrlRequest): Promise<PublicUrlWithPasswordDto>;
   suggestPublicUrlSlug(request: SuggestPublicUrlSlugRequest): Promise<PublicUrlSlugSuggestionDto>;
@@ -332,6 +343,13 @@ export function createDesktopClient(): DesktopClient {
         request: pollCloudSignInRequestSchema.parse(request),
       }),
     signOutCloud: () => tauriInvoke("sign_out_cloud"),
+    getCloudPlan: () => tauriInvoke("get_cloud_plan"),
+    startCloudCheckout: (request) =>
+      tauriInvoke("start_cloud_checkout", {
+        request: startCloudCheckoutRequestSchema.parse(request),
+      }),
+    openCloudBillingPortal: () => tauriInvoke("open_cloud_billing_portal"),
+    refreshPublicTunnel: () => tauriInvoke("refresh_public_tunnel"),
     listPublicUrls: () => tauriInvoke("list_public_urls"),
     createPublicUrl: (request) =>
       tauriInvoke("create_public_url", {

@@ -365,8 +365,26 @@ enum Commands {
         json: bool,
     },
 
-    /// Show who is signed in to Localify Cloud on this machine, and how its tunnel is doing
+    /// Show who is signed in to Localify Cloud on this machine, the plan, and how its tunnel is doing
     Whoami {
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Start Localify Cloud Pro, after a 7-day trial: opens the checkout and waits for the plan
+    Subscribe {
+        /// Pay yearly ($79) instead of monthly ($7.99)
+        #[arg(long)]
+        yearly: bool,
+
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage the Localify Cloud subscription: card, invoices, interval, cancelling
+    Billing {
         /// Print JSON (the default when stdout is not a terminal)
         #[arg(long)]
         json: bool,
@@ -1241,6 +1259,12 @@ fn main() -> Result<()> {
         Commands::Login { json } => cli::cloud::login(json, &cloud_adapters(config_path, &paths)),
         Commands::Logout { json } => cli::cloud::logout(json, &cloud_adapters(config_path, &paths)),
         Commands::Whoami { json } => cli::cloud::whoami(json, &cloud_adapters(config_path, &paths)),
+        Commands::Subscribe { yearly, json } => {
+            cli::cloud::subscribe(yearly, json, &cloud_adapters(config_path, &paths))
+        }
+        Commands::Billing { json } => {
+            cli::cloud::billing(json, &cloud_adapters(config_path, &paths))
+        }
         Commands::PublicUrl { json, command } => {
             let cloud = cloud_adapters(config_path, &paths);
             match command {

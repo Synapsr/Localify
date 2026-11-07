@@ -9,17 +9,21 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::application::cloud_account::CloudAccounts;
+use crate::application::cloud_billing::CloudBilling;
 use crate::application::ports::{
-    CloudAccount, CloudAccountStore, CloudApi, CloudApiError, DaemonConnection,
-    DaemonConnectionError, DeviceAuthorization, DeviceTokenPoll, LocalDomainOwner, LocalDomains,
-    NewPublicUrl, Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl,
-    PublicUrlPasswords, PublicUrlWithPassword, SavedPassword, SavedPasswords, ServingMachine,
-    SignInRequest, SlugSuggestion, TunnelState, TunnelStatus,
+    BillingPage, BillingPageKind, CloudAccount, CloudAccountStore, CloudApi, CloudApiError,
+    DaemonConnection, DaemonConnectionError, DeviceAuthorization, DeviceTokenPoll,
+    LocalDomainOwner, LocalDomains, NewPublicUrl, Plan, PlanCounts, PlanInterval, PlanStatus,
+    Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
+    PublicUrlState, PublicUrlWithPassword, RuntimeBlock, RuntimeState, SavedPassword,
+    SavedPasswords, ServingMachine, SignInRequest, SlugSuggestion, TunnelState, TunnelStatus,
 };
 use crate::application::public_urls::PublicUrls;
 use crate::config::LocalifyPaths;
 use crate::domain::{DomainName, PublicSlug, RegistrationSource};
-use crate::infrastructure::cloud::api::{CloudClient, CreatePublicUrlRequest, ProtectionRequest};
+use crate::infrastructure::cloud::api::{
+    self, CloudClient, CreatePublicUrlRequest, ProtectionRequest,
+};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
 use crate::infrastructure::cloud::http::{self, CloudError, CloudHttp, block_on};
 use crate::infrastructure::cloud::passwords::{PasswordStore, StoredPassword};
@@ -62,6 +66,10 @@ impl CloudAdapters {
             &self.daemon,
             &self.domains,
         )
+    }
+
+    pub fn billing(&self) -> CloudBilling<'_> {
+        CloudBilling::new(&self.api, &self.credentials, &self.daemon)
     }
 }
 
@@ -148,6 +156,43 @@ impl CloudApi for HttpCloudApi {
 
     fn sign_out(&self, account: &CloudAccount) -> Result<(), CloudApiError> {
         Self::signed_in(account, |client| async move { client.logout().await })
+    }
+
+    fn plan(&self, account: &CloudAccount) -> Result<Option<Plan>, CloudApiError> {
+        let me = Self::signed_in(account, |client| async move { client.me().await })?;
+        me.plan.map(plan).transpose()
+    }
+
+    fn checkout(
+        &self,
+        account: &CloudAccount,
+        interval: PlanInterval,
+    ) -> Result<BillingPage, CloudApiError> {
+        let product = match interval {
+            PlanInterval::Month => "pro_monthly",
+            PlanInterval::Year => "pro_yearly",
+        };
+        let page = Self::signed_in(
+            account,
+            |client| async move { client.checkout(product).await },
+        )?;
+        let kind = match page.kind.as_str() {
+            "checkout" => BillingPageKind::Checkout,
+            "portal" => BillingPageKind::Portal,
+            other => return Err(unreadable(&format!("a billing page of kind '{other}'"))),
+        };
+        Ok(BillingPage {
+            kind,
+            url: https_url(page.url)?,
+        })
+    }
+
+    fn billing_portal(&self, account: &CloudAccount) -> Result<String, CloudApiError> {
+        Self::signed_in(
+            account,
+            |client| async move { client.billing_portal().await },
+        )
+        .and_then(https_url)
     }
 
     fn suggest_slug(
@@ -262,6 +307,57 @@ fn api_error(error: CloudError) -> CloudApiError {
     }
 }
 
+/// What a person reads when the cloud speaks a newer contract than this
+/// build.
+fn unreadable(what: &str) -> CloudApiError {
+    CloudApiError::Failed(
+        CloudError::InvalidResponse(format!("{what} is unknown to this version")).to_string(),
+    )
+}
+
+/// A billing page opens in a browser: anything but an `https://` URL could
+/// be a file or an app, so it is refused.
+fn https_url(url: String) -> Result<String, CloudApiError> {
+    if url.starts_with("https://") {
+        Ok(url)
+    } else {
+        Err(unreadable("a billing page that is not an https:// URL"))
+    }
+}
+
+fn plan(plan: api::Plan) -> Result<Plan, CloudApiError> {
+    let status = match plan.status.as_str() {
+        "none" => PlanStatus::None,
+        "trialing" => PlanStatus::Trialing,
+        "active" => PlanStatus::Active,
+        "past_due" => PlanStatus::PastDue,
+        "canceling" => PlanStatus::Canceling,
+        "override" => PlanStatus::Override,
+        other => return Err(unreadable(&format!("the plan status '{other}'"))),
+    };
+    let interval = match plan.interval.as_deref() {
+        None => None,
+        Some("month") => Some(PlanInterval::Month),
+        Some("year") => Some(PlanInterval::Year),
+        Some(other) => return Err(unreadable(&format!("the plan interval '{other}'"))),
+    };
+    let counts = |counts: api::PlanCounts| PlanCounts {
+        serving_machines: counts.serving_machines,
+        public_urls: counts.public_urls,
+    };
+    Ok(Plan {
+        status,
+        entitled: plan.entitled,
+        interval,
+        trial_ends_at: plan.trial_ends_at,
+        renews_at: plan.renews_at,
+        ends_at: plan.ends_at,
+        trial_available: plan.trial_available,
+        limits: counts(plan.limits),
+        usage: counts(plan.usage),
+    })
+}
+
 fn protection_request(choice: &ProtectionChoice) -> ProtectionRequest {
     match choice {
         ProtectionChoice::Password(password) => ProtectionRequest::Password(password.clone()),
@@ -287,6 +383,11 @@ fn public_url(url: types::PublicUrl) -> PublicUrl {
             },
             version: url.protection.version,
         },
+        state: url.state.map(|state| match state {
+            types::PublicUrlState::Serving => PublicUrlState::Serving,
+            types::PublicUrlState::Suspended => PublicUrlState::Suspended,
+            types::PublicUrlState::TakenDown => PublicUrlState::TakenDown,
+        }),
         created_at: url.created_at,
     }
 }
@@ -371,6 +472,17 @@ impl PublicTunnel for MgmtSocketClient {
             },
             connections: status.connections,
             error: status.error,
+            runtime: status.runtime.map(|runtime| match runtime {
+                types::RuntimeStatus::Idle => RuntimeState::Idle,
+                types::RuntimeStatus::Provisioning => RuntimeState::Provisioning,
+                types::RuntimeStatus::Ready => RuntimeState::Ready,
+                types::RuntimeStatus::Blocked => RuntimeState::Blocked,
+                types::RuntimeStatus::Banned => RuntimeState::Banned,
+            }),
+            blocked: status.blocked.map(|blocked| RuntimeBlock {
+                reason: blocked.reason,
+                message: blocked.message,
+            }),
         })
     }
 

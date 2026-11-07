@@ -77,7 +77,8 @@ run them as root, and start the daemon yourself with `localify start`.
 | `localify project domain attach\|detach <domain>` | Move a domain into or out of a project |
 | `localify project env remove <env> [--delete-worktree]` | Remove a worktree environment, and the worktree |
 | `localify project env prune`       | Remove environments whose folder is gone |
-| `localify login` / `logout` / `whoami` | Sign this machine in to Localify Cloud with GitHub, or out |
+| `localify login` / `logout` / `whoami` | Sign this machine in to Localify Cloud with GitHub, or out; `whoami` shows the plan |
+| `localify subscribe [--yearly]` / `billing` | Start Localify Cloud Pro after a 7-day trial, or manage the subscription |
 | `localify public-url create <domain> ...` | Give a project domain a [public URL](#public-urls) |
 | `localify public-url list\|remove\|protect\|unprotect\|claim` | Manage your public URLs |
 | `localify agent install`           | Connect coding agents to Localify's MCP server |
@@ -644,7 +645,9 @@ does in a container. Set `lan_access = false` to keep it on this machine.
 A public URL opens a project domain of this machine from anywhere, such as your
 laptop or phone on another network: `https://<slug>.localify.fyi` reaches
 `web.journal.localify` on the machine that serves it. It needs a Localify Cloud
-account. Accounts are invite-only for now.
+account. Accounts are invite-only for now. Serving takes Localify Cloud Pro, $7.99 a
+month or $79 a year after a 7-day free trial: `localify subscribe` starts it, and
+`localify billing` manages it.
 
 ```bash
 localify login                                   # shows a code to enter on github.com
