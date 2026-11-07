@@ -88,11 +88,13 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05; step 5 comes with the p
    - `COOKIE_KEY`, `INGRESS_KEY` and `EDGE_KEY`: `openssl rand -hex 32` each.
    - `POLAR_ACCESS_TOKEN`: an organization access token; `dev` holds the sandbox one.
    - `POLAR_WEBHOOK_SECRET`.
-   - For reference only: `CLOUDFLARE_ACCOUNT_ID`, `GITHUB_CLIENT_ID` and `D1_DATABASE_ID`.
+   - `CLOUDFLARE_DEPLOY_TOKEN`, `prod` only: wrangler's identity for `pnpm cloud:deploy` and `pnpm cloud:migrate`, so nobody's `wrangler login` is needed. Account: Workers Scripts Edit, D1 Edit, Account Settings Read; zones `localify.dev` and `localify.fyi`: Workers Routes Edit, Zone Read; User Details Read.
+   - `CLOUDFLARE_OPS_TOKEN`, `prod` only: an operator's token for the zone rules below (Zone WAF Edit, Transform Rules Edit, Zone Read on both zones). Neither script reads it, and it never reaches the Worker.
+   - `CLOUDFLARE_ACCOUNT_ID`: read by the scripts with `CLOUDFLARE_DEPLOY_TOKEN`. For reference only: `GITHUB_CLIENT_ID` and `D1_DATABASE_ID`.
 
    Changing `COOKIE_KEY` signs every browser out and shows every visitor the warning page again. Changing `INGRESS_KEY` makes every daemon refuse public traffic until its next runtime fetch, within 5 minutes. Changing `EDGE_KEY` means updating the zone's WAF rule in the same step, or public traffic stops.
 3. **D1 database**: `pnpm exec wrangler d1 create localify-cloud --location weur`, then put the printed id in `database_id` in `wrangler.jsonc`.
-4. **Migrations and deploy**, with your own `wrangler login`: `pnpm cloud:migrate`, then `pnpm cloud:deploy`. The deploy script ([`scripts/deploy.mjs`](scripts/deploy.mjs)) reads the secrets from Infisical and passes them to `wrangler deploy --secrets-file`, keeping the Tunnel and DNS token out of wrangler's own environment.
+4. **Migrations and deploy**: `pnpm cloud:migrate`, then `pnpm cloud:deploy`. Both run wrangler as `CLOUDFLARE_DEPLOY_TOKEN` from Infisical, or with your own `wrangler login` when that key is missing ([`scripts/infisical.mjs`](scripts/infisical.mjs)). The deploy script ([`scripts/deploy.mjs`](scripts/deploy.mjs)) passes the Worker's secrets to `wrangler deploy --secrets-file`, keeping the Tunnel and DNS token out of wrangler's own environment.
 
 5. **Polar**, once in the sandbox (`sandbox.polar.sh`) and once in production:
    - two Pro products, $7.99 a month and $79 a year, each with a 7-day trial; their ids go in `POLAR_PRODUCT_PRO_MONTHLY` and `POLAR_PRODUCT_PRO_YEARLY`;
