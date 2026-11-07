@@ -3,7 +3,7 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
-## 1.3.3 - unreleased
+## 1.3.3 - 2026-11-07
 
 ### New
 
