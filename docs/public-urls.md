@@ -184,7 +184,7 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `PUT /v1/public-urls/{id}/protection` | `{protection}`, the same object as in `POST` | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
 | `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine, in one update. `402 subscription_required`; `403 taken_down`. |
 | `GET /v2/machines/self/runtime?generation=<n>` | — | `MachineRuntime`, see "Tunnels". `n` is the tunnel generation the daemon runs, or `0` when it runs none: generations start at 1, and 0 never names a tunnel. |
-| `GET /v1/machines/self/runtime` | — | For clients before this contract. Runs the same reservation and provisioning as v2. When the state is `ready`, it returns `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` with the current generation's token every time. Otherwise it returns `409 runtime_not_ready` with `{state}`. Removed once no such client remains (see "Rollout order"). |
+| `GET /v1/machines/self/runtime` | — | For clients before this contract. Runs the same reservation and provisioning as v2. When the state is `ready`, it returns `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` with the current generation's token every time, and only the URLs whose state is `serving`, since those clients serve every URL they get. Otherwise it returns `409 runtime_not_ready` with `{state}`. Removed once no such client remains (see "Rollout order"). |
 
 Error codes this contract adds, everywhere they apply:
 
@@ -292,8 +292,8 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
 **The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes:
 
 1. Lists the account's tunnels, page by page.
-2. For each `ready` machine, reads the status of its tunnel:
-   - healthy: clears `down_seen_at`;
+2. For each `ready` machine, reads the status of its tunnel in that listing; a tunnel missing from a complete listing reads as down:
+   - healthy (or degraded): clears `down_seen_at`;
    - down or inactive, with `down_seen_at` empty: sets `down_seen_at`;
    - down or inactive again, with `down_seen_at` and `tunnel_ready_at` both more than 15 minutes old: releases it;
    - a failed read: changes nothing.
@@ -321,7 +321,7 @@ type MachineRuntime = {
 ```
 
 - `idle`: the machine wants no tunnel. Its owner may still be entitled.
-- `provisioning`: a slot is reserved and the tunnel is on its way; `retryAfter` is 3.
+- `provisioning`: a slot is reserved and the tunnel is on its way, including while the previous generation is being released for a rotation; `retryAfter` is 3.
 - `ready`: serve with this generation's tunnel.
 - `blocked`: the machine has something to serve but may not. The reason is the plan, its owner's slots, or the account cap. `retryAfter` is 60 for `capacity` and `null` otherwise, since only a plan or a URL change unblocks it, and the CLI and the app send `public_refresh` after either.
 

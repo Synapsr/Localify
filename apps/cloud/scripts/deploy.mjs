@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const SECRETS = ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY"];
+const SECRETS = ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY", "EDGE_KEY"];
 
 const exported = JSON.parse(
   execFileSync(

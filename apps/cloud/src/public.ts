@@ -85,6 +85,7 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     env,
     site.machineId,
     {
+      edgeKey: setting(env, "EDGE_KEY"),
       ingressSecret: site.ingressSecret,
       publicHost: host,
       localHost,

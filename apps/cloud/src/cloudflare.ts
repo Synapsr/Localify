@@ -1,9 +1,33 @@
-// The Cloudflare API calls behind machine registration: one named tunnel per
-// machine, configured by Cloudflare, and a proxied CNAME to it.
+// The Cloudflare API calls behind machines' tunnels: named tunnels configured
+// by Cloudflare, and one proxied CNAME per machine that points at its
+// current tunnel.
 
 import { setting } from "./config";
 
 const API = "https://api.cloudflare.com/client/v4";
+/** Results per page when listing tunnels and DNS records. */
+export const LIST_PAGE_SIZE = 1000;
+
+/**
+ * Cloudflare API calls a scheduled run may still make. The account allows
+ * 1,200 calls per 5 minutes; a run stays well below.
+ */
+export class CallBudget {
+  constructor(public left: number) {}
+
+  /** Reserves `calls` when they fit. */
+  take(calls: number): boolean {
+    if (this.left < calls) return false;
+    this.left -= calls;
+    return true;
+  }
+}
+
+/** A tunnel as the account's listing gives it. `status` is Cloudflare's. */
+export type ListedTunnel = { id: string; name: string; status: string; createdAt: number };
+
+/** A CNAME of the machine zone. */
+export type ListedRecord = { id: string; name: string; content: string };
 
 /** A failed Cloudflare API call. The message never contains the API token. */
 export class CloudflareError extends Error {
@@ -83,6 +107,57 @@ export class CloudflareApi {
     return result.id;
   }
 
+  /** Moves an existing CNAME to `<tunnel id>.cfargotunnel.com`. */
+  async pointRecord(recordId: string, tunnelId: string): Promise<void> {
+    await this.call("PATCH", `${API}/zones/${this.zoneId}/dns_records/${recordId}`, {
+      content: `${tunnelId}.cfargotunnel.com`,
+      proxied: true,
+    });
+  }
+
+  /** One page of the zone's CNAMEs, starting at 1. */
+  async listRecords(page: number): Promise<ListedRecord[]> {
+    const query = new URLSearchParams({
+      type: "CNAME",
+      per_page: String(LIST_PAGE_SIZE),
+      page: String(page),
+    });
+    const result = await this.call<{ id?: unknown; name?: unknown; content?: unknown }[]>(
+      "GET",
+      `${API}/zones/${this.zoneId}/dns_records?${query}`,
+    );
+    if (!Array.isArray(result)) throw new CloudflareError(502, "DNS listing returned no list");
+    return result.flatMap((record) =>
+      typeof record.id === "string" &&
+      typeof record.name === "string" &&
+      typeof record.content === "string"
+        ? [{ id: record.id, name: record.name, content: record.content }]
+        : [],
+    );
+  }
+
+  /** One page of the account's live tunnels, starting at 1. */
+  async listTunnels(page: number): Promise<ListedTunnel[]> {
+    const query = new URLSearchParams({
+      is_deleted: "false",
+      per_page: String(LIST_PAGE_SIZE),
+      page: String(page),
+    });
+    const result = await this.call<
+      { id?: unknown; name?: unknown; status?: unknown; created_at?: unknown }[]
+    >("GET", `${this.tunnels()}?${query}`);
+    if (!Array.isArray(result)) throw new CloudflareError(502, "Tunnel listing returned no list");
+    return result.flatMap((tunnel) => {
+      const createdAt = typeof tunnel.created_at === "string" ? Date.parse(tunnel.created_at) : NaN;
+      return typeof tunnel.id === "string" &&
+        typeof tunnel.name === "string" &&
+        typeof tunnel.status === "string" &&
+        Number.isFinite(createdAt)
+        ? [{ id: tunnel.id, name: tunnel.name, status: tunnel.status, createdAt }]
+        : [];
+    });
+  }
+
   async deleteDnsRecord(recordId: string): Promise<void> {
     await this.callAllowingMissing("DELETE", `${API}/zones/${this.zoneId}/dns_records/${recordId}`);
   }
@@ -96,7 +171,7 @@ export class CloudflareApi {
     await this.callAllowingMissing("DELETE", `${this.tunnels()}/${tunnelId}`);
   }
 
-  /** The id of a live tunnel with this name, for a sign-in that stopped before recording it. */
+  /** The id of a live tunnel with this name, for an operation that stopped before recording it. */
   async findTunnelId(name: string): Promise<string | null> {
     const query = new URLSearchParams({ name, is_deleted: "false" });
     const result = await this.call<{ id?: unknown }[]>("GET", `${this.tunnels()}?${query}`);
@@ -104,7 +179,7 @@ export class CloudflareApi {
     return typeof id === "string" ? id : null;
   }
 
-  /** The id of the CNAME for this hostname, for a sign-in that stopped before recording it. */
+  /** The id of the CNAME for this hostname, for an operation that stopped before recording it. */
   async findDnsRecordId(hostname: string): Promise<string | null> {
     const query = new URLSearchParams({ type: "CNAME", name: hostname });
     const result = await this.call<{ id?: unknown }[]>(

@@ -28,10 +28,12 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 
 | File | What it does |
 |---|---|
-| `src/index.ts` | Routes by host, and runs the hourly cleanup |
+| `src/index.ts` | Routes by host, and runs the 5-minute and daily jobs |
 | `src/api.ts` | The API routes |
-| `src/machines.ts` | Sign-in, sign-out, replacing a machine, and the hourly cleanup |
-| `src/public.ts` | The public traffic path |
+| `src/machines.ts` | Sign-in, sign-out, replacing a machine, the cleanup of revoked machines, and the purge of deleted URLs |
+| `src/tunnels.ts` | Serving slots, provisioning and releasing tunnels, the machine runtime, and the 5-minute sweep |
+| `src/entitlement.ts` | What an account may use; for now, the allowlist with the team's limits |
+| `src/public.ts`, `src/sites.ts` | The public traffic path |
 | `src/github.ts`, `src/cloudflare.ts` | The GitHub and Cloudflare API calls |
 | `src/names.ts` | Slugs, labels, public hosts, and the origin rule |
 | `src/cookie.ts`, `src/headers.ts`, `src/crypto.ts` | Access cookie, forwarded headers, hashing |
@@ -50,7 +52,7 @@ pnpm cloud:dev
 LOCALIFY_CLOUD_API=http://127.0.0.1:8787 localify login
 ```
 
-Sign-in reaches the real GitHub, and creates a real tunnel and DNS record when `.dev.vars` has a `CLOUDFLARE_API_TOKEN`; without one, it answers `502 provisioning_failed`. `localify logout` removes what sign-in created.
+Sign-in reaches the real GitHub and makes no Cloudflare call. Once the machine has a URL to serve, its next runtime fetch creates a real tunnel and DNS record when `.dev.vars` has a `CLOUDFLARE_API_TOKEN`; without one, the runtime stays `provisioning` and the Worker logs that the token is not set. `localify logout` removes what the machine created.
 
 To try the public path, send the public host in the `Host` header. The `dev` script passes `--infer-origin-from-routes=false` so the Worker sees that host instead of its first route's.
 
@@ -65,7 +67,7 @@ cd apps/cloud && pnpm exec wrangler dev --infer-origin-from-routes=false --local
 curl -k -H 'Host: journal-a8f3.localify.fyi' https://127.0.0.1:8787/
 ```
 
-Trigger the hourly cleanup with `curl http://127.0.0.1:8787/cdn-cgi/local/scheduled`.
+Trigger the 5-minute sweep with `curl 'http://127.0.0.1:8787/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*'`, and the daily job with `cron=0+3+*+*+*`.
 
 ## Checks
 
@@ -109,7 +111,10 @@ The `localify.dev` zone needs two rules, so that nobody holding a tunnel token c
 
 - **WAF custom rule, action Block:**
   `starts_with(http.host, "m-") and ends_with(http.host, ".localify.dev") and not any(http.request.headers["x-localify-edge"][*] eq "<EDGE_KEY>")`
-- **Request header transform rule:** remove `X-Localify-Edge` on the same hosts. Transform rules run after the WAF, so the header never reaches the tunnel.
+- **Request Header Transform Rule, operation Remove, header `X-Localify-Edge`:**
+  `starts_with(http.host, "m-") and ends_with(http.host, ".localify.dev")`
+
+  Request header rules run in the `http_request_late_transform` phase, after the WAF custom rules, so the header never reaches the tunnel. The Worker sends `X-Localify-Edge` on every forwarded request and never calls the rules API: an operator sets both rules in the dashboard.
 
 ### Configuration
 

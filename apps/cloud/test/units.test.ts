@@ -269,6 +269,7 @@ describe("upstream headers", () => {
       "x-forwarded-for": "1.2.3.4",
       "x-forwarded-host": "evil",
       "x-localify-ingress": "forged",
+      "x-localify-edge": "forged",
       "x-localify-local-host": "other.localify",
       "cf-connecting-ip": "5.6.7.8",
       "cf-ray": "abc",
@@ -277,6 +278,7 @@ describe("upstream headers", () => {
       upgrade: "websocket",
     });
     const headers = upstreamHeaders(incoming, {
+      edgeKey: "edge",
       ingressSecret: "ingress",
       publicHost: "journal-a8f3.localify.fyi",
       localHost: "journal.localify",
@@ -287,6 +289,7 @@ describe("upstream headers", () => {
       accept: "text/html",
       cookie: "session=1",
       upgrade: "websocket",
+      "x-localify-edge": "edge",
       "x-localify-ingress": "ingress",
       "x-localify-public-host": "journal-a8f3.localify.fyi",
       "x-localify-local-host": "journal.localify",
@@ -297,6 +300,7 @@ describe("upstream headers", () => {
 
   it("drops the Cookie header when only the access cookie was in it", () => {
     const headers = upstreamHeaders(new Headers({ cookie: `${ACCESS_COOKIE}=secret` }), {
+      edgeKey: "e",
       ingressSecret: "i",
       publicHost: "p",
       localHost: "l",

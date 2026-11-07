@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { hmacHex, sha256Hex } from "../src/crypto";
-import { runCleanup } from "../src/machines";
+import { CallBudget } from "../src/cloudflare";
+import { sha256Hex } from "../src/crypto";
+import { cleanUpRevokedMachines, purgeDeletedUrls, revokeStuckSignIns } from "../src/machines";
 import { WORDS } from "../src/passwords";
 import {
   api,
@@ -9,6 +10,7 @@ import {
   createContext,
   fakeSignIn,
   jsonResponse,
+  serve,
   signIn,
   type TestContext,
 } from "./support";
@@ -21,6 +23,7 @@ type PublicUrlBody = {
   wildcard: boolean;
   machine: { id: string; name: string } | null;
   protection: { mode: string; version?: number };
+  state: string;
   createdAt: string;
 };
 
@@ -113,6 +116,7 @@ describe("errors", () => {
         body: "{",
       }) as never,
       context.env,
+      context.ctx,
     );
     expect(response.status).toBe(400);
   });
@@ -218,7 +222,7 @@ describe("device flow", () => {
     }
   });
 
-  it("checks the GitHub id, not the login, before touching Cloudflare", async () => {
+  it("checks the GitHub id, not the login", async () => {
     context.routes.set("POST https://github.com/login/oauth/access_token", () =>
       jsonResponse({ access_token: "gho" }),
     );
@@ -236,48 +240,26 @@ describe("device flow", () => {
 });
 
 describe("signing in", () => {
-  it("registers the machine: tunnel, ingress, CNAME, then an active machine and a hashed token", async () => {
+  it("registers an active machine with no tunnel and a hashed token, without any Cloudflare call", async () => {
     const { token, machineId } = await signIn(context, "Teo-Goulois", 1, "laptop");
     expect(token).toMatch(/^lfy_[0-9a-f]{64}$/);
 
     const github = context.calls.find((call) => call.url === "https://api.github.com/user")!;
     expect(github.headers.get("user-agent")).toBeTruthy();
     expect(github.headers.get("authorization")).toBe("Bearer gho_Teo-Goulois");
-
-    const create = context.calls.find(
-      (call) => call.method === "POST" && call.url.endsWith("/cfd_tunnel"),
-    )!;
-    expect(JSON.parse(create.body!)).toEqual({
-      name: `localify-${machineId}`,
-      config_src: "cloudflare",
-    });
-    expect(create.headers.get("authorization")).toBe("Bearer cf-token");
-
-    const configure = context.calls.find((call) => call.method === "PUT")!;
-    expect(configure.url).toBe(`${CF}/accounts/account-1/cfd_tunnel/tunnel-laptop/configurations`);
-    expect(JSON.parse(configure.body!)).toEqual({
-      config: {
-        ingress: [
-          { hostname: `m-${machineId}.localify.dev`, service: "http://127.0.0.1:7381" },
-          { service: "http_status:404" },
-        ],
-      },
-    });
-
-    const dns = context.calls.find((call) => call.url.endsWith("/zones/zone-1/dns_records"))!;
-    expect(JSON.parse(dns.body!)).toMatchObject({
-      type: "CNAME",
-      name: `m-${machineId}.localify.dev`,
-      content: "tunnel-laptop.cfargotunnel.com",
-      proxied: true,
-    });
+    expect(cloudflareCalls()).toEqual([]);
 
     expect(machineRow(machineId)).toEqual({
       status: "active",
-      tunnel_id: "tunnel-laptop",
-      dns_record_id: "dns-tunnel-laptop",
+      tunnel_id: null,
+      dns_record_id: null,
       revoked_at: null,
     });
+    expect(
+      context.sqlite
+        .prepare("SELECT tunnel_state, tunnel_generation FROM machines WHERE id = ?")
+        .get(machineId),
+    ).toEqual({ tunnel_state: "none", tunnel_generation: 0 });
     expect(context.sqlite.prepare("SELECT hash FROM tokens").all()).toEqual([
       { hash: await sha256Hex(token) },
     ]);
@@ -298,44 +280,27 @@ describe("signing in", () => {
     expect(context.sqlite.prepare("SELECT COUNT(*) AS n FROM machines").get()).toEqual({ n: 2 });
   });
 
-  it("answers 502 provisioning_failed and removes what it created when a step fails", async () => {
-    fakeSignIn(context, "teo-goulois", 1, "tunnel-x");
-    context.routes.set(`POST ${CF}/zones/zone-1/dns_records`, () =>
-      jsonResponse({ success: false, errors: [{ code: 81053, message: "record exists" }] }, 400),
-    );
+  it("keeps a user to 10 signed-in machines", async () => {
+    for (let i = 0; i < 10; i++) await signIn(context, "teo-goulois", 1, `machine-${i}`);
+    fakeSignIn(context, "teo-goulois", 1, "tunnel-11");
     const response = await api(context, "POST", "/v1/auth/device/token", {
-      body: { deviceCode: "d", machineName: "laptop", ingressPort: 7381 },
-    });
-    expect(response.status).toBe(502);
-    expect(await errorCode(response)).toBe("provisioning_failed");
-    expect(cloudflareCalls().slice(-2)).toEqual([
-      "DELETE /accounts/account-1/cfd_tunnel/tunnel-x/connections",
-      "DELETE /accounts/account-1/cfd_tunnel/tunnel-x",
-    ]);
-    const machines = context.sqlite
-      .prepare("SELECT status, tunnel_id, dns_record_id FROM machines")
-      .all();
-    expect(machines).toEqual([{ status: "revoked", tunnel_id: null, dns_record_id: null }]);
-    expect(context.sqlite.prepare("SELECT COUNT(*) AS n FROM tokens").get()).toEqual({ n: 0 });
-  });
-
-  it("keeps a user to 5 active machines", async () => {
-    for (let i = 0; i < 5; i++) await signIn(context, "teo-goulois", 1, `machine-${i}`);
-    fakeSignIn(context, "teo-goulois", 1, "tunnel-6");
-    const response = await api(context, "POST", "/v1/auth/device/token", {
-      body: { deviceCode: "d", machineName: "machine-6", ingressPort: 7381 },
+      body: { deviceCode: "d", machineName: "machine-11", ingressPort: 7381 },
     });
     expect(response.status).toBe(403);
     expect(await errorCode(response)).toBe("quota_exceeded");
+    expect(context.sqlite.prepare("SELECT COUNT(*) AS n FROM machines").get()).toEqual({ n: 10 });
+    expect(context.sqlite.prepare("SELECT COUNT(*) AS n FROM tokens").get()).toEqual({ n: 10 });
   });
 
-  it("replaces an active machine with the same name and moves its URLs", async () => {
+  it("replaces an active machine with the same name, moves its URLs and releases its tunnel", async () => {
     const old = await signIn(context, "teo-goulois", 1, "laptop");
     const { body } = await createUrl(old.token, { localDomain: "a.localify" });
-    for (let i = 0; i < 4; i++) await signIn(context, "teo-goulois", 1, `machine-${i}`);
+    await serve(context, old.token);
+    for (let i = 0; i < 9; i++) await signIn(context, "teo-goulois", 1, `machine-${i}`);
 
-    // Five machines, but the same name replaces one instead of counting.
+    // Ten machines, but the same name replaces one instead of counting.
     fakeSignIn(context, "teo-goulois", 1, "tunnel-new");
+    context.calls.length = 0;
     const response = await api(context, "POST", "/v1/auth/device/token", {
       body: { deviceCode: "d", machineName: "laptop", ingressPort: 7381 },
     });
@@ -347,11 +312,14 @@ describe("signing in", () => {
       tunnel_id: null,
       dns_record_id: null,
     });
-    expect(cloudflareCalls().slice(-3)).toEqual([
+    expect(cloudflareCalls()).toEqual([
       "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop/connections",
       "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop",
       "DELETE /zones/zone-1/dns_records/dns-tunnel-laptop",
     ]);
+    expect(
+      context.sqlite.prepare("SELECT tunnel_state FROM machines WHERE id = ?").get(old.machineId),
+    ).toEqual({ tunnel_state: "none" });
     expect((await api(context, "GET", "/v1/me", { token: old.token })).status).toBe(401);
     const moved = await api(context, "GET", "/v1/public-urls", { token: fresh.token });
     expect(((await moved.json()) as { publicUrls: PublicUrlBody[] }).publicUrls).toEqual([
@@ -604,7 +572,6 @@ describe("public URLs", () => {
   });
 });
 
-
 describe("slugs", () => {
   async function suggestion(token: string, localDomain: string) {
     const query = new URLSearchParams({ localDomain });
@@ -669,46 +636,11 @@ describe("slugs", () => {
     }
   });
 });
-describe("machine runtime", () => {
-  it("returns the tunnel token, the ingress secret and the live URLs this machine serves", async () => {
-    const laptop = await signIn(context, "teo-goulois", 1, "laptop");
-    const runner = await signIn(context, "teo-goulois", 1, "runner");
-    const served = await createUrl(runner.token, { localDomain: "a.localify" });
-    const deleted = await createUrl(runner.token, { localDomain: "c.localify" });
-    await api(context, "DELETE", `/v1/public-urls/${deleted.body.publicUrl.id}`, {
-      token: runner.token,
-    });
-    await createUrl(laptop.token, { localDomain: "b.localify" });
-
-    const response = await api(context, "GET", "/v1/machines/self/runtime", {
-      token: runner.token,
-    });
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      tunnelToken: string;
-      ingressSecret: string;
-      publicUrls: PublicUrlBody[];
-    };
-    expect(body.tunnelToken).toBe("token-of-tunnel-runner");
-    expect(body.ingressSecret).toBe(await hmacHex("ingress-key", runner.machineId));
-    expect(body.publicUrls.map((url) => url.id)).toEqual([served.body.publicUrl.id]);
-    expect(cloudflareCalls().at(-1)).toBe("GET /accounts/account-1/cfd_tunnel/tunnel-runner/token");
-  });
-
-  it("answers 502 when Cloudflare fails", async () => {
-    const { token } = await signIn(context);
-    context.routes.clear();
-    context.routes.set(`GET ${CF}/`, () => jsonResponse({ success: false, errors: [] }, 500));
-    const response = await api(context, "GET", "/v1/machines/self/runtime", { token });
-    expect(response.status).toBe(502);
-    expect(await errorCode(response)).toBe("cloudflare_unavailable");
-  });
-});
-
 describe("signing out", () => {
   it("revokes in D1, then removes connections, tunnel and DNS record", async () => {
     const { token, machineId } = await signIn(context);
     const { body } = await createUrl(token, { localDomain: "a.localify" });
+    await serve(context, token);
     context.calls.length = 0;
 
     const response = await api(context, "POST", "/v1/auth/logout", { token });
@@ -725,6 +657,9 @@ describe("signing out", () => {
       dns_record_id: null,
     });
     expect(
+      context.sqlite.prepare("SELECT tunnel_state FROM machines WHERE id = ?").get(machineId),
+    ).toEqual({ tunnel_state: "none" });
+    expect(
       context.sqlite
         .prepare("SELECT machine_id FROM public_urls WHERE id = ?")
         .get(body.publicUrl.id),
@@ -733,8 +668,17 @@ describe("signing out", () => {
     });
   });
 
-  it("succeeds when Cloudflare fails, and the hourly cleanup retries what is left", async () => {
+  it("makes no Cloudflare call for a machine that never served", async () => {
+    const { token } = await signIn(context);
+    context.calls.length = 0;
+    expect((await api(context, "POST", "/v1/auth/logout", { token })).status).toBe(204);
+    expect(cloudflareCalls()).toEqual([]);
+  });
+
+  it("succeeds when Cloudflare fails, holding the slot until the cleanup removes the tunnel", async () => {
     const { token, machineId } = await signIn(context);
+    await createUrl(token, { localDomain: "a.localify" });
+    await serve(context, token);
     context.routes.clear();
     context.routes.set(`DELETE ${CF}/accounts/`, () =>
       jsonResponse({ success: false, errors: [] }, 500),
@@ -748,18 +692,26 @@ describe("signing out", () => {
       tunnel_id: "tunnel-laptop",
       dns_record_id: null,
     });
+    expect(
+      context.sqlite.prepare("SELECT tunnel_state FROM machines WHERE id = ?").get(machineId),
+    ).toEqual({ tunnel_state: "releasing" });
 
     context.routes.set(`DELETE ${CF}/accounts/`, () => cloudflareOk(null));
-    await runCleanup(context.env);
+    await cleanUpRevokedMachines(context.env, Date.now(), new CallBudget(300));
     expect(machineRow(machineId)).toMatchObject({
       status: "revoked",
       tunnel_id: null,
       dns_record_id: null,
     });
+    expect(
+      context.sqlite.prepare("SELECT tunnel_state FROM machines WHERE id = ?").get(machineId),
+    ).toEqual({ tunnel_state: "none" });
   });
 
   it("treats an already deleted tunnel as gone", async () => {
     const { token, machineId } = await signIn(context);
+    await createUrl(token, { localDomain: "a.localify" });
+    await serve(context, token);
     context.routes.clear();
     context.routes.set(`DELETE ${CF}/`, () => jsonResponse({ success: false, errors: [] }, 404));
     expect((await api(context, "POST", "/v1/auth/logout", { token })).status).toBe(204);
@@ -767,7 +719,7 @@ describe("signing out", () => {
   });
 });
 
-describe("hourly cleanup", () => {
+describe("revoked machines' cleanup", () => {
   it("revokes machines stuck in provisioning, finding unrecorded resources by name", async () => {
     const { machineId } = await signIn(context);
     const { user_id } = context.sqlite
@@ -786,7 +738,8 @@ describe("hourly cleanup", () => {
     context.routes.set(`GET ${CF}/zones/zone-1/dns_records?`, () => cloudflareOk([]));
     context.calls.length = 0;
 
-    await runCleanup(context.env);
+    await revokeStuckSignIns(context.env, Date.now());
+    await cleanUpRevokedMachines(context.env, Date.now(), new CallBudget(300));
     expect(cloudflareCalls()).toEqual([
       "GET /accounts/account-1/cfd_tunnel?name=localify-stuck&is_deleted=false",
       "GET /zones/zone-1/dns_records?type=CNAME&name=m-stuck.localify.dev",
@@ -818,7 +771,7 @@ describe("hourly cleanup", () => {
     );
     context.calls.length = 0;
 
-    await runCleanup(context.env);
+    await cleanUpRevokedMachines(context.env, Date.now(), new CallBudget(300));
     expect(cloudflareCalls()).toEqual([
       "GET /accounts/account-1/cfd_tunnel?name=localify-failed&is_deleted=false",
       "GET /zones/zone-1/dns_records?type=CNAME&name=m-failed.localify.dev",
@@ -852,13 +805,13 @@ describe("hourly cleanup", () => {
     context.routes.set(`DELETE ${CF}/accounts/`, () => cloudflareOk(null));
 
     const now = Date.now();
-    await runCleanup(context.env, now);
-    // The budget allows 8 machines a run: the 9th waits.
+    await cleanUpRevokedMachines(context.env, now, new CallBudget(40));
+    // A budget of 40 calls allows 8 machines: the 9th waits.
     expect(cleanupRow("stale-7")).toMatchObject({ cleanup_attempts: 1 });
     expect(cleanupRow("stale-8")).toMatchObject({ cleanup_attempts: 0, next_cleanup_at: null });
 
     insert.run("fresh", user_id, "fresh", "tunnel-fresh", now, now);
-    await runCleanup(context.env, now + 60 * 1000);
+    await cleanUpRevokedMachines(context.env, now + 60 * 1000, new CallBudget(40));
     expect(cleanupRow("stale-8")).toMatchObject({ cleanup_attempts: 1 });
     expect(cleanupRow("fresh")).toMatchObject({ tunnel_id: null, cleanup_attempts: 0 });
     expect(cleanupRow("stale-0")).toMatchObject({ cleanup_attempts: 1 });
@@ -874,7 +827,7 @@ describe("hourly cleanup", () => {
       .prepare("UPDATE public_urls SET deleted_at = ? WHERE id = ?")
       .run(Date.now() - 31 * 24 * 60 * 60 * 1000, old.body.publicUrl.id);
 
-    await runCleanup(context.env);
+    await purgeDeletedUrls(context.env);
     expect(context.sqlite.prepare("SELECT id FROM public_urls").all()).toEqual([
       { id: recent.body.publicUrl.id },
     ]);

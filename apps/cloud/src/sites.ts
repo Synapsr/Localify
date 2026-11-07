@@ -1,10 +1,10 @@
 // The public path's view of a public URL, cached in the isolate for 10
-// seconds, so a deleted URL, a new password, a claim or a removal from the
-// allowlist reaches every location within that time. These changes apply to
-// new requests: a WebSocket or SSE stream already open stays open until it
-// closes.
+// seconds, so a deleted URL, a new password, a claim, a lost entitlement or
+// a released tunnel reaches every location within that time. These changes
+// apply to new requests: streams already open close when the machine's
+// tunnel is released.
 
-import { isAllowedGithubId } from "./config";
+import { entitlementOf } from "./entitlement";
 import { ingressSecret } from "./machines";
 
 export type Site = {
@@ -12,8 +12,8 @@ export type Site = {
   slug: string;
   localDomain: string;
   wildcard: boolean;
+  /** Null when no machine serves the URL, or its tunnel is not `ready`. */
   machineId: string | null;
-  /** Null when no machine serves the URL. */
   ingressSecret: string | null;
   protected: boolean;
   passwordHash: string | null;
@@ -31,14 +31,16 @@ type SiteRow = {
   password_hash: string | null;
   password_salt: string | null;
   password_version: number;
+  user_id: string;
   github_id: number;
+  tunnel_state: string | null;
 };
 
 const TTL_MS = 10_000;
 const MAX_ENTRIES = 1_000;
 const cache = new Map<string, { site: Site | null; expires: number }>();
 
-/** The live public URL for a slug, or null when there is none or its owner is off the allowlist. */
+/** The live public URL for a slug, or null when there is none or its owner has no entitlement. */
 export async function findSite(env: Env, slug: string, now = Date.now()): Promise<Site | null> {
   const cached = cache.get(slug);
   if (cached && cached.expires > now) return cached.site;
@@ -56,20 +58,25 @@ export function forgetSite(slug: string): void {
 async function loadSite(env: Env, slug: string): Promise<Site | null> {
   const row = await env.DB.prepare(
     `SELECT p.id, p.slug, p.local_domain, p.wildcard, p.machine_id, p.protected,
-            p.password_hash, p.password_salt, p.password_version, u.github_id
+            p.password_hash, p.password_salt, p.password_version, p.user_id, u.github_id,
+            m.tunnel_state
      FROM public_urls p JOIN users u ON u.id = p.user_id
+       LEFT JOIN machines m ON m.id = p.machine_id AND m.status = 'active'
      WHERE p.slug = ?1 AND p.deleted_at IS NULL`,
   )
     .bind(slug)
     .first<SiteRow>();
-  if (!row || !isAllowedGithubId(env, row.github_id)) return null;
+  if (!row) return null;
+  const entitlement = await entitlementOf(env, { id: row.user_id, githubId: row.github_id });
+  if (entitlement.publicUrls === 0) return null;
+  const machineId = row.tunnel_state === "ready" ? row.machine_id : null;
   return {
     id: row.id,
     slug: row.slug,
     localDomain: row.local_domain,
     wildcard: row.wildcard === 1,
-    machineId: row.machine_id,
-    ingressSecret: row.machine_id === null ? null : await ingressSecret(env, row.machine_id),
+    machineId,
+    ingressSecret: machineId === null ? null : await ingressSecret(env, machineId),
     protected: row.protected === 1,
     passwordHash: row.password_hash,
     passwordSalt: row.password_salt,
