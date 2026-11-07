@@ -12,7 +12,9 @@ export const useTerminalHotkeys = () => {
     isOpen,
     newTabFromActiveTarget,
     openSelectedTarget,
+    selectNextEnvironment,
     selectNextSession,
+    selectPreviousEnvironment,
     selectPreviousSession,
     togglePanel,
   } = useTerminal();
@@ -42,7 +44,11 @@ export const useTerminalHotkeys = () => {
         return;
       }
 
-      void newTabFromActiveTarget();
+      void newTabFromActiveTarget().catch((error) => {
+        toast.error("Open terminal failed", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
     },
     { preventDefault: true },
   );
@@ -70,6 +76,24 @@ export const useTerminalHotkeys = () => {
     () => {
       if (!isOpen) return;
       selectNextSession();
+    },
+    { preventDefault: true },
+  );
+
+  useHotkey(
+    toRegisterableHotkey(hotkeys.previousTerminalEnvironment),
+    () => {
+      if (!isOpen) return;
+      selectPreviousEnvironment();
+    },
+    { preventDefault: true },
+  );
+
+  useHotkey(
+    toRegisterableHotkey(hotkeys.nextTerminalEnvironment),
+    () => {
+      if (!isOpen) return;
+      selectNextEnvironment();
     },
     { preventDefault: true },
   );

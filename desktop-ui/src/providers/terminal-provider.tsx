@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import {
   createContext,
@@ -25,6 +25,12 @@ import type {
 import { setDeepLinkLaunchHandler } from "@/lib/deep-link";
 import { bootstrapQueries } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
+import {
+  reachableServiceSessionIds,
+  sortTerminalSessions,
+  type TerminalSessionState,
+} from "@/lib/util.terminal-sessions";
+import { useSharedProjectOrder } from "@/providers/project-order-provider";
 
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
@@ -58,16 +64,19 @@ interface TerminalContextValue {
   outputBySessionId: OutputBySessionId;
   panelHeight: number;
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<void>;
+  selectEnvironment: (projectId: string, environmentSlug: string) => void;
+  selectNextEnvironment: () => void;
   selectNextSession: () => void;
+  selectPreviousEnvironment: () => void;
   selectPreviousSession: () => void;
+  sessionStates: Map<string, TerminalSessionState>;
+  /** Every session, in tab order. */
   sessions: TerminalSessionDto[];
   setActiveSessionId: (sessionId: string) => void;
   setPanelHeight: (height: number) => void;
   selectedTarget: TerminalTargetRequest | null;
   setSelectedTarget: (target: TerminalTargetRequest | null) => void;
-  sidebarCollapsed: boolean;
   togglePanel: () => void;
-  toggleSidebar: () => void;
   writeToSession: (sessionId: string, data: string) => Promise<void>;
 }
 
@@ -75,15 +84,30 @@ const TerminalContext = createContext<TerminalContextValue | null>(null);
 
 export const TerminalProvider = ({ children }: PropsWithChildren) => {
   const queryClient = useQueryClient();
-  const [sessions, setSessions] = useState<TerminalSessionDto[]>([]);
+  const { data: bootstrap } = useQuery(bootstrapQueries.read());
+  const { order: projectOrder } = useSharedProjectOrder();
+  const [unsortedSessions, setSessions] = useState<TerminalSessionDto[]>([]);
   const [outputBySessionId, setOutputBySessionId] = useState<OutputBySessionId>({});
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [panelHeight, setPanelHeightState] = useState(loadStoredPanelHeight);
   const [selectedTarget, setSelectedTargetState] = useState<TerminalTargetRequest | null>(null);
   const [focusRequestId, setFocusRequestId] = useState(0);
+  const projectEnvironments = bootstrap?.projectEnvironments;
+  const sessions = useMemo(
+    () => sortTerminalSessions(unsortedSessions, projectOrder, projectEnvironments ?? []),
+    [projectEnvironments, projectOrder, unsortedSessions],
+  );
   const sessionsRef = useRef(sessions);
+  const lastSessionByEnvironmentRef = useRef(new Map<string, string>());
+  const [stoppedSessionIds, setStoppedSessionIds] = useState<ReadonlySet<string>>(new Set());
+  const previousReachableIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const expectedStopIdsRef = useRef(new Set<string>());
+  const domains = bootstrap?.domains;
+  const reachableIds = useMemo(
+    () => reachableServiceSessionIds(sessions, projectEnvironments ?? [], domains ?? []),
+    [domains, projectEnvironments, sessions],
+  );
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -146,6 +170,32 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       unlistenExit?.();
     };
   }, [queryClient]);
+
+  // Bootstrap polling is what sees a service stop. A stop the user just asked for, or watches
+  // in the active tab, needs no warning, and looking at the tab clears it.
+  useEffect(() => {
+    const previousReachableIds = previousReachableIdsRef.current;
+    previousReachableIdsRef.current = reachableIds;
+
+    setStoppedSessionIds((current) => {
+      const next = new Set(current);
+      next.delete(activeSessionId ?? "");
+      for (const id of reachableIds) {
+        next.delete(id);
+      }
+      for (const id of previousReachableIds) {
+        if (reachableIds.has(id) || !sessionsRef.current.some((session) => session.id === id)) {
+          continue;
+        }
+        if (!expectedStopIdsRef.current.delete(id) && id !== activeSessionId) {
+          next.add(id);
+        }
+      }
+      return next.size === current.size && [...next].every((id) => current.has(id))
+        ? current
+        : next;
+    });
+  }, [activeSessionId, reachableIds]);
 
   const setSelectedTarget = useCallback((target: TerminalTargetRequest | null) => {
     setSelectedTargetState(target);
@@ -282,6 +332,9 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   const interruptSession = useCallback(
     async (sessionId = activeSessionId ?? undefined) => {
       if (!sessionId) return;
+      if (previousReachableIdsRef.current.has(sessionId)) {
+        expectedStopIdsRef.current.add(sessionId);
+      }
       await tauriClient.terminalInterrupt({ sessionId });
       await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     },
@@ -304,12 +357,18 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       }
 
       await tauriClient.terminalClose({ sessionId });
+      const closedIndex = currentSessions.findIndex((candidate) => candidate.id === sessionId);
       const next = currentSessions.filter((candidate) => candidate.id !== sessionId);
       setSessions(next);
       setActiveSessionIdState((currentActive) => {
         if (currentActive !== sessionId) return currentActive;
+        const neighbors = [next[closedIndex], next[closedIndex - 1]].filter(Boolean);
         const nextActive =
-          lastSessionMatchingEnvironment(next, session.target) ?? lastSession(next) ?? null;
+          neighbors.find((candidate) =>
+            sessionEnvironmentMatches(candidate.target, session.target),
+          ) ??
+          neighbors[0] ??
+          null;
         setSelectedTargetState(nextActive ? toTerminalTargetRequest(nextActive.target) : null);
         return nextActive?.id ?? null;
       });
@@ -342,15 +401,71 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     setIsOpen(true);
   }, [activeSessionId, setActiveSessionId]);
 
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId) ?? null,
+    [activeSessionId, sessions],
+  );
+
+  useEffect(() => {
+    if (activeSession) {
+      lastSessionByEnvironmentRef.current.set(
+        environmentKey(activeSession.target),
+        activeSession.id,
+      );
+    }
+  }, [activeSession]);
+
+  // Coming back to a checkout reopens the tab left open there.
+  const selectEnvironment = useCallback(
+    (projectId: string, environmentSlug: string) => {
+      const key = environmentKey({ projectId, environmentSlug });
+      const candidates = sessionsRef.current.filter(
+        (session) => environmentKey(session.target) === key,
+      );
+      const lastSessionId = lastSessionByEnvironmentRef.current.get(key);
+      const session =
+        candidates.find((candidate) => candidate.id === lastSessionId) ?? candidates[0];
+      if (session) {
+        setActiveSessionId(session.id);
+      }
+    },
+    [setActiveSessionId],
+  );
+
+  const selectAdjacentEnvironment = useCallback(
+    (offset: 1 | -1) => {
+      const firstSessions = sessionsRef.current.filter(
+        (session, index, all) =>
+          all.findIndex(
+            (candidate) => environmentKey(candidate.target) === environmentKey(session.target),
+          ) === index,
+      );
+      if (firstSessions.length === 0) return;
+
+      const currentIndex = activeSession
+        ? firstSessions.findIndex(
+            (session) => environmentKey(session.target) === environmentKey(activeSession.target),
+          )
+        : -1;
+      const next =
+        firstSessions[(currentIndex + offset + firstSessions.length) % firstSessions.length];
+      selectEnvironment(next.target.projectId, next.target.environmentSlug);
+    },
+    [activeSession, selectEnvironment],
+  );
+
+  const sessionStates = useMemo(() => {
+    const states = new Map<string, TerminalSessionState>();
+    for (const session of sessions) {
+      const live =
+        session.status === "running" && (!session.target.serviceId || reachableIds.has(session.id));
+      states.set(session.id, stoppedSessionIds.has(session.id) ? "failed" : live ? "live" : "idle");
+    }
+    return states;
+  }, [reachableIds, sessions, stoppedSessionIds]);
+
   const newTabFromActiveTarget = useCallback(async () => {
-    const active = sessionsRef.current.find((session) => session.id === activeSessionId);
-    const target =
-      selectedTarget &&
-      (!active || !targetEnvironmentMatches(toTerminalTargetRequest(active.target), selectedTarget))
-        ? selectedTarget
-        : active
-          ? toTerminalTargetRequest(active.target)
-          : selectedTarget;
+    const target = activeSession ? toTerminalTargetRequest(activeSession.target) : selectedTarget;
 
     if (!target) {
       setIsOpen(true);
@@ -358,17 +473,12 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     }
 
     const session = await tauriClient.terminalCreateSession({
-      target,
+      target: shellTarget(target),
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
     });
     upsertSession(session);
-  }, [activeSessionId, selectedTarget, upsertSession]);
-
-  const activeSession = useMemo(
-    () => sessions.find((session) => session.id === activeSessionId) ?? null,
-    [activeSessionId, sessions],
-  );
+  }, [activeSession, selectedTarget, upsertSession]);
 
   const value = useMemo<TerminalContextValue>(
     () => ({
@@ -389,16 +499,18 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       outputBySessionId,
       panelHeight,
       resizeSession,
+      selectEnvironment,
+      selectNextEnvironment: () => selectAdjacentEnvironment(1),
       selectNextSession,
+      selectPreviousEnvironment: () => selectAdjacentEnvironment(-1),
       selectPreviousSession,
+      sessionStates,
       sessions,
       setActiveSessionId,
       setPanelHeight,
       selectedTarget,
       setSelectedTarget,
-      sidebarCollapsed,
       togglePanel: () => setIsOpen((current) => !current),
-      toggleSidebar: () => setSidebarCollapsed((current) => !current),
       writeToSession,
     }),
     [
@@ -416,14 +528,16 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       outputBySessionId,
       panelHeight,
       resizeSession,
+      selectAdjacentEnvironment,
+      selectEnvironment,
       selectNextSession,
       selectPreviousSession,
+      sessionStates,
       sessions,
       setActiveSessionId,
       setPanelHeight,
       setSelectedTarget,
       selectedTarget,
-      sidebarCollapsed,
       writeToSession,
     ],
   );
@@ -517,43 +631,38 @@ function appendOutputChunk(
   };
 }
 
+// Tabs show one checkout at a time, so moving between tabs stays inside it.
 function adjacentSessionId(
   sessions: TerminalSessionDto[],
   currentSessionId: string | null,
   offset: 1 | -1,
 ) {
   if (sessions.length === 0) return null;
-  const currentIndex = sessions.findIndex((session) => session.id === currentSessionId);
-  if (currentIndex === -1) return sessions[0].id;
-  const currentSession = sessions[currentIndex];
-  const scopedSessions = sessions.filter((session) =>
-    sessionEnvironmentMatches(session.target, currentSession.target),
+  const current = sessions.find((session) => session.id === currentSessionId);
+  if (!current) return sessions[0].id;
+  const scoped = sessions.filter((session) =>
+    sessionEnvironmentMatches(session.target, current.target),
   );
-  const scopedIndex = scopedSessions.findIndex((session) => session.id === currentSessionId);
-  if (scopedIndex === -1) return scopedSessions[0]?.id ?? sessions[0].id;
-  return scopedSessions[(scopedIndex + offset + scopedSessions.length) % scopedSessions.length].id;
+  return scoped[(scoped.indexOf(current) + offset + scoped.length) % scoped.length].id;
 }
 
 function sessionEnvironmentMatches(
   left: TerminalSessionTargetDto,
   right: TerminalSessionTargetDto,
 ) {
-  return left.projectId === right.projectId && left.environmentSlug === right.environmentSlug;
+  return environmentKey(left) === environmentKey(right);
 }
 
-function lastSession(sessions: TerminalSessionDto[]) {
-  return sessions.length > 0 ? sessions[sessions.length - 1] : null;
+function environmentKey(target: { projectId: string; environmentSlug: string }) {
+  return `${target.projectId}/${target.environmentSlug}`;
 }
 
-function lastSessionMatchingEnvironment(
-  sessions: TerminalSessionDto[],
-  target: TerminalSessionTargetDto,
-) {
-  for (let index = sessions.length - 1; index >= 0; index -= 1) {
-    const session = sessions[index];
-    if (sessionEnvironmentMatches(session.target, target)) {
-      return session;
-    }
-  }
-  return null;
+// A new tab is a plain shell at the checkout's root, even next to a service tab.
+function shellTarget(target: TerminalTargetRequest): TerminalTargetRequest {
+  return {
+    kind: target.environmentSlug === "primary" ? "project" : "projectEnvironment",
+    projectId: target.projectId,
+    environmentSlug: target.environmentSlug,
+    serviceId: null,
+  };
 }

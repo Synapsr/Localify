@@ -1,6 +1,7 @@
 import { useAppNavigationHotkeys } from "@/hooks/use-app-navigation-hotkeys";
 import { useTerminalHotkeys } from "@/hooks/use-terminal-hotkeys";
 import { useThemeShortcut } from "@/hooks/use-theme-shortcut";
+import { ProjectOrderProvider } from "@/providers/project-order-provider";
 import { TerminalProvider, useTerminal } from "@/providers/terminal-provider";
 
 import { HttpsTrustNotice } from "./app/https-trust-notice";
@@ -13,9 +14,11 @@ import { SharedNavigation } from "./shared/shared-navigation";
 
 export function AppLayout() {
   return (
-    <TerminalProvider>
-      <AppLayoutContent />
-    </TerminalProvider>
+    <ProjectOrderProvider>
+      <TerminalProvider>
+        <AppLayoutContent />
+      </TerminalProvider>
+    </ProjectOrderProvider>
   );
 }
 

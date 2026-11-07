@@ -7,7 +7,7 @@ import { useMemo } from "react";
 import { AppStartupScreen } from "@/components/shared/app-startup-screen";
 import { bootstrapQueries } from "@/lib/queries";
 import { buildProjectGroups } from "@/lib/util.project-groups";
-import { useProjectOrder } from "@/lib/use-project-order";
+import { useSharedProjectOrder } from "@/providers/project-order-provider";
 
 import { ProjectsListEmptyState } from "./projects-list-empty-state";
 import {
@@ -52,23 +52,7 @@ export const ProjectsList = ({ query }: ProjectsListProps) => {
     }
     return next;
   }, [bootstrap?.projectEnvironments]);
-  const knownIds = useMemo(
-    () => groups.map((group) => group.project.id),
-    [groups],
-  );
-  const projectActivities = useMemo(
-    () =>
-      groups.map((group) => ({
-        id: group.project.id,
-        hasReachableDomain: group.project.hasReachableDomain,
-        lastAccessedAt: group.project.lastAccessedAt,
-      })),
-    [groups],
-  );
-  const { order, pinnedIds, setOrder, togglePinned } = useProjectOrder(
-    knownIds,
-    projectActivities,
-  );
+  const { order, pinnedIds, setOrder, togglePinned } = useSharedProjectOrder();
   const pinnedProjectIds = useMemo(() => new Set(pinnedIds), [pinnedIds]);
   const filteredGroups = useMemo(
     () => filterProjectGroups(groups, query),
