@@ -100,6 +100,15 @@ CREATE INDEX pending_webhooks ON webhook_events (next_attempt_at) WHERE processe
 UPDATE machines SET tunnel_state = 'ready', tunnel_generation = 1, tunnel_ready_at = created_at
 WHERE status = 'active' AND tunnel_id IS NOT NULL;
 
+-- A machine that is not active may still hold a tunnel: a sign-out or a
+-- failed sign-in whose cleanup has not finished, or a sign-in still running.
+-- It holds a slot, counted against MAX_TUNNELS, until the cleanup confirms
+-- the tunnel is gone. These rows serve no daemon and keep generation 0, so
+-- a lookup by name finds `localify-<machine-id>`. A running sign-in that
+-- turns active anyway is released by the sweep as an abandoned operation.
+UPDATE machines SET tunnel_state = 'releasing', tunnel_op_at = 0
+WHERE status != 'active' AND (tunnel_id IS NOT NULL OR reconcile = 1 OR status = 'provisioning');
+
 -- Everyone on the allowlist (ALLOWED_GITHUB_IDS in wrangler.jsonc) keeps
 -- serving through an override. Nothing re-creates it: deleting the row ends
 -- that access.

@@ -234,7 +234,7 @@ type Plan = {
 
 **Signing in registers the machine.** In one D1 batch, the Worker inserts the machine as `active` with `tunnel_state` `none` and issues the token. It makes no Cloudflare call: the tunnel comes when the machine first has something to serve (see "Tunnels"). The `provisioning` machine status remains only for rows from before this contract, and the cleanup revokes such a row after 10 minutes. If the user already has an active machine with the same name, the new one replaces it: the old machine is revoked like a sign-out, its URLs move to the new one, and its tunnel is released. That covers signing in again on a machine whose credentials were lost. The machine name is the computer's name, with ` (dev)` added under the dev profile so that a dev build never replaces the installed app's machine, cut to 64 UTF-16 units. The ingress secret is `HMAC-SHA-256(INGRESS_KEY, machine id)` in hex; it is never stored.
 
-**Signing out.** In one D1 batch, the Worker deletes the token, marks the machine `revoked` and detaches its URLs (`machine: null`). Then it removes the tunnel's connections, deletes the tunnel if there is one, and deletes the DNS record if there is one. Whatever fails stays recorded on the revoked machine, and the 5-minute cleanup retries it. The Worker's own Cloudflare token does this work, so the user's revoked token is never needed again. A ban releases the user's tunnels the same way but keeps their tokens and URLs, so the API keeps answering `403 banned` and an unban restores everything.
+**Signing out.** In one D1 batch, the Worker deletes the token, marks the machine `revoked` and detaches its URLs (`machine: null`). Then, if there is a tunnel, it gives it a new secret, removes its connections and deletes it, and it deletes the DNS record if there is one. Whatever fails stays recorded on the revoked machine, and the 5-minute cleanup retries it. The Worker's own Cloudflare token does this work, so the user's revoked token is never needed again. A ban releases the user's tunnels the same way but keeps their tokens and URLs, so the API keeps answering `403 banned` and an unban restores everything.
 
 ### Tunnels
 
@@ -268,9 +268,10 @@ Each write is conditioned on the row still holding this `tunnel_op` and this `tu
 
 **Releasing**, as the holder of a new `tunnel_op`, from `ready` or from an abandoned `provisioning`:
 
-1. Drops the tunnel's connections, which closes every open stream (ADR 0027).
-2. Deletes the tunnel.
-3. Sets `none` and clears `tunnel_id`, conditioned on the operation.
+1. Gives the tunnel a new `tunnel_secret` (`PATCH` on the tunnel), so its token stops working and `cloudflared` cannot reconnect before the delete.
+2. Drops the tunnel's connections, which closes every open stream (ADR 0027).
+3. Deletes the tunnel.
+4. Sets `none` and clears `tunnel_id`, conditioned on the operation.
 
 It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A machine is released when:
 
@@ -302,7 +303,7 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
 5. Deletes `localify-*` tunnels no machine row holds, once they are more than an hour old.
 6. Logs an error when the database holds more than 800 slots.
 
-Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They may use the whole budget, and they never back off longer than one run. A revocation costs at most 3 calls, so up to 100 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 100. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
+Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They may use the whole budget, and they never back off longer than one run. A revocation costs at most 4 calls (a lookup by name, the new secret, the connections, the delete), so at least 75 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 75. A revocation keeps `rotate_requested_at` set until Cloudflare confirms the delete, so one that fails comes first again in the next run. The budget counts every request actually sent, fallbacks included. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
 
 **Runtime.** `GET /v2/machines/self/runtime?generation=<n>` answers:
 

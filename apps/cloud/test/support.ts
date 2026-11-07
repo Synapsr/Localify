@@ -200,6 +200,8 @@ export function fakeSignIn(
     cloudflareOk({ id: tunnel }),
   );
   context.routes.set(`PUT ${CF}/accounts/account-1/cfd_tunnel/`, () => cloudflareOk({}));
+  // A new tunnel secret, before a tunnel is removed.
+  context.routes.set(`PATCH ${CF}/accounts/account-1/cfd_tunnel/`, () => cloudflareOk({}));
   context.routes.set(`POST ${CF}/zones/zone-1/dns_records`, () =>
     cloudflareOk({ id: `dns-${tunnel}` }),
   );

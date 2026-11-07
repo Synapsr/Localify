@@ -14,6 +14,7 @@ import {
   CloudflareApi,
   CloudflareError,
   LIST_PAGE_SIZE,
+  REMOVE_TUNNEL_CALLS,
   type ListedRecord,
   type ListedTunnel,
 } from "./cloudflare";
@@ -36,9 +37,10 @@ const DOWN_GRACE_MS = 15 * 60 * 1000;
 const ORPHAN_AGE_MS = 60 * 60 * 1000;
 const LATE_REVOCATION_MS = 10 * 60 * 1000;
 const SWEEP_CALL_BUDGET = 300;
-/** A release looks the tunnel up by name at most once, then drops its connections and deletes it. */
-const RELEASE_CALLS = 3;
-const ORPHAN_CALLS = 2;
+/** A release looks the tunnel up by name at most once, then removes it. */
+const RELEASE_CALLS = 1 + REMOVE_TUNNEL_CALLS;
+/** Moving a CNAME may find it gone, fail to create it, then look it up and move it. */
+const CNAME_CALLS = 4;
 const SLOT_ALERT = 800;
 const PROVISIONING_RETRY_SECONDS = 3;
 const CAPACITY_RETRY_SECONDS = 60;
@@ -102,7 +104,7 @@ export async function machineRuntime(
 
   if (!wantsTunnel(entitlement, publicUrls)) {
     if (row.tunnel_state !== "none") {
-      background(ctx, releaseTunnel(env, caller.machineId, row.tunnel_generation, now));
+      background(ctx, releaseTunnel(env, caller.machineId, row.tunnel_generation, { now }));
     }
     if (!isEntitled(entitlement) && publicUrls.some((url) => url.state !== "taken_down")) {
       return {
@@ -139,7 +141,13 @@ export async function machineRuntime(
   // A rotation, or an operation that stopped: release, and the next fetch
   // provisions the next generation.
   if (row.tunnel_state === "ready" || isStale(row.tunnel_op_at, now)) {
-    background(ctx, releaseTunnel(env, caller.machineId, row.tunnel_generation, now));
+    background(
+      ctx,
+      releaseTunnel(env, caller.machineId, row.tunnel_generation, {
+        now,
+        urgent: row.rotate_requested_at !== null,
+      }),
+    );
   }
   return provisioning;
 }
@@ -352,45 +360,54 @@ async function pointCname(
 /** A provisioning that lost its row deletes the tunnel it created. */
 async function abandon(cloudflare: CloudflareApi, machineId: string, tunnelId: string) {
   console.warn("A provisioning lost its machine row; deleting its tunnel", machineId);
-  await cloudflare.cleanConnections(tunnelId);
-  await cloudflare.deleteTunnel(tunnelId);
+  await cloudflare.removeTunnel(tunnelId);
 }
 
 type ReleaseResult = "released" | "skipped" | "failed";
 
+type ReleaseOptions = {
+  now?: number;
+  /**
+   * A revocation: the release must not wait. `rotate_requested_at` marks it
+   * until Cloudflare confirms the deletion, so a failed one stays first in
+   * the next sweep, without backoff.
+   */
+  urgent?: boolean;
+  /** The sweep's budget; API requests have none. */
+  budget?: CallBudget | null;
+};
+
 /**
  * Releases generation `generation` of an active machine, as the holder of a
  * new operation: from `ready`, or from a provisioning or a release that
- * stopped. Drops the tunnel's connections, which closes every open stream,
- * deletes the tunnel, then sets `none`. The CNAME stays: the next tunnel
- * only moves it.
+ * stopped. Removes the tunnel, which closes every open stream, then sets
+ * `none` and clears a rotation requested before it started. The CNAME
+ * stays: the next tunnel only moves it.
  */
 async function releaseTunnel(
   env: Env,
   machineId: string,
   generation: number,
-  now = Date.now(),
+  { now = Date.now(), urgent = false, budget = null }: ReleaseOptions = {},
 ): Promise<ReleaseResult> {
   const op = newOp();
   const taken = await env.DB.prepare(
     `UPDATE machines SET tunnel_state = 'releasing', tunnel_op = ?3, tunnel_op_at = ?4,
-            rotate_requested_at = NULL
+            rotate_requested_at = CASE WHEN ?6 THEN COALESCE(rotate_requested_at, ?4)
+                                       ELSE rotate_requested_at END
      WHERE id = ?1 AND status = 'active' AND tunnel_generation = ?2
        AND (tunnel_state = 'ready'
             OR (tunnel_state IN ('provisioning', 'releasing') AND tunnel_op_at <= ?5))
      RETURNING tunnel_id`,
   )
-    .bind(machineId, generation, op, now, now - OP_STALE_MS)
+    .bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0)
     .first<{ tunnel_id: string | null }>();
   if (!taken) return "skipped";
   try {
-    const cloudflare = new CloudflareApi(env);
+    const cloudflare = new CloudflareApi(env, budget);
     const tunnelId =
       taken.tunnel_id ?? (await cloudflare.findTunnelId(tunnelName(machineId, generation)));
-    if (tunnelId) {
-      await cloudflare.cleanConnections(tunnelId);
-      await cloudflare.deleteTunnel(tunnelId);
-    }
+    if (tunnelId) await cloudflare.removeTunnel(tunnelId);
   } catch (error) {
     console.error("Releasing a tunnel failed; the sweep retries it", machineId, error);
     return "failed";
@@ -398,10 +415,12 @@ async function releaseTunnel(
   await env.DB.prepare(
     `UPDATE machines SET tunnel_state = 'none', tunnel_id = NULL, tunnel_op = NULL,
             tunnel_op_at = NULL, tunnel_ready_at = NULL, down_seen_at = NULL,
+            rotate_requested_at = CASE WHEN rotate_requested_at <= ?3 THEN NULL
+                                       ELSE rotate_requested_at END,
             cleanup_attempts = 0, next_cleanup_at = NULL
      WHERE id = ?1 AND tunnel_op = ?2`,
   )
-    .bind(machineId, op)
+    .bind(machineId, op, now)
     .run();
   return "released";
 }
@@ -497,14 +516,15 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   }
   const done = new Set<string>();
 
-  // 1. Revocations, never backed off.
+  // 1. Revocations, never backed off: one that fails keeps its mark and
+  // comes first again in the next run.
   for (const slot of revocations(slots, entitlements)) {
     if (slot.rotate_requested_at !== null && slot.rotate_requested_at <= now - LATE_REVOCATION_MS) {
       console.error("A tunnel revocation has waited more than 10 minutes", slot.id);
     }
     done.add(slot.id);
-    if (!budget.take(RELEASE_CALLS)) continue;
-    await releaseTunnel(env, slot.id, slot.tunnel_generation, now);
+    if (!budget.has(RELEASE_CALLS)) continue;
+    await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
   }
 
   // 2. Revoked machines.
@@ -560,8 +580,8 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
     if (done.has(slot.id)) continue;
     done.add(slot.id);
     if (slot.next_cleanup_at !== null && slot.next_cleanup_at > now) continue;
-    if (!budget.take(RELEASE_CALLS)) continue;
-    if ((await releaseTunnel(env, slot.id, slot.tunnel_generation, now)) === "failed") {
+    if (!budget.has(RELEASE_CALLS)) continue;
+    if ((await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, budget })) === "failed") {
       const attempts = slot.cleanup_attempts + 1;
       await env.DB.prepare(
         `UPDATE machines SET cleanup_attempts = ?2, next_cleanup_at = ?3 WHERE id = ?1`,
@@ -581,8 +601,8 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
         if (slot.tunnel_id === null) continue;
         const record = byName.get(machineHostname(env, slot.id));
         if (record?.content === `${slot.tunnel_id}.cfargotunnel.com`) continue;
-        if (!budget.take(1)) break;
-        await correctCname(env, slot, record ?? null, now);
+        if (!budget.has(CNAME_CALLS)) break;
+        await correctCname(env, slot, record ?? null, now, budget);
       }
     }
   }
@@ -601,7 +621,7 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
     }>();
     const heldIds = new Set(held.map((row) => row.tunnel_id));
     const heldNames = new Set(held.map((row) => tunnelName(row.id, row.tunnel_generation)));
-    const cloudflare = new CloudflareApi(env);
+    const cloudflare = new CloudflareApi(env, budget);
     for (const tunnel of tunnels) {
       if (
         !OWN_TUNNEL.test(tunnel.name) ||
@@ -610,10 +630,9 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
         heldNames.has(tunnel.name)
       )
         continue;
-      if (!budget.take(ORPHAN_CALLS)) break;
+      if (!budget.has(REMOVE_TUNNEL_CALLS)) break;
       try {
-        await cloudflare.cleanConnections(tunnel.id);
-        await cloudflare.deleteTunnel(tunnel.id);
+        await cloudflare.removeTunnel(tunnel.id);
       } catch (error) {
         console.error("Deleting an orphan tunnel failed", tunnel.name, error);
       }
@@ -632,31 +651,37 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
 }
 
 /**
- * Slots to release before anything else: rotations, oldest request first,
- * then every slot of an owner without entitlement, then an owner's slots
- * provisioned most recently beyond `servingMachines`. A release already on
- * its way is left to finish.
+ * Slots to release before anything else. First the marked ones, oldest mark
+ * first: rotations, and revocations whose release has not finished. Then
+ * every slot of an owner without entitlement, and an owner's slots
+ * provisioned most recently beyond `servingMachines`. A release still
+ * running is skipped by `releaseTunnel` until it counts as abandoned.
  */
 function revocations(slots: SlotRow[], entitlements: Map<string, Entitlement>): SlotRow[] {
-  const rotations = slots
-    .filter((slot) => slot.tunnel_state === "ready" && slot.rotate_requested_at !== null)
+  const marked = slots
+    .filter((slot) => slot.rotate_requested_at !== null)
     .sort((a, b) => (a.rotate_requested_at ?? 0) - (b.rotate_requested_at ?? 0));
   const beyond: SlotRow[] = [];
   const byOwner = new Map<string, SlotRow[]>();
   for (const slot of slots) {
-    if (slot.tunnel_state === "releasing") continue;
     byOwner.set(slot.user_id, [...(byOwner.get(slot.user_id) ?? []), slot]);
   }
   for (const [owner, held] of byOwner) {
     const allowed = entitlements.get(owner)?.servingMachines ?? 0;
-    held.sort(
-      (a, b) =>
-        (a.tunnel_ready_at ?? Infinity) - (b.tunnel_ready_at ?? Infinity) ||
-        a.id.localeCompare(b.id),
-    );
-    beyond.push(...held.slice(allowed));
+    if (allowed === 0) {
+      beyond.push(...held);
+      continue;
+    }
+    const kept = held
+      .filter((slot) => slot.tunnel_state !== "releasing")
+      .sort(
+        (a, b) =>
+          (a.tunnel_ready_at ?? Infinity) - (b.tunnel_ready_at ?? Infinity) ||
+          a.id.localeCompare(b.id),
+      );
+    beyond.push(...kept.slice(allowed));
   }
-  return [...rotations, ...beyond.filter((slot) => !rotations.includes(slot))];
+  return [...marked, ...beyond.filter((slot) => !marked.includes(slot))];
 }
 
 /** Machines with at least one URL their owner's entitlement serves. */
@@ -694,6 +719,7 @@ async function correctCname(
   slot: SlotRow,
   record: ListedRecord | null,
   now: number,
+  budget: CallBudget,
 ): Promise<void> {
   const op = newOp();
   const taken = await env.DB.prepare(
@@ -708,7 +734,7 @@ async function correctCname(
     console.warn("Correcting a machine's CNAME", slot.id);
     const recordId = await pointCname(
       env,
-      new CloudflareApi(env),
+      new CloudflareApi(env, budget),
       slot.id,
       slot.tunnel_id,
       record?.id ?? slot.dns_record_id,
@@ -735,9 +761,9 @@ async function listAll<T extends ListedTunnel | ListedRecord>(
 ): Promise<T[] | null> {
   const all: T[] = [];
   try {
-    const cloudflare = new CloudflareApi(env);
+    const cloudflare = new CloudflareApi(env, budget);
     for (let number = 1; ; number++) {
-      if (!budget.take(1)) return null;
+      if (!budget.has(1)) return null;
       const results = await page(cloudflare, number);
       all.push(...results);
       if (results.length < LIST_PAGE_SIZE) return all;

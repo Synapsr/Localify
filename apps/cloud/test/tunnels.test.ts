@@ -111,15 +111,18 @@ function deferred<T>() {
 }
 
 describe("migration", () => {
-  it("makes existing tunnels generation 1 and gives the allowlist an override", () => {
+  it("makes existing tunnels generation 1, counts the ones still being removed, and gives the allowlist an override", () => {
     const sqlite = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
     applyMigrations(sqlite, (file) => file < "0003");
     sqlite.exec(`
       INSERT INTO users (id, github_id, login, created_at) VALUES ('team', 77238381, 'teo', 1), ('other', 9, 'x', 1);
-      INSERT INTO machines (id, user_id, name, status, tunnel_id, dns_record_id, ingress_port, created_at)
-      VALUES ('served', 'team', 'a', 'active', 't-1', 'd-1', 7381, 5),
-             ('gone', 'team', 'b', 'revoked', 't-2', NULL, 7381, 6),
-             ('bare', 'other', 'c', 'active', NULL, NULL, 7381, 7);`);
+      INSERT INTO machines (id, user_id, name, status, tunnel_id, dns_record_id, ingress_port, created_at, reconcile)
+      VALUES ('served', 'team', 'a', 'active', 't-1', 'd-1', 7381, 5, 0),
+             ('gone', 'team', 'b', 'revoked', 't-2', NULL, 7381, 6, 0),
+             ('failed', 'team', 'c', 'revoked', NULL, NULL, 7381, 7, 1),
+             ('signing-in', 'team', 'd', 'provisioning', NULL, NULL, 7381, 8, 0),
+             ('cleaned', 'team', 'e', 'revoked', NULL, NULL, 7381, 9, 0),
+             ('bare', 'other', 'f', 'active', NULL, NULL, 7381, 10, 0);`);
     applyMigrations(sqlite, (file) => file >= "0003");
 
     expect(
@@ -130,9 +133,16 @@ describe("migration", () => {
         .all(),
     ).toEqual([
       { id: "bare", tunnel_state: "none", tunnel_generation: 0, tunnel_ready_at: null },
-      { id: "gone", tunnel_state: "none", tunnel_generation: 0, tunnel_ready_at: null },
+      { id: "cleaned", tunnel_state: "none", tunnel_generation: 0, tunnel_ready_at: null },
+      // A revoked or unreconciled machine may still hold a tunnel: it holds a slot until the cleanup.
+      { id: "failed", tunnel_state: "releasing", tunnel_generation: 0, tunnel_ready_at: null },
+      { id: "gone", tunnel_state: "releasing", tunnel_generation: 0, tunnel_ready_at: null },
       { id: "served", tunnel_state: "ready", tunnel_generation: 1, tunnel_ready_at: 5 },
+      { id: "signing-in", tunnel_state: "releasing", tunnel_generation: 0, tunnel_ready_at: null },
     ]);
+    expect(
+      sqlite.prepare("SELECT COUNT(*) AS n FROM machines WHERE tunnel_state != 'none'").get(),
+    ).toEqual({ n: 4 });
     expect(
       sqlite
         .prepare(
@@ -326,6 +336,7 @@ describe("runtime v2", () => {
     const { body } = await serve(context, token, 1);
     expect(body.state).toBe("idle");
     expect(cloudflareCalls()).toEqual([
+      "PATCH /accounts/account-1/cfd_tunnel/tunnel-laptop",
       "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop/connections",
       "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop",
     ]);
@@ -371,6 +382,7 @@ describe("runtime v2", () => {
     context.calls.length = 0;
     expect((await serve(context, token)).body.state).toBe("provisioning");
     expect(cloudflareCalls()).toEqual([
+      "PATCH /accounts/account-1/cfd_tunnel/tunnel-laptop",
       "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop/connections",
       "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop",
     ]);
@@ -439,7 +451,9 @@ describe("operations", () => {
       dns_record_id: "dns-tunnel-laptop",
     });
     expect(count("POST /zones/zone-1/dns_records")).toBe(1);
-    const moved = context.calls.find((call) => call.method === "PATCH")!;
+    const moved = context.calls.find(
+      (call) => call.method === "PATCH" && call.url.includes("/dns_records/"),
+    )!;
     expect(moved.url).toBe(`${CF}/zones/zone-1/dns_records/dns-tunnel-laptop`);
     expect(JSON.parse(moved.body!)).toEqual({
       content: "tunnel-2.cfargotunnel.com",
@@ -632,7 +646,7 @@ describe("the sweep", () => {
     for (const machine of machines) expect(row(machine.machineId).tunnel_state).toBe("ready");
   });
 
-  it("does up to 100 revocations a run, and the rest at the next one", async () => {
+  it("does at least 75 revocations a run within 300 calls, and the rest at the next one", async () => {
     const { machineId } = await signIn(context);
     const { user_id } = context.sqlite
       .prepare("SELECT user_id FROM machines WHERE id = ?")
@@ -651,9 +665,12 @@ describe("the sweep", () => {
           .get() as { n: number }
       ).n;
 
+    context.calls.length = 0;
     await runSweep(context.env);
-    expect(ready()).toBe(1);
+    // 3 calls each, started while 4 remain: 99 of them.
+    expect(ready()).toBe(2);
     expect(row("r-100").tunnel_state).toBe("ready");
+    expect(cloudflareCalls().length).toBeLessThanOrEqual(300);
     await runSweep(context.env);
     expect(ready()).toBe(0);
   });
@@ -790,5 +807,120 @@ describe("the sweep", () => {
     expect(
       errors.mock.calls.some((call) => String(call[0]).includes("holds 801 serving slots")),
     ).toBe(true);
+  });
+});
+
+describe("revocations that fail", () => {
+  function failDeletes() {
+    context.routes.delete(`DELETE ${CF}/`);
+    context.routes.set(`DELETE ${TUNNELS}/`, () =>
+      jsonResponse({ success: false, errors: [] }, 500),
+    );
+  }
+
+  it("keep their mark until Cloudflare confirms, and are retried every run without backoff", async () => {
+    const { machineId } = await servingMachine();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const requested = Date.now();
+    update("UPDATE machines SET rotate_requested_at = ? WHERE id = ?", requested, machineId);
+    failDeletes();
+    for (let run = 0; run < 3; run++) {
+      context.calls.length = 0;
+      await runSweep(context.env, requested + run * 5 * MINUTE);
+      expect(count("DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop"), `run ${run}`).toBe(1);
+      expect(row(machineId)).toMatchObject({
+        tunnel_state: "releasing",
+        rotate_requested_at: requested,
+      });
+    }
+    context.routes.set(`DELETE ${TUNNELS}/`, () => cloudflareOk(null));
+    await runSweep(context.env, requested + 15 * MINUTE);
+    expect(row(machineId)).toMatchObject({
+      tunnel_state: "none",
+      rotate_requested_at: null,
+      cleanup_attempts: 0,
+    });
+  });
+
+  it("are retried every run for an owner who lost the entitlement", async () => {
+    const { machineId } = await servingMachine();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    context.env.ALLOWED_GITHUB_IDS = "2";
+    failDeletes();
+    const start = Date.now();
+    for (let run = 0; run < 3; run++) {
+      context.calls.length = 0;
+      await runSweep(context.env, start + run * 5 * MINUTE);
+      expect(count("DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop"), `run ${run}`).toBe(1);
+    }
+    expect(row(machineId)).toMatchObject({ tunnel_state: "releasing", next_cleanup_at: null });
+    context.routes.set(`DELETE ${TUNNELS}/`, () => cloudflareOk(null));
+    await runSweep(context.env, start + 15 * MINUTE);
+    expect(row(machineId)).toMatchObject({ tunnel_state: "none", rotate_requested_at: null });
+  });
+});
+
+describe("removing a tunnel", () => {
+  it("gives it a new secret before dropping its connections and deleting it", async () => {
+    const { token, urlId } = await servingMachine();
+    context.calls.length = 0;
+    await api(context, "DELETE", `/v1/public-urls/${urlId}`, { token });
+    await settle(context);
+    expect(cloudflareCalls()).toEqual([
+      "PATCH /accounts/account-1/cfd_tunnel/tunnel-laptop",
+      "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop/connections",
+      "DELETE /accounts/account-1/cfd_tunnel/tunnel-laptop",
+    ]);
+    const { tunnel_secret } = JSON.parse(context.calls[0]!.body!) as { tunnel_secret: string };
+    expect(Buffer.from(tunnel_secret, "base64")).toHaveLength(32);
+  });
+});
+
+describe("the sweep's budget", () => {
+  it("counts every Cloudflare request, fallbacks included", async () => {
+    const githubIds = Array.from({ length: 20 }, (_, i) => 100 + i);
+    context = createContext({ ALLOWED_GITHUB_IDS: githubIds.join(",") } as Partial<Env>);
+    const insertUser = context.sqlite.prepare(
+      "INSERT INTO users (id, github_id, login, created_at) VALUES (?, ?, ?, 1)",
+    );
+    const insertMachine = context.sqlite.prepare(
+      `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, tunnel_state,
+                             tunnel_generation, tunnel_id, tunnel_ready_at, dns_record_id)
+       VALUES (?, ?, ?, 'active', 7381, 1, 'ready', 1, ?, 1, 'missing')`,
+    );
+    const insertUrl = context.sqlite.prepare(
+      `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
+                                password_version, created_at)
+       VALUES (?, ?, ?, ?, 0, ?, 0, 1, 1)`,
+    );
+    // 20 owners serving from 5 machines each, every CNAME gone from the zone.
+    const tunnels = [];
+    for (const [u, githubId] of githubIds.entries()) {
+      insertUser.run(`u-${u}`, githubId, `user-${u}`);
+      for (let m = 0; m < 5; m++) {
+        const id = `m-${u}-${m}`;
+        insertMachine.run(id, `u-${u}`, id, `t-${id}`);
+        insertUrl.run(`url-${id}`, `u-${u}`, `slug-${id}`, `${id}.localify`, id);
+        tunnels.push({ id: `t-${id}`, name: `localify-${id}-1`, status: "healthy", ageMs: 0 });
+      }
+    }
+    listTunnels(tunnels);
+    listRecords([]);
+    // Each correction takes the longest path: moved, created, looked up, moved.
+    context.routes.set(`PATCH ${CF}/zones/zone-1/dns_records/missing`, () =>
+      jsonResponse({ success: false, errors: [] }, 404),
+    );
+    context.routes.set(`POST ${CF}/zones/zone-1/dns_records`, () =>
+      jsonResponse({ success: false, errors: [{ code: 81053, message: "exists" }] }, 400),
+    );
+    context.routes.set(`GET ${CF}/zones/zone-1/dns_records?type=CNAME&name=`, () =>
+      cloudflareOk([{ id: "found" }]),
+    );
+    context.routes.set(`PATCH ${CF}/zones/zone-1/dns_records/found`, () => cloudflareOk({}));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await runSweep(context.env);
+    expect(cloudflareCalls().length).toBeLessThanOrEqual(300);
+    expect(count("PATCH /zones/zone-1/dns_records/found")).toBeGreaterThan(0);
   });
 });

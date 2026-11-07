@@ -3,23 +3,38 @@
 // current tunnel.
 
 import { setting } from "./config";
+import { randomBytes } from "./crypto";
 
 const API = "https://api.cloudflare.com/client/v4";
 /** Results per page when listing tunnels and DNS records. */
 export const LIST_PAGE_SIZE = 1000;
+/** Calls `removeTunnel` makes: a new secret, the connections, the tunnel. */
+export const REMOVE_TUNNEL_CALLS = 3;
 
 /**
  * Cloudflare API calls a scheduled run may still make. The account allows
- * 1,200 calls per 5 minutes; a run stays well below.
+ * 1,200 calls per 5 minutes; a run stays well below. Every request of a
+ * `CloudflareApi` given a budget spends one call, and none is sent once it
+ * is spent.
  */
 export class CallBudget {
   constructor(public left: number) {}
 
-  /** Reserves `calls` when they fit. */
-  take(calls: number): boolean {
-    if (this.left < calls) return false;
-    this.left -= calls;
-    return true;
+  /** Whether work that makes up to `calls` requests can start. */
+  has(calls: number): boolean {
+    return this.left >= calls;
+  }
+
+  spend(): void {
+    if (this.left < 1) throw new BudgetExhausted();
+    this.left -= 1;
+  }
+}
+
+/** A request refused because the run's budget is spent. Not a CloudflareError: nothing retries it. */
+class BudgetExhausted extends Error {
+  constructor() {
+    super("The run's Cloudflare call budget is spent");
   }
 }
 
@@ -50,7 +65,10 @@ export class CloudflareApi {
   private readonly zoneId: string;
   private readonly token: string;
 
-  constructor(env: Env) {
+  constructor(
+    env: Env,
+    private readonly budget: CallBudget | null = null,
+  ) {
     this.accountId = setting(env, "CLOUDFLARE_ACCOUNT_ID");
     this.zoneId = setting(env, "MACHINE_ZONE_ID");
     this.token = setting(env, "CLOUDFLARE_API_TOKEN");
@@ -162,12 +180,18 @@ export class CloudflareApi {
     await this.callAllowingMissing("DELETE", `${API}/zones/${this.zoneId}/dns_records/${recordId}`);
   }
 
-  /** Drops the connections `cloudflared` holds, so the tunnel can be deleted. */
-  async cleanConnections(tunnelId: string): Promise<void> {
+  /**
+   * Removes a tunnel so that nothing can serve through it again. A new
+   * secret first: dropping the connections alone leaves the token valid, and
+   * `cloudflared` would reconnect before the delete. Then the connections,
+   * which closes every open stream, then the tunnel. What is already gone
+   * counts as done.
+   */
+  async removeTunnel(tunnelId: string): Promise<void> {
+    await this.callAllowingMissing("PATCH", `${this.tunnels()}/${tunnelId}`, {
+      tunnel_secret: btoa(String.fromCharCode(...randomBytes(32))),
+    });
     await this.callAllowingMissing("DELETE", `${this.tunnels()}/${tunnelId}/connections`);
-  }
-
-  async deleteTunnel(tunnelId: string): Promise<void> {
     await this.callAllowingMissing("DELETE", `${this.tunnels()}/${tunnelId}`);
   }
 
@@ -194,10 +218,10 @@ export class CloudflareApi {
     return `${API}/accounts/${this.accountId}/cfd_tunnel`;
   }
 
-  /** A delete of something already gone succeeds. */
-  private async callAllowingMissing(method: string, url: string): Promise<void> {
+  /** A change to something already gone succeeds. */
+  private async callAllowingMissing(method: string, url: string, body?: unknown): Promise<void> {
     try {
-      await this.call(method, url);
+      await this.call(method, url, body);
     } catch (error) {
       if (error instanceof CloudflareError && error.status === 404) return;
       throw error;
@@ -205,6 +229,7 @@ export class CloudflareApi {
   }
 
   private async call<T>(method: string, url: string, body?: unknown): Promise<T | undefined> {
+    this.budget?.spend();
     let response: Response;
     try {
       response = await fetch(url, {
