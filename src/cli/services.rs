@@ -2615,9 +2615,11 @@ mod tests {
         ensure_next_allowed_dev_origin(temp_dir.path(), "fix-branch.demo.localify");
         ensure_next_allowed_dev_origin(temp_dir.path(), "fix-branch.demo.localify");
 
+        // The project's site covers every worktree: none of them changes the file again.
+        ensure_next_allowed_dev_origin(temp_dir.path(), "other.demo.localify");
         let updated = std::fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains("allowedDevOrigins: ['fix-branch.demo.localify']"));
-        assert_eq!(updated.matches("fix-branch.demo.localify").count(), 1);
+        assert!(updated.contains("allowedDevOrigins: ['demo.localify', '**.demo.localify']"));
+        assert!(!updated.contains("fix-branch"));
     }
 
     #[test]
@@ -2633,9 +2635,10 @@ mod tests {
         ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify");
         ensure_vite_allowed_host(temp_dir.path(), "fix-branch.demo.localify");
 
+        ensure_vite_allowed_host(temp_dir.path(), "other.demo.localify");
         let updated = std::fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains("server: { allowedHosts: ['fix-branch.demo.localify'] }"));
-        assert_eq!(updated.matches("fix-branch.demo.localify").count(), 1);
+        assert!(updated.contains("server: { allowedHosts: ['.demo.localify'] }"));
+        assert_eq!(updated.matches("demo.localify").count(), 1);
     }
 
     #[test]
