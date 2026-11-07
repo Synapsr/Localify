@@ -81,13 +81,33 @@ The shared password a public URL asks for before any traffic reaches the machine
 _Avoid_: User login, account access
 
 **Localify Cloud**:
-The hosted service behind public URLs: accounts, URL reservations, access protection and the public entry point.
+The paid hosted service behind public URLs: accounts, plans, URL reservations, access protection and the public entry point.
 _Avoid_: Backend, server, relay
 
 **Cloud Account**:
-A person on the allowlist, signed in to Localify Cloud with GitHub. Each machine they sign in from serves the public URLs it created or claimed.
+A person signed in to Localify Cloud with GitHub. Each machine they sign in from serves the public URLs it created or claimed, as far as their entitlement allows.
 _Avoid_: License, user profile
+
+**Plan**:
+What a cloud account pays for on Polar: Localify Cloud Pro, monthly or yearly, after a 7-day trial, plus optional add-ons. Without a plan, an account can sign in but serves no public URL.
+_Avoid_: Tier, license, subscription (Polar's object behind a plan)
+
+**Entitlement**:
+How many serving machines and public URLs a cloud account may use right now, computed from its plan's state and add-ons, or from an override. A ban makes it zero.
+_Avoid_: Quota, permissions
+
+**Override**:
+A recorded grant of limits for one cloud account, with a reason and an optional expiry, that replaces what the plan would give, such as the team's access.
+_Avoid_: Allowlist, comp, free plan
 
 **Serving Machine**:
 The one signed-in machine whose tunnel carries a public URL's traffic. Another machine takes over with an explicit claim.
 _Avoid_: Host, connector, agent
+
+**Serving Slot**:
+A machine of a cloud account that holds a tunnel, being created, ready or being deleted. An entitlement allows a number of them; signing in uses none.
+_Avoid_: Seat, machine limit, connection
+
+**Suspended**:
+A public URL that exists, keeps its slug and password, but does not serve, because its account's entitlement does not cover it. Paying again or removing other URLs brings it back. Not the same as taken down, which is a removal for abuse.
+_Avoid_: Disabled, offline, deleted

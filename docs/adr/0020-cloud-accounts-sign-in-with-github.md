@@ -1,3 +1,5 @@
+> **Amended.** [ADR 0024](0024-localify-cloud-is-paid-and-billed-through-polar.md) replaces the invite-only allowlist with paid plans and a separate `SIGNUP` switch, and [ADR 0025](0025-tunnels-exist-only-while-a-machine-serves.md) moves tunnel creation out of sign-in.
+
 # Cloud Accounts Sign In With GitHub
 
 Localify Cloud identifies people by their GitHub account, through GitHub's device flow, and replaces the license identity of ADR 0002. `localify login` and the desktop app show a code to confirm on github.com, which works the same in a terminal, over SSH on a remote machine and in the app. The Worker runs the flow with the OAuth App's client ID alone, keeps no GitHub token, and only reads the user's id and login. No email has to be sent and no password stored.
