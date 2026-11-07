@@ -39,6 +39,14 @@ if [ "$(uname -s)" = "Darwin" ]; then
   rm -rf "$ROOT_DIR/src-tauri/target/release/bundle/dmg"
 fi
 
+# With notary credentials, the post-processing rebuilds the DMG from the notarized
+# app, so skip Tauri's Finder layout step: it needs Automation access, which a
+# remote or agent session doesn't have, and its DMG is thrown away anyway.
+if { [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; } ||
+  { [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; }; then
+  export CI=true
+fi
+
 # Tauri only signs here. The post-processing notarizes the final app and DMG.
 env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
   -u APPLE_API_KEY -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH \
