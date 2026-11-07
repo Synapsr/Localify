@@ -99,6 +99,7 @@ export async function machineRuntime(
     caller.machineId,
     entitlement.publicUrls,
   );
+  await adoptUntrackedTunnels(env, now, caller.machineId);
   let row = await tunnelRow(env, caller.machineId);
   const base = { blocked: null, tunnel: null, ingressSecret: null, publicUrls, retryAfter: null };
   const provisioning = {
@@ -516,7 +517,7 @@ type SlotRow = {
  */
 export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
-  await adoptUntrackedTunnels(env, now);
+  await adoptUntrackedTunnels(env, now, null);
   const { results: slots } = await env.DB.prepare(
     `SELECT m.id, m.user_id, u.github_id, m.tunnel_state, m.tunnel_generation, m.tunnel_op_at,
             m.tunnel_id, m.tunnel_ready_at, m.down_seen_at, m.rotate_requested_at, m.dns_record_id,
@@ -724,11 +725,18 @@ function revocations(slots: SlotRow[], entitlements: Map<string, Entitlement>): 
 /**
  * A Worker from before tunnel states can still sign a machine in while a
  * deploy rolls out: the machine is active with a real tunnel and
- * `tunnel_state` `none`, so it holds no slot. Takes it over at generation 1:
- * `ready` when it has a live URL, `releasing` otherwise, already abandoned,
- * so the release below removes it.
+ * `tunnel_state` `none`, so it holds no slot. Takes it over at generation 1
+ * in one statement: `ready` when it has a live URL, `releasing` otherwise,
+ * already abandoned, so the next release removes it. The runtime runs it for
+ * its own machine before it reserves anything, so the old tunnel is reused,
+ * never replaced; the sweep runs it for every machine. `machineId` null
+ * means every machine.
  */
-async function adoptUntrackedTunnels(env: Env, now: number): Promise<void> {
+async function adoptUntrackedTunnels(
+  env: Env,
+  now: number,
+  machineId: string | null,
+): Promise<void> {
   const live = `EXISTS (SELECT 1 FROM public_urls p WHERE p.machine_id = machines.id
                         AND p.deleted_at IS NULL AND p.taken_down_at IS NULL)`;
   await env.DB.prepare(
@@ -736,9 +744,10 @@ async function adoptUntrackedTunnels(env: Env, now: number): Promise<void> {
             tunnel_state = CASE WHEN ${live} THEN 'ready' ELSE 'releasing' END,
             tunnel_ready_at = CASE WHEN ${live} THEN ?1 ELSE NULL END,
             tunnel_op_at = CASE WHEN ${live} THEN NULL ELSE 0 END
-     WHERE status = 'active' AND tunnel_state = 'none' AND tunnel_id IS NOT NULL`,
+     WHERE status = 'active' AND tunnel_state = 'none' AND tunnel_id IS NOT NULL
+       AND (?2 IS NULL OR id = ?2)`,
   )
-    .bind(now)
+    .bind(now, machineId)
     .run();
 }
 

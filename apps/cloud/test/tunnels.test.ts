@@ -1063,3 +1063,42 @@ describe("second review", () => {
     ).toEqual({ n: 1 });
   });
 });
+
+describe("sign-ins by an older Worker", () => {
+  it("reuses the old tunnel when a v1 runtime comes before any sweep, and rotates it", async () => {
+    const { token, machineId } = await signIn(context);
+    await createUrl(token, "journal.localify");
+    // What a Worker from before tunnel states leaves after the migration.
+    update(
+      "UPDATE machines SET tunnel_id = 'legacy-tunnel', dns_record_id = 'dns-legacy' WHERE id = ?",
+      machineId,
+    );
+    context.calls.length = 0;
+
+    const response = await api(context, "GET", "/v1/machines/self/runtime", { token });
+    await settle(context);
+    expect(response.status).toBe(200);
+    expect(cloudflareCalls()).toEqual(["GET /accounts/account-1/cfd_tunnel/legacy-tunnel/token"]);
+    expect(row(machineId)).toMatchObject({
+      tunnel_state: "ready",
+      tunnel_generation: 1,
+      tunnel_id: "legacy-tunnel",
+      dns_record_id: "dns-legacy",
+    });
+    expect(
+      context.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM machines WHERE tunnel_state != 'none'")
+        .get(),
+    ).toEqual({ n: 1 });
+
+    update("UPDATE machines SET rotate_requested_at = ? WHERE id = ?", Date.now(), machineId);
+    context.calls.length = 0;
+    await runSweep(context.env);
+    expect(cloudflareCalls().filter((call) => !call.startsWith("GET"))).toEqual([
+      "PATCH /accounts/account-1/cfd_tunnel/legacy-tunnel",
+      "DELETE /accounts/account-1/cfd_tunnel/legacy-tunnel/connections",
+      "DELETE /accounts/account-1/cfd_tunnel/legacy-tunnel",
+    ]);
+    expect(row(machineId)).toMatchObject({ tunnel_state: "none", tunnel_id: null });
+  });
+});
