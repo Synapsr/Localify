@@ -400,7 +400,7 @@ Losing to a newer revision is not a failure: the newer refresh read Polar later.
 
 ### Moderation
 
-`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 100 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
+`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 75 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
 
 - `ban <github-login> <reason>` and `unban <github-login>`;
 - `takedown <slug> <reason>`;
