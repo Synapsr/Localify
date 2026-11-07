@@ -1404,19 +1404,54 @@ fn apply_next_config_update(update: &NextConfigUpdate) -> Result<()> {
     Ok(())
 }
 
-/// Adds a Localify host to Next.js `allowedDevOrigins` without touching images.
+/// The Localify site a host belongs to: the label before the Localify suffix,
+/// with it. `teo.feature.journal.localify` and `journal.localify` both give
+/// `journal.localify`, so one entry covers a project's namespace, every
+/// worktree and every subdomain under them. Another project with a domain
+/// under the same site is covered too: all of them are this machine's own
+/// local domains.
+fn localify_site(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = normalize_domain(host);
+    let suffix = [BRANDING.dev_domain_suffix, BRANDING.domain_suffix]
+        .into_iter()
+        .find(|suffix| host.ends_with(suffix))
+        .unwrap_or(BRANDING.domain_suffix());
+    let name = host.strip_suffix(suffix).unwrap_or(&host);
+    let label = name.rsplit('.').next().unwrap_or(name);
+    format!("{label}{suffix}")
+}
+
+/// Next.js `allowedDevOrigins` entries for a host's Localify site: the site,
+/// and `**.` before it, which Next.js matches at any depth but not on the
+/// site itself.
+fn next_dev_origins(host: &str) -> [String; 2] {
+    let site = localify_site(host);
+    [site.clone(), format!("**.{site}")]
+}
+
+/// The Vite `server.allowedHosts` entry for a host's Localify site: a leading
+/// dot allows the site and every subdomain.
+fn vite_allowed_host(host: &str) -> String {
+    format!(".{}", localify_site(host))
+}
+
+/// Adds a host's Localify site to Next.js `allowedDevOrigins` without
+/// touching images, so the first run in a project covers every worktree and
+/// none of them changes the file again.
 ///
 /// Full project bootstrap also updates `images.remotePatterns`; `localify run`
-/// only needs to satisfy the Next.js dev-server origin check for the current
-/// ephemeral worktree domain.
+/// only needs to satisfy the Next.js dev-server origin check.
 pub fn apply_next_allowed_dev_origin(
     next_config_path: &Path,
     allowed_dev_origin: &str,
 ) -> Result<bool> {
     let content = fs::read_to_string(next_config_path)
         .with_context(|| format!("Failed to read '{}'", next_config_path.display()))?;
-    let origin = normalize_domain(allowed_dev_origin.to_string());
-    let updated = update_next_allowed_dev_origins_content(&content, &origin)?;
+    let mut updated = content.clone();
+    for origin in next_dev_origins(allowed_dev_origin) {
+        updated = update_next_allowed_dev_origins_content(&updated, &origin)?;
+    }
 
     if updated == content {
         return Ok(false);
@@ -1431,7 +1466,7 @@ pub fn apply_next_allowed_dev_origin(
 fn apply_vite_config_update(update: &ViteConfigUpdate) -> Result<()> {
     let content = fs::read_to_string(&update.vite_config_path)
         .with_context(|| format!("Failed to read '{}'", update.vite_config_path.display()))?;
-    let updated = update_vite_config_content(&content, &update.allowed_host)?;
+    let updated = update_vite_config_content(&content, &vite_allowed_host(&update.allowed_host))?;
 
     if updated == content {
         return Ok(());
@@ -1443,15 +1478,15 @@ fn apply_vite_config_update(update: &ViteConfigUpdate) -> Result<()> {
     Ok(())
 }
 
-/// Adds a Localify host to Vite `server.allowedHosts`.
+/// Adds a host's Localify site to Vite `server.allowedHosts`, so every
+/// worktree and subdomain of the project is allowed by one entry.
 ///
-/// Localify keeps Vite strict by adding the concrete worktree host instead of
-/// using `allowedHosts: true`, which would disable Vite's host allowlist.
+/// Localify keeps Vite strict with the project's own site instead of using
+/// `allowedHosts: true`, which would disable Vite's host allowlist.
 pub fn apply_vite_allowed_host(vite_config_path: &Path, allowed_host: &str) -> Result<bool> {
     let content = fs::read_to_string(vite_config_path)
         .with_context(|| format!("Failed to read '{}'", vite_config_path.display()))?;
-    let host = normalize_domain(allowed_host.to_string());
-    let updated = update_vite_config_content(&content, &host)?;
+    let updated = update_vite_config_content(&content, &vite_allowed_host(allowed_host))?;
 
     if updated == content {
         return Ok(false);
@@ -1821,8 +1856,14 @@ fn update_existing_allowed_hosts(
         &content[array_close + 1..]
     ))
 }
+
+/// `origin` is the service's own domain: its site goes to `allowedDevOrigins`,
+/// and the domain itself to `images.remotePatterns`.
 fn update_next_config_content(content: &str, origin: &str) -> Result<String> {
-    let with_origin = update_next_allowed_dev_origins_content(content, origin)?;
+    let mut with_origin = content.to_string();
+    for allowed in next_dev_origins(origin) {
+        with_origin = update_next_allowed_dev_origins_content(&with_origin, &allowed)?;
+    }
 
     let Some((updated_object_open, updated_object_close)) =
         find_next_config_object_bounds(&with_origin)
@@ -2474,6 +2515,36 @@ mod tests {
     }
 
     #[test]
+    fn a_host_belongs_to_the_site_before_the_localify_suffix() {
+        let suffix = BRANDING.domain_suffix();
+        for host in [
+            format!("journal{suffix}"),
+            format!("web.journal{suffix}"),
+            format!("teo.feature.journal{suffix}"),
+            "journal".to_string(),
+        ] {
+            assert_eq!(localify_site(&host), format!("journal{suffix}"), "{host}");
+        }
+        assert_eq!(
+            localify_site(&format!("web.journal{}", BRANDING.dev_domain_suffix)),
+            format!("journal{}", BRANDING.dev_domain_suffix)
+        );
+        // Case and a trailing dot do not change the site.
+        assert_eq!(
+            localify_site(&format!("WEB.Journal{}.", suffix.to_uppercase())),
+            format!("journal{suffix}")
+        );
+        assert_eq!(
+            next_dev_origins(&format!("web.journal{suffix}")),
+            [format!("journal{suffix}"), format!("**.journal{suffix}")]
+        );
+        assert_eq!(
+            vite_allowed_host(&format!("web.journal{suffix}")),
+            format!(".journal{suffix}")
+        );
+    }
+
+    #[test]
     fn normalize_domain_appends_suffix_once() {
         assert_eq!(
             normalize_domain("demo".into()),
@@ -2935,7 +3006,7 @@ mod tests {
         .unwrap();
 
         let updated = fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains(&format!("allowedDevOrigins: ['{origin}']")));
+        assert!(updated.contains(&format!("allowedDevOrigins: ['{origin}', '**.{origin}']")));
         assert!(updated.contains(&format!("hostname: '{origin}'")));
     }
 
@@ -2979,7 +3050,9 @@ mod tests {
         assert!(!apply_next_allowed_dev_origin(&config_path, &origin).unwrap());
 
         let updated = fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains(&format!("allowedDevOrigins: ['{origin}']")));
+        let site = format!("demo{}", BRANDING.domain_suffix());
+        assert!(updated.contains(&format!("allowedDevOrigins: ['{site}', '**.{site}']")));
+        assert!(!updated.contains("worktree"));
         assert!(!updated.contains("remotePatterns"));
     }
 
@@ -3025,7 +3098,7 @@ mod tests {
         .unwrap();
 
         let updated = fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains(&format!("server: {{ allowedHosts: ['{host}'] }}")));
+        assert!(updated.contains(&format!("server: {{ allowedHosts: ['.{host}'] }}")));
     }
 
     #[test]
@@ -3047,7 +3120,7 @@ mod tests {
 
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(updated.contains("target: 'node-server'"));
-        assert!(updated.contains(&format!("server: {{ allowedHosts: ['{host}'] }}")));
+        assert!(updated.contains(&format!("server: {{ allowedHosts: ['.{host}'] }}")));
     }
 
     #[test]
@@ -3064,8 +3137,10 @@ mod tests {
         assert!(!apply_vite_allowed_host(&config_path, &host).unwrap());
 
         let updated = fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains(&format!("server: {{ allowedHosts: ['{host}'] }}")));
-        assert_eq!(updated.matches(&host).count(), 1);
+        let site = format!("demo{}", BRANDING.domain_suffix());
+        assert!(updated.contains(&format!("server: {{ allowedHosts: ['.{site}'] }}")));
+        assert_eq!(updated.matches(&site).count(), 1);
+        assert!(!updated.contains("worktree"));
     }
 
     #[test]
@@ -3087,7 +3162,7 @@ mod tests {
 
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(updated.contains("server: { ignored: true }"));
-        assert!(updated.contains(&format!("port: 3001,\n      allowedHosts: ['{host}']")));
+        assert!(updated.contains(&format!("port: 3001,\n      allowedHosts: ['.{host}']")));
     }
 
     #[test]
@@ -3109,7 +3184,7 @@ mod tests {
 
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(updated.contains(&format!(
-            "host: process.env.HOST,\n      allowedHosts: ['{host}']"
+            "host: process.env.HOST,\n      allowedHosts: ['.{host}']"
         )));
         assert_eq!(updated.matches("server:").count(), 1);
         assert!(!updated.contains("};,"));
@@ -3137,7 +3212,7 @@ mod tests {
         apply_vite_config_update(&update).unwrap();
 
         let updated = fs::read_to_string(config_path).unwrap();
-        assert!(updated.contains(&format!("'{existing_host}', '{host}'")));
+        assert!(updated.contains(&format!("'{existing_host}', '.{host}'")));
         assert_eq!(updated.matches(&host).count(), 1);
     }
 

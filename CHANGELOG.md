@@ -19,6 +19,12 @@ and the desktop app share the same version.
   answer "has no detected command". It now says the folder no longer exists and gives
   the command that points the project at its new one. When a folder already belongs to
   another project, the message names the file that says so and how to remove it.
+- **Worktrees no longer change `next.config` or `vite.config`.** Localify used to add
+  each worktree's host to Next.js `allowedDevOrigins` or Vite `server.allowedHosts`, and
+  missed subdomains such as `teo.feature.louez.localify`. It now adds the site of the
+  domain once: `louez.localify` and `**.louez.localify` for Next.js, `.louez.localify`
+  for Vite, which cover every worktree and subdomain under `louez.localify`. The
+  entries added before stay; you can remove them.
 - **Localify no longer edits your project's `.gitignore`.** The file that links a folder
   to its project on your machine stays out of Git through the repository's own exclude
   file, which covers every worktree.
