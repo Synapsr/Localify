@@ -52,8 +52,8 @@ The Worker reads the user's subscriptions from Polar (see "Billing"). The Pro pl
 | `trialing` | — | yes | `trialing` |
 | `active` | `cancel_at_period_end` false | yes | `active` |
 | `active` | `cancel_at_period_end` true | yes, until `current_period_end` | `canceling` |
-| `past_due` | for 7 days from when the Worker first saw it `past_due` | yes | `past_due` |
-| `past_due` | later | no | `past_due` |
+| `past_due` | less than 7 days after Polar's `past_due_at` | yes | `past_due` |
+| `past_due` | 7 days or more after `past_due_at` | no | `past_due` |
 | `canceled` | `ends_at` in the future | yes, until `ends_at` | `canceling` |
 | `canceled` | `ended_at` set, or `ends_at` past | no | `none` |
 | `unpaid`, `paused`, `incomplete`, `incomplete_expired` | — | no | `none` |
@@ -93,12 +93,13 @@ One Cloudflare Worker on the Workers Paid plan, deployed with wrangler, with a D
 | `POLAR_PRODUCT_PRO_MONTHLY`, `POLAR_PRODUCT_PRO_YEARLY` | var | the two Pro product ids; both carry a 7-day trial in Polar |
 | `POLAR_PRODUCT_ADDON_MACHINE`, `POLAR_PRODUCT_ADDON_URLS` | var | the add-on product ids, unit-priced, without trial; empty until add-ons ship |
 | `CLOUDFLARE_API_TOKEN` | secret | Tunnel Edit, DNS Edit (Infisical `localify` `/cloud`) |
+| `EDGE_KEY` | secret | the value the Worker sends in `X-Localify-Edge` to machine hostnames; the `localify.dev` zone refuses those hostnames without it (see "Edge rule") |
 | `COOKIE_KEY` | secret | signs access and warning cookies |
 | `INGRESS_KEY` | secret | derives each machine's ingress secret |
-| `POLAR_ACCESS_TOKEN` | secret | an organization access token with `checkouts:write`, `customer_sessions:write` and `subscriptions:read` (and `subscriptions:write` once add-ons ship) |
+| `POLAR_ACCESS_TOKEN` | secret | an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write`, `orders:read` and `refunds:write` |
 | `POLAR_WEBHOOK_SECRET` | secret | the `whsec_…` secret of the webhook endpoint |
 
-In Polar, the organization turns on "Prevent trial abuse", and once add-ons ship, "Enable subscription unit changes" in the customer portal. The webhook endpoint is `https://api.localify.dev/v1/webhooks/polar` and subscribes to every `subscription.*` event and to `customer.state_changed`.
+In Polar, the organization turns on "Prevent trial abuse", and once add-ons ship, "Enable subscription unit changes" in the customer portal. The webhook endpoint is `https://api.localify.dev/v1/webhooks/polar` with `api_version: "2026-10"`, and subscribes to every `subscription.*` event and to `customer.state_changed`. Every REST call sends `Polar-Version: 2026-10`, so requests and webhook payloads share one contract. Polar removes a version about nine months after it ships (2026-10 is removed in April 2027), so the Worker and the endpoint move to a newer version together, before then.
 
 `SIGNUP` only gates the device flow. Entitlements are enforced in both modes. Going back to `allowlist` stops new sign-ins, but accounts already signed in keep their tokens, their plans and their URLs.
 
@@ -112,7 +113,7 @@ machines    (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), na
              tunnel_state TEXT NOT NULL DEFAULT 'none'
                CHECK (tunnel_state IN ('none', 'provisioning', 'ready', 'releasing')),
              tunnel_generation INTEGER NOT NULL DEFAULT 0, tunnel_op TEXT, tunnel_op_at INTEGER,
-             tunnel_id TEXT, tunnel_ready_at INTEGER, down_seen_at INTEGER,
+             tunnel_id TEXT, tunnel_ready_at INTEGER, down_seen_at INTEGER, rotate_requested_at INTEGER,
              dns_record_id TEXT, ingress_port INTEGER NOT NULL,
              created_at INTEGER NOT NULL, revoked_at INTEGER,
              reconcile INTEGER NOT NULL DEFAULT 0, cleanup_attempts INTEGER NOT NULL DEFAULT 0, next_cleanup_at INTEGER)
@@ -128,13 +129,19 @@ plan_overrides (user_id TEXT PRIMARY KEY REFERENCES users(id), serving_machines 
 billing     (user_id TEXT PRIMARY KEY REFERENCES users(id), polar_customer_id TEXT,
              pro_subscription_id TEXT, pro_status TEXT, pro_interval TEXT CHECK (pro_interval IN ('month', 'year')),
              cancel_at_period_end INTEGER NOT NULL DEFAULT 0, current_period_end INTEGER, trial_end INTEGER,
-             ends_at INTEGER, ended_at INTEGER, past_due_since INTEGER,
+             ends_at INTEGER, ended_at INTEGER, past_due_at INTEGER,
              addon_machines INTEGER NOT NULL DEFAULT 0, addon_url_packs INTEGER NOT NULL DEFAULT 0,
-             refresh_started_at INTEGER NOT NULL, refreshed_at INTEGER NOT NULL)
-checkouts   (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
-             product TEXT NOT NULL CHECK (product IN ('pro_monthly', 'pro_yearly', 'addon_machine', 'addon_urls')),
-             units INTEGER NOT NULL DEFAULT 1, url TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)
-webhook_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, user_id TEXT, received_at INTEGER NOT NULL,
+             revision INTEGER NOT NULL, refreshed_at INTEGER NOT NULL)
+billing_revisions (user_id TEXT PRIMARY KEY REFERENCES users(id), last INTEGER NOT NULL,
+             check_due_at INTEGER)
+checkouts   (user_id TEXT NOT NULL REFERENCES users(id),
+             kind TEXT NOT NULL CHECK (kind IN ('pro', 'addon_machine', 'addon_urls')),
+             state TEXT NOT NULL CHECK (state IN ('creating', 'open')), op TEXT,
+             checkout_id TEXT, url TEXT, units INTEGER NOT NULL DEFAULT 1,
+             expires_at INTEGER, created_at INTEGER NOT NULL,
+             PRIMARY KEY (user_id, kind))
+webhook_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, type TEXT NOT NULL,
+             user_id TEXT, received_at INTEGER NOT NULL,
              processed_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER)
 CREATE UNIQUE INDEX one_url_per_local_domain ON public_urls (user_id, local_domain) WHERE deleted_at IS NULL;
 CREATE INDEX live_urls_by_owner ON public_urls (user_id, created_at, id) WHERE deleted_at IS NULL;
@@ -145,9 +152,12 @@ CREATE INDEX pending_webhooks ON webhook_events (next_attempt_at) WHERE processe
 - **Secrets:** tokens are stored as SHA-256 hashes. Passwords use PBKDF2-SHA-256 with a random salt and 100,000 iterations. No tunnel token is stored: the Worker asks Cloudflare for it when a daemon needs a new generation.
 - **Limits:** a user has at most 10 signed-in machines and 10 + 10 × `addon_url_packs` live URLs (or their override's count). A live URL is one that is neither deleted nor taken down. Its owner can still delete a taken-down URL, but its slug stays held. The limits are checked in the same statement as the insert, so two concurrent requests cannot both pass.
 - **Deleted URLs:** deleting a URL sets `deleted_at` and keeps the row for 30 days, so its slug cannot serve someone else's page behind old bookmarks. Only its owner can take that slug again during that time. The daily job removes older deleted rows, except taken-down ones, which are kept with their slug forever.
-- **Billing:** `billing` is a snapshot of the user's Polar subscriptions, written only by a refresh (see "Billing"). `checkouts` keeps each open checkout so that a second request reuses it instead of starting a second purchase. `webhook_events` records each delivery under its `webhook-id`, so a repeated delivery is recognized and a failed one is retried. Processed events are deleted after 30 days.
-- **Trials:** `trial_used_at` is set the first time a refresh sees a Pro subscription with a `trial_start`. From then on, every checkout for that user is created without a trial.
-- **Migration:** the migration that adds these tables, run once, gives each existing user whose GitHub id is in `ALLOWED_GITHUB_IDS` an override (5 serving machines, 10 URLs, reason `team`). It marks every active machine that already has a tunnel as `ready` at generation 0. Those older tunnels are named `localify-<machine-id>` and are released like any other.
+- **Billing:** `billing` is a snapshot of the user's Polar subscriptions, written only by a refresh (see "Billing").
+- **Refresh revisions:** `billing_revisions.last` is a per-user counter. Each refresh takes the next value, and only the winning revision may write. `check_due_at` queues the user for the reconciliation.
+- **Checkouts:** `checkouts` holds at most one Pro checkout per user, for both intervals, and one per add-on, so a second request reuses it instead of starting a second purchase.
+- **Webhook events:** `webhook_events` records each delivery under its `webhook-id`, so a repeated delivery is recognized and a failed one is retried. `seq` orders a user's events for the refresh's watermark. Processed events are deleted after 30 days.
+- **Trials:** `trial_used_at` is set the first time a refresh finds a `trial_start` on any of the user's Pro subscriptions, past ones included. From then on, every checkout for that user is created without a trial.
+- **Migration:** the migration that adds these tables, run once, gives each existing user whose GitHub id is in `ALLOWED_GITHUB_IDS` an override (5 serving machines, 10 URLs, reason `team`). It marks every active machine that already has a tunnel as `ready` at generation 1. Generation 0 only ever means "no tunnel, no token". Those older tunnels are named `localify-<machine-id>` and are released like any other.
 
 ### API
 
@@ -158,7 +168,7 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `POST /v1/auth/device` | — | `{deviceCode, userCode, verificationUri, interval, expiresIn}` |
 | `POST /v1/auth/device/token` | `{deviceCode, machineName, ingressPort}` | `200 {token, user, machine}`; `428 authorization_pending`; `429 slow_down` with `{interval}`, the new polling interval; `403 access_denied` (the person declined on GitHub); `403 not_allowed` (under `SIGNUP=allowlist`); `403 banned`; `403 quota_exceeded` (10 signed-in machines); `410 expired_token` |
 | `GET /v1/me` | — | `{user, machine, plan: Plan}` |
-| `POST /v1/billing/checkout` | `{product: "pro_monthly" \| "pro_yearly"}`; after launch also `{product: "addon_machine" \| "addon_urls", units}` | `{url}`, the Polar checkout to open in a browser. `409 already_subscribed` when the Pro plan is already entitled (manage it with the portal); `402 subscription_required` for an add-on without an entitled Pro plan; `422 invalid_product`. |
+| `POST /v1/billing/checkout` | `{product: "pro_monthly" \| "pro_yearly"}`; after launch also `{product: "addon_machine" \| "addon_urls", units}` | `{kind: "checkout" \| "portal", url}`, the page to open in a browser. When the Pro plan is already entitled, a Pro request gets the customer portal (`kind: "portal"`), where the interval is switched, instead of a checkout. `409 checkout_in_progress` while another request of the same user is creating one (retry after 2 seconds); `402 subscription_required` for an add-on without an entitled Pro plan; `422 invalid_product`. |
 | `POST /v1/billing/portal` | — | `{url}`, a Polar customer portal session. `404 no_billing` when the user has never checked out. |
 | `POST /v1/webhooks/polar` | Polar's signed delivery | `202`; `403` on a bad signature. Not authenticated by a Localify token. |
 | `POST /v1/auth/logout` | — | `204`, see "Signing out" |
@@ -169,8 +179,8 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `DELETE /v1/public-urls/{id}` | — | `204` |
 | `PUT /v1/public-urls/{id}/protection` | `{protection}`, the same object as in `POST` | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
 | `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine, in one update. `402 subscription_required`; `403 taken_down`. |
-| `GET /v2/machines/self/runtime?generation=<n>` | — | `MachineRuntime`, see "Tunnels". `n` is the tunnel generation the daemon runs, `0` when none. |
-| `GET /v1/machines/self/runtime` | — | For clients before this contract: `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` only when the v2 state is `ready`; otherwise `409 runtime_not_ready` with `{state}`. Removed once no such client remains. |
+| `GET /v2/machines/self/runtime?generation=<n>` | — | `MachineRuntime`, see "Tunnels". `n` is the tunnel generation the daemon runs, or `0` when it runs none: generations start at 1, and 0 never names a tunnel. |
+| `GET /v1/machines/self/runtime` | — | For clients before this contract. Runs the same reservation and provisioning as v2. When the state is `ready`, it returns `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` with the current generation's token every time. Otherwise it returns `409 runtime_not_ready` with `{state}`. Removed once no such client remains (see "Rollout order"). |
 
 Error codes this contract adds, everywhere they apply:
 
@@ -266,6 +276,15 @@ It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A
 - the sweep reaps it;
 - it signs out, which also deletes the CNAME.
 
+**Rotating.** One of a machine's URLs can stop serving, through a takedown or a suspension, while the machine keeps serving others. Releasing would not be enough for that URL: its open WebSockets and SSE streams ride the same tunnel as the others. Whoever removes the URL's right (a refresh, a downgrade, `cloud:admin takedown`) sets `rotate_requested_at` on the machine. The Worker, right away or at the next sweep, then releases the machine's current generation as above. The machine still wants a tunnel, so its next runtime fetch provisions generation `n + 1`. The daemon's next fetch comes when `cloudflared` exits twice, which deleting the tunnel causes. The URLs that keep their right to serve are offline for those seconds. ADR 0027 covers this case.
+
+**Edge rule.** A machine hostname is public, and whoever holds its tunnel token could run their own origin behind it and serve arbitrary pages on `localify.dev`. The `localify.dev` zone therefore has two rules:
+
+- a WAF custom rule that blocks every request to a host matching `m-*.localify.dev` unless its `X-Localify-Edge` header equals `EDGE_KEY`;
+- a late request-header transform rule that removes `X-Localify-Edge` before the request reaches the tunnel.
+
+The Worker sends that header on every forwarded request (see "Public traffic"). A tenant who learns the key gains nothing, since a victim's browser never sends it, and the tunnel never sees it.
+
 **The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes:
 
 1. Lists the account's tunnels, page by page.
@@ -274,7 +293,7 @@ It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A
    - down or inactive, with `down_seen_at` empty: sets `down_seen_at`;
    - down or inactive again, with `down_seen_at` and `tunnel_ready_at` both more than 15 minutes old: releases it;
    - a failed read: changes nothing.
-3. Releases abandoned operations and machines that no longer want a tunnel.
+3. Releases abandoned operations, machines that no longer want a tunnel, and `ready` machines whose `rotate_requested_at` is set, clearing it with the release.
 4. Compares each `ready` machine's CNAME content with its `tunnel_id` and corrects it, since a generation check cannot stop a DNS call already on its way.
 5. Deletes `localify-*` tunnels no machine row holds, once they are more than an hour old.
 6. Logs an error when the database holds more than 800 slots.
@@ -304,15 +323,27 @@ type MachineRuntime = {
 
 A banned owner gets `403 banned` instead of a runtime.
 
+**Rollout order.** Clients already installed only know `/v1`, and treat anything but a 401 as a passing failure.
+
+1. The cloud ships `/v2`, the lifecycle, and `/v1` running the same logic. Every user who serves today has an override, so nothing they see changes.
+2. The daemon compatibility release ships `/v2`, the state table in "Daemon", and the terminal stop on `blocked` and `403 banned`.
+3. Only after that release are users without an override able to reach `blocked` or `402`: either `SIGNUP` opens, or an override is removed.
+
+Until then, an old daemon that is refused keeps retrying harmlessly. The cloud has already released its tunnel, so it serves nothing (ADR 0027).
+
 ### Billing
 
-Polar is the merchant of record (ADR 0024). The Worker calls it at `POLAR_API_BASE` with `POLAR_ACCESS_TOKEN`, from the API and the scheduled jobs only, never from the public path. The Polar customer's external id is always the Localify `users.id`. The Worker sets it itself, so a client never chooses it.
+Polar is the merchant of record (ADR 0024). The Worker calls it at `POLAR_API_BASE` with `POLAR_ACCESS_TOKEN` and `Polar-Version: 2026-10`, from the API and the scheduled jobs only, never from the public path. The Polar customer's external id is always the Localify `users.id`. The Worker sets it itself, so a client never chooses it.
 
-**Checkout.** `POST /v1/billing/checkout` maps `product` to its configured product id, so a client can only buy those four. It reuses a row of `checkouts` for the same user and product that expires more than 5 minutes from now. Otherwise it calls `POST /v1/checkouts/` with:
+**Checkout.** `POST /v1/billing/checkout` maps `product` to its configured product ids, so a client can only buy those. A Pro request from a user whose Pro plan is entitled gets the portal instead (below). Otherwise, one checkout per user and kind exists at a time, and creating it is serialized through the `checkouts` row:
+
+1. Claims the row: inserts `creating` with a random `op`, or takes over a row that is `open` and expires less than 5 minutes from now, or `creating` for more than 30 seconds. An `open` row that expires more than 5 minutes from now is returned as is. A Pro checkout lists both intervals, so a request for the other one reuses it, and the person picks the interval on Polar's page. A row another request is `creating` answers `409 checkout_in_progress`.
+2. Calls `POST /v1/checkouts/` with the fields below.
+3. Sets `open`, `checkout_id`, `url` and `expires_at`, conditioned on `op`.
 
 | Field | Value |
 |---|---|
-| `products` | that one id |
+| `products` | for Pro, both Pro ids with the requested interval first, which Polar selects by default; for an add-on, its one id |
 | `external_customer_id` | the user id |
 | `allow_trial` | `false` once `trial_used_at` is set, and for add-ons |
 | `metadata` | `{userId}` |
@@ -320,7 +351,7 @@ Polar is the merchant of record (ADR 0024). The Worker calls it at `POLAR_API_BA
 | `return_url` | `https://localify.dev/pricing` |
 | `units` | for an add-on |
 
-It stores the checkout's `url` and `expires_at` and returns the URL. The success page only says to go back to Localify: it grants nothing. Access starts when a refresh sees the subscription.
+The success page only says to go back to Localify: it grants nothing. Access starts when a refresh sees the subscription.
 
 **Portal.** `POST /v1/billing/portal` calls `POST /v1/customer-sessions/` with `external_customer_id` and `return_url: https://localify.dev/cloud`, and returns `customer_portal_url`. Cancelling, the card, invoices, refunds requested through support, and (after launch) add-on quantities all live there.
 
@@ -329,26 +360,42 @@ It stores the checkout's `url` and `expires_at` and returns the URL. The success
 1. Reads the raw body and verifies `webhook-id`, `webhook-timestamp` and `webhook-signature` with `POLAR_WEBHOOK_SECRET`, Standard Webhooks style. A bad signature, or a timestamp more than 5 minutes off, answers 403.
 2. `INSERT OR IGNORE`s the event into `webhook_events` with its user. The user is the customer's `external_id`: `data.customer.external_id` on `subscription.*`, `data.external_id` on `customer.state_changed`.
 3. Answers `202` within Polar's 10-second timeout, also for event types it ignores and for customers without an external id.
-4. Refreshes that user in `waitUntil`. A refresh that fails leaves the event unprocessed. The 5-minute job retries it with backoff (1 minute, doubling, up to 6 hours), and logs an error after 10 attempts.
+4. Refreshes that user in `waitUntil`. A refresh that fails leaves the event pending. The 5-minute job retries pending events with backoff (1 minute, doubling, up to 6 hours), and logs an error after 10 attempts.
 
 The payload is never trusted for state: it only names who to refresh.
 
 **Refresh.** For one user:
 
-1. Notes `started = now`.
-2. Calls `GET /v1/subscriptions/?external_customer_id=<user id>&limit=100`, page by page.
-3. Picks the Pro subscription (see "Lifecycle") and sums the units of add-on subscriptions that are `active` or `trialing`.
-4. Upserts `billing` only `WHERE excluded.refresh_started_at >= billing.refresh_started_at`, so a refresh that started earlier can never overwrite one that started later. `past_due_since` keeps its first value while the status stays `past_due`, and is cleared otherwise. `trial_used_at` is set when the Pro subscription has a `trial_start`.
-5. Marks the user's pending webhook events as processed.
-6. Applies the entitlement: downgrades, releases (ADR 0027), and `forgetSite` for the user's slugs.
+1. Takes the next revision: `UPDATE billing_revisions SET last = last + 1 … RETURNING last`, inserting the row at 1 the first time.
+2. Captures the watermark: the highest `seq` among the user's stored webhook events.
+3. Calls `GET /v1/subscriptions/?external_customer_id=<user id>&limit=100`, page by page, every status included.
+4. Works out the state:
+   - picks the Pro subscription (see "Lifecycle");
+   - sums the units of add-on subscriptions that are `active` or `trialing`;
+   - copies Polar's `past_due_at`;
+   - sets `trial_used_at` when any Pro subscription, past ones included, has a `trial_start`.
+5. Upserts `billing` with its revision, only `WHERE excluded.revision > billing.revision`.
+6. Runs the follow-up work, each step conditioned on `billing.revision` still being its own:
+   - applying the entitlement: downgrades, releases and rotations (ADR 0027), and `forgetSite` for the user's slugs;
+   - the duplicate check below.
+7. When steps 5 and 6 have committed, marks processed the user's events with `seq` at or below the watermark.
 
-Without an entitled Pro plan, the refresh cancels the user's add-on subscriptions at period end through Polar's API, so they stop charging for nothing. This ships with add-ons.
+Losing to a newer revision is not a failure: the newer refresh read Polar later. Events stored after the watermark stay pending and cause another refresh. A refresh that fails leaves its events pending for the retry.
 
-**Reconciliation.** The daily job refreshes every user with a `billing` row whose status is not `none`, or whose `refreshed_at` is older than 7 days. A missed webhook therefore costs at most a day, and the 7-day `past_due` grace runs out on time.
+**Duplicate Pro subscriptions.** A single pending checkout makes a second Pro subscription rare, but a second checkout opened from an old link could still create one. When a refresh finds two entitled Pro subscriptions:
+
+1. It keeps the one ending latest.
+2. It revokes the other with `DELETE /v1/subscriptions/{id}`.
+3. It refunds that subscription's paid orders, found with `GET /v1/orders/?subscription_id=`, through `POST /v1/refunds/` with the full `amount` and reason `duplicate`.
+4. It logs an error so a person follows up.
+
+**Add-ons**, contracted and deferred: they need an entitled Pro plan. When the Pro plan stops being entitled, the refresh cancels them at period end, so they stop charging for nothing.
+
+**Reconciliation.** Once a day, the job sets `check_due_at` for every user who has a `billing` row or a `checkouts` row. It also pages through all the organization's subscriptions (`GET /v1/subscriptions/?limit=100`) and does the same for each `customer.external_id` it finds. That catches a customer whose state changed without any event reaching us. The 5-minute job refreshes due users, oldest first, within its budget, and clears `check_due_at` when a refresh commits. Every user is therefore checked against Polar at least once a day, so a missed webhook costs at most a day, and the 7-day `past_due` grace ends on time.
 
 ### Moderation
 
-`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. The next sweep releases the tunnels that no longer have anything to serve, which closes open streams within 5 minutes (ADR 0027). There is no admin route on the Worker to protect.
+`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes (ADR 0027). There is no admin route on the Worker to protect.
 
 - `ban <github-login> <reason>` and `unban <github-login>`;
 - `takedown <slug> <reason>`;
@@ -380,11 +427,12 @@ For a request to `*.localify.fyi`, the Worker:
 6. Forwards to `https://m-<machine-id>.localify.dev<path>?<query>` with the method, body and headers, after removing:
    - `Host`, `Forwarded`, `X-Real-IP`;
    - every `X-Forwarded-*`, `X-Localify-*` and `CF-*` header;
-   - the `Localify-Skip-Warning` header;
+   - the `Localify-Skip-Warning` header and any incoming `X-Localify-Edge`;
    - the access and notice cookies from `Cookie`. It adds:
 
 | Header | Value |
 |---|---|
+| `X-Localify-Edge` | `EDGE_KEY`, which the `localify.dev` zone checks and then removes (see "Edge rule") |
 | `X-Localify-Ingress` | the machine's ingress secret |
 | `X-Localify-Public-Host` | the public host |
 | `X-Localify-Local-Host` | the local host |
@@ -499,7 +547,7 @@ localify public-url claim <url-or-slug-or-id>
 4. Polls `GET /v1/me` every 5 seconds for up to 15 minutes, until `plan.entitled`.
 5. Sends `public_refresh` and prints the plan.
 
-On `409 already_subscribed`, it says to run `localify billing`. Without a terminal, it prints the URL (JSON: `{url}`) and returns without waiting.
+When it gets the portal instead (`kind: "portal"`), it says the plan is already active and opens the portal, where the interval can be switched. Without a terminal, it prints the URL (JSON: `{kind, url}`) and returns without waiting.
 
 `billing` calls `POST /v1/billing/portal` and opens the URL the same way. `whoami` prints the plan the way `/v1/me` gives it, for example:
 

@@ -83,24 +83,32 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05; step 5 comes with the p
 1. **GitHub OAuth App** (in the Synapsr organization: Settings → Developer settings → OAuth Apps): any homepage and callback URL, **Enable Device Flow** checked. Its client ID is `GITHUB_CLIENT_ID` in [`wrangler.jsonc`](wrangler.jsonc). It needs no client secret.
 2. **Infisical**, project `localify`, folder `/cloud`, same keys in `dev` and `prod`, with values that differ between them:
    - `CLOUDFLARE_API_TOKEN`: a token with Cloudflare Tunnel Edit and DNS Edit on `localify.dev` and `localify.fyi`, used by the Worker to manage tunnels; it cannot deploy.
-   - `COOKIE_KEY` and `INGRESS_KEY`: `openssl rand -hex 32` each.
+   - `COOKIE_KEY`, `INGRESS_KEY` and `EDGE_KEY`: `openssl rand -hex 32` each.
    - `POLAR_ACCESS_TOKEN`: an organization access token; `dev` holds the sandbox one.
    - `POLAR_WEBHOOK_SECRET`.
    - For reference only: `CLOUDFLARE_ACCOUNT_ID`, `GITHUB_CLIENT_ID` and `D1_DATABASE_ID`.
 
-   Changing `COOKIE_KEY` signs every browser out and shows every visitor the warning page again. Changing `INGRESS_KEY` makes every daemon refuse public traffic until its next runtime fetch, within 5 minutes.
+   Changing `COOKIE_KEY` signs every browser out and shows every visitor the warning page again. Changing `INGRESS_KEY` makes every daemon refuse public traffic until its next runtime fetch, within 5 minutes. Changing `EDGE_KEY` means updating the zone's WAF rule in the same step, or public traffic stops.
 3. **D1 database**: `pnpm exec wrangler d1 create localify-cloud --location weur`, then put the printed id in `database_id` in `wrangler.jsonc`.
 4. **Migrations and deploy**, with your own `wrangler login`: `pnpm cloud:migrate`, then `pnpm cloud:deploy`. The deploy script ([`scripts/deploy.mjs`](scripts/deploy.mjs)) reads the secrets from Infisical and passes them to `wrangler deploy --secrets-file`, keeping the Tunnel and DNS token out of wrangler's own environment.
 
 5. **Polar**, once in the sandbox (`sandbox.polar.sh`) and once in production:
    - two Pro products, $7.99 a month and $79 a year, each with a 7-day trial; their ids go in `POLAR_PRODUCT_PRO_MONTHLY` and `POLAR_PRODUCT_PRO_YEARLY`;
    - "Prevent trial abuse" turned on;
-   - a webhook endpoint at `https://api.localify.dev/v1/webhooks/polar` (the sandbox points at a dev deployment), subscribed to `subscription.*` and `customer.state_changed`;
-   - an organization access token with `checkouts:write`, `customer_sessions:write` and `subscriptions:read`.
+   - a webhook endpoint at `https://api.localify.dev/v1/webhooks/polar` (the sandbox points at a dev deployment), with `api_version` `2026-10`, subscribed to `subscription.*` and `customer.state_changed`;
+   - an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write`, `orders:read` and `refunds:write`.
+
+   The Worker sends `Polar-Version: 2026-10` on every call. Polar removes that version in April 2027: move the Worker and the webhook endpoint to the next version together before then.
 
    The add-on products and "Enable subscription unit changes" come when add-ons ship.
 
 The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route, and a rate-limiting rule per client IP (docs/public-urls.md, "Public traffic").
+
+The `localify.dev` zone needs two rules, so that nobody holding a tunnel token can serve pages on a machine hostname directly (docs/public-urls.md, "Edge rule"):
+
+- **WAF custom rule, action Block:**
+  `starts_with(http.host, "m-") and ends_with(http.host, ".localify.dev") and not any(http.request.headers["x-localify-edge"][*] eq "<EDGE_KEY>")`
+- **Request header transform rule:** remove `X-Localify-Edge` on the same hosts. Transform rules run after the WAF, so the header never reaches the tunnel.
 
 ### Configuration
 
@@ -113,6 +121,7 @@ The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label
 | `POLAR_PRODUCT_PRO_MONTHLY`, `POLAR_PRODUCT_PRO_YEARLY` | var | Pro product ids |
 | `POLAR_PRODUCT_ADDON_MACHINE`, `POLAR_PRODUCT_ADDON_URLS` | var | add-on product ids, empty until add-ons ship |
 | `POLAR_ACCESS_TOKEN`, `POLAR_WEBHOOK_SECRET` | secret | from Infisical |
+| `EDGE_KEY` | secret | from Infisical; must match the `localify.dev` WAF rule |
 
 The full table, with the Cloudflare and GitHub settings, is in [docs/public-urls.md](../../docs/public-urls.md), "Configuration".
 
