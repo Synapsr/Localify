@@ -1,4 +1,11 @@
-import type { CloudAccountDto, PublicUrlDto, TunnelStatusDto } from "@/types/localify";
+import type {
+  CloudAccountDto,
+  CloudPlanDto,
+  CloudPlanIntervalDto,
+  CloudRuntimeBlockDto,
+  PublicUrlDto,
+  TunnelStatusDto,
+} from "@/types/localify";
 
 import { normalizeSuffix } from "@/lib/validators/validator.create-project";
 
@@ -14,8 +21,102 @@ export interface CloudStatus {
   detail: string | null;
 }
 
+/** Pro's prices (`docs/public-urls.md`, "Plans"). */
+export const PRO_PRICE: Record<CloudPlanIntervalDto, string> = {
+  month: "$7.99 a month",
+  year: "$79 a year",
+};
+
+export const ABUSE_CONTACT = "abuse@localify.dev";
+
+/** `14 Nov 2026` from an RFC 3339 time. */
+export function formatPlanDate(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** The plan in words, as the plan card shows it. */
+export function describePlan(plan: CloudPlanDto): { label: string; detail: string | null } {
+  const interval = plan.interval === "year" ? "yearly" : "monthly";
+  switch (plan.status) {
+    case "none":
+      return {
+        label: "No plan",
+        detail: plan.trialAvailable
+          ? "Public URLs need Localify Cloud Pro. It starts with a 7-day free trial."
+          : "Public URLs need Localify Cloud Pro.",
+      };
+    case "trialing":
+      return { label: `Trial, ends ${formatPlanDate(plan.trialEndsAt)}`, detail: null };
+    case "active":
+      return {
+        label: plan.renewsAt
+          ? `Pro ${interval}, renews ${formatPlanDate(plan.renewsAt)}`
+          : `Pro ${interval}`,
+        detail: null,
+      };
+    case "canceling":
+      return {
+        label: `Ending ${formatPlanDate(plan.endsAt)}`,
+        detail: "Public URLs stop serving then. Renew it in Manage billing.",
+      };
+    case "past_due":
+      return {
+        label: "Payment failed, update the card",
+        detail: plan.entitled
+          ? "Public URLs keep serving for a few days while the card is retried."
+          : "Public URLs are paused until the card is updated.",
+      };
+    case "override":
+      return {
+        label: plan.endsAt ? `Team access, until ${formatPlanDate(plan.endsAt)}` : "Team access",
+        detail: null,
+      };
+  }
+}
+
+/**
+ * The other machines serving the account's URLs: the ones holding its serving slots when
+ * this Mac finds none left.
+ */
+export function slotHolders(publicUrls: PublicUrlDto[] | undefined): string[] {
+  const names = (publicUrls ?? [])
+    .filter((url) => !url.servedHere && url.state !== "suspended" && url.state !== "taken_down")
+    .map((url) => url.machineName)
+    .filter((name): name is string => name !== null);
+  return [...new Set(names)].sort();
+}
+
+/** Why this Mac serves nothing although it has URLs, when Localify Cloud blocks it. */
+function describeBlock(block: CloudRuntimeBlockDto): CloudStatus {
+  switch (block.reason) {
+    case "subscription_required":
+      return { tone: "error", label: "Needs a plan", detail: block.message };
+    case "serving_slots_full":
+      return { tone: "error", label: "No serving slot left", detail: block.message };
+    case "capacity":
+      return {
+        tone: "pending",
+        label: "Waiting for room",
+        detail: `${block.message} Serving resumes by itself.`,
+      };
+    default:
+      return { tone: "error", label: "Blocked", detail: block.message };
+  }
+}
+
 /** This Mac's tunnel, which carries only the URLs this Mac serves. */
 export function describeTunnel(tunnel: TunnelStatusDto): CloudStatus {
+  if (tunnel.runtime === "blocked" && tunnel.blocked) return describeBlock(tunnel.blocked);
+  if (tunnel.runtime === "provisioning" && tunnel.state === "stopped") {
+    return {
+      tone: "pending",
+      label: "Starting",
+      detail: "Localify Cloud is preparing this Mac's tunnel.",
+    };
+  }
   switch (tunnel.state) {
     case "connected":
       return {
@@ -46,6 +147,21 @@ export function describePublicUrlState(
   publicUrl: PublicUrlDto,
   account: CloudAccountDto | undefined,
 ): CloudStatus {
+  if (publicUrl.state === "suspended") {
+    return {
+      tone: "off",
+      label: "Suspended",
+      detail:
+        "The plan does not cover it right now, so it does not serve. Its name and password are kept.",
+    };
+  }
+  if (publicUrl.state === "taken_down") {
+    return {
+      tone: "error",
+      label: "Taken down",
+      detail: `It was removed for abuse and cannot serve again. To appeal, write to ${ABUSE_CONTACT}.`,
+    };
+  }
   if (!publicUrl.servedHere) {
     return publicUrl.machineName
       ? {
@@ -60,6 +176,9 @@ export function describePublicUrlState(
         };
   }
 
+  if (account?.tunnel.runtime === "blocked" && account.tunnel.blocked) {
+    return describeBlock(account.tunnel.blocked);
+  }
   switch (account?.tunnel.state) {
     case "connected":
       return {

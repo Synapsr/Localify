@@ -68,6 +68,9 @@ jobs:
       - name: Typecheck desktop UI
         run: pnpm run typecheck
 
+      - name: Test desktop UI
+        run: pnpm desktop:test
+
       - name: Typecheck Localify Cloud
         run: pnpm cloud:typecheck
 

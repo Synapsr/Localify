@@ -22,10 +22,11 @@ use localify::desktop::dto::{
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use localify::desktop::dto::{
-    CheckPublicUrlSlugRequest, CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto,
-    CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest, PublicUrlDto,
-    PublicUrlIdRequest, PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto,
-    PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest, SuggestPublicUrlSlugRequest,
+    CheckPublicUrlSlugRequest, CloudAccountDto, CloudBillingPageDto, CloudPlanDto,
+    CloudSignInPollDto, CloudSignInStartDto, CloudSignOutDto, CreatePublicUrlRequest,
+    PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest, PublicUrlSlugCheckDto,
+    PublicUrlSlugSuggestionDto, PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest,
+    StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -603,6 +604,43 @@ pub async fn poll_cloud_sign_in(
 pub async fn sign_out_cloud(state: tauri::State<'_, AppState>) -> Result<CloudSignOutDto, String> {
     let api = state.api.clone();
     async_runtime::spawn_blocking(move || api.sign_out_cloud().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn get_cloud_plan(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<CloudPlanDto>, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.cloud_plan().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn start_cloud_checkout(
+    state: tauri::State<'_, AppState>,
+    request: StartCloudCheckoutRequest,
+) -> Result<CloudBillingPageDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.start_cloud_checkout(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn open_cloud_billing_portal(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.open_cloud_billing_portal().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn refresh_public_tunnel(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.refresh_public_tunnel().map_err(map_error))
         .await
         .map_err(map_error)?
 }

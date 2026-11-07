@@ -22,7 +22,10 @@ use crate::application::ports::DaemonConnection;
 use crate::application::ports::DaemonControl;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
-use crate::application::ports::{ProtectionChoice, ProtectionMode, TunnelState};
+use crate::application::ports::{
+    BillingPageKind, Plan, PlanCounts, PlanInterval, PlanStatus, ProtectionChoice, ProtectionMode,
+    PublicUrlState, RuntimeState, TunnelState,
+};
 use crate::application::public_urls::{CreatePublicUrl, PublicUrlView};
 use crate::application::register_domain::RegisterDomain;
 use crate::application::restart_daemon::RestartDaemon;
@@ -61,11 +64,14 @@ use crate::desktop::dto::{
     UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::dto::{
-    CheckPublicUrlSlugRequest, CloudAccountDto, CloudSignInPollDto, CloudSignInStartDto,
+    CheckPublicUrlSlugRequest, CloudAccountDto, CloudBillingPageDto, CloudBillingPageKindDto,
+    CloudPlanCountsDto, CloudPlanDto, CloudPlanIntervalDto, CloudPlanStatusDto,
+    CloudRuntimeBlockDto, CloudRuntimeStateDto, CloudSignInPollDto, CloudSignInStartDto,
     CloudSignInStatusDto, CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest,
     PublicUrlDto, PublicUrlIdRequest, PublicUrlProtectionDto, PublicUrlProtectionModeDto,
-    PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto, PublicUrlWithPasswordDto,
-    SetPublicUrlProtectionRequest, SuggestPublicUrlSlugRequest, TunnelStateDto, TunnelStatusDto,
+    PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto, PublicUrlStateDto, PublicUrlWithPasswordDto,
+    SetPublicUrlProtectionRequest, StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
+    TunnelStateDto, TunnelStatusDto,
 };
 use crate::desktop::node_trust;
 use crate::desktop::port_conflicts::{
@@ -417,6 +423,50 @@ impl DesktopApi {
         Ok(map_public_url(
             self.cloud()?.public_urls().claim(&request.id)?.value,
         ))
+    }
+
+    /// The account's plan from Localify Cloud; `None` from a cloud that does
+    /// not report plans yet.
+    pub fn cloud_plan(&self) -> Result<Option<CloudPlanDto>> {
+        Ok(self.cloud()?.billing().plan()?.map(map_cloud_plan))
+    }
+
+    /// Opens the Polar checkout for Pro in the browser, or the customer
+    /// portal when the plan is already active.
+    pub fn start_cloud_checkout(
+        &self,
+        request: StartCloudCheckoutRequest,
+    ) -> Result<CloudBillingPageDto> {
+        let interval = match request.interval {
+            CloudPlanIntervalDto::Month => PlanInterval::Month,
+            CloudPlanIntervalDto::Year => PlanInterval::Year,
+        };
+        let page = self.cloud()?.billing().subscribe(interval)?;
+        self.open_project_url_with_preferred_browser(&page.url)?;
+        Ok(CloudBillingPageDto {
+            kind: match page.kind {
+                BillingPageKind::Checkout => CloudBillingPageKindDto::Checkout,
+                BillingPageKind::Portal => CloudBillingPageKindDto::Portal,
+            },
+            url: page.url,
+        })
+    }
+
+    /// Opens the Polar customer portal in the browser.
+    pub fn open_cloud_billing_portal(&self) -> Result<()> {
+        let url = self.cloud()?.billing().portal()?;
+        self.open_project_url_with_preferred_browser(&url)
+    }
+
+    /// Asks the daemon to fetch what this Mac may serve, once a plan became
+    /// entitled. A stopped daemon fetches it when it starts.
+    pub fn refresh_public_tunnel(&self) -> Result<()> {
+        match self.cloud()?.billing().refresh_tunnel() {
+            TunnelRefresh::Done | TunnelRefresh::DaemonStopped => Ok(()),
+            TunnelRefresh::Failed(reason) => anyhow::bail!(
+                "The daemon did not take the new plan ({reason}). It checks again within 5 minutes, or restart it."
+            ),
+        }
     }
 
     fn cloud(&self) -> Result<CloudAdapters> {
@@ -4034,7 +4084,46 @@ fn map_cloud_account(status: AccountStatus) -> CloudAccountDto {
             },
             connections: status.tunnel.connections,
             error: status.tunnel.error,
+            runtime: status.tunnel.runtime.map(|runtime| match runtime {
+                RuntimeState::Idle => CloudRuntimeStateDto::Idle,
+                RuntimeState::Provisioning => CloudRuntimeStateDto::Provisioning,
+                RuntimeState::Ready => CloudRuntimeStateDto::Ready,
+                RuntimeState::Blocked => CloudRuntimeStateDto::Blocked,
+                RuntimeState::Banned => CloudRuntimeStateDto::Banned,
+            }),
+            blocked: status.tunnel.blocked.map(|blocked| CloudRuntimeBlockDto {
+                reason: blocked.reason,
+                message: blocked.message,
+            }),
         },
+    }
+}
+
+fn map_cloud_plan(plan: Plan) -> CloudPlanDto {
+    let counts = |counts: PlanCounts| CloudPlanCountsDto {
+        serving_machines: counts.serving_machines,
+        public_urls: counts.public_urls,
+    };
+    CloudPlanDto {
+        status: match plan.status {
+            PlanStatus::None => CloudPlanStatusDto::None,
+            PlanStatus::Trialing => CloudPlanStatusDto::Trialing,
+            PlanStatus::Active => CloudPlanStatusDto::Active,
+            PlanStatus::PastDue => CloudPlanStatusDto::PastDue,
+            PlanStatus::Canceling => CloudPlanStatusDto::Canceling,
+            PlanStatus::Override => CloudPlanStatusDto::Override,
+        },
+        entitled: plan.entitled,
+        interval: plan.interval.map(|interval| match interval {
+            PlanInterval::Month => CloudPlanIntervalDto::Month,
+            PlanInterval::Year => CloudPlanIntervalDto::Year,
+        }),
+        trial_ends_at: plan.trial_ends_at,
+        renews_at: plan.renews_at,
+        ends_at: plan.ends_at,
+        trial_available: plan.trial_available,
+        limits: counts(plan.limits),
+        usage: counts(plan.usage),
     }
 }
 
@@ -4055,6 +4144,11 @@ fn map_public_url(view: PublicUrlView) -> PublicUrlDto {
             },
         },
         password_link: view.password_link,
+        state: url.state.map(|state| match state {
+            PublicUrlState::Serving => PublicUrlStateDto::Serving,
+            PublicUrlState::Suspended => PublicUrlStateDto::Suspended,
+            PublicUrlState::TakenDown => PublicUrlStateDto::TakenDown,
+        }),
         created_at: url.created_at,
     }
 }

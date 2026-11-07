@@ -17,6 +17,10 @@ const protectionModeSchema = z.enum(["password", "public"]);
 
 const idSchema = z.string().trim().min(1, "Public URL id is required");
 
+export const startCloudCheckoutRequestSchema = z.object({
+  interval: z.enum(["month", "year"]),
+});
+
 export const pollCloudSignInRequestSchema = z.object({
   deviceCode: z.string().trim().min(1, "Device code is required"),
 });

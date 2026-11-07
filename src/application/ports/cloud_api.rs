@@ -104,8 +104,89 @@ pub struct PublicUrl {
     /// `None` when no machine serves it.
     pub machine: Option<ServingMachine>,
     pub protection: Protection,
+    /// `None` from a Localify Cloud older than the paid plan.
+    pub state: Option<PublicUrlState>,
     /// RFC 3339.
     pub created_at: String,
+}
+
+/// Whether a public URL carries traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicUrlState {
+    Serving,
+    /// Beyond the plan's limits, or without a plan. Kept with its slug and
+    /// password until the plan covers it again.
+    Suspended,
+    /// Removed for abuse: it never serves again.
+    TakenDown,
+}
+
+/// The account's Localify Cloud plan, as `GET /v1/me` gives it
+/// (`docs/public-urls.md`, "Plans").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Plan {
+    pub status: PlanStatus,
+    /// May serve public URLs right now.
+    pub entitled: bool,
+    pub interval: Option<PlanInterval>,
+    /// RFC 3339, while trialing.
+    pub trial_ends_at: Option<String>,
+    /// RFC 3339: the next charge, when one is due.
+    pub renews_at: Option<String>,
+    /// RFC 3339: when a canceled plan stops, or an override expires.
+    pub ends_at: Option<String>,
+    /// False once the account used its trial.
+    pub trial_available: bool,
+    pub limits: PlanCounts,
+    pub usage: PlanCounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    None,
+    Trialing,
+    Active,
+    /// The card failed; still entitled for 7 days.
+    PastDue,
+    /// Canceled, entitled until `ends_at`.
+    Canceling,
+    /// Access granted by the Localify team instead of a subscription.
+    Override,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanInterval {
+    Month,
+    Year,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCounts {
+    pub serving_machines: u32,
+    pub public_urls: u32,
+}
+
+/// The page that takes the person to Polar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingPage {
+    pub kind: BillingPageKind,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingPageKind {
+    /// A checkout for Pro, with its trial when the account still has one.
+    Checkout,
+    /// The customer portal: the plan is already entitled, or the person
+    /// manages it.
+    Portal,
 }
 
 /// The slug a new public URL would get, and its URL. Localify Cloud owns the
@@ -178,6 +259,17 @@ pub trait CloudApi {
     fn poll_sign_in(&self, request: &SignInRequest) -> Result<DeviceTokenPoll, CloudApiError>;
     /// Revokes the token and detaches the machine's public URLs.
     fn sign_out(&self, account: &CloudAccount) -> Result<(), CloudApiError>;
+    /// `None` from a Localify Cloud older than the paid plan.
+    fn plan(&self, account: &CloudAccount) -> Result<Option<Plan>, CloudApiError>;
+    /// A Polar checkout for Pro at `interval`, or the customer portal when
+    /// the plan is already entitled.
+    fn checkout(
+        &self,
+        account: &CloudAccount,
+        interval: PlanInterval,
+    ) -> Result<BillingPage, CloudApiError>;
+    /// The URL of a Polar customer portal session.
+    fn billing_portal(&self, account: &CloudAccount) -> Result<String, CloudApiError>;
     /// The first free slug that mirrors the local domain's name, as
     /// creating a URL without a slug would pick it.
     #[allow(dead_code)] // Only the app calls it; the CLI target does not build the app.

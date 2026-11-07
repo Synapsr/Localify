@@ -5,8 +5,9 @@ import { Link } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 
-import type { PublicUrlWithPasswordDto } from "@/types/localify";
+import type { CloudPlanDto, PublicUrlWithPasswordDto } from "@/types/localify";
 
+import { CloudSubscribeAction } from "@/components/app/cloud/cloud-subscribe-action";
 import { SpinnerIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,14 +20,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useCloudPlan } from "@/hooks/use-cloud-plan";
 import { bootstrapQueries, cloudQueries } from "@/lib/queries";
 import {
   findPublicUrl,
   linkOnHost,
+  PRO_PRICE,
   projectNamespaceDomain,
   publicUrlOf,
   publicUrlTarget,
   SETTINGS_CLOUD_ANCHOR,
+  slotHolders,
 } from "@/lib/util.cloud";
 
 import { PublicUrlCreateForm } from "./public-url-create-form";
@@ -55,7 +59,12 @@ export const PublicUrlDialog = ({
   const account = useQuery(cloudQueries.account());
   const signedIn = account.data?.signedIn ?? false;
   const publicUrls = useQuery({ ...cloudQueries.publicUrls(), enabled: signedIn });
+  const plan = useCloudPlan(signedIn);
   const [revealed, setRevealed] = useState<RevealedPassword | null>(null);
+  const slotsFull =
+    signedIn &&
+    account.data?.tunnel.runtime === "blocked" &&
+    account.data.tunnel.blocked?.reason === "serving_slots_full";
   const namespace =
     projectId === null
       ? null
@@ -123,6 +132,9 @@ export const PublicUrlDialog = ({
       );
     }
     if (!match) {
+      if (plan.isPending) return <PublicUrlLoading label="Checking the plan…" />;
+      // A cloud that reports no plan predates the paid plan: creating works as before.
+      if (plan.data && !plan.data.entitled) return <PublicUrlPaywall plan={plan.data} />;
       return (
         <PublicUrlCreateForm
           localDomain={localDomain}
@@ -156,12 +168,50 @@ export const PublicUrlDialog = ({
             through Localify Cloud.
           </DialogDescription>
         </DialogHeader>
+        {slotsFull ? <ServingSlotsFullNotice holders={slotHolders(publicUrls.data)} /> : null}
         {content}
         <PublicUrlPasswordDialog revealed={revealed} onClose={() => setRevealed(null)} />
       </DialogContent>
     </Dialog>
   );
 };
+
+/** Without an entitled plan: no create form, but what a public URL does and how to start. */
+const PublicUrlPaywall = ({ plan }: { plan: CloudPlanDto }) => (
+  <>
+    <DialogBody className="space-y-3">
+      <p className="text-sm text-foreground">
+        A public URL opens this project's dev servers from a phone, a laptop or a teammate's
+        browser, behind a password, served from this Mac.
+      </p>
+      <p className="text-sm text-muted-foreground">
+        It takes Localify Cloud Pro: {PRO_PRICE.month} or {PRO_PRICE.year}, with 2 serving machines
+        and 10 URLs.{" "}
+        {plan.trialAvailable
+          ? "It starts with a 7-day free trial, which asks for a card."
+          : "The trial was already used on this account."}
+      </p>
+    </DialogBody>
+    <DialogFooter>
+      <DialogClose render={<Button variant="outline" />}>Close</DialogClose>
+      <CloudSubscribeAction plan={plan} />
+    </DialogFooter>
+  </>
+);
+
+/** This Mac has URLs to serve, but the account's other machines hold every serving slot. */
+const ServingSlotsFullNotice = ({ holders }: { holders: string[] }) => (
+  <DialogBody>
+    <p
+      role="status"
+      className="rounded-lg bg-amber-500/10 p-3 text-xs leading-normal text-foreground ring-1 ring-amber-500/20"
+    >
+      Every serving slot of the plan is taken
+      {holders.length > 0 ? `, by ${holders.join(", ")}` : " by your other machines"}, so this Mac
+      serves nothing. Remove a URL one of them serves, or serve it from this Mac below.
+    </p>
+  </DialogBody>
+);
 
 const PublicUrlLoading = ({ label }: { label: string }) => (
   <>

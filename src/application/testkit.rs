@@ -17,13 +17,15 @@ use crate::domain::{
 };
 
 use super::ports::{
-    CertificateError, CertificateManager, CloudAccount, CloudAccountStore, CloudApi, CloudApiError,
-    ConfigLoadError, ConfigLoader, DaemonConnection, DaemonConnectionError, DaemonControl,
-    DaemonRuntimeInfo, DeviceAuthorization, DeviceTokenPoll, DnsConfigError, DnsManager,
-    DomainRepository, IosSimulatorTrust, LocalDomainOwner, LocalDomains, NetworkInfo, NewPublicUrl,
+    BillingPage, BillingPageKind, CertificateError, CertificateManager, CloudAccount,
+    CloudAccountStore, CloudApi, CloudApiError, ConfigLoadError, ConfigLoader, DaemonConnection,
+    DaemonConnectionError, DaemonControl, DaemonRuntimeInfo, DeviceAuthorization, DeviceTokenPoll,
+    DnsConfigError, DnsManager, DomainRepository, IosSimulatorTrust, LocalDomainOwner,
+    LocalDomains, NetworkInfo, NewPublicUrl, Plan, PlanCounts, PlanInterval, PlanStatus,
     Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
-    PublicUrlWithPassword, RegistrationProvider, RepositoryError, SavedPasswords, ServingMachine,
-    SignInRequest, SlugSuggestion, SystemSetup, TunnelState, TunnelStatus,
+    PublicUrlState, PublicUrlWithPassword, RegistrationProvider, RepositoryError, RuntimeState,
+    SavedPasswords, ServingMachine, SignInRequest, SlugSuggestion, SystemSetup, TunnelState,
+    TunnelStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -597,7 +599,29 @@ pub fn public_url(id: &str, slug: &str, wildcard: bool) -> PublicUrl {
             mode: ProtectionMode::Password,
             version: Some(1),
         },
+        state: Some(PublicUrlState::Serving),
         created_at: "2026-11-05T18:00:00Z".into(),
+    }
+}
+
+/// A plan with `status`, 2 serving machines and 10 URLs, one of each used.
+pub fn plan(status: PlanStatus, entitled: bool) -> Plan {
+    Plan {
+        status,
+        entitled,
+        interval: Some(PlanInterval::Month),
+        trial_ends_at: Some("2026-11-14T10:00:00Z".into()),
+        renews_at: None,
+        ends_at: None,
+        trial_available: false,
+        limits: PlanCounts {
+            serving_machines: 2,
+            public_urls: 10,
+        },
+        usage: PlanCounts {
+            serving_machines: 1,
+            public_urls: 1,
+        },
     }
 }
 
@@ -613,6 +637,7 @@ pub struct InMemoryCloudApi {
     calls: RefCell<Vec<&'static str>>,
     /// `public_url` fixtures are at version 1.
     last_version: Cell<u32>,
+    plan: RefCell<Option<Plan>>,
 }
 
 const GENERATED_PASSWORD: &str = "four-random-words-here";
@@ -627,7 +652,14 @@ impl InMemoryCloudApi {
             last_sign_in: RefCell::new(None),
             calls: RefCell::new(Vec::new()),
             last_version: Cell::new(1),
+            plan: RefCell::new(None),
         }
+    }
+
+    /// What `GET /v1/me` reports as the plan; `None`, as an older cloud, by
+    /// default.
+    pub fn set_plan(&self, plan: Option<Plan>) {
+        *self.plan.borrow_mut() = plan;
     }
 
     /// What the device flow answers, poll after poll; then `Pending`.
@@ -736,6 +768,44 @@ impl CloudApi for InMemoryCloudApi {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    fn plan(&self, _account: &CloudAccount) -> Result<Option<Plan>, CloudApiError> {
+        self.call("plan")?;
+        Ok(self.plan.borrow().clone())
+    }
+
+    /// A checkout, or the portal when the plan is entitled, as the API does.
+    fn checkout(
+        &self,
+        _account: &CloudAccount,
+        interval: PlanInterval,
+    ) -> Result<BillingPage, CloudApiError> {
+        self.call(match interval {
+            PlanInterval::Month => "checkout:month",
+            PlanInterval::Year => "checkout:year",
+        })?;
+        let entitled = self
+            .plan
+            .borrow()
+            .as_ref()
+            .is_some_and(|plan| plan.entitled);
+        Ok(if entitled {
+            BillingPage {
+                kind: BillingPageKind::Portal,
+                url: "https://polar.sh/portal".into(),
+            }
+        } else {
+            BillingPage {
+                kind: BillingPageKind::Checkout,
+                url: "https://polar.sh/checkout".into(),
+            }
+        })
+    }
+
+    fn billing_portal(&self, _account: &CloudAccount) -> Result<String, CloudApiError> {
+        self.call("portal")?;
+        Ok("https://polar.sh/portal".into())
     }
 
     /// The domain's first label, then `<label>-teo-goulois` when taken.
@@ -967,6 +1037,8 @@ impl PublicTunnel for InMemoryPublicTunnel {
             state: TunnelState::Connected,
             connections: 4,
             error: None,
+            runtime: Some(RuntimeState::Ready),
+            blocked: None,
         })
     }
 

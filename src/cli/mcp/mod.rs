@@ -122,10 +122,23 @@ fn call_tool(params: &Value, runner: &CliRunner) -> Result<Value> {
         Ok((argv, cwd)) => runner.run(&argv, cwd.as_deref()),
         Err(error) => (format!("{error:#}"), true),
     };
+    let text = if failed { for_an_agent(text) } else { text };
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
         "isError": failed,
     }))
+}
+
+/// Paying is for a person (ADR 0018): when a command says the plan is
+/// needed, the agent learns what it costs and to ask the user.
+fn for_an_agent(text: String) -> String {
+    let subscribe = format!("{} subscribe", BRANDING.cli_command());
+    if !text.contains(&subscribe) {
+        return text;
+    }
+    format!(
+        "{text}\n\nLocalify Cloud Pro costs $7.99 a month or $79 a year, after a 7-day free trial that asks for a card. Do not start a checkout or pass on a checkout link: ask the user to run `{subscribe}` themselves, then try again."
+    )
 }
 
 fn prepare(tool: &Tool, args: &ToolArgs) -> Result<(Vec<String>, Option<PathBuf>)> {
@@ -294,6 +307,18 @@ mod tests {
                 .unwrap()
                 .contains("service")
         );
+    }
+
+    #[test]
+    fn a_missing_plan_tells_the_agent_to_ask_the_user() {
+        let cli = BRANDING.cli_command();
+        let refused = format!("No plan. Start a 7-day trial with {cli} subscribe.");
+
+        let text = for_an_agent(refused.clone());
+
+        assert!(text.starts_with(&refused));
+        assert!(text.contains("$7.99") && text.contains("ask the user"));
+        assert_eq!(for_an_agent("Port taken.".into()), "Port taken.");
     }
 
     #[test]

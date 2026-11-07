@@ -2,6 +2,8 @@ import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react
 
 import type {
   CloudAccountDto,
+  CloudBillingPageDto,
+  CloudPlanDto,
   CloudSignInPollDto,
   CloudSignInStartDto,
   CloudSignOutDto,
@@ -13,14 +15,34 @@ import type {
   PublicUrlSlugSuggestionDto,
   PublicUrlWithPasswordDto,
   SetPublicUrlProtectionRequest,
+  StartCloudCheckoutRequest,
 } from "../../types/localify";
 
+import { createEntitlementTracker } from "../plan-entitlement";
 import { tauriClient } from "../tauri-client";
 import { invalidateQueries } from "./shared";
+
+/** After a checkout or the portal opens, the plan is read this often, for this long. */
+const CHECKOUT_POLL_MS = 5000;
+const CHECKOUT_WATCH_MS = 15 * 60_000;
+
+/** Until when the app polls the plan for a checkout or portal it opened. */
+let checkoutWatchUntil = 0;
+
+function isWatchingCheckout(): boolean {
+  return Date.now() < checkoutWatchUntil;
+}
+
+/**
+ * Whether the plan's entitlement changed since the last answer any screen saw, however it
+ * changed. The checkout watch only makes the app ask more often.
+ */
+export const entitlementChange = createEntitlementTracker();
 
 const cloudQueryKeys = {
   all: () => ["cloud"] as const,
   account: () => [...cloudQueryKeys.all(), "account"] as const,
+  plan: () => [...cloudQueryKeys.all(), "plan"] as const,
   publicUrls: () => [...cloudQueryKeys.all(), "public-urls"] as const,
   slugSuggestion: (localDomain: string) =>
     [...cloudQueryKeys.all(), "slug-suggestion", localDomain] as const,
@@ -43,6 +65,18 @@ export const cloudQueries = {
         if (!account?.signedIn) return false;
         return account.tunnel.state === "starting" ? 3000 : 10_000;
       },
+    }),
+  /**
+   * Calls Localify Cloud: only while signed in. Null from a cloud without plans. Polled while
+   * a checkout or the portal is open, and on every focus of the window then.
+   */
+  plan: () =>
+    queryOptions<CloudPlanDto | null, Error>({
+      queryKey: cloudQueryKeys.plan(),
+      queryFn: () => tauriClient.getCloudPlan(),
+      staleTime: 30_000,
+      refetchInterval: () => (isWatchingCheckout() ? CHECKOUT_POLL_MS : false),
+      refetchOnWindowFocus: () => (isWatchingCheckout() ? "always" : true),
     }),
   /** Calls Localify Cloud: only while signed in. */
   publicUrls: () =>
@@ -68,7 +102,33 @@ export const cloudQueries = {
     }),
 } as const;
 
+/** Starts waiting on the page that just opened in the browser. */
+async function watchCheckout(queryClient: QueryClient) {
+  checkoutWatchUntil = Date.now() + CHECKOUT_WATCH_MS;
+  await invalidateQueries(queryClient, [cloudQueryKeys.plan()]);
+}
+
 export const cloudMutations = {
+  /** Opens the Polar checkout (or the portal when the plan is active) in the browser. */
+  startCheckout: (queryClient: QueryClient) =>
+    mutationOptions<CloudBillingPageDto, Error, StartCloudCheckoutRequest>({
+      mutationFn: (request) => tauriClient.startCloudCheckout(request),
+      onSuccess: async () => watchCheckout(queryClient),
+    }),
+  openBillingPortal: (queryClient: QueryClient) =>
+    mutationOptions<void, Error, void>({
+      mutationFn: () => tauriClient.openCloudBillingPortal(),
+      onSuccess: async () => watchCheckout(queryClient),
+    }),
+  /**
+   * After the plan's entitlement changed: the daemon fetches what this Mac serves, and the
+   * account, the plan and the URLs, whose state follows the plan, are read again.
+   */
+  refreshTunnel: (queryClient: QueryClient) =>
+    mutationOptions<void, Error, void>({
+      mutationFn: () => tauriClient.refreshPublicTunnel(),
+      onSettled: async () => invalidateQueries(queryClient, cloudMutationInvalidations),
+    }),
   startSignIn: () =>
     mutationOptions<CloudSignInStartDto, Error, void>({
       mutationFn: () => tauriClient.startCloudSignIn(),

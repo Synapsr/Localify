@@ -80,17 +80,18 @@ fn serve_upstream(mut stream: TcpStream, heads: mpsc::Sender<String>) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// Answers every request with this machine's runtime: one wildcard URL on
-/// the `journal` project's namespace, which no service registers.
+/// Answers every request with this machine's `ready` runtime: one wildcard
+/// URL on the `journal` project's namespace, which no service registers.
 fn fake_cloud() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let body = format!(
-        r#"{{"tunnelToken":"{TOKEN}","ingressSecret":"{SECRET}","publicUrls":[{{
+        r#"{{"state":"ready","blocked":null,"tunnel":{{"generation":1,"token":"{TOKEN}"}},
+            "ingressSecret":"{SECRET}","retryAfter":null,"publicUrls":[{{
             "id":"u1","slug":"journal-a8f3","url":"https://journal-a8f3.localify.fyi",
             "localDomain":"journal.localify.test","wildcard":true,
-            "machine":{{"id":"m1","name":"runner"}},"protection":{{"mode":"password"}},
-            "createdAt":"2026-11-05T18:00:00Z"}}]}}"#
+            "machine":{{"id":"m1","name":"runner"}},"protection":{{"mode":"password","version":1}},
+            "state":"serving","createdAt":"2026-11-05T18:00:00Z"}}]}}"#
     );
     thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {

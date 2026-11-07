@@ -5,9 +5,10 @@ use serde::Serialize;
 use tracing::warn;
 
 use super::cloud_account::{TunnelRefresh, refresh_tunnel};
+use super::cloud_errors::with_next_step;
 use super::ports::{
-    CloudAccount, CloudAccountStore, CloudApi, CloudApiError, LocalDomainOwner, LocalDomains,
-    NewPublicUrl, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
+    CloudAccount, CloudAccountStore, CloudApi, LocalDomainOwner, LocalDomains, NewPublicUrl,
+    ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
     PublicUrlWithPassword, SavedPassword, SavedPasswords, SlugSuggestion,
 };
 use crate::branding::BRANDING;
@@ -464,23 +465,6 @@ fn chosen_password(protection: &ProtectionChoice) -> Option<String> {
     }
 }
 
-/// Adds what to do next to the API's sentence, for the errors a person can
-/// act on.
-fn with_next_step(error: CloudApiError) -> anyhow::Error {
-    let cli = BRANDING.cli_command();
-    let CloudApiError::Rejected { code, message, .. } = &error else {
-        return error.into();
-    };
-    match code.as_str() {
-        "not_found" => anyhow!("{message} List your public URLs with: {cli} public-url list"),
-        "local_domain_taken" => {
-            anyhow!("{message} Find the URL it already has with: {cli} public-url list")
-        }
-        "invalid_local_domain" => anyhow!("{message} Check the name with: {cli} list"),
-        _ => error.into(),
-    }
-}
-
 fn parse_local_domain(value: &str) -> Result<DomainName> {
     DomainName::new(value)
         .map_err(|error| anyhow!("'{}' is not a local domain: {error}", value.trim()))
@@ -550,6 +534,7 @@ fn host_of(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::ports::CloudApiError;
     use crate::application::testkit::*;
 
     fn create(domain: &str, wildcard: bool) -> CreatePublicUrl {

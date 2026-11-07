@@ -843,6 +843,58 @@ export interface TunnelStatusDto {
   /** Connections the tunnel holds to Cloudflare. */
   connections: number;
   error: string | null;
+  /** What Localify Cloud last told the daemon; null before its first answer. */
+  runtime: CloudRuntimeStateDto | null;
+  /** Why this Mac may not serve, when `runtime` is "blocked". */
+  blocked: CloudRuntimeBlockDto | null;
+}
+
+export type CloudRuntimeStateDto = "idle" | "provisioning" | "ready" | "blocked" | "banned";
+
+export interface CloudRuntimeBlockDto {
+  reason: "subscription_required" | "serving_slots_full" | "capacity" | (string & {});
+  message: string;
+}
+
+export type CloudPlanStatusDto =
+  | "none"
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "canceling"
+  | "override";
+
+export type CloudPlanIntervalDto = "month" | "year";
+
+export interface CloudPlanCountsDto {
+  servingMachines: number;
+  publicUrls: number;
+}
+
+/** The account's plan, from Localify Cloud. */
+export interface CloudPlanDto {
+  status: CloudPlanStatusDto;
+  entitled: boolean;
+  interval: CloudPlanIntervalDto | null;
+  /** RFC 3339, while trialing. */
+  trialEndsAt: string | null;
+  /** RFC 3339: the next charge. */
+  renewsAt: string | null;
+  /** RFC 3339: when a canceled plan or a team access ends. */
+  endsAt: string | null;
+  trialAvailable: boolean;
+  limits: CloudPlanCountsDto;
+  usage: CloudPlanCountsDto;
+}
+
+export interface StartCloudCheckoutRequest {
+  interval: CloudPlanIntervalDto;
+}
+
+/** The page Localify opened in the browser: "portal" when the plan was already active. */
+export interface CloudBillingPageDto {
+  kind: "checkout" | "portal";
+  url: string;
 }
 
 export interface CloudAccountDto {
@@ -907,9 +959,14 @@ export interface PublicUrlDto {
   protection: PublicUrlProtectionDto;
   /** The URL with its current password, which signs a browser in; set when this Mac set that password. */
   passwordLink: string | null;
+  /** Null from a Localify Cloud older than the paid plan. */
+  state: PublicUrlStateDto | null;
   /** RFC 3339. */
   createdAt: string;
 }
+
+/** "suspended": the plan does not cover it right now; "taken_down": removed for abuse. */
+export type PublicUrlStateDto = "serving" | "suspended" | "taken_down";
 
 export interface PublicUrlWithPasswordDto {
   publicUrl: PublicUrlDto;

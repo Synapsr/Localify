@@ -811,8 +811,17 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "whoami",
+        description: "Shows who is signed in to Localify Cloud on this machine (JSON), the plan (status, entitled, trial and renewal dates, limits and usage), and this machine's tunnel with why it is blocked, if it is. Read-only: an agent never subscribes.",
+        params: &[],
+        uses_cwd: false,
+        read_only: true,
+        destructive: false,
+        build: |_| Ok(argv(&["whoami", "--json"])),
+    },
+    Tool {
         name: "public_url_list",
-        description: "Lists the user's public URLs on Localify Cloud (JSON): https://<slug>.localify.fyi, the local domain each one serves, password or open, which machine serves it (servedHere), and passwordLink, the link that signs a browser in, when this machine set the password.",
+        description: "Lists the user's public URLs on Localify Cloud (JSON): https://<slug>.localify.fyi, the local domain each one serves, password or open, which machine serves it (servedHere), its state (serving, suspended when the plan does not cover it, taken_down), and passwordLink, the link that signs a browser in, when this machine set the password.",
         params: &[],
         uses_cwd: false,
         read_only: true,
@@ -1178,7 +1187,13 @@ mod tests {
 
     #[test]
     fn an_agent_cannot_sign_in_or_open_a_url_to_everyone() {
-        for name in ["login", "logout", "public_url_unprotect"] {
+        for name in [
+            "login",
+            "logout",
+            "public_url_unprotect",
+            "subscribe",
+            "billing",
+        ] {
             assert!(TOOLS.iter().all(|tool| tool.name != name), "{name}");
         }
         let create = TOOLS

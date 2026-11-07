@@ -502,7 +502,7 @@ The daemon fetches `GET /v2/machines/self/runtime?generation=<the generation it 
 | Answer | The daemon |
 |---|---|
 | `ready`, same generation | keeps `cloudflared` running; updates the served URLs and the ingress secret |
-| `ready`, new generation (with its token) | starts `cloudflared` on the new token, then stops the old one |
+| `ready`, new generation (with its token) | stops the old `cloudflared`, then starts one on the new token, and keeps the ingress secret throughout. A new generation exists only once the old tunnel is deleted, so the old process carries nothing, and two `cloudflared` cannot share the metrics port. |
 | `provisioning` | runs no `cloudflared`, keeps the ingress secret dropped, asks again after `retryAfter` |
 | `idle` | stops `cloudflared` and drops the ingress secret |
 | `blocked` | stops `cloudflared` and drops the ingress secret, and shows `blocked.message`. This is final until a plan or URL change, or until `retryAfter` for `capacity`. |
