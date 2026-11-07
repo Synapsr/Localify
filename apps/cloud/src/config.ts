@@ -14,13 +14,21 @@ type Setting =
   | "MACHINE_ZONE_ID"
   | "CLOUDFLARE_API_TOKEN"
   | "COOKIE_KEY"
-  | "INGRESS_KEY";
+  | "INGRESS_KEY"
+  | "EDGE_KEY";
 
 /** A setting's value, or a ConfigError when it is empty: nothing runs on a default. */
 export function setting(env: Env, name: Setting): string {
   const value = env[name];
   if (typeof value !== "string" || value.trim() === "") throw new ConfigError(name);
   return value.trim();
+}
+
+/** `MAX_TUNNELS`: the most serving slots the whole Cloudflare account holds. */
+export function maxTunnels(env: Env): number {
+  const value = Number(env.MAX_TUNNELS);
+  if (!Number.isInteger(value) || value < 1) throw new ConfigError("MAX_TUNNELS");
+  return value;
 }
 
 /**

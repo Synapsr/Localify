@@ -1,6 +1,7 @@
 /// <reference types="node" />
-// A D1 stand-in over node:sqlite with the real migrations, a test Env, and a
-// fake `fetch` for GitHub, Cloudflare and the machines' tunnels.
+// A D1 stand-in over node:sqlite with the real migrations, a test Env, a
+// fake `fetch` for GitHub, Cloudflare and the machines' tunnels, and an
+// ExecutionContext whose `waitUntil` work the tests can wait for.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -74,14 +75,22 @@ class TestD1 {
 export function createTestDb(): { db: D1Database; sqlite: DatabaseSync } {
   // Foreign keys on, as D1 enforces them.
   const sqlite = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
-  for (const file of readdirSync(MIGRATIONS).sort()) {
-    sqlite.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  applyMigrations(sqlite, () => true);
   return { db: new TestD1(sqlite) as unknown as D1Database, sqlite };
+}
+
+/** Applies the migrations whose file name `include` accepts, in order. */
+export function applyMigrations(sqlite: DatabaseSync, include: (file: string) => boolean): void {
+  for (const file of readdirSync(MIGRATIONS).sort()) {
+    if (include(file)) sqlite.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
+  }
 }
 
 export type TestContext = {
   env: Env;
+  ctx: ExecutionContext;
+  /** Work handed to `waitUntil` and not yet awaited by `settle`. */
+  background: Promise<unknown>[];
   sqlite: DatabaseSync;
   /** Requests the Worker sent with `fetch`, in order. */
   calls: {
@@ -93,7 +102,7 @@ export type TestContext = {
     redirect?: string;
   }[];
   /** Answers for `fetch`, by `METHOD url`; the first matching prefix wins. */
-  routes: Map<string, (body: string | null) => Response>;
+  routes: Map<string, (body: string | null, url: string) => Response | Promise<Response>>;
   limiter: { allowed: boolean };
   deviceLimiter: { allowed: boolean };
 };
@@ -115,10 +124,19 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     CLOUDFLARE_API_TOKEN: "cf-token",
     COOKIE_KEY: "cookie-key",
     INGRESS_KEY: "ingress-key",
+    EDGE_KEY: "edge-key",
+    MAX_TUNNELS: 950,
     ...overrides,
   } as unknown as Env;
+  const background: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (promise: Promise<unknown>) => background.push(promise),
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
   const context: TestContext = {
     env,
+    ctx,
+    background,
     sqlite,
     calls: [],
     routes: new Map(),
@@ -138,11 +156,18 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
       redirect: init.redirect,
     });
     for (const [key, answer] of context.routes) {
-      if (`${method} ${url}`.startsWith(key)) return answer(body);
+      if (`${method} ${url}`.startsWith(key)) return answer(body, url);
     }
     throw new Error(`No fake answer for ${method} ${url}`);
   });
   return context;
+}
+
+/** Waits for every `waitUntil` work, including what that work started. */
+export async function settle(context: TestContext): Promise<void> {
+  while (context.background.length > 0) {
+    await Promise.all(context.background.splice(0));
+  }
 }
 
 export function jsonResponse(body: unknown, status = 200): Response {
@@ -158,7 +183,7 @@ export function cloudflareOk(result: unknown): Response {
 
 const CF = "https://api.cloudflare.com/client/v4";
 
-/** GitHub signs in `login`, and Cloudflare provisions tunnel `tunnel-<n>`. */
+/** GitHub signs in `login`, and Cloudflare provisions tunnel `tunnel`. */
 export function fakeSignIn(
   context: TestContext,
   login: string,
@@ -175,9 +200,12 @@ export function fakeSignIn(
     cloudflareOk({ id: tunnel }),
   );
   context.routes.set(`PUT ${CF}/accounts/account-1/cfd_tunnel/`, () => cloudflareOk({}));
+  // A new tunnel secret, before a tunnel is removed.
+  context.routes.set(`PATCH ${CF}/accounts/account-1/cfd_tunnel/`, () => cloudflareOk({}));
   context.routes.set(`POST ${CF}/zones/zone-1/dns_records`, () =>
     cloudflareOk({ id: `dns-${tunnel}` }),
   );
+  context.routes.set(`PATCH ${CF}/zones/zone-1/dns_records/`, () => cloudflareOk({}));
   context.routes.set(`GET ${CF}/accounts/account-1/cfd_tunnel/`, () =>
     cloudflareOk(`token-of-${tunnel}`),
   );
@@ -215,7 +243,21 @@ export async function api(
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
-  return worker.fetch(request as never, context.env);
+  return worker.fetch(request as never, context.env, context.ctx);
+}
+
+/** The v2 runtime of the machine behind `token`, after its background work is done. */
+export async function serve(
+  context: TestContext,
+  token: string,
+  generation = 0,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await api(context, "GET", `/v2/machines/self/runtime?generation=${generation}`, {
+    token,
+  });
+  const body = (await response.json()) as Record<string, unknown>;
+  await settle(context);
+  return { status: response.status, body };
 }
 
 export async function visit(
@@ -224,5 +266,5 @@ export async function visit(
   init: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<Response> {
   const { default: worker } = await import("../src/index");
-  return worker.fetch(new Request(url, init) as never, context.env);
+  return worker.fetch(new Request(url, init) as never, context.env, context.ctx);
 }

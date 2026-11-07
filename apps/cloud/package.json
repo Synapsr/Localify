@@ -8,7 +8,7 @@
     "typecheck": "wrangler types --strict-vars=false && tsc --noEmit",
     "test": "vitest run",
     "deploy": "node scripts/deploy.mjs",
-    "migrate": "wrangler d1 migrations apply localify-cloud --remote",
+    "migrate": "node scripts/infisical.mjs d1 migrations apply localify-cloud --remote",
     "migrate:local": "wrangler d1 migrations apply localify-cloud --local"
   },
   "devDependencies": {

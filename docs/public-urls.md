@@ -184,7 +184,7 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `PUT /v1/public-urls/{id}/protection` | `{protection}`, the same object as in `POST` | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
 | `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine, in one update. `402 subscription_required`; `403 taken_down`. |
 | `GET /v2/machines/self/runtime?generation=<n>` | — | `MachineRuntime`, see "Tunnels". `n` is the tunnel generation the daemon runs, or `0` when it runs none: generations start at 1, and 0 never names a tunnel. |
-| `GET /v1/machines/self/runtime` | — | For clients before this contract. Runs the same reservation and provisioning as v2. When the state is `ready`, it returns `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` with the current generation's token every time. Otherwise it returns `409 runtime_not_ready` with `{state}`. Removed once no such client remains (see "Rollout order"). |
+| `GET /v1/machines/self/runtime` | — | For clients before this contract. Runs the same reservation and provisioning as v2. When the state is `ready`, it returns `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` with the current generation's token every time, and only the URLs whose state is `serving`, since those clients serve every URL they get. Otherwise it returns `409 runtime_not_ready` with `{state}`. Removed once no such client remains (see "Rollout order"). |
 
 Error codes this contract adds, everywhere they apply:
 
@@ -234,7 +234,7 @@ type Plan = {
 
 **Signing in registers the machine.** In one D1 batch, the Worker inserts the machine as `active` with `tunnel_state` `none` and issues the token. It makes no Cloudflare call: the tunnel comes when the machine first has something to serve (see "Tunnels"). The `provisioning` machine status remains only for rows from before this contract, and the cleanup revokes such a row after 10 minutes. If the user already has an active machine with the same name, the new one replaces it: the old machine is revoked like a sign-out, its URLs move to the new one, and its tunnel is released. That covers signing in again on a machine whose credentials were lost. The machine name is the computer's name, with ` (dev)` added under the dev profile so that a dev build never replaces the installed app's machine, cut to 64 UTF-16 units. The ingress secret is `HMAC-SHA-256(INGRESS_KEY, machine id)` in hex; it is never stored.
 
-**Signing out.** In one D1 batch, the Worker deletes the token, marks the machine `revoked` and detaches its URLs (`machine: null`). Then it removes the tunnel's connections, deletes the tunnel if there is one, and deletes the DNS record if there is one. Whatever fails stays recorded on the revoked machine, and the 5-minute cleanup retries it. The Worker's own Cloudflare token does this work, so the user's revoked token is never needed again. A ban releases the user's tunnels the same way but keeps their tokens and URLs, so the API keeps answering `403 banned` and an unban restores everything.
+**Signing out.** In one D1 batch, the Worker deletes the token, marks the machine `revoked` and detaches its URLs (`machine: null`). Then, if there is a tunnel, it gives it a new secret, removes its connections and deletes it, and it deletes the DNS record if there is one. Whatever fails stays recorded on the revoked machine, and the 5-minute cleanup retries it. The Worker's own Cloudflare token does this work, so the user's revoked token is never needed again. A ban releases the user's tunnels the same way but keeps their tokens and URLs, so the API keeps answering `403 banned` and an unban restores everything.
 
 ### Tunnels
 
@@ -268,9 +268,10 @@ Each write is conditioned on the row still holding this `tunnel_op` and this `tu
 
 **Releasing**, as the holder of a new `tunnel_op`, from `ready` or from an abandoned `provisioning`:
 
-1. Drops the tunnel's connections, which closes every open stream (ADR 0027).
-2. Deletes the tunnel.
-3. Sets `none` and clears `tunnel_id`, conditioned on the operation.
+1. Gives the tunnel a new `tunnel_secret` (`PATCH` on the tunnel), so its token stops working and `cloudflared` cannot reconnect before the delete.
+2. Drops the tunnel's connections, which closes every open stream (ADR 0027).
+3. Deletes the tunnel.
+4. Sets `none` and clears `tunnel_id`, conditioned on the operation.
 
 It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A machine is released when:
 
@@ -292,8 +293,8 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
 **The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes:
 
 1. Lists the account's tunnels, page by page.
-2. For each `ready` machine, reads the status of its tunnel:
-   - healthy: clears `down_seen_at`;
+2. For each `ready` machine, reads the status of its tunnel in that listing; a tunnel missing from a complete listing reads as down:
+   - healthy (or degraded): clears `down_seen_at`;
    - down or inactive, with `down_seen_at` empty: sets `down_seen_at`;
    - down or inactive again, with `down_seen_at` and `tunnel_ready_at` both more than 15 minutes old: releases it;
    - a failed read: changes nothing.
@@ -302,7 +303,9 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
 5. Deletes `localify-*` tunnels no machine row holds, once they are more than an hour old.
 6. Logs an error when the database holds more than 800 slots.
 
-Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They may use the whole budget, and they never back off longer than one run. A revocation costs at most 3 calls, so up to 100 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 100. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
+Before all of this, the run takes over any active machine that has a `tunnel_id` but `tunnel_state` `none`. A Worker from before this contract can sign such a machine in while a deploy rolls out. It becomes `ready` at generation 1 when it has a live URL, and `releasing` otherwise, so it holds a slot and its tunnel is released like any other.
+
+Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They may use all of the budget but 60 calls, which the rest of the work keeps; whatever that work leaves goes back to the revocations. They never back off longer than one run. A revocation costs at most 4 calls (a lookup by name, the new secret, the connections, the delete), so at least 60 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 60. A revocation keeps `rotate_requested_at` set until Cloudflare confirms the delete. The queue takes the revocations not yet tried first, then the others by their last attempt, so one that keeps failing goes to the back of the queue without losing its urgency, and cannot starve the others. The budget counts every request actually sent, fallbacks included. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
 
 **Runtime.** `GET /v2/machines/self/runtime?generation=<n>` answers:
 
@@ -321,7 +324,7 @@ type MachineRuntime = {
 ```
 
 - `idle`: the machine wants no tunnel. Its owner may still be entitled.
-- `provisioning`: a slot is reserved and the tunnel is on its way; `retryAfter` is 3.
+- `provisioning`: a slot is reserved and the tunnel is on its way, including while the previous generation is being released for a rotation; `retryAfter` is 3.
 - `ready`: serve with this generation's tunnel.
 - `blocked`: the machine has something to serve but may not. The reason is the plan, its owner's slots, or the account cap. `retryAfter` is 60 for `capacity` and `null` otherwise, since only a plan or a URL change unblocks it, and the CLI and the app send `public_refresh` after either.
 
@@ -399,7 +402,7 @@ Losing to a newer revision is not a failure: the newer refresh read Polar later.
 
 ### Moderation
 
-`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 100 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
+`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 60 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
 
 - `ban <github-login> <reason>` and `unban <github-login>`;
 - `takedown <slug> <reason>`;

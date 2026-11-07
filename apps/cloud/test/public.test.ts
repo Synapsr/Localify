@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ACCESS_COOKIE } from "../src/cookie";
 import { hmacHex } from "../src/crypto";
-import { api, createContext, signIn, visit, type TestContext } from "./support";
+import { api, createContext, serve, signIn, visit, type TestContext } from "./support";
 
 let context: TestContext;
 let token: string;
@@ -25,6 +25,7 @@ beforeEach(async () => {
     },
   });
   urlId = ((await response.json()) as { publicUrl: { id: string } }).publicUrl.id;
+  await serve(context, token);
   context.routes.set(
     `GET https://m-${machineId}.localify.dev/`,
     () => new Response("from the machine"),
@@ -80,6 +81,15 @@ describe("finding the URL", () => {
     expect(plain.status).toBe(201);
     expect((await visit(context, "https://plain-site--web.localify.fyi/")).status).toBe(404);
     expect((await visit(context, "https://plain-site.localify.fyi/")).status).toBe(200);
+  });
+
+  it("answers 503 while the machine's tunnel is not ready", async () => {
+    context.sqlite
+      .prepare("UPDATE machines SET tunnel_state = 'releasing' WHERE id = ?")
+      .run(machineId);
+    const response = await visit(context, `https://${host()}/`);
+    expect(response.status).toBe(503);
+    expect(machineCalls()).toHaveLength(0);
   });
 
   it("answers 503 when no machine serves the URL", async () => {
@@ -189,6 +199,7 @@ describe("the password", () => {
         cookie: `theme=dark; ${cookie}`,
         "cf-connecting-ip": "203.0.113.7",
         "x-forwarded-host": "spoofed",
+        "x-localify-edge": "forged",
       },
     });
     expect(response.status).toBe(200);
@@ -198,6 +209,7 @@ describe("the password", () => {
     expect(call!.redirect).toBe("manual");
     expect(call!.headers.get("cookie")).toBe("theme=dark");
     expect(call!.headers.get("x-forwarded-host")).toBeNull();
+    expect(call!.headers.get("x-localify-edge")).toBe("edge-key");
     expect(call!.headers.get("x-localify-ingress")).toBe(await hmacHex("ingress-key", machineId));
     expect(call!.headers.get("x-localify-public-host")).toBe(host());
     expect(call!.headers.get("x-localify-local-host")).toBe("journal.localify");

@@ -39,9 +39,10 @@
       "simple": { "limit": 60, "period": 60 }
     }
   ],
-  // Retries Cloudflare cleanups, revokes stuck sign-ins, purges deleted URLs.
+  // Every 5 minutes: the tunnel sweep and the cleanup of revoked machines.
+  // Every day at 03:00 UTC: purging URLs deleted more than 30 days ago.
   "triggers": {
-    "crons": ["0 * * * *"]
+    "crons": ["*/5 * * * *", "0 3 * * *"]
   },
   "vars": {
     // The GitHub OAuth App's client ID, with Device Flow enabled. It is public;
@@ -54,12 +55,15 @@
     "MACHINE_DOMAIN": "localify.dev",
     "CLOUDFLARE_ACCOUNT_ID": "3346bba113d622c4b100e546032bc5dc",
     // The localify.dev zone, where each machine gets m-<machine-id>.
-    "MACHINE_ZONE_ID": "0a4ca7eeb2a20ddbcc50de8f86a74ae9"
+    "MACHINE_ZONE_ID": "0a4ca7eeb2a20ddbcc50de8f86a74ae9",
+    // The most serving slots (tunnels) the whole account holds. Cloudflare
+    // charges past 1,000 tunnels; the sweep logs an error above 800.
+    "MAX_TUNNELS": 950
   },
   // Set with `wrangler secret put <NAME>`; locally, in .dev.vars. Deploys
   // refuse to run while one is missing.
   "secrets": {
-    "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY"]
+    "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY", "EDGE_KEY"]
   },
   // Error logs only: invocation logs would keep the URL of every request to a
   // public URL, and Localify keeps nothing about that traffic.

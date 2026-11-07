@@ -1,9 +1,12 @@
 # Copy to .dev.vars for `pnpm cloud:dev`. Any random values work locally.
 COOKIE_KEY=local-cookie-key-change-me
 INGRESS_KEY=local-ingress-key-change-me
-# Signing in creates a real tunnel and DNS record in the Cloudflare account.
-# Leave this empty unless you test sign-in end to end; `localify logout`
-# removes what sign-in created.
+# Sent in X-Localify-Edge to machine hostnames; the localify.dev zone's WAF
+# rule holds the production value.
+EDGE_KEY=local-edge-key-change-me
+# A machine with a URL to serve gets a real tunnel and DNS record in the
+# Cloudflare account. Leave this empty unless you test serving end to end;
+# `localify logout` removes what the machine created.
 CLOUDFLARE_API_TOKEN=
 # Override vars from wrangler.jsonc, for example a test OAuth App, or your own
 # GitHub id while the allowlist does not hold it.

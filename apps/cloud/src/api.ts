@@ -3,13 +3,14 @@
 // scoped to that user, and an unknown id and someone else's id both answer
 // 404.
 
-import { CloudflareApi, CloudflareError } from "./cloudflare";
+import { CloudflareError } from "./cloudflare";
 import { ConfigError, isAllowedGithubId, setting } from "./config";
 import { hashPassword, sha256Hex } from "./crypto";
-import { isUniqueViolation, urlOfUser, urlsOfMachine, urlsOfUser, type PublicUrl } from "./db";
+import { isUniqueViolation, urlOfUser, urlsOfUser, type PublicUrl } from "./db";
+import { entitlementOf } from "./entitlement";
 import { fetchGitHubUser, pollDeviceFlow, startDeviceFlow } from "./github";
 import { ApiError, errorResponse, json, noContent, readJson } from "./http";
-import { ingressSecret, newId, signInMachine, signOutMachine } from "./machines";
+import { newId, signInMachine, signOutMachine } from "./machines";
 import {
   isValidLocalDomain,
   isValidSlug,
@@ -19,6 +20,7 @@ import {
 } from "./names";
 import { generatePassword } from "./passwords";
 import { forgetSite } from "./sites";
+import { background, machineRuntime, releaseIfUnwanted } from "./tunnels";
 
 export const MAX_URLS_PER_USER = 10;
 const MIN_PASSWORD_LENGTH = 8;
@@ -31,17 +33,21 @@ const SLOW_DOWN_SECONDS = 5;
 /** Who calls, from the bearer token. */
 type Caller = {
   userId: string;
+  githubId: number;
   login: string;
   machineId: string;
   machineName: string;
-  tunnelId: string | null;
-  dnsRecordId: string | null;
 };
 
 type Route = {
   method: string;
   pattern: RegExp;
-  handle: (request: Request, env: Env, params: string[]) => Promise<Response>;
+  handle: (
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    params: string[],
+  ) => Promise<Response>;
 };
 
 const ROUTES: Route[] = [
@@ -60,10 +66,15 @@ const ROUTES: Route[] = [
     handle: authed(setProtection),
   },
   { method: "POST", pattern: /^\/v1\/public-urls\/([^/]+)\/claim$/, handle: authed(claimUrl) },
-  { method: "GET", pattern: /^\/v1\/machines\/self\/runtime$/, handle: authed(runtime) },
+  { method: "GET", pattern: /^\/v2\/machines\/self\/runtime$/, handle: authed(runtimeV2) },
+  { method: "GET", pattern: /^\/v1\/machines\/self\/runtime$/, handle: authed(runtimeV1) },
 ];
 
-export async function handleApi(request: Request, env: Env): Promise<Response> {
+export async function handleApi(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const path = new URL(request.url).pathname;
   const matching = ROUTES.filter((route) => route.pattern.test(path));
   const route = matching.find((candidate) => candidate.method === request.method);
@@ -78,7 +89,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
           );
     }
     const params = (route.pattern.exec(path) ?? []).slice(1);
-    return await route.handle(request, env, params);
+    return await route.handle(request, env, ctx, params);
   } catch (error) {
     return errorResponse(toApiError(error));
   }
@@ -111,10 +122,16 @@ function toApiError(error: unknown): ApiError {
 }
 
 function authed(
-  handler: (request: Request, env: Env, caller: Caller, params: string[]) => Promise<Response>,
+  handler: (
+    request: Request,
+    env: Env,
+    caller: Caller,
+    params: string[],
+    ctx: ExecutionContext,
+  ) => Promise<Response>,
 ): Route["handle"] {
-  return async (request, env, params) =>
-    handler(request, env, await authenticate(request, env), params);
+  return async (request, env, ctx, params) =>
+    handler(request, env, await authenticate(request, env), params, ctx);
 }
 
 async function authenticate(request: Request, env: Env): Promise<Caller> {
@@ -127,8 +144,7 @@ async function authenticate(request: Request, env: Env): Promise<Caller> {
   );
   if (!match?.[1]) throw signedOut;
   const row = await env.DB.prepare(
-    `SELECT u.id AS user_id, u.github_id, u.login, m.id AS machine_id, m.name AS machine_name,
-            m.tunnel_id, m.dns_record_id
+    `SELECT u.id AS user_id, u.github_id, u.login, m.id AS machine_id, m.name AS machine_name
      FROM tokens t
      JOIN users u ON u.id = t.user_id
      JOIN machines m ON m.id = t.machine_id AND m.user_id = t.user_id
@@ -141,18 +157,15 @@ async function authenticate(request: Request, env: Env): Promise<Caller> {
       login: string;
       machine_id: string;
       machine_name: string;
-      tunnel_id: string | null;
-      dns_record_id: string | null;
     }>();
   if (!row) throw signedOut;
   if (!isAllowedGithubId(env, row.github_id)) throw notAllowed(row.login);
   return {
     userId: row.user_id,
+    githubId: row.github_id,
     login: row.login,
     machineId: row.machine_id,
     machineName: row.machine_name,
-    tunnelId: row.tunnel_id,
-    dnsRecordId: row.dns_record_id,
   };
 }
 
@@ -281,11 +294,7 @@ async function me(_request: Request, _env: Env, caller: Caller): Promise<Respons
 }
 
 async function logout(_request: Request, env: Env, caller: Caller): Promise<Response> {
-  await signOutMachine(env, {
-    id: caller.machineId,
-    tunnelId: caller.tunnelId,
-    dnsRecordId: caller.dnsRecordId,
-  });
+  await signOutMachine(env, caller.machineId);
   return noContent();
 }
 
@@ -351,7 +360,14 @@ async function takenSlugs(env: Env, caller: Caller, slugs: string[]): Promise<Se
 // --- Public URLs ---
 
 async function listUrls(_request: Request, env: Env, caller: Caller): Promise<Response> {
-  return json({ publicUrls: await urlsOfUser(env.DB, baseDomain(env), caller.userId) });
+  return json({
+    publicUrls: await urlsOfUser(
+      env.DB,
+      baseDomain(env),
+      caller.userId,
+      await servingLimit(env, caller),
+    ),
+  });
 }
 
 async function createUrl(request: Request, env: Env, caller: Caller): Promise<Response> {
@@ -449,15 +465,18 @@ async function deleteUrl(
   env: Env,
   caller: Caller,
   [id]: string[],
+  ctx: ExecutionContext,
 ): Promise<Response> {
   // The row stays 30 days, so the slug cannot serve someone else's page behind old bookmarks.
   const deleted = await env.DB.prepare(
-    `UPDATE public_urls SET deleted_at = ?3 WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL RETURNING slug`,
+    `UPDATE public_urls SET deleted_at = ?3 WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL
+     RETURNING slug, machine_id`,
   )
     .bind(id, caller.userId, Date.now())
-    .first<{ slug: string }>();
+    .first<{ slug: string; machine_id: string | null }>();
   if (!deleted) throw urlNotFound();
   forgetSite(deleted.slug);
+  if (deleted.machine_id) background(ctx, releaseIfUnwanted(env, deleted.machine_id));
   return noContent();
 }
 
@@ -494,7 +513,13 @@ async function claimUrl(
   env: Env,
   caller: Caller,
   [id]: string[],
+  ctx: ExecutionContext,
 ): Promise<Response> {
+  const before = await env.DB.prepare(
+    `SELECT machine_id FROM public_urls WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL`,
+  )
+    .bind(id, caller.userId)
+    .first<{ machine_id: string | null }>();
   const claimed = await env.DB.prepare(
     `UPDATE public_urls SET machine_id = ?3 WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL RETURNING slug`,
   )
@@ -502,17 +527,62 @@ async function claimUrl(
     .first<{ slug: string }>();
   if (!claimed) throw urlNotFound();
   forgetSite(claimed.slug);
+  const previous = before?.machine_id;
+  if (previous && previous !== caller.machineId) {
+    background(ctx, releaseIfUnwanted(env, previous));
+  }
   return json({ publicUrl: await requireUrl(env, caller, id) });
 }
 
-async function runtime(_request: Request, env: Env, caller: Caller): Promise<Response> {
-  if (!caller.tunnelId) throw new Error(`Active machine ${caller.machineId} has no tunnel`);
-  const [tunnelToken, secret, publicUrls] = await Promise.all([
-    new CloudflareApi(env).tunnelToken(caller.tunnelId),
-    ingressSecret(env, caller.machineId),
-    urlsOfMachine(env.DB, baseDomain(env), caller.machineId),
-  ]);
-  return json({ tunnelToken, ingressSecret: secret, publicUrls });
+// --- Machine runtime ---
+
+/**
+ * `GET /v2/machines/self/runtime?generation=<n>`: `n` is the generation the
+ * daemon runs, 0 for none. The token comes only for another generation.
+ */
+async function runtimeV2(
+  request: Request,
+  env: Env,
+  caller: Caller,
+  _params: string[],
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const value = new URL(request.url).searchParams.get("generation") ?? "";
+  const generation = /^\d{1,9}$/.test(value) ? Number(value) : null;
+  if (generation === null) {
+    throw invalid("generation must be the tunnel generation the daemon runs, or 0 for none.");
+  }
+  return json(await machineRuntime(env, ctx, caller, generation));
+}
+
+/**
+ * `GET /v1/machines/self/runtime`, for daemons before generations: the same
+ * reservation and provisioning, with the current token every time once the
+ * tunnel is ready.
+ */
+async function runtimeV1(
+  _request: Request,
+  env: Env,
+  caller: Caller,
+  _params: string[],
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const runtime = await machineRuntime(env, ctx, caller, null);
+  if (runtime.state !== "ready" || !runtime.tunnel?.token || !runtime.ingressSecret) {
+    return json(
+      {
+        error: "runtime_not_ready",
+        message: `This machine's tunnel is not ready (${runtime.state}). Update Localify to see why.`,
+        state: runtime.state,
+      },
+      409,
+    );
+  }
+  return json({
+    tunnelToken: runtime.tunnel.token,
+    ingressSecret: runtime.ingressSecret,
+    publicUrls: runtime.publicUrls.filter((url) => url.state === "serving"),
+  });
 }
 
 // --- Helpers ---
@@ -533,6 +603,11 @@ function baseDomain(env: Env): string {
   return setting(env, "PUBLIC_BASE_DOMAIN");
 }
 
+/** How many of the caller's live URLs serve, oldest first. */
+async function servingLimit(env: Env, caller: Caller): Promise<number> {
+  return (await entitlementOf(env, { id: caller.userId, githubId: caller.githubId })).publicUrls;
+}
+
 function urlNotFound(): ApiError {
   return new ApiError(
     404,
@@ -542,7 +617,9 @@ function urlNotFound(): ApiError {
 }
 
 async function requireUrl(env: Env, caller: Caller, id: string | undefined): Promise<PublicUrl> {
-  const url = id ? await urlOfUser(env.DB, baseDomain(env), caller.userId, id) : null;
+  const url = id
+    ? await urlOfUser(env.DB, baseDomain(env), caller.userId, id, await servingLimit(env, caller))
+    : null;
   if (!url) throw urlNotFound();
   return url;
 }
