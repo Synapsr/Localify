@@ -143,6 +143,9 @@ checkouts   (user_id TEXT NOT NULL REFERENCES users(id),
 webhook_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, type TEXT NOT NULL,
              user_id TEXT, received_at INTEGER NOT NULL,
              processed_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER)
+duplicate_subscriptions (subscription_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+             revoked_at INTEGER, refunded_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+             next_attempt_at INTEGER, created_at INTEGER NOT NULL)
 CREATE UNIQUE INDEX one_url_per_local_domain ON public_urls (user_id, local_domain) WHERE deleted_at IS NULL;
 CREATE INDEX live_urls_by_owner ON public_urls (user_id, created_at, id) WHERE deleted_at IS NULL;
 CREATE INDEX slots_by_owner ON machines (user_id, tunnel_state) WHERE tunnel_state != 'none';
@@ -156,6 +159,7 @@ CREATE INDEX pending_webhooks ON webhook_events (next_attempt_at) WHERE processe
 - **Refresh revisions:** `billing_revisions.last` is a per-user counter. Each refresh takes the next value, and only the winning revision may write. `check_due_at` queues the user for the reconciliation.
 - **Checkouts:** `checkouts` holds at most one Pro checkout per user, for both intervals, and one per add-on, so a second request reuses it instead of starting a second purchase.
 - **Webhook events:** `webhook_events` records each delivery under its `webhook-id`, so a repeated delivery is recognized and a failed one is retried. `seq` orders a user's events for the refresh's watermark. Processed events are deleted after 30 days.
+- **Duplicate subscriptions:** `duplicate_subscriptions` records a duplicate Pro subscription before anything is done to it, so its revocation and its refund are each retried until both are settled (see "Billing").
 - **Trials:** `trial_used_at` is set the first time a refresh finds a `trial_start` on any of the user's Pro subscriptions, past ones included. From then on, every checkout for that user is created without a trial.
 - **Migration:** the migration that adds these tables, run once, gives each existing user whose GitHub id is in `ALLOWED_GITHUB_IDS` an override (5 serving machines, 10 URLs, reason `team`). It marks every active machine that already has a tunnel as `ready` at generation 1. Generation 0 only ever means "no tunnel, no token". Those older tunnels are named `localify-<machine-id>` and are released like any other.
 
@@ -298,7 +302,7 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
 5. Deletes `localify-*` tunnels no machine row holds, once they are more than an hour old.
 6. Logs an error when the database holds more than 800 slots.
 
-Work is taken oldest `down_seen_at` first. What the budget leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
+Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They may use the whole budget, and they never back off longer than one run. A revocation costs at most 3 calls, so up to 100 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 100. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
 
 **Runtime.** `GET /v2/machines/self/runtime?generation=<n>` answers:
 
@@ -385,9 +389,9 @@ Losing to a newer revision is not a failure: the newer refresh read Polar later.
 **Duplicate Pro subscriptions.** A single pending checkout makes a second Pro subscription rare, but a second checkout opened from an old link could still create one. When a refresh finds two entitled Pro subscriptions:
 
 1. It keeps the one ending latest.
-2. It revokes the other with `DELETE /v1/subscriptions/{id}`.
-3. It refunds that subscription's paid orders, found with `GET /v1/orders/?subscription_id=`, through `POST /v1/refunds/` with the full `amount` and reason `duplicate`.
-4. It logs an error so a person follows up.
+2. It records the other in `duplicate_subscriptions`, in the same commit as the snapshot, before calling Polar. Revoking does not refund, and once revoked the subscription no longer looks like a duplicate, so the obligation has to outlive the call.
+3. The 5-minute job revokes it with `DELETE /v1/subscriptions/{id}` and sets `revoked_at`. Separately, it refunds that subscription's paid orders, found with `GET /v1/orders/?subscription_id=`, through `POST /v1/refunds/` with the full `amount` and reason `duplicate`, and sets `refunded_at`. Each step is retried with backoff until it is settled. A refund Polar reports as already made counts as settled.
+4. It logs an error when the row is created and again while a step stays unsettled for more than a day, so a person follows up.
 
 **Add-ons**, contracted and deferred: they need an entitled Pro plan. When the Pro plan stops being entitled, the refresh cancels them at period end, so they stop charging for nothing.
 
@@ -395,7 +399,7 @@ Losing to a newer revision is not a failure: the newer refresh read Polar later.
 
 ### Moderation
 
-`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes (ADR 0027). There is no admin route on the Worker to protect.
+`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 100 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
 
 - `ban <github-login> <reason>` and `unban <github-login>`;
 - `takedown <slug> <reason>`;

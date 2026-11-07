@@ -94,7 +94,8 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05; step 5 comes with the p
 
 5. **Polar**, once in the sandbox (`sandbox.polar.sh`) and once in production:
    - two Pro products, $7.99 a month and $79 a year, each with a 7-day trial; their ids go in `POLAR_PRODUCT_PRO_MONTHLY` and `POLAR_PRODUCT_PRO_YEARLY`;
-   - "Prevent trial abuse" turned on;
+   - "Prevent trial abuse" turned on (Settings → Subscriptions);
+   - "Enable subscription plan changes" turned on in the customer portal settings, so a subscriber can switch between monthly and yearly there;
    - a webhook endpoint at `https://api.localify.dev/v1/webhooks/polar` (the sandbox points at a dev deployment), with `api_version` `2026-10`, subscribed to `subscription.*` and `customer.state_changed`;
    - an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write`, `orders:read` and `refunds:write`.
 
