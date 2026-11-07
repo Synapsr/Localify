@@ -37,6 +37,11 @@ const DOWN_GRACE_MS = 15 * 60 * 1000;
 const ORPHAN_AGE_MS = 60 * 60 * 1000;
 const LATE_REVOCATION_MS = 10 * 60 * 1000;
 const SWEEP_CALL_BUDGET = 300;
+/**
+ * Calls kept for the rest of the sweep while revocations run first.
+ * Revocations get them too, once the rest of the work is done.
+ */
+const MAINTENANCE_RESERVE = 60;
 /** A release looks the tunnel up by name at most once, then removes it. */
 const RELEASE_CALLS = 1 + REMOVE_TUNNEL_CALLS;
 /** Moving a CNAME may find it gone, fail to create it, then look it up and move it. */
@@ -136,7 +141,20 @@ export async function machineRuntime(
       daemonGeneration === generation ? null : new CloudflareApi(env).tunnelToken(row.tunnel_id),
       ingressSecret(env, caller.machineId),
     ]);
-    return { ...base, state: "ready", tunnel: { generation, token }, ingressSecret: secret };
+    // A revocation may have taken the row while the token was on its way,
+    // and its new secret makes Cloudflare hand out a token that works again.
+    // Only a row still ready, on the same tunnel, unmarked, may have it.
+    const after = await tunnelRow(env, caller.machineId);
+    if (
+      after.tunnel_state === "ready" &&
+      after.tunnel_generation === generation &&
+      after.tunnel_id === row.tunnel_id &&
+      after.rotate_requested_at === null
+    ) {
+      return { ...base, state: "ready", tunnel: { generation, token }, ingressSecret: secret };
+    }
+    row = after;
+    if (row.tunnel_state === "none") return provisioning;
   }
   // A rotation, or an operation that stopped: release, and the next fetch
   // provisions the next generation.
@@ -490,14 +508,15 @@ type SlotRow = {
 
 /**
  * The 5-minute sweep, within a budget of Cloudflare calls. Revocations come
- * first and may use the whole budget: rotations, and the slots of owners
- * who lost their entitlement or hold more than it allows. Then the revoked
- * machines' cleanup, the status readings and reaps, abandoned operations,
- * machines with nothing to serve, CNAME drift and orphan tunnels, with what
- * the budget leaves.
+ * first, with all but a reserve of the budget: rotations, and the slots of
+ * owners who lost their entitlement or hold more than it allows. Then the
+ * revoked machines' cleanup, the status readings and reaps, abandoned
+ * operations, machines with nothing to serve, CNAME drift and orphan
+ * tunnels. What they leave goes to the revocations still queued.
  */
 export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
+  await adoptUntrackedTunnels(env, now);
   const { results: slots } = await env.DB.prepare(
     `SELECT m.id, m.user_id, u.github_id, m.tunnel_state, m.tunnel_generation, m.tunnel_op_at,
             m.tunnel_id, m.tunnel_ready_at, m.down_seen_at, m.rotate_requested_at, m.dns_record_id,
@@ -516,16 +535,22 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   }
   const done = new Set<string>();
 
-  // 1. Revocations, never backed off: one that fails keeps its mark and
-  // comes first again in the next run.
-  for (const slot of revocations(slots, entitlements)) {
+  // 1. Revocations, never backed off: one that fails keeps its mark, and
+  // goes behind the ones not tried since, so none of them starves.
+  const queue = revocations(slots, entitlements);
+  for (const slot of queue) {
     if (slot.rotate_requested_at !== null && slot.rotate_requested_at <= now - LATE_REVOCATION_MS) {
       console.error("A tunnel revocation has waited more than 10 minutes", slot.id);
     }
     done.add(slot.id);
-    if (!budget.has(RELEASE_CALLS)) continue;
-    await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
   }
+  const revoke = async (reserve: number) => {
+    while (queue.length > 0 && budget.has(RELEASE_CALLS + reserve)) {
+      const slot = queue.shift()!;
+      await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
+    }
+  };
+  await revoke(MAINTENANCE_RESERVE);
 
   // 2. Revoked machines.
   await cleanUpRevokedMachines(env, now, budget);
@@ -639,6 +664,9 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
     }
   }
 
+  // The revocations the reserve kept waiting.
+  await revoke(0);
+
   // 8. The account's slots.
   const total = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM machines WHERE tunnel_state != 'none'`,
@@ -651,11 +679,14 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
 }
 
 /**
- * Slots to release before anything else. First the marked ones, oldest mark
- * first: rotations, and revocations whose release has not finished. Then
- * every slot of an owner without entitlement, and an owner's slots
- * provisioned most recently beyond `servingMachines`. A release still
- * running is skipped by `releaseTunnel` until it counts as abandoned.
+ * Slots to release before anything else: the marked ones (rotations, and
+ * revocations whose release has not finished), every slot of an owner
+ * without entitlement, and an owner's slots provisioned most recently beyond
+ * `servingMachines`. Those never tried come first, then the others by their
+ * last attempt, so a release that keeps failing goes to the back of the
+ * queue without losing its urgency; then by their mark, oldest first. A
+ * release still running is skipped by `releaseTunnel` until it counts as
+ * abandoned.
  */
 function revocations(slots: SlotRow[], entitlements: Map<string, Entitlement>): SlotRow[] {
   const marked = slots
@@ -681,7 +712,34 @@ function revocations(slots: SlotRow[], entitlements: Map<string, Entitlement>): 
       );
     beyond.push(...kept.slice(allowed));
   }
-  return [...marked, ...beyond.filter((slot) => !marked.includes(slot))];
+  const lastAttempt = (slot: SlotRow) =>
+    slot.tunnel_state === "releasing" ? (slot.tunnel_op_at ?? 0) : 0;
+  return [...marked, ...beyond.filter((slot) => !marked.includes(slot))].sort(
+    (a, b) =>
+      lastAttempt(a) - lastAttempt(b) ||
+      (a.rotate_requested_at ?? Infinity) - (b.rotate_requested_at ?? Infinity),
+  );
+}
+
+/**
+ * A Worker from before tunnel states can still sign a machine in while a
+ * deploy rolls out: the machine is active with a real tunnel and
+ * `tunnel_state` `none`, so it holds no slot. Takes it over at generation 1:
+ * `ready` when it has a live URL, `releasing` otherwise, already abandoned,
+ * so the release below removes it.
+ */
+async function adoptUntrackedTunnels(env: Env, now: number): Promise<void> {
+  const live = `EXISTS (SELECT 1 FROM public_urls p WHERE p.machine_id = machines.id
+                        AND p.deleted_at IS NULL AND p.taken_down_at IS NULL)`;
+  await env.DB.prepare(
+    `UPDATE machines SET tunnel_generation = 1, tunnel_op = NULL, down_seen_at = NULL,
+            tunnel_state = CASE WHEN ${live} THEN 'ready' ELSE 'releasing' END,
+            tunnel_ready_at = CASE WHEN ${live} THEN ?1 ELSE NULL END,
+            tunnel_op_at = CASE WHEN ${live} THEN NULL ELSE 0 END
+     WHERE status = 'active' AND tunnel_state = 'none' AND tunnel_id IS NOT NULL`,
+  )
+    .bind(now)
+    .run();
 }
 
 /** Machines with at least one URL their owner's entitlement serves. */

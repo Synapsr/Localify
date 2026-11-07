@@ -102,7 +102,7 @@ export type TestContext = {
     redirect?: string;
   }[];
   /** Answers for `fetch`, by `METHOD url`; the first matching prefix wins. */
-  routes: Map<string, (body: string | null) => Response | Promise<Response>>;
+  routes: Map<string, (body: string | null, url: string) => Response | Promise<Response>>;
   limiter: { allowed: boolean };
   deviceLimiter: { allowed: boolean };
 };
@@ -156,7 +156,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
       redirect: init.redirect,
     });
     for (const [key, answer] of context.routes) {
-      if (`${method} ${url}`.startsWith(key)) return answer(body);
+      if (`${method} ${url}`.startsWith(key)) return answer(body, url);
     }
     throw new Error(`No fake answer for ${method} ${url}`);
   });

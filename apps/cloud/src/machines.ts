@@ -14,6 +14,8 @@ const STUCK_AFTER_MS = 10 * 60 * 1000;
 const DELETED_URL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** A revoked machine costs at most two lookups by name, the tunnel's removal, and the record. */
 const CALLS_PER_REVOKED_MACHINE = 2 + REMOVE_TUNNEL_CALLS + 1;
+/** A sign-in cleans up at most what one replaced machine costs, twice over. */
+const SIGN_IN_CLEANUP_CALLS = 2 * CALLS_PER_REVOKED_MACHINE;
 const RETRY_BASE_MS = 5 * 60 * 1000;
 const MAX_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 
@@ -125,12 +127,18 @@ export async function signInMachine(
       `Your account already has ${MAX_SIGNED_IN_MACHINES} machines signed in, the most it can have. Run \`localify logout\` on one of them, or sign in with the name of a machine you no longer use to replace it.`,
     );
   }
-  const { results: old } = await env.DB.prepare(
-    `${SELECT_REVOKED} AND user_id = ?1 AND name = ?2 AND ${HOLDS_RESOURCES}`,
+  // Only what this batch replaced, within a small budget: older cleanups,
+  // and anything left over, are the sweep's.
+  const { results: replacedNow } = await env.DB.prepare(
+    `${SELECT_REVOKED} AND user_id = ?1 AND name = ?2 AND revoked_at = ?3 AND ${HOLDS_RESOURCES}`,
   )
-    .bind(userId, name)
+    .bind(userId, name, now)
     .all<RevokedMachine>();
-  for (const machine of old) await removeCloudflareResources(env, machine, null);
+  const budget = new CallBudget(SIGN_IN_CLEANUP_CALLS);
+  for (const machine of replacedNow) {
+    if (!budget.has(CALLS_PER_REVOKED_MACHINE)) break;
+    await removeCloudflareResources(env, machine, budget);
+  }
   return { machineId: id, token };
 }
 

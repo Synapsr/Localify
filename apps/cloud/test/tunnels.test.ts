@@ -646,7 +646,7 @@ describe("the sweep", () => {
     for (const machine of machines) expect(row(machine.machineId).tunnel_state).toBe("ready");
   });
 
-  it("does at least 75 revocations a run within 300 calls, and the rest at the next one", async () => {
+  it("does at least 60 revocations a run within 300 calls, and the rest at the next one", async () => {
     const { machineId } = await signIn(context);
     const { user_id } = context.sqlite
       .prepare("SELECT user_id FROM machines WHERE id = ?")
@@ -922,5 +922,144 @@ describe("the sweep's budget", () => {
     await runSweep(context.env);
     expect(cloudflareCalls().length).toBeLessThanOrEqual(300);
     expect(count("PATCH /zones/zone-1/dns_records/found")).toBeGreaterThan(0);
+  });
+});
+
+describe("second review", () => {
+  it("withholds a token fetched while a revocation rotated the tunnel's secret", async () => {
+    const { token, machineId } = await servingMachine();
+    const pending = deferred<Response>();
+    context.routes.set(`GET ${TUNNELS}/`, () => pending.promise);
+    const fetched = api(context, "GET", "/v2/machines/self/runtime?generation=0", { token });
+    await vi.waitFor(() =>
+      expect(context.calls.some((call) => call.url.endsWith("/token"))).toBe(true),
+    );
+
+    update("UPDATE machines SET rotate_requested_at = ? WHERE id = ?", Date.now(), machineId);
+    await runSweep(context.env);
+    expect(row(machineId).tunnel_state).toBe("none");
+    pending.resolve(cloudflareOk("token-after-rotation"));
+
+    const body = await (await fetched).json();
+    expect(body).toMatchObject({ state: "provisioning", tunnel: null, ingressSecret: null });
+    expect(JSON.stringify(body)).not.toContain("token-after-rotation");
+  });
+
+  it("lets no failing revocation starve the others or the rest of the sweep", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    context.sqlite.exec(`
+      INSERT INTO users (id, github_id, login, created_at)
+      VALUES ('rotated', 1, 'rotated', 1), ('keeper', 2, 'keeper', 1), ('gone', 9, 'gone', 1);`);
+    const insert = context.sqlite.prepare(
+      `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, tunnel_state,
+                             tunnel_generation, tunnel_id, tunnel_ready_at, rotate_requested_at,
+                             dns_record_id)
+       VALUES (?, ?, ?, 'active', 7381, 1, 'ready', 1, ?, 1, ?, ?)`,
+    );
+    const urgent: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      insert.run(`r-${i}`, "rotated", `r-${i}`, `t-r-${i}`, i + 1, null);
+      insert.run(`g-${i}`, "gone", `g-${i}`, `t-g-${i}`, null, null);
+      urgent.push(`t-r-${i}`, `t-g-${i}`);
+    }
+    // One healthy machine whose CNAME drifted: the rest of the sweep's work.
+    insert.run("keep", "keeper", "keep", "t-keep", null, "dns-keep");
+    context.sqlite
+      .prepare(
+        `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
+                                  password_version, created_at)
+         VALUES ('url-keep', 'keeper', 'keep', 'keep.localify', 0, 'keep', 0, 1, 1)`,
+      )
+      .run();
+    listTunnels([...urgent, "t-keep"].map((id) => ({ id, name: id, status: "healthy", ageMs: 0 })));
+    listRecords([
+      { id: "dns-keep", name: "m-keep.localify.dev", content: "stale.cfargotunnel.com" },
+    ]);
+    // Every final delete of an urgent tunnel fails, after a new secret and
+    // the connections went fine: 3 calls an attempt.
+    context.routes.set(`PATCH ${TUNNELS}/`, () => cloudflareOk({}));
+    context.routes.set(`PATCH ${CF}/zones/zone-1/dns_records/`, () => cloudflareOk({}));
+    context.routes.set(`DELETE ${TUNNELS}/t-`, (_body, url) =>
+      url.endsWith("/connections")
+        ? cloudflareOk(null)
+        : jsonResponse({ success: false, errors: [] }, 500),
+    );
+
+    const tried = new Set<string>();
+    const start = Date.now();
+    for (let run = 0; run < 2; run++) {
+      context.calls.length = 0;
+      await runSweep(context.env, start + run * 5 * MINUTE);
+      expect(cloudflareCalls().length, `run ${run}`).toBeLessThanOrEqual(300);
+      expect(count("PATCH /zones/zone-1/dns_records/dns-keep"), `run ${run}`).toBe(1);
+      for (const call of cloudflareCalls()) {
+        const match = /^PATCH \/accounts\/account-1\/cfd_tunnel\/(t-[rg]-\d+)$/.exec(call);
+        if (match) tried.add(match[1]!);
+      }
+    }
+    expect(urgent.filter((id) => !tried.has(id))).toEqual([]);
+    const unmarked = context.sqlite
+      .prepare(
+        `SELECT COUNT(*) AS n FROM machines
+         WHERE id != 'keep' AND (rotate_requested_at IS NULL OR tunnel_state != 'releasing')`,
+      )
+      .get();
+    expect(unmarked).toEqual({ n: 0 });
+  });
+
+  it("cleans up at sign-in only what that sign-in replaced, within a small budget", async () => {
+    const old = await servingMachine();
+    const { user_id } = context.sqlite
+      .prepare("SELECT user_id FROM machines WHERE id = ?")
+      .get(old.machineId) as { user_id: string };
+    const backlog = context.sqlite.prepare(
+      `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, revoked_at,
+                             tunnel_state, tunnel_id)
+       VALUES (?, ?, 'laptop', 'revoked', 7381, 1, 1, 'releasing', ?)`,
+    );
+    for (let i = 0; i < 200; i++) backlog.run(`old-${i}`, user_id, `backlog-${i}`);
+    context.calls.length = 0;
+
+    await signIn(context, "teo-goulois", 1, "laptop");
+    expect(cloudflareCalls().length).toBeLessThanOrEqual(12);
+    expect(cloudflareCalls()).toContain("PATCH /accounts/account-1/cfd_tunnel/tunnel-laptop");
+    expect(cloudflareCalls().some((call) => call.includes("backlog-"))).toBe(false);
+  });
+
+  it("takes over machines an older Worker signed in during the deploy", async () => {
+    const served = await signIn(context, "teo-goulois", 1, "served");
+    await createUrl(served.token, "served.localify");
+    const idle = await signIn(context, "teo-goulois", 1, "idle");
+    for (const [machine, tunnel] of [
+      [served.machineId, "legacy-served"],
+      [idle.machineId, "legacy-idle"],
+    ] as const) {
+      update(
+        "UPDATE machines SET tunnel_id = ?, dns_record_id = ? WHERE id = ?",
+        tunnel,
+        `dns-${tunnel}`,
+        machine,
+      );
+    }
+    context.calls.length = 0;
+
+    await runSweep(context.env);
+    expect(row(served.machineId)).toMatchObject({
+      tunnel_state: "ready",
+      tunnel_generation: 1,
+      tunnel_id: "legacy-served",
+    });
+    expect(row(idle.machineId)).toMatchObject({
+      tunnel_state: "none",
+      tunnel_id: null,
+      dns_record_id: "dns-legacy-idle",
+    });
+    expect(cloudflareCalls()).toContain("DELETE /accounts/account-1/cfd_tunnel/legacy-idle");
+    expect(
+      context.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM machines WHERE tunnel_state != 'none'")
+        .get(),
+    ).toEqual({ n: 1 });
   });
 });
