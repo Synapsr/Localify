@@ -1407,9 +1407,12 @@ fn apply_next_config_update(update: &NextConfigUpdate) -> Result<()> {
 /// The Localify site a host belongs to: the label before the Localify suffix,
 /// with it. `teo.feature.journal.localify` and `journal.localify` both give
 /// `journal.localify`, so one entry covers a project's namespace, every
-/// worktree and every subdomain under them.
+/// worktree and every subdomain under them. Another project with a domain
+/// under the same site is covered too: all of them are this machine's own
+/// local domains.
 fn localify_site(host: &str) -> String {
-    let host = normalize_domain(host.to_string()).to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = normalize_domain(host);
     let suffix = [BRANDING.dev_domain_suffix, BRANDING.domain_suffix]
         .into_iter()
         .find(|suffix| host.ends_with(suffix))
@@ -2525,6 +2528,11 @@ mod tests {
         assert_eq!(
             localify_site(&format!("web.journal{}", BRANDING.dev_domain_suffix)),
             format!("journal{}", BRANDING.dev_domain_suffix)
+        );
+        // Case and a trailing dot do not change the site.
+        assert_eq!(
+            localify_site(&format!("WEB.Journal{}.", suffix.to_uppercase())),
+            format!("journal{suffix}")
         );
         assert_eq!(
             next_dev_origins(&format!("web.journal{suffix}")),
