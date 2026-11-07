@@ -20,7 +20,7 @@
 
 ## Public URLs
 
-- A public URL opens a project domain from another device, at `https://<slug>.localify.fyi`, behind a password by default. It needs a Localify Cloud account, invite-only for now.
+- A public URL opens a project domain from another device, at `https://<slug>.localify.fyi`, behind a password by default. It needs a Localify Cloud account (GitHub sign-in) and the paid Pro plan: $7.99 a month or $79 a year, with a 7-day free trial, 2 machines serving at the same time and 10 public URLs. A person starts the trial from the app or with `localify subscribe`; an agent never starts a checkout. The rest of Localify is free and needs no account. Pricing: https://localify.dev/pricing
 - `localify login` prints a GitHub device code; the person enters it at https://github.com/login/device from any device, so an agent can sign in a remote machine without anyone at its screen.
 - `localify public-url create <project-domain>` prints the URL, its password and a link that carries the password. `--wildcard` on a project's namespace (`<project>.localify`) also reaches every service and worktree, at `<slug>--<label>.localify.fyi`.
 - Apps that check `Origin`, such as Better Auth, must also trust their own public URL in development, for example `https://<slug>.localify.fyi` and `https://<slug>--*.localify.fyi`: writes keep the public origin. Not every `*.localify.fyi` origin, which would let other people's public URLs post to the app's local domain.

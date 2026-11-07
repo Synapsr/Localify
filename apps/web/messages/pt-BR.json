@@ -6,6 +6,7 @@
   "Navigation": {
     "howItWorks": "Como funciona",
     "faq": "FAQ",
+    "pricing": "Preços",
     "source": "Código-fonte",
     "cta": "Baixar"
   },
@@ -84,7 +85,11 @@
       },
       {
         "question": "É grátis?",
-        "answer": "Sim. O Localify é grátis e open source sob a AGPL, sem conta e sem limite de projetos ou domínios. As URLs públicas também são grátis, mas exigem uma conta com convite e, por enquanto, são limitadas a 10 por pessoa. O código-fonte está no GitHub."
+        "answer": "Sim. O Localify é grátis e open source sob a AGPL, sem conta e sem limite de projetos ou domínios. O código-fonte está no GitHub. As URLs públicas são a única parte paga: elas rodam no Localify Cloud e exigem o plano Pro, que começa com 7 dias de teste grátis.",
+        "link": {
+          "label": "Ver preços",
+          "href": "/pricing"
+        }
       },
       {
         "question": "Para quem é?",
@@ -92,7 +97,7 @@
       },
       {
         "question": "Ele coloca meu trabalho online?",
-        "answer": "Só se você pedir. Seus serviços locais ficam na sua máquina, e nenhum tráfego da app nem log de requisição é enviado para o Localify. A exceção é uma URL pública, uma opção só por convite que você ativa para um domínio de cada vez: as requisições para essa URL passam pela Cloudflare até a sua máquina, protegidas por senha por padrão."
+        "answer": "Só se você pedir. Seus serviços locais ficam na sua máquina, e nenhum tráfego da app nem log de requisição é enviado para o Localify. A exceção é uma URL pública, uma opção paga que você ativa para um domínio de cada vez: as requisições para essa URL passam pela Cloudflare até a sua máquina, protegidas por senha por padrão."
       },
       {
         "question": "O Localify coleta analytics?",
@@ -112,7 +117,11 @@
       },
       {
         "question": "Qual a diferença para ngrok ou Cloudflare Tunnel?",
-        "answer": "ngrok e Cloudflare Tunnel são feitos para colocar serviços na internet. O Localify é feito para o desenvolvimento local: URLs limpas e HTTPS confiável na sua máquina, sem nuvem. Quando você precisa abrir um dev server pelo celular ou por outro computador, uma URL pública faz isso, protegida por senha por padrão. Por enquanto, as URLs públicas são só por convite."
+        "answer": "ngrok e Cloudflare Tunnel são feitos para colocar serviços na internet. O Localify é feito para o desenvolvimento local: URLs limpas e HTTPS confiável na sua máquina, sem nuvem. Quando você precisa abrir um dev server pelo celular ou por outro computador, uma URL pública faz isso, protegida por senha por padrão. As URLs públicas vêm com o Localify Cloud Pro.",
+        "link": {
+          "label": "Ver preços",
+          "href": "/pricing"
+        }
       },
       {
         "question": "Funciona com Cursor, Claude Code, ou vários agentes de IA em paralelo?",
@@ -127,10 +136,108 @@
     "terminal": "Ou pelo terminal, no macOS e no Linux:",
     "requirements": "macOS com Apple Silicon · Linha de comando também no Linux x86_64"
   },
+  "Pricing": {
+    "metaTitle": "Preços",
+    "metaDescription": "O Localify é grátis e open source, sem conta. URLs públicas pelo Localify Cloud exigem o Pro: US$ 7,99 por mês ou US$ 79 por ano, depois de 7 dias de teste grátis.",
+    "titleLine1": "Grátis na sua máquina.",
+    "titleLine2": "Pro para URLs públicas.",
+    "description": "O proxy local é grátis, open source e não exige conta. URLs públicas, servidas da sua máquina pelo Localify Cloud, exigem um plano pago.",
+    "free": {
+      "name": "Grátis",
+      "tagline": "O proxy local: tudo, menos URLs públicas.",
+      "note": "Open source sob a AGPL. Sem conta.",
+      "features": [
+        "Projetos e domínios .localify ilimitados",
+        "HTTPS local confiável, DNS e roteamento",
+        "App desktop para macOS, CLI para macOS e Linux",
+        "Servidor MCP para Claude Code, Codex e Cursor",
+        "Descoberta de Docker e logs de requisição ao vivo"
+      ],
+      "cta": "Baixar"
+    },
+    "pro": {
+      "name": "Pro",
+      "badge": "Localify Cloud",
+      "tagline": "URLs públicas para os seus dev servers, em {url}.",
+      "interval": "Período de cobrança",
+      "monthly": "Mensal",
+      "yearly": "Anual",
+      "save": "Economize {percent}",
+      "perMonth": "/ mês",
+      "perYear": "/ ano",
+      "monthlyNote": "Cobrado todo mês.",
+      "yearlyNote": "{price} por mês, cobrado uma vez por ano.",
+      "features": [
+        "URLs públicas servidas da sua máquina",
+        "10 URLs públicas",
+        "2 máquinas servindo ao mesmo tempo",
+        "Senha em toda URL por padrão",
+        "URLs wildcard que alcançam cada serviço e cada worktree de um projeto",
+        "Tudo do Grátis"
+      ],
+      "trial": "7 dias de teste grátis. O checkout pede um cartão, e nada é cobrado até o fim do teste. Cancele quando quiser antes disso. Um teste por conta do GitHub.",
+      "start": "Comece um teste de 7 dias pelo app ou com:"
+    },
+    "team": {
+      "name": "Equipe",
+      "badge": "Mais tarde",
+      "tagline": "Localify Cloud para várias pessoas, em uma única fatura.",
+      "body": "Ainda não existe. Se a sua equipe quiser, conte o que vocês precisariam.",
+      "cta": "Diga que você quer"
+    },
+    "addons": {
+      "title": "Adicionais, logo depois do lançamento",
+      "machine": "+1 máquina servindo, {price} por mês",
+      "urls": "+10 URLs públicas, {price} por mês"
+    },
+    "billing": "Preços em dólares americanos. A Polar é a merchant of record: ela vende o plano, cuida dos impostos e envia as suas faturas. Cancele, troque entre mensal e anual ou atualize o cartão no portal do cliente da Polar, pelo app ou com localify billing.",
+    "faq": {
+      "title": "Perguntas sobre preços",
+      "items": [
+        {
+          "question": "O que continua grátis?",
+          "answer": "Tudo o que roda na sua máquina: domínios .localify, HTTPS confiável, DNS, roteamento, o app desktop, o CLI e o servidor MCP. É open source sob a AGPL e não exige conta. Só as URLs públicas exigem um plano, porque o Localify Cloud transporta o tráfego delas."
+        },
+        {
+          "question": "Como funciona o teste?",
+          "answer": "Comece pelo app ou com localify subscribe. O checkout pede um cartão, mas nada é cobrado por 7 dias. Cancele antes do fim do teste e você não paga nada. Caso contrário, o Pro começa, mensal ou anual, como você escolheu. Cada conta do GitHub tem um teste."
+        },
+        {
+          "question": "O que conta como máquina servindo?",
+          "answer": "Um computador que coloca as suas URLs públicas online pelo Localify Cloud. O Pro deixa 2 fazerem isso ao mesmo tempo, por exemplo o seu notebook e a máquina onde rodam os seus agentes. Entrar em outro computador não usa nenhuma."
+        },
+        {
+          "question": "Posso cancelar ou pedir reembolso?",
+          "answer": "Cancele quando quiser pelo portal do cliente. O Pro continua até o fim do período pago e depois para. Para a sua primeira cobrança, escreva para support@localify.dev em até 14 dias e reembolsamos o valor integral.",
+          "link": {
+            "label": "Ler os termos",
+            "href": "/terms"
+          }
+        },
+        {
+          "question": "Quem cuida do pagamento?",
+          "answer": "A Polar (polar.sh), como merchant of record. A Polar é a vendedora: recebe o pagamento, cuida dos impostos e envia as suas faturas. Os dados do seu cartão vão para a Polar e para o processador de pagamentos dela, nunca para nós.",
+          "link": {
+            "label": "Ler a política de privacidade",
+            "href": "/privacy"
+          }
+        },
+        {
+          "question": "Para que posso usar URLs públicas?",
+          "answer": "Para acessar seus próprios dev servers pelo celular ou por outro computador, e para mostrar trabalho em andamento. Não para hospedar produção: cada conta tem um limite de requisições para picos de tráfego. Phishing, malware, conteúdo ilegal e violação de direitos são proibidos e fazem a URL ser removida.",
+          "link": {
+            "label": "Ler as regras de uso",
+            "href": "/terms"
+          }
+        }
+      ]
+    }
+  },
   "Footer": {
     "resources": "Recursos",
     "legal": "Legal",
     "download": "Baixar",
+    "pricing": "Preços",
     "source": "Código-fonte",
     "docs": "Documentação",
     "contact": "Contato",
@@ -153,8 +260,8 @@
   },
   "Terms": {
     "title": "Termos de serviço",
-    "updatedAt": "6 de novembro de 2026",
-    "intro": "O Localify é grátis e open source. Estes termos são curtos porque a licença faz quase todo o trabalho. Se algo não estiver claro, escreva para support@localify.dev.",
+    "updatedAt": "7 de novembro de 2026",
+    "intro": "O Localify é grátis e open source, e a licença cobre quase tudo o que você pode fazer com ele. Estes termos acrescentam o resto: o serviço pago Localify Cloud por trás das URLs públicas, e o site. Se algo não estiver claro, escreva para support@localify.dev.",
     "sections": [
       {
         "title": "1. Quem somos",
@@ -173,9 +280,9 @@
         }
       },
       {
-        "title": "3. Nada para comprar",
+        "title": "3. O que é grátis e o que é pago",
         "body": [
-          "Não há compra, chave de licença nem limite de ativação. Você não precisa de conta para usar o Localify, exceto para URLs públicas."
+          "O software Localify é grátis: sem compra, sem chave de licença, sem limite de ativação e sem conta. As URLs públicas são a exceção. Elas rodam no Localify Cloud, um serviço pago com conta própria, descrito na seção 6."
         ]
       },
       {
@@ -193,8 +300,35 @@
       {
         "title": "6. Localify Cloud",
         "body": [
-          "As URLs públicas rodam no Localify Cloud, que por enquanto é grátis e só por convite. Use-as para acessar seus próprios dev servers ou para mostrar trabalho em andamento, não para hospedar um site para o público. Não as use para nada ilegal, para phishing ou malware, nem para conteúdo que viole direitos de outras pessoas.",
-          "Podemos remover uma URL pública ou encerrar uma conta que descumpra estes termos, e podemos mudar ou descontinuar o serviço. Assim como o software, ele é fornecido sem garantia, inclusive de que continue disponível."
+          "As URLs públicas, em https://<slug>.localify.fyi e servidas da sua máquina, rodam no Localify Cloud. Você entra com o GitHub, e servir uma URL pública exige um plano pago. O Localify Cloud Pro custa US$ 7,99 por mês ou US$ 79 por ano e inclui 2 máquinas servindo URLs públicas ao mesmo tempo e 10 URLs públicas.",
+          "A Polar (polar.sh) vende o plano como merchant of record. A Polar é a vendedora oficial: recebe o pagamento, cuida dos impostos e emite as suas faturas. Os termos da Polar também se aplicam à compra.",
+          "Podemos mudar ou descontinuar o Localify Cloud. Assim como o software, ele é fornecido sem garantia, inclusive de que continue disponível."
+        ],
+        "link": {
+          "label": "Ver preços",
+          "href": "/pricing"
+        }
+      },
+      {
+        "title": "6.1 Teste, renovação e cancelamento",
+        "body": [
+          "O Pro começa com 7 dias de teste grátis. O checkout pede um cartão, e nada é cobrado até o fim do teste. Se você cancelar antes, não paga nada. Há um teste por conta do GitHub.",
+          "Depois do teste, o plano se renova automaticamente todo mês ou todo ano, conforme você escolheu, e a Polar cobra o seu cartão a cada renovação até você cancelar. No portal do cliente da Polar, que você abre pelo app ou com localify billing, você pode cancelar, trocar entre mensal e anual e atualizar o cartão a qualquer momento.",
+          "Quando você cancela, o plano não se renova, e você mantém o Pro até o fim do período já pago."
+        ]
+      },
+      {
+        "title": "6.2 Reembolsos",
+        "body": [
+          "Para a sua primeira cobrança, escreva para support@localify.dev em até 14 dias e reembolsamos o valor integral. Isso respeita o direito de arrependimento de 14 dias que os consumidores têm na União Europeia. Fora isso, um período já iniciado não é reembolsado, a menos que a lei do seu país diga o contrário."
+        ]
+      },
+      {
+        "title": "6.3 Uso aceitável",
+        "body": [
+          "As URLs públicas servem para acessar seus próprios dev servers e mostrar trabalho em andamento. Não servem para hospedar produção nem um site para o público. Cada conta tem um limite de requisições que absorve picos, como uma página que carrega centenas de arquivos de uma vez. As requisições acima dele são recusadas por um curto período.",
+          "Não use uma URL pública para phishing, malware, conteúdo ilegal ou conteúdo que viole direitos de outras pessoas. Você é responsável pelo que as suas URLs públicas servem.",
+          "Se uma URL pública violar estas regras, nós a removemos e encerramos a conta, sem reembolso. Para denunciar abuso, escreva para abuse@localify.dev."
         ]
       },
       {
@@ -223,13 +357,13 @@
   },
   "Privacy": {
     "title": "Política de privacidade",
-    "updatedAt": "6 de novembro de 2026",
+    "updatedAt": "7 de novembro de 2026",
     "intro": "Seu ambiente de desenvolvimento local fica na sua máquina. O app desktop e o CLI mantêm lá DNS, TLS, roteamento, projetos e logs de requisição. Esta página cobre os casos em que dados saem do seu dispositivo e o que o site coleta.",
     "sections": [
       {
         "title": "1. A versão curta",
         "body": [
-          "O Localify não guarda logs de requisição nem nada sobre o tráfego dos serviços que você roda. As requisições para uma URL pública passam pela Cloudflare e pelo Localify Cloud a caminho da sua máquina, sem serem armazenadas. Os analytics não incluem caminhos locais, e um filtro os remove dos relatórios de erro. O proxy funciona localmente depois da instalação. Dados chegam até nós em cinco casos: você visita o site, o app desktop oficial envia analytics de produto e relatórios de erro, o app procura atualizações, você entra no Localify Cloud e usa URLs públicas ou você nos escreve."
+          "O Localify não guarda logs de requisição nem nada sobre o tráfego dos serviços que você roda. As requisições para uma URL pública passam pela Cloudflare e pelo Localify Cloud a caminho da sua máquina, sem serem armazenadas. Os analytics não incluem caminhos locais, e um filtro os remove dos relatórios de erro. O proxy funciona localmente depois da instalação. Dados chegam até nós em seis casos: você visita o site, o app desktop oficial envia analytics de produto e relatórios de erro, o app procura atualizações, você entra no Localify Cloud e usa URLs públicas, você paga um plano do Localify Cloud pela Polar ou você nos escreve."
         ]
       },
       {
@@ -251,20 +385,27 @@
       {
         "title": "4. Localify Cloud e URLs públicas",
         "body": [
-          "As URLs públicas são opcionais e só por convite. Elas exigem uma conta no Localify Cloud, que você cria ao entrar com o GitHub. A partir daí, guardamos o ID numérico e o nome de usuário da sua conta do GitHub e, para cada computador em que você entra, o nome dele, a porta local à qual o túnel dele se conecta e um token de login armazenado só como hash. Nunca vemos sua senha do GitHub, e o token do GitHub usado no login serve uma única vez para ler seu nome de usuário e depois é descartado. Um computador conectado pergunta ao Localify Cloud a cada 5 minutos quais URLs públicas ele serve; essas requisições incluem a versão do Localify instalada nele.",
+          "As URLs públicas são opcionais e exigem um plano pago. Elas exigem uma conta no Localify Cloud, que você cria ao entrar com o GitHub. Guardamos o ID numérico e o nome de usuário da sua conta do GitHub enquanto a conta existir, para reconhecer você quando entra. Para cada computador em que você entra, guardamos o nome dele, a porta local à qual o túnel dele se conecta e um token de login armazenado só como hash. Nunca vemos sua senha do GitHub, e o token do GitHub usado no login serve uma única vez para ler seu nome de usuário e depois é descartado. Um computador conectado pergunta ao Localify Cloud a cada 5 minutos quais URLs públicas ele serve; essas requisições incluem a versão do Localify instalada nele.",
           "Para cada URL pública, guardamos o endereço, o domínio local que ela abre (como web.journal.localify), o computador que a serve, as configurações dela e, quando ela é protegida, um hash com salt da senha. A senha passa pelo Localify Cloud quando você a define, mas nunca é armazenada. Também guardamos identificadores técnicos, status e datas. Uma URL removida fica guardada por 30 dias, para que o endereço não possa servir a página de outra pessoa, e depois é excluída na limpeza seguinte, que roda a cada hora. Até lá, você pode recuperar o endereço.",
           "As requisições para uma URL pública passam pela Cloudflare, que roda o Localify Cloud, e depois por um Cloudflare Tunnel até o seu computador. O Localify Cloud verifica o acesso e repassa cada requisição, com o endereço IP do visitante, sem registrá-la nem armazená-la. Para frear tentativas de adivinhar senhas e abusos no login, a Cloudflare limita as tentativas de senha por URL e endereço IP, e as requisições de login por endereço IP, em janelas de um minuto. Uma URL protegida define um único cookie no próprio endereço, válido por 7 dias, que só registra que você digitou a senha. O Localify Cloud registra os próprios erros, não cada requisição. Uma mensagem de erro pode incluir detalhes da requisição que a causou, e a Cloudflare guarda esses logs por até 7 dias."
         ]
       },
       {
-        "title": "5. Versões antigas do app",
+        "title": "5. Pagamento do Localify Cloud",
+        "body": [
+          "Os planos são vendidos pela Polar (polar.sh), a merchant of record. Quando você começa um teste ou assina, a Polar e o processador de pagamentos dela recebem e tratam o seu nome, o seu e-mail, os seus dados de pagamento e o endereço ou o país de cobrança dos quais os impostos dependem. Os dados do seu cartão nunca chegam até nós. A Polar envia os seus recibos e faturas, e a política de privacidade dela cobre o que ela faz com esses dados.",
+          "Da Polar, o Localify Cloud guarda só o seu ID de cliente na Polar, os seus IDs de assinatura e o status do seu plano, como teste, ativo ou cancelado, com a data em que o teste ou o período atual termina, além de se a sua conta já usou o teste. A Polar nos avisa quando uma assinatura muda, e pedimos a ela as suas assinaturas para manter esse status em dia."
+        ]
+      },
+      {
+        "title": "6. Versões antigas do app",
         "body": [
           "Versões antigas do app usavam chaves de licença. Se você ativou uma chave em uma delas, essa versão ainda pode contatar licences.localify.dev para validá-la, enviando a chave e uma impressão digital da máquina. Essa impressão digital é um identificador não reversível derivado de um identificador estável da máquina. A versão atual não tem verificação de licença e não faz essa requisição.",
           "A Keygen, provedora de licenças, guarda os registros dessas ativações, incluindo a plataforma, o hostname e o nome do dispositivo enviados na ativação, quando disponíveis. Eles ficam lá até serem excluídos mediante solicitação. Para pedir a exclusão, escreva para support@localify.dev."
         ]
       },
       {
-        "title": "6. O site",
+        "title": "7. O site",
         "body": [
           "Em produção, o site usa duas ferramentas de analytics, Umami e PostHog. Elas registram visualizações de página e cliques em botões como o de download. Não usamos rastreadores de publicidade nem retargeting entre sites.",
           "O Umami roda para todos os visitantes. Ele é carregado de analytics.teogoulois.com e não usa cookies.",
@@ -273,7 +414,7 @@
         ]
       },
       {
-        "title": "7. Provedores",
+        "title": "8. Provedores",
         "body": [
           "Usamos estes provedores:"
         ],
@@ -285,6 +426,10 @@
           {
             "name": "GitHub",
             "description": "login no Localify Cloud."
+          },
+          {
+            "name": "Polar",
+            "description": "checkout, pagamentos, impostos e faturas dos planos do Localify Cloud, como merchant of record, com o seu processador de pagamentos."
           },
           {
             "name": "PostHog",
@@ -301,37 +446,39 @@
         ]
       },
       {
-        "title": "8. Por que tratamos esses dados",
+        "title": "9. Por que tratamos esses dados",
         "body": [
-          "Para o PostHog no site, nos baseamos no seu consentimento, e você pode retirá-lo a qualquer momento pelo link Cookies no rodapé. Tratamos as analytics do Umami, as analytics do app desktop e os relatórios de erro porque temos interesse legítimo em entender como o Localify é usado e em corrigir o que quebra. Tratamos as requisições de atualização para entregar atualizações, os dados do Localify Cloud para fornecer as URLs públicas para as quais você fez login, e os e-mails de suporte para responder a você."
+          "Para o PostHog no site, nos baseamos no seu consentimento, e você pode retirá-lo a qualquer momento pelo link Cookies no rodapé. Tratamos as analytics do Umami, as analytics do app desktop e os relatórios de erro porque temos interesse legítimo em entender como o Localify é usado e em corrigir o que quebra. Tratamos as requisições de atualização para entregar atualizações, os dados do Localify Cloud para fornecer as URLs públicas para as quais você fez login, e os e-mails de suporte para responder a você.",
+          "Tratamos os dados de cobrança da Polar para fornecer o plano que você paga."
         ]
       },
       {
-        "title": "9. Retenção",
+        "title": "10. Retenção",
         "body": [
-          "Guardamos os e-mails de suporte enquanto forem úteis para o suporte e depois os excluímos. O PostHog guarda os eventos de analytics por até 7 anos, o período definido pelo nosso plano, que não podemos reduzir, e as gravações de sessão, se você as ativar, por até 3 meses. Os dados do Umami ficam guardados enquanto o projeto existir, a menos que os excluamos antes. O Localify Cloud guarda sua conta e seus computadores até você pedir que os excluamos, e as URLs públicas removidas por 30 dias. Os logs de servidor ficam com os provedores acima, conforme as configurações de retenção de cada serviço. Os registros de licença existentes ficam com o provedor até serem excluídos mediante solicitação."
+          "Guardamos os e-mails de suporte enquanto forem úteis para o suporte e depois os excluímos. O PostHog guarda os eventos de analytics por até 7 anos, o período definido pelo nosso plano, que não podemos reduzir, e as gravações de sessão, se você as ativar, por até 3 meses. Os dados do Umami ficam guardados enquanto o projeto existir, a menos que os excluamos antes. O Localify Cloud guarda sua conta e seus computadores até você pedir que os excluamos, e as URLs públicas removidas por 30 dias. Os logs de servidor ficam com os provedores acima, conforme as configurações de retenção de cada serviço. Os registros de licença existentes ficam com o provedor até serem excluídos mediante solicitação.",
+          "O Localify Cloud guarda os seus IDs da Polar e o status do seu plano enquanto a sua conta existir. A Polar guarda os registros de pagamento e as faturas conforme a política dela e pelo tempo que a lei fiscal exigir."
         ]
       },
       {
-        "title": "10. Seus direitos",
+        "title": "11. Seus direitos",
         "body": [
           "Você pode nos pedir uma cópia dos dados que temos sobre você, corrigi-los ou pedir a exclusão. Quando o GDPR ou uma lei semelhante se aplicar, você também pode se opor a certos tratamentos ou limitá-los, pedir a portabilidade ou reclamar à sua autoridade local de proteção de dados. Escreva para support@localify.dev e responderemos em um prazo razoável."
         ]
       },
       {
-        "title": "11. Transferências internacionais",
+        "title": "12. Transferências internacionais",
         "body": [
           "Nós e nossos provedores podemos tratar dados fora do seu país, inclusive nos Estados Unidos. Quando necessário, usamos mecanismos de transferência como decisões de adequação ou cláusulas contratuais padrão."
         ]
       },
       {
-        "title": "12. Crianças",
+        "title": "13. Crianças",
         "body": [
           "O Localify é uma ferramenta de desenvolvimento voltada a adultos. Não é destinado a menores de 16 anos, e não coletamos conscientemente dados pessoais deles."
         ]
       },
       {
-        "title": "13. Mudanças nesta política",
+        "title": "14. Mudanças nesta política",
         "body": [
           "Se mudarmos a forma como tratamos os dados, atualizaremos esta página e a data no topo. Se a mudança for significativa, vamos sinalizá-la no site."
         ]

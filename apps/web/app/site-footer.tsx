@@ -21,6 +21,7 @@ export const SiteFooter = () => {
       head: t("resources"),
       items: [
         { label: t("download"), href: "/#download" },
+        { label: t("pricing"), href: "/pricing" },
         { label: t("source"), href: sourceUrl },
         { label: t("docs"), href: `${sourceUrl}/tree/main/docs` },
         { label: t("contact"), href: "mailto:support@localify.dev" },

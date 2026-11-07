@@ -92,6 +92,7 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 ### Facts copy can use
 
 - **License**: free and open source under AGPL-3.0-only. No account, and no limit on projects or domains.
+- **Localify Cloud**: public URLs (`https://<slug>.localify.fyi`, served from the user's machine) are the one paid part. Pro costs $7.99 a month or $79 a year, after a 7-day free trial that asks for a card and charges nothing before it ends, one trial per GitHub account. It includes 2 machines serving at the same time and 10 public URLs, a password on every URL by default, and wildcard URLs. Add-ons (+1 serving machine $3 a month, +10 URLs $2 a month) come after launch, and Team is "coming later" with a mailto. Polar (polar.sh) is the merchant of record. Sign-up opens later, so copy must stay true before and after: never say invite-only, never say anyone can buy today. Say "Start a 7-day trial from the app or with `localify subscribe`". The [pricing page](app/pricing/page.tsx), the Terms and the Privacy Policy carry the details.
 - **Platforms**: the desktop app runs on macOS on Apple Silicon for now. The CLI and daemon install on macOS on Apple Silicon and Linux x86_64 with `curl -fsSL https://localify.dev/install.sh | sh` (`public/install.sh`, which downloads the GitHub release and checks its SHA-256), and build from source elsewhere. Windows and a Linux desktop app are planned for later, with no date to promise.
 - **For agents**: `public/llms.txt` sums up install, first steps, MCP and public URLs. Keep it in step with this file and `docs/README.md`.
 - **Architecture**: Rust daemon plus Tauri desktop UI.
@@ -119,6 +120,8 @@ Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
 | How it works | `app/_sections/how-it-works.tsx` | Steps plus the inline agent row (see 4.7) |
 | FAQ | `app/_sections/faq.tsx` | |
 | Final CTA | `app/_sections/final-cta.tsx` | Download and source actions, requirements |
+
+The pricing page, [`app/pricing/page.tsx`](app/pricing/page.tsx), is a separate route: Free, Pro with a monthly/yearly toggle (`app/_components/pro-plan-card.tsx`), Team, the add-ons line, and its own FAQ. The prices are constants at the top of that file.
 
 ## 9. How it works videos
 

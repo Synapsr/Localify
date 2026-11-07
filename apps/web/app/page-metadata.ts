@@ -6,7 +6,7 @@ import { routing, type Locale } from "@/i18n/routing";
 
 import { siteName } from "./site-metadata";
 
-export type SiteRoute = "" | "/privacy" | "/terms";
+export type SiteRoute = "" | "/pricing" | "/privacy" | "/terms";
 
 export const localizedPath = (locale: Locale, route: SiteRoute) => {
   return locale === routing.defaultLocale ? route || "/" : `/${locale}${route}`;
@@ -28,6 +28,7 @@ export const buildPageMetadata = async (locale: Locale, route: SiteRoute): Promi
   const t = await getTranslations({ locale });
   const { title, description } = {
     "": { title: t("Metadata.title"), description: t("Metadata.description") },
+    "/pricing": { title: t("Pricing.metaTitle"), description: t("Pricing.metaDescription") },
     "/privacy": { title: t("Privacy.title"), description: t("Privacy.intro") },
     "/terms": { title: t("Terms.title"), description: t("Terms.intro") },
   }[route];

@@ -75,6 +75,7 @@ const HomePage = async ({ params }: HomePageProps) => {
   const navItems = [
     { href: "#how-it-works", label: nav("howItWorks") },
     { href: "#faq", label: nav("faq") },
+    { href: "/pricing", label: nav("pricing") },
     { href: sourceUrl, label: nav("source") },
   ];
 
