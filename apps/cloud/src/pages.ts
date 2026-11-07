@@ -3,6 +3,12 @@
 
 /** Where the password form posts, on every protected host. */
 export const ACCESS_PATH = "/__localify/access";
+/** Where the warning page's `Continue` posts, on every host. */
+export const NOTICE_PATH = "/__localify/notice";
+/** Linked from every page, for reports about a public URL. */
+export const ABUSE_EMAIL = "abuse@localify.dev";
+/** The owner limiter counts per minute. */
+export const RETRY_AFTER_SECONDS = 60;
 
 const STYLE = `
 :root{color-scheme:light dark;--bg:#f6f6f4;--card:#fff;--text:#1b1b18;--muted:#5d5d57;--line:#d8d8d2;--accent:#1f5eff;--error:#b42318}
@@ -18,7 +24,10 @@ input{width:100%;font:inherit;padding:10px 12px;border:1px solid var(--line);bor
 input:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 button{margin-top:16px;width:100%;font:inherit;font-weight:600;padding:10px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
 .error{color:var(--error);margin:12px 0 0}
+a{color:var(--accent)}
+a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 footer{margin-top:20px;font-size:.85rem;color:var(--muted)}
+footer a{color:inherit}
 `;
 
 const CSP =
@@ -49,6 +58,18 @@ if (hash) {
   } catch {}
 }`;
 
+/**
+ * The same for a browser that has not acknowledged the warning: it fills the
+ * password in, and the visitor's `Continue` posts it with the acknowledgement.
+ */
+const FILL_LINK_PASSWORD = `const hash = location.hash.slice(1);
+if (hash) {
+  history.replaceState(null, "", location.pathname + location.search);
+  try {
+    document.forms[0].password.value = decodeURIComponent(hash);
+  } catch {}
+}`;
+
 function page(
   status: number,
   title: string,
@@ -72,12 +93,35 @@ function page(
 <body>
 <main>
 ${body}
-<footer>Shared with Localify</footer>
+<footer>Shared with Localify · <a href="mailto:${ABUSE_EMAIL}">Report abuse</a></footer>
 </main>
 ${nonce ? `<script nonce="${nonce}">${script}</script>\n` : ""}</body>
 </html>
 `;
   return new Response(method === "HEAD" ? null : html, { status, headers });
+}
+
+/** What the warning page says (ADR 0026), also on a shared link's page. */
+function noticeText(host: string, login: string): string {
+  return `<h1>Before you continue</h1>
+<p><span class="host">${escapeHtml(host)}</span> is a development preview, served from a personal computer through Localify by GitHub user <a href="https://github.com/${encodeURIComponent(login)}">${escapeHtml(login)}</a>.</p>
+<p>Continue only if you trust whoever sent you this link. Never enter passwords or payment details for another site here.</p>`;
+}
+
+export type WarningPageOptions = { host: string; login: string; next: string; method?: string };
+
+/** Shown before anything else, the password included, on a browser's first visit to a host. */
+export function warningPage({ host, login, next, method }: WarningPageOptions): Response {
+  return page(
+    200,
+    "Before you continue",
+    `${noticeText(host, login)}
+<form method="post" action="${NOTICE_PATH}">
+<input type="hidden" name="next" value="${escapeHtml(next)}">
+<button type="submit">Continue</button>
+</form>`,
+    method,
+  );
 }
 
 export type PasswordPageOptions = {
@@ -88,6 +132,12 @@ export type PasswordPageOptions = {
   method?: string;
   /** The page a shared link opens: it posts the password the link carries. */
   fromLink?: boolean;
+  /**
+   * The owner's login, when this browser has not acknowledged the warning yet:
+   * the page then says what the warning says, and posts the acknowledgement
+   * with the password.
+   */
+  noticeFor?: string;
 };
 
 export function passwordPage({
@@ -97,23 +147,43 @@ export function passwordPage({
   status = 401,
   method,
   fromLink = false,
+  noticeFor,
 }: PasswordPageOptions): Response {
   const errorId = error ? ` aria-describedby="password-error" aria-invalid="true"` : "";
+  const notice = noticeFor !== undefined;
+  const intro = notice
+    ? noticeText(host, noticeFor)
+    : `<h1>Password required</h1>
+<p><span class="host">${escapeHtml(host)}</span> is protected. Enter the password its owner shared with you.</p>`;
+  let script: string | undefined;
+  if (fromLink) script = notice ? FILL_LINK_PASSWORD : SUBMIT_LINK_PASSWORD;
   return page(
     status,
-    "Password required",
-    `<h1>Password required</h1>
-<p><span class="host">${escapeHtml(host)}</span> is protected. Enter the password its owner shared with you.</p>
+    notice ? "Before you continue" : "Password required",
+    `${intro}
 <form method="post" action="${ACCESS_PATH}">
 <input type="hidden" name="next" value="${escapeHtml(next)}">
-<label for="password">Password</label>
+${notice ? `<input type="hidden" name="notice" value="1">\n` : ""}<label for="password">Password</label>
 <input id="password" name="password" type="password" autocomplete="current-password" required autofocus${errorId}>
 ${error ? `<p id="password-error" class="error" role="alert">${escapeHtml(error)}</p>` : ""}
 <button type="submit">Continue</button>
 </form>`,
     method,
-    fromLink ? SUBMIT_LINK_PASSWORD : undefined,
+    script,
   );
+}
+
+/** Over the owner's traffic limit, for a browser's navigation. */
+export function tooManyRequestsPage(method?: string): Response {
+  const response = page(
+    429,
+    "Too many requests",
+    `<h1>Too many requests</h1>
+<p>The public URLs of this owner received more requests in the last minute than Localify allows. Wait a minute, then reload this page.</p>`,
+    method,
+  );
+  response.headers.set("retry-after", String(RETRY_AFTER_SECONDS));
+  return response;
 }
 
 export function notFoundPage(method?: string): Response {

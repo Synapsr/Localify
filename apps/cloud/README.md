@@ -36,8 +36,8 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/public.ts`, `src/sites.ts` | The public traffic path |
 | `src/github.ts`, `src/cloudflare.ts` | The GitHub and Cloudflare API calls |
 | `src/names.ts` | Slugs, labels, public hosts, and the origin rule |
-| `src/cookie.ts`, `src/headers.ts`, `src/crypto.ts` | Access cookie, forwarded headers, hashing |
-| `src/pages.ts`, `src/passwords.ts` | The HTML pages and generated passwords |
+| `src/cookie.ts`, `src/headers.ts`, `src/crypto.ts` | Access and notice cookies, forwarded headers, hashing |
+| `src/pages.ts`, `src/passwords.ts` | The HTML pages (warning, password, errors) and generated passwords |
 
 ## Run locally
 
@@ -107,7 +107,32 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05; step 5 comes with the p
 
    The add-on products and "Enable subscription unit changes" come when add-ons ship.
 
-The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route, and a rate-limiting rule per client IP (docs/public-urls.md, "Public traffic").
+The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route, and a rate-limiting rule per client IP (docs/public-urls.md, "Public traffic"). The rule runs before the Worker, so a flood from one address costs no Worker requests; the Worker's own `OWNER_LIMITER` (2,000 requests a minute per owner) caps the rest.
+
+The zone is on the Free plan, which allows one rate-limiting rule, matching on the URI path and verified bots only, counting by IP, over 10 seconds, with a 10-second block and Cloudflare's default response (a custom response needs Pro). The rule fits those limits. Create it under Security rules → Create rule → Rate limiting rules:
+
+- **Name:** `Per-IP flood limit`
+- **If incoming requests match:** `(http.request.uri.path wildcard "/*")`, every request
+- **With the same characteristics:** IP
+- **When rate exceeds:** 1,000 requests per 10 seconds
+- **Then take action:** Block, with the default response (429)
+- **For duration:** 10 seconds
+
+1,000 requests in 10 seconds is more than a Vite page that loads a thousand modules at once, from an office or a phone network behind one shared address, and about 100 requests a second sustained before the block. Through the API (`CLOUDFLARE_OPS_TOKEN`), it is one rule in the zone's `http_ratelimit` phase entrypoint:
+
+```json
+{
+  "description": "Per-IP flood limit",
+  "expression": "(http.request.uri.path wildcard \"/*\")",
+  "action": "block",
+  "ratelimit": {
+    "characteristics": ["ip.src", "cf.colo.id"],
+    "period": 10,
+    "requests_per_period": 1000,
+    "mitigation_timeout": 10
+  }
+}
+```
 
 The `localify.dev` zone needs two rules, so that nobody holding a tunnel token can serve pages on a machine hostname directly (docs/public-urls.md, "Edge rule"):
 

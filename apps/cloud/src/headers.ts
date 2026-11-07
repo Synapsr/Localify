@@ -1,8 +1,8 @@
 // The headers a public request carries to the machine.
 
-import { ACCESS_COOKIE, withoutCookie } from "./cookie";
+import { ACCESS_COOKIE, NOTICE_COOKIE, withoutCookies } from "./cookie";
 
-const STRIPPED = new Set(["host", "forwarded", "x-real-ip"]);
+const STRIPPED = new Set(["host", "forwarded", "x-real-ip", "localify-skip-warning"]);
 const STRIPPED_PREFIXES = ["x-forwarded-", "x-localify-", "cf-"];
 
 export type LocalifyHeaders = {
@@ -17,7 +17,8 @@ export type LocalifyHeaders = {
 
 /**
  * Copies the request's headers without `Host`, `Forwarded`, `X-Real-IP`,
- * `X-Forwarded-*`, `X-Localify-*`, `CF-*` and the access cookie, then adds
+ * `X-Forwarded-*`, `X-Localify-*`, `CF-*`, `Localify-Skip-Warning`, and the
+ * access and notice cookies, then adds
  * `X-Localify-Edge` for the machine zone, and the `X-Localify-*` headers the
  * daemon's public ingress reads.
  */
@@ -29,7 +30,7 @@ export function upstreamHeaders(incoming: Headers, localify: LocalifyHeaders): H
     if (STRIPPED_PREFIXES.some((prefix) => lower.startsWith(prefix))) continue;
     headers.append(name, value);
   }
-  const cookies = withoutCookie(incoming.get("cookie"), ACCESS_COOKIE);
+  const cookies = withoutCookies(incoming.get("cookie"), [ACCESS_COOKIE, NOTICE_COOKIE]);
   if (cookies) headers.set("cookie", cookies);
   headers.set("x-localify-edge", localify.edgeKey);
   headers.set("x-localify-ingress", localify.ingressSecret);

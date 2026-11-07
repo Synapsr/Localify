@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ACCESS_COOKIE } from "../src/cookie";
+import { ACCESS_COOKIE, NOTICE_COOKIE } from "../src/cookie";
 import { hmacHex } from "../src/crypto";
-import { api, createContext, serve, signIn, visit, type TestContext } from "./support";
+import { api, createContext, rateLimit, serve, signIn, visit, type TestContext } from "./support";
 
 let context: TestContext;
 let token: string;
@@ -35,6 +35,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function host(label?: string): string {
@@ -471,5 +472,321 @@ describe("forwarding", () => {
     const cookie = await accessCookie();
     const response = await visit(context, `https://${host()}/`, { headers: { cookie } });
     expect(response.status).toBe(502);
+  });
+});
+
+const navigation = { "sec-fetch-dest": "document", accept: "text/html,*/*;q=0.8" };
+
+async function acknowledge(publicHost = host(), next = "/docs?page=2"): Promise<Response> {
+  return visit(context, `https://${publicHost}/__localify/notice`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${publicHost}`,
+    },
+    body: new URLSearchParams({ next }).toString(),
+  });
+}
+
+async function noticeCookie(publicHost = host()): Promise<string> {
+  const response = await acknowledge(publicHost);
+  return response.headers.get("set-cookie")!.split(";")[0]!;
+}
+
+async function makePublic(): Promise<void> {
+  await api(context, "PUT", `/v1/public-urls/${urlId}/protection`, {
+    token,
+    body: { protection: { mode: "public" } },
+  });
+}
+
+describe("the warning page", () => {
+  it("comes before the password on a browser's first navigation", async () => {
+    const page = await visit(context, `https://${host()}/docs?page=2`, { headers: navigation });
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(page.headers.get("content-security-policy")).not.toContain("script-src");
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
+    const html = await page.text();
+    expect(html).toContain("development preview");
+    expect(html).toContain('<a href="https://github.com/teo-goulois">teo-goulois</a>');
+    expect(html).toContain("Never enter passwords or payment details for another site");
+    expect(html).toContain('href="mailto:abuse@localify.dev"');
+    expect(html).toContain('action="/__localify/notice"');
+    expect(html).toContain('name="next" value="/docs?page=2"');
+    expect(html).not.toContain('name="password"');
+    expect(html).not.toMatch(/<(script|link|img)\b/);
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("shows on open URLs, in frames, and to browsers without Sec-Fetch-Dest", async () => {
+    await makePublic();
+    const navigations: Record<string, string>[] = [
+      navigation,
+      { "sec-fetch-dest": "iframe" },
+      { "sec-fetch-dest": "frame" },
+      { accept: "text/html,application/xhtml+xml" },
+    ];
+    for (const headers of navigations) {
+      const page = await visit(context, `https://${host("web")}/`, { headers });
+      expect(page.status, JSON.stringify(headers)).toBe(200);
+      expect(await page.text()).toContain("Before you continue");
+    }
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("sets a signed host-only cookie on Continue, then shows the password page", async () => {
+    const response = await acknowledge();
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/docs?page=2");
+    const setCookie = response.headers.get("set-cookie")!;
+    expect(setCookie).toMatch(
+      new RegExp(
+        `^${NOTICE_COOKIE}=\\d+\\.[0-9a-f]{64}; Max-Age=604800; Path=/; Secure; HttpOnly; SameSite=Lax$`,
+      ),
+    );
+    expect(setCookie).not.toMatch(/domain=/i);
+    const cookie = setCookie.split(";")[0]!;
+    const page = await visit(context, `https://${host()}/docs?page=2`, {
+      headers: { ...navigation, cookie },
+    });
+    expect(page.status).toBe(401);
+    expect(await page.text()).toContain("Password required");
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("is acknowledged once for the host, and never for another label", async () => {
+    const notice = await noticeCookie(host());
+    const access = await accessCookie(host());
+    const cookie = `${notice}; ${access}; theme=dark`;
+    const response = await visit(context, `https://${host()}/`, {
+      headers: { ...navigation, cookie },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("from the machine");
+    expect(machineCalls()[0]!.headers.get("cookie")).toBe("theme=dark");
+
+    const other = await visit(context, `https://${host("web")}/`, {
+      headers: { ...navigation, cookie },
+    });
+    expect(other.status).toBe(200);
+    expect(await other.text()).toContain("Before you continue");
+    expect(machineCalls()).toHaveLength(1);
+  });
+
+  it("refuses a forged or expired notice cookie", async () => {
+    await makePublic();
+    const notice = await noticeCookie();
+    const [name, value] = notice.split("=") as [string, string];
+    const [expiry, signature] = value.split(".") as [string, string];
+    const past = Math.floor(Date.now() / 1000) - 1;
+    const pastSignature = await hmacHex("cookie-key", `notice|${host()}|${urlId}|${past}`);
+    for (const forged of [
+      `${name}=${Number(expiry) + 60}.${signature}`,
+      `${name}=${past}.${pastSignature}`,
+      `${name}=garbage`,
+    ]) {
+      const page = await visit(context, `https://${host()}/`, {
+        headers: { ...navigation, cookie: forged },
+      });
+      expect(await page.text(), forged).toContain("Before you continue");
+    }
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("returns only to a path on the same host, outside Localify's paths", async () => {
+    for (const next of ["https://evil.example/", "//evil.example/", "/__localify/notice"]) {
+      const response = await acknowledge(host(), next);
+      expect(response.headers.get("location"), next).toBe("/");
+    }
+  });
+
+  it("keeps its path from the app, and refuses Continue from another public URL", async () => {
+    const get = await visit(context, `https://${host()}/__localify/notice`, {
+      headers: navigation,
+    });
+    expect(get.status).toBe(303);
+    expect(get.headers.get("location")).toBe("/");
+    expect(get.headers.get("set-cookie")).toBeNull();
+
+    const foreign = await visit(context, `https://${host()}/__localify/notice`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://other-site.localify.fyi",
+      },
+      body: "next=%2F",
+    });
+    expect(foreign.status).toBe(403);
+    expect(foreign.headers.get("set-cookie")).toBeNull();
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("never interrupts assets, fetch, HMR, WebSockets, webhooks or tools", async () => {
+    await makePublic();
+    context.routes.set(`HEAD https://m-${machineId}.localify.dev/`, () => new Response(null));
+    const requests: { method?: string; headers: Record<string, string>; body?: string }[] = [
+      { headers: { "sec-fetch-dest": "script", accept: "*/*" } },
+      { headers: { "sec-fetch-dest": "style", accept: "text/css,*/*;q=0.1" } },
+      { headers: { "sec-fetch-dest": "image", accept: "image/avif,*/*" } },
+      // `fetch` and XHR, even when they ask for HTML.
+      { headers: { "sec-fetch-dest": "empty", accept: "text/html" } },
+      { headers: { "sec-fetch-dest": "websocket", upgrade: "websocket", connection: "Upgrade" } },
+      { headers: { upgrade: "websocket", connection: "Upgrade", accept: "text/html" } },
+      { method: "HEAD", headers: navigation },
+      // A webhook.
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+      { headers: {} },
+      { headers: { accept: "application/json" } },
+      { headers: { ...navigation, "localify-skip-warning": "1" } },
+    ];
+    for (const init of requests) {
+      const response = await visit(context, `https://${host()}/`, init);
+      expect(response.status, JSON.stringify(init)).toBe(200);
+    }
+    expect(machineCalls()).toHaveLength(requests.length);
+    expect(machineCalls().at(-1)!.headers.has("localify-skip-warning")).toBe(false);
+  });
+});
+
+describe("a shared link", () => {
+  it("shows the warning with the password filled in, for one click", async () => {
+    const page = await visit(context, `https://${host()}/__localify/access`, {
+      headers: navigation,
+    });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Before you continue");
+    expect(html).toContain("teo-goulois");
+    expect(html).toContain('href="mailto:abuse@localify.dev"');
+    expect(html).toContain('action="/__localify/access"');
+    expect(html).toContain('name="notice" value="1"');
+    expect(html).toContain('name="password"');
+    expect(html).toContain("location.hash");
+    expect(html).toContain("history.replaceState");
+    expect(html).not.toContain("submit()");
+    const nonce = /<script nonce="([0-9a-f-]{36})">/.exec(html)?.[1];
+    expect(nonce).toBeDefined();
+    expect(page.headers.get("content-security-policy")).toContain(`script-src 'nonce-${nonce}'`);
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("sets both cookies on Continue, and then opens the app", async () => {
+    const response = await visit(context, `https://${host()}/__localify/access`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: `https://${host()}`,
+      },
+      body: new URLSearchParams({ next: "/", notice: "1", password: PASSWORD }).toString(),
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/");
+    const cookies = response.headers.getSetCookie();
+    expect(cookies.map((cookie) => cookie.split("=")[0])).toEqual([ACCESS_COOKIE, NOTICE_COOKIE]);
+    const cookie = cookies.map((value) => value.split(";")[0]).join("; ");
+    const app = await visit(context, `https://${host()}/`, { headers: { ...navigation, cookie } });
+    expect(app.status).toBe(200);
+    expect(await app.text()).toBe("from the machine");
+  });
+
+  it("keeps the acknowledgement when the password is wrong", async () => {
+    const response = await visit(context, `https://${host()}/__localify/access`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "next=%2F&notice=1&password=wrong",
+    });
+    expect(response.status).toBe(401);
+    const cookies = response.headers.getSetCookie();
+    expect(cookies).toHaveLength(1);
+    expect(cookies[0]).toMatch(new RegExp(`^${NOTICE_COOKIE}=`));
+    const html = await response.text();
+    expect(html).toContain("Password required");
+    expect(html).not.toContain('name="notice"');
+  });
+
+  it("signs in by itself once the warning is acknowledged", async () => {
+    const cookie = await noticeCookie();
+    const page = await visit(context, `https://${host()}/__localify/access`, {
+      headers: { ...navigation, cookie },
+    });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Password required");
+    expect(html).not.toContain('name="notice"');
+    expect(html).toContain("form.submit()");
+  });
+});
+
+describe("the owner's traffic limit", () => {
+  function ownerId(): string {
+    const row = context.sqlite.prepare("SELECT user_id FROM public_urls WHERE id = ?").get(urlId);
+    return (row as { user_id: string }).user_id;
+  }
+
+  it("is 2,000 requests a minute, keyed by owner", async () => {
+    expect(rateLimit("OWNER_LIMITER")).toEqual({ limit: 2000, period: 60 });
+    await makePublic();
+    await visit(context, `https://${host()}/`);
+    expect([...context.ownerLimiter.counts.keys()]).toEqual([ownerId()]);
+  });
+
+  it("lets a Vite page load its modules, several times a minute", async () => {
+    await makePublic();
+    const cookie = await noticeCookie();
+    for (let reload = 0; reload < 4; reload++) {
+      const page = await visit(context, `https://${host()}/`, {
+        headers: { ...navigation, cookie },
+      });
+      expect(page.status).toBe(200);
+      const modules = await Promise.all(
+        Array.from({ length: 400 }, (_, index) =>
+          visit(context, `https://${host("web")}/src/module-${index}.ts`, {
+            headers: { "sec-fetch-dest": "script", origin: `https://${host()}` },
+          }),
+        ),
+      );
+      expect(modules.every((response) => response.status === 200)).toBe(true);
+    }
+    expect(machineCalls()).toHaveLength(4 * 401);
+  });
+
+  it("answers 429 with Retry-After across all the owner's URLs, until the next minute", async () => {
+    await makePublic();
+    context.ownerLimiter.counts.set(ownerId(), 2000);
+    const page = await visit(context, `https://${host()}/`, { headers: navigation });
+    expect(page.status).toBe(429);
+    expect(page.headers.get("retry-after")).toBe("60");
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(await page.text()).toContain("Too many requests");
+
+    const requests: { method?: string; headers: Record<string, string>; body?: string }[] = [
+      { headers: { "sec-fetch-dest": "script" } },
+      { method: "POST", headers: {}, body: "x" },
+    ];
+    for (const init of requests) {
+      const response = await visit(context, `https://${host("web")}/api`, init);
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("60");
+      expect(response.headers.get("content-type")).toContain("text/plain");
+    }
+    expect(machineCalls()).toHaveLength(0);
+
+    context.ownerLimiter.counts.clear();
+    expect((await visit(context, `https://${host()}/`)).status).toBe(200);
+  });
+
+  it("lets traffic through when the limiter fails", async () => {
+    await makePublic();
+    context.env.OWNER_LIMITER = {
+      limit: async () => {
+        throw new Error("limiter down");
+      },
+    } as unknown as RateLimit;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await visit(context, `https://${host()}/`)).status).toBe(200);
   });
 });

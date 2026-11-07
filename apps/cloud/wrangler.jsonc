@@ -37,6 +37,13 @@
       "name": "DEVICE_LIMITER",
       "namespace_id": "1002",
       "simple": { "limit": 60, "period": 60 }
+    },
+    // Public traffic, keyed by the owner's user id, across all their URLs. A
+    // Vite page loads hundreds of modules at once; this absorbs several.
+    {
+      "name": "OWNER_LIMITER",
+      "namespace_id": "1003",
+      "simple": { "limit": 2000, "period": 60 }
     }
   ],
   // Every 5 minutes: the tunnel sweep and the cleanup of revoked machines.
