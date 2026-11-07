@@ -60,6 +60,9 @@ const LOG_FILE_NAME: &str = "cloudflared.log";
 const CONFIG_FILE_NAME: &str = "cloudflared.yml";
 const SIGNED_OUT_BY_CLOUD: &str =
     "Localify Cloud no longer accepts this machine's sign-in. Sign in again with `localify login`.";
+/// The `403` codes of Localify Cloud that refuse this machine until something
+/// changes (`docs/public-urls.md`, "API"). Any other `403` is a passing failure.
+const TERMINAL_403_CODES: &[&str] = &["banned", "suspended", "taken_down", "quota_exceeded"];
 const BANNED: &str = "Localify Cloud suspended this account for breaking its terms, so this machine serves no public URL. To appeal, write to abuse@localify.dev.";
 
 /// The tunnel token. Its `Debug` leaves the value out, so it never reaches a log.
@@ -435,7 +438,7 @@ fn refused(
             code,
             message,
             ..
-        } => {
+        } if code == "subscription_required" => {
             stand_down(tunnel, access, desired, true, None);
             let mut parts = tunnel.parts();
             parts.runtime = Some(RuntimeStatus::Blocked);
@@ -444,12 +447,14 @@ fn refused(
                 message,
             });
         }
+        // Only the API's own refusals, by their code: a 403 from anything in
+        // between, such as a Cloudflare challenge page, is no reason to stop.
         CloudError::Api {
             status: 403,
             code,
             message,
             ..
-        } => {
+        } if TERMINAL_403_CODES.contains(&code.as_str()) => {
             info!(code = %code, "Localify Cloud refuses this machine's public URLs");
             let banned = code == "banned";
             let error = if banned { BANNED.to_string() } else { message };
@@ -1146,6 +1151,44 @@ mod tests {
         assert_eq!(status.runtime, Some(RuntimeStatus::Banned));
         assert_eq!(status.tunnel, TunnelState::Error);
         assert!(status.error.unwrap().contains("abuse@localify.dev"));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_without_a_known_code_keeps_what_is_served() {
+        let fixture = Fixture::new().serving().await;
+        let refusals = [
+            // A Cloudflare challenge page, not the API.
+            ("403 Forbidden", "<html>Just a moment…</html>"),
+            ("402 Payment Required", "<html>Payment required</html>"),
+            ("403 Forbidden", r#"{"error":"forbidden","message":"No."}"#),
+        ];
+
+        for (status, body) in refusals {
+            let next = fixture.check(&FakeApi::v2(status, body).await).await;
+
+            assert_eq!(next, Next::Retry, "{status} {body}");
+            assert_eq!(fixture.wanted(), generation(1, "tok-1"), "{status} {body}");
+            assert!(fixture.access.accepts_secret("s3cret"), "{status} {body}");
+            let status = fixture.status().await;
+            assert_eq!(status.runtime, Some(RuntimeStatus::Ready));
+            assert_eq!(status.served_urls, vec!["u1".to_string()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_suspended_account_stops_serving_and_says_why() {
+        let fixture = Fixture::new().serving().await;
+        let refused = r#"{"error":"suspended","message":"This account is suspended."}"#;
+
+        let next = fixture
+            .check(&FakeApi::v2("403 Forbidden", refused).await)
+            .await;
+
+        assert_eq!(next, Next::Regular);
+        assert_eq!(fixture.wanted(), None);
+        let status = fixture.status().await;
+        assert!(status.signed_in);
+        assert_eq!(status.error.as_deref(), Some("This account is suspended."));
     }
 
     #[tokio::test]

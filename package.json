@@ -14,6 +14,7 @@
     "desktop:dev": "vite",
     "desktop:build": "vite build",
     "desktop:typecheck": "tsc --noEmit",
+    "desktop:test": "node --test \"desktop-ui/src/**/*.test.ts\"",
     "desktop:lint": "oxlint",
     "desktop:lint:fix": "oxlint --fix",
     "desktop:format": "oxfmt",

@@ -18,6 +18,7 @@ import type {
   StartCloudCheckoutRequest,
 } from "../../types/localify";
 
+import { createEntitlementTracker } from "../plan-entitlement";
 import { tauriClient } from "../tauri-client";
 import { invalidateQueries } from "./shared";
 
@@ -25,22 +26,18 @@ import { invalidateQueries } from "./shared";
 const CHECKOUT_POLL_MS = 5000;
 const CHECKOUT_WATCH_MS = 15 * 60_000;
 
-/** The checkout or portal the app is waiting on, shared by every screen that shows the plan. */
-const checkoutWatch = { until: 0, entitledAtStart: false };
+/** Until when the app polls the plan for a checkout or portal it opened. */
+let checkoutWatchUntil = 0;
 
 function isWatchingCheckout(): boolean {
-  return Date.now() < checkoutWatch.until;
+  return Date.now() < checkoutWatchUntil;
 }
 
 /**
- * True once, when the plan becomes entitled while the app waits on a checkout: the daemon
- * then has to fetch what this Mac may serve.
+ * Whether the plan's entitlement changed since the last answer any screen saw, however it
+ * changed. The checkout watch only makes the app ask more often.
  */
-export function planBecameEntitled(plan: CloudPlanDto | null | undefined): boolean {
-  if (!isWatchingCheckout() || checkoutWatch.entitledAtStart || !plan?.entitled) return false;
-  checkoutWatch.entitledAtStart = true;
-  return true;
-}
+export const entitlementChange = createEntitlementTracker();
 
 const cloudQueryKeys = {
   all: () => ["cloud"] as const,
@@ -107,9 +104,7 @@ export const cloudQueries = {
 
 /** Starts waiting on the page that just opened in the browser. */
 async function watchCheckout(queryClient: QueryClient) {
-  const plan = queryClient.getQueryData<CloudPlanDto | null>(cloudQueryKeys.plan());
-  checkoutWatch.until = Date.now() + CHECKOUT_WATCH_MS;
-  checkoutWatch.entitledAtStart = plan?.entitled ?? false;
+  checkoutWatchUntil = Date.now() + CHECKOUT_WATCH_MS;
   await invalidateQueries(queryClient, [cloudQueryKeys.plan()]);
 }
 
@@ -125,7 +120,10 @@ export const cloudMutations = {
       mutationFn: () => tauriClient.openCloudBillingPortal(),
       onSuccess: async () => watchCheckout(queryClient),
     }),
-  /** After the plan became entitled: the daemon fetches what this Mac serves. */
+  /**
+   * After the plan's entitlement changed: the daemon fetches what this Mac serves, and the
+   * account, the plan and the URLs, whose state follows the plan, are read again.
+   */
   refreshTunnel: (queryClient: QueryClient) =>
     mutationOptions<void, Error, void>({
       mutationFn: () => tauriClient.refreshPublicTunnel(),
