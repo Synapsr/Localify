@@ -143,7 +143,7 @@
     "titleLine2": "Pro für öffentliche URLs.",
     "description": "Der lokale Proxy ist kostenlos, Open Source und braucht kein Konto. Öffentliche URLs, die über Localify Cloud von deinem Rechner ausgeliefert werden, brauchen einen bezahlten Plan.",
     "free": {
-      "name": "Free",
+      "name": "Kostenlos",
       "tagline": "Der lokale Proxy: alles außer öffentlichen URLs.",
       "note": "Open Source unter der AGPL. Ohne Konto.",
       "features": [
@@ -173,7 +173,7 @@
         "2 Rechner, die gleichzeitig ausliefern",
         "Standardmäßig ein Passwort auf jeder URL",
         "Wildcard-URLs, die jeden Service und jeden Worktree eines Projekts erreichen",
-        "Alles aus Free"
+        "Alles aus dem kostenlosen Plan"
       ],
       "trial": "7 Tage kostenlos testen. Beim Checkout wird eine Karte abgefragt, belastet wird sie erst nach der Testphase. Vorher jederzeit kündbar. Eine Testphase pro GitHub-Konto.",
       "start": "Starte die 7-tägige Testphase in der App oder mit:"
@@ -208,7 +208,7 @@
         },
         {
           "question": "Kann ich kündigen oder eine Erstattung bekommen?",
-          "answer": "Kündige jederzeit im Kundenportal. Pro bleibt bis zum Ende des bezahlten Zeitraums aktiv und endet dann. Für deine erste Abbuchung schreib innerhalb von 14 Tagen an support@localify.dev, dann erstatten wir sie vollständig.",
+          "answer": "Kündige jederzeit im Kundenportal. Pro bleibt bis zum Ende des bezahlten Zeitraums aktiv und endet dann: Deine öffentlichen URLs werden nicht mehr ausgeliefert, bleiben aber mit ihren Adressen und Passwörtern erhalten. Für deine erste Abbuchung schreib innerhalb von 14 Tagen an support@localify.dev, dann erstatten wir sie vollständig.",
           "link": {
             "label": "Nutzungsbedingungen lesen",
             "href": "/terms"
@@ -231,6 +231,55 @@
           }
         }
       ]
+    }
+  },
+  "Cloud": {
+    "overview": {
+      "metaTitle": "Localify Cloud",
+      "eyebrow": "Localify Cloud",
+      "title": "Deine Dev-Server, von überall.",
+      "description": "Localify Cloud gibt einer Projekt-Domain eine öffentliche URL unter {url}, ausgeliefert von deinem Rechner und standardmäßig passwortgeschützt.",
+      "points": [
+        {
+          "title": "Von jedem Gerät",
+          "body": "Öffne ein Projekt vom Handy oder einem anderen Computer aus, oder zeig jemandem laufende Arbeit. Requests laufen über Cloudflare zu deinem Rechner."
+        },
+        {
+          "title": "Standardmäßig ein Passwort",
+          "body": "Jede öffentliche URL fragt nach einem Passwort. Teile den Link, der einen Browser von selbst anmeldet, oder die URL und das Passwort."
+        },
+        {
+          "title": "Jeder Service und jeder Worktree",
+          "body": "Eine Wildcard-URL auf einem Projekt erreicht jeden seiner Services und Worktrees, jeweils unter einer eigenen Adresse."
+        }
+      ],
+      "billing": {
+        "title": "Dein Abo verwalten",
+        "body": "Kündigen, zwischen monatlich und jährlich wechseln, die Karte ändern oder Rechnungen abrufen kannst du im Kundenportal von Polar. Öffne es in der App unter Settings → Localify Cloud → Manage billing, oder mit:",
+        "note": "Wenn du kündigst, bleibt Pro bis zum Ende des bezahlten Zeitraums aktiv. Danach werden deine öffentlichen URLs nicht mehr ausgeliefert, bleiben aber mit ihren Adressen und Passwörtern erhalten, bereit für ein neues Abo."
+      },
+      "pricing": "Preise ansehen",
+      "docs": "Dokumentation lesen"
+    },
+    "subscribed": {
+      "metaTitle": "Danke",
+      "eyebrow": "Localify Cloud",
+      "title": "Danke.",
+      "description": "Dein Localify-Cloud-Abo wird innerhalb einer Minute aktiv, sobald Polar es bestätigt. Du kannst diese Seite schließen und zu Localify zurückkehren.",
+      "steps": {
+        "check": {
+          "title": "Prüfe deinen Plan",
+          "body": "Die App zeigt ihn unter Settings → Localify Cloud, sobald er aktiv ist. Im Terminal führst du aus:"
+        },
+        "create": {
+          "title": "Erstelle eine öffentliche URL",
+          "body": "Sobald dein Plan als aktiv angezeigt wird, gib einer Projekt-Domain in der App eine öffentliche URL, oder führ aus:"
+        }
+      },
+      "trialNote": "Wenn du die 7-tägige Testphase gestartet hast, wird bis zu ihrem Ende nichts belastet.",
+      "helpPrefix": "Dein Plan erscheint nach ein paar Minuten immer noch nicht? Schreib an",
+      "overview": "Über Localify Cloud",
+      "docs": "Dokumentation lesen"
     }
   },
   "Footer": {
@@ -274,10 +323,12 @@
         "body": [
           "Die Localify-Software steht unter der GNU Affero General Public License, nur Version 3 (AGPL-3.0-only). Diese Lizenz regelt, wie du die Software nutzen, verändern und weitergeben darfst. Nichts auf dieser Seite nimmt dir ein Recht, das sie dir gibt."
         ],
-        "link": {
-          "label": "AGPL-3.0 lesen",
-          "href": "https://www.gnu.org/licenses/agpl-3.0.html"
-        }
+        "links": [
+          {
+            "label": "AGPL-3.0 lesen",
+            "href": "https://www.gnu.org/licenses/agpl-3.0.html"
+          }
+        ]
       },
       {
         "title": "3. Was kostenlos ist und was kostet",
@@ -301,26 +352,43 @@
         "title": "6. Localify Cloud",
         "body": [
           "Öffentliche URLs unter https://<slug>.localify.fyi, ausgeliefert von deinem Rechner, laufen über Localify Cloud. Du meldest dich mit GitHub an, und um eine öffentliche URL auszuliefern, brauchst du einen bezahlten Plan. Localify Cloud Pro kostet 7,99 $ im Monat oder 79 $ im Jahr, in US-Dollar, und umfasst 2 Rechner, die gleichzeitig öffentliche URLs ausliefern, und 10 öffentliche URLs.",
-          "Polar (polar.sh) verkauft den Plan als Merchant of Record. Polar ist der Verkäufer: Polar nimmt die Zahlung entgegen, kümmert sich um Umsatzsteuer und Sales Tax und stellt deine Rechnungen aus. Für den Kauf gelten zusätzlich die Bedingungen von Polar.",
-          "Wir können Localify Cloud ändern oder einstellen. Wie die Software wird der Dienst ohne Gewährleistung bereitgestellt und ohne Garantie, dass er verfügbar bleibt."
+          "Polar (polar.sh) verkauft den Plan als Merchant of Record. Polar ist der Verkäufer: Polar nimmt die Zahlung entgegen, kümmert sich um Umsatzsteuer und Sales Tax und stellt deine Rechnungen aus. Für die Zahlung gelten zusätzlich die Käuferbedingungen von Polar.",
+          "Wir können Localify Cloud ändern oder einstellen. Vor einer wesentlichen Änderung informieren wir Abonnenten mindestens 30 Tage im Voraus. Stellen wir den Dienst ein, erstatten wir jedem Abonnenten die nicht genutzte, im Voraus bezahlte Zeit anteilig. Es gibt keine Verfügbarkeitszusage und kein Service Level Agreement, und Localify Cloud kann zeitweise nicht erreichbar sein. Die gesetzliche Gewährleistung, die dir als Verbraucher zusteht, bleibt davon unberührt."
         ],
-        "link": {
-          "label": "Preise ansehen",
-          "href": "/pricing"
-        }
+        "links": [
+          {
+            "label": "Preise ansehen",
+            "href": "/pricing"
+          },
+          {
+            "label": "Käuferbedingungen von Polar",
+            "href": "https://polar.sh/legal/checkout-buyer-terms"
+          }
+        ]
       },
       {
         "title": "6.1 Testphase, Verlängerung und Kündigung",
         "body": [
           "Pro beginnt mit einer 7-tägigen kostenlosen Testphase. Beim Checkout wird eine Karte abgefragt, belastet wird sie erst nach der Testphase. Kündigst du vorher, zahlst du nichts. Es gibt eine Testphase pro GitHub-Konto.",
           "Nach der Testphase verlängert sich der Plan automatisch jeden Monat oder jedes Jahr, je nachdem, was du gewählt hast, und Polar belastet deine Karte bei jeder Verlängerung, bis du kündigst. Im Kundenportal von Polar, das du aus der App oder mit localify billing öffnest, kannst du jederzeit kündigen, zwischen monatlich und jährlich wechseln und deine Karte ändern.",
-          "Wenn du kündigst, verlängert sich der Plan nicht, und du behältst Pro bis zum Ende des bereits bezahlten Zeitraums."
+          "Wenn du kündigst, verlängert sich der Plan nicht, und du behältst Pro bis zum Ende des bereits bezahlten Zeitraums.",
+          "Wenn Pro endet, werden deine öffentlichen URLs nicht mehr ausgeliefert, bleiben aber mit ihren Adressen und Passwörtern erhalten und werden wieder ausgeliefert, wenn du erneut ein Abo abschließt. Dein Konto und deine Anmeldung bleiben ebenfalls bestehen. Eine URL oder das Konto zu löschen ist ein eigener Schritt: Entferne eine URL in der App oder mit localify public-url remove, und schreib an support@localify.dev, um das Konto zu löschen."
         ]
       },
       {
         "title": "6.2 Erstattungen",
         "body": [
-          "Für deine erste Abbuchung schreib innerhalb von 14 Tagen an support@localify.dev, dann erstatten wir sie vollständig. Damit wahren wir das 14-tägige Widerrufsrecht, das Verbraucher in der Europäischen Union haben. Darüber hinaus wird ein begonnener Zeitraum nicht erstattet, es sei denn, das Recht deines Landes sieht etwas anderes vor."
+          "Für deine erste Abbuchung schreib innerhalb von 14 Tagen an support@localify.dev, dann erstatten wir sie vollständig, ganz gleich aus welchem Grund. Andere Abbuchungen für einen begonnenen Zeitraum werden nicht erstattet, außer wie in Abschnitt 6 oder gesetzlich vorgesehen.",
+          "Als Verbraucher in der Europäischen Union, Frankreich eingeschlossen, hast du außerdem ein gesetzliches Widerrufsrecht: Du kannst das Abo innerhalb von 14 Tagen ab Abschluss ohne Angabe von Gründen widerrufen. Hast du verlangt, dass der Dienst in diesen 14 Tagen beginnt, wie es eine Testphase tut, zahlst du beim Widerruf anteilig für die bis dahin erbrachte Leistung. Während der kostenlosen Testphase wird nichts belastet, ein Widerruf in dieser Zeit kostet also nichts.",
+          "Um zu widerrufen, teile es uns vor Ablauf der 14 Tage per E-Mail an support@localify.dev mit. Du kannst dieses Muster-Widerrufsformular verwenden, musst es aber nicht. Den Widerruf wickeln wir mit Polar ab."
+        ],
+        "quote": [
+          "An Téo Goulois, support@localify.dev:",
+          "Hiermit widerrufe ich den von mir abgeschlossenen Vertrag über die Erbringung der folgenden Dienstleistung: Localify Cloud Pro.",
+          "Abgeschlossen am: [Datum]",
+          "Name: [dein Name]",
+          "GitHub-Konto und beim Checkout verwendete E-Mail: [Benutzername, E-Mail]",
+          "Datum: [Datum]"
         ]
       },
       {
@@ -328,7 +396,7 @@
         "body": [
           "Öffentliche URLs sind dafür da, deine eigenen Dev-Server zu erreichen und laufende Arbeit zu zeigen. Sie sind nicht für Produktiv-Hosting oder für eine Website für die Öffentlichkeit gedacht. Jedes Konto hat ein Request-Limit, das Spitzen abfängt, etwa eine Seite, die Hunderte Dateien auf einmal lädt. Requests darüber werden für kurze Zeit abgelehnt.",
           "Nutze keine öffentliche URL für Phishing, Malware, illegale Inhalte oder Inhalte, die die Rechte anderer verletzen. Du bist für das verantwortlich, was deine öffentlichen URLs ausliefern.",
-          "Verstößt eine öffentliche URL gegen diese Regeln, entfernen wir sie und schließen das Konto, ohne Erstattung. Missbrauch meldest du an abuse@localify.dev."
+          "Verstößt eine öffentliche URL gegen diese Regeln, entfernen wir sie. Nach einem schweren Verstoß können wir außerdem das Konto schließen, und der laufende Zeitraum wird nicht erstattet, soweit das Gesetz es zulässt. Missbrauch meldest du an abuse@localify.dev."
         ]
       },
       {
@@ -395,6 +463,12 @@
         "body": [
           "Pläne verkauft Polar (polar.sh) als Merchant of Record. Wenn du eine Testphase startest oder ein Abo abschließt, erhalten und verarbeiten Polar und sein Zahlungsdienstleister deinen Namen, deine E-Mail-Adresse, deine Zahlungsdaten und die Rechnungsadresse oder das Land, von dem die Steuern abhängen. Deine Kartendaten erreichen uns nie. Polar schickt dir Belege und Rechnungen, und seine eigene Datenschutzerklärung regelt, was es mit diesen Daten tut.",
           "Von Polar speichert Localify Cloud nur deine Polar-Kunden-ID, deine Abo-IDs und den Status deines Plans, etwa Testphase, aktiv oder gekündigt, mit dem Datum, an dem die Testphase oder der laufende Zeitraum endet, sowie ob dein Konto seine Testphase schon genutzt hat. Polar teilt uns mit, wenn sich ein Abo ändert, und wir fragen deine Abos bei Polar ab, um diesen Status aktuell zu halten."
+        ],
+        "links": [
+          {
+            "label": "Datenschutzerklärung von Polar",
+            "href": "https://polar.sh/legal/privacy-policy"
+          }
         ]
       },
       {

@@ -42,7 +42,7 @@
       },
       "agents": {
         "title": "多个代理，零冲突。",
-        "body": "Cursor、Claude Code 和你自己的 dev server 并排运行。每个项目都保持自己稳定的 URL。"
+        "body": "Cursor、Claude Code 和你自己的开发服务器并排运行。每个项目都保持自己稳定的 URL。"
       }
     }
   },
@@ -117,7 +117,7 @@
       },
       {
         "question": "它和 ngrok 或 Cloudflare Tunnel 有什么不同？",
-        "answer": "ngrok 和 Cloudflare Tunnel 的设计目的是把服务放到互联网上。Localify 为本地开发而设计：在你的机器上提供干净的 URL 和可信 HTTPS，不依赖云服务。需要在手机或另一台电脑上打开 dev server 时，公开 URL 可以做到，默认受密码保护。公开 URL 包含在 Localify Cloud Pro 中。",
+        "answer": "ngrok 和 Cloudflare Tunnel 的设计目的是把服务放到互联网上。Localify 为本地开发而设计：在你的机器上提供干净的 URL 和可信 HTTPS，不依赖云服务。需要在手机或另一台电脑上打开开发服务器时，公开 URL 可以做到，默认受密码保护。公开 URL 包含在 Localify Cloud Pro 中。",
         "link": {
           "label": "查看价格",
           "href": "/pricing"
@@ -143,7 +143,7 @@
     "titleLine2": "公开 URL 用 Pro。",
     "description": "本地代理免费、开源，无需账户。通过 Localify Cloud 从你的机器提供的公开 URL 需要付费方案。",
     "free": {
-      "name": "Free",
+      "name": "免费",
       "tagline": "本地代理：除公开 URL 外的一切。",
       "note": "采用 AGPL 开源。无需账户。",
       "features": [
@@ -158,7 +158,7 @@
     "pro": {
       "name": "Pro",
       "badge": "Localify Cloud",
-      "tagline": "为你的 dev server 提供公开 URL，地址为 {url}。",
+      "tagline": "为你的开发服务器提供公开 URL，地址为 {url}。",
       "interval": "计费周期",
       "monthly": "按月",
       "yearly": "按年",
@@ -173,13 +173,13 @@
         "2 台机器同时提供服务",
         "每个 URL 默认设有密码",
         "通配符 URL，可访问项目的每个服务和每个 worktree",
-        "包含 Free 的全部内容"
+        "包含免费方案的全部内容"
       ],
       "trial": "7 天免费试用。结账时需要提供银行卡，但试用结束前不会扣款。在此之前可随时取消。每个 GitHub 账户只能试用一次。",
       "start": "在应用中或用以下命令开始 7 天试用："
     },
     "team": {
-      "name": "Team",
+      "name": "团队",
       "badge": "以后推出",
       "tagline": "供多人使用的 Localify Cloud，一张账单。",
       "body": "目前还没有。如果你的团队需要，请告诉我们你们需要什么。",
@@ -208,7 +208,7 @@
         },
         {
           "question": "可以取消或退款吗？",
-          "answer": "可随时在客户门户中取消。Pro 会持续到你已付费周期结束，然后停止。对于首次扣款，请在 14 天内写信至 support@localify.dev，我们会全额退款。",
+          "answer": "可随时在客户门户中取消。Pro 会持续到你已付费周期结束，然后停止：你的公开 URL 将停止提供服务，但会连同地址和密码一起保留。对于首次扣款，请在 14 天内写信至 support@localify.dev，我们会全额退款。",
           "link": {
             "label": "阅读服务条款",
             "href": "/terms"
@@ -224,13 +224,62 @@
         },
         {
           "question": "公开 URL 可以用来做什么？",
-          "answer": "从手机或另一台电脑访问你自己的 dev server，以及展示进行中的工作。不用于生产环境托管：每个账户都有应对突发流量的请求上限。禁止网络钓鱼、恶意软件、非法内容和侵权内容，违者 URL 会被移除。",
+          "answer": "从手机或另一台电脑访问你自己的开发服务器，以及展示进行中的工作。不用于生产环境托管：每个账户都有应对突发流量的请求上限。禁止网络钓鱼、恶意软件、非法内容和侵权内容，违者 URL 会被移除。",
           "link": {
             "label": "阅读使用规则",
             "href": "/terms"
           }
         }
       ]
+    }
+  },
+  "Cloud": {
+    "overview": {
+      "metaTitle": "Localify Cloud",
+      "eyebrow": "Localify Cloud",
+      "title": "随时随地访问你的开发服务器。",
+      "description": "Localify Cloud 为项目域名提供 {url} 形式的公开 URL，由你的机器提供服务，默认受密码保护。",
+      "points": [
+        {
+          "title": "任何设备都能打开",
+          "body": "从手机或另一台电脑打开项目，或把进行中的工作展示给别人。请求经由 Cloudflare 到达你的机器。"
+        },
+        {
+          "title": "默认设有密码",
+          "body": "每个公开 URL 都会要求输入密码。你可以分享能让浏览器自动登录的链接，或分享 URL 和密码。"
+        },
+        {
+          "title": "每个服务和每个 worktree",
+          "body": "项目上的通配符 URL 可访问它的每个服务和每个 worktree，每个都有自己的地址。"
+        }
+      ],
+      "billing": {
+        "title": "管理你的订阅",
+        "body": "取消、在按月和按年之间切换、更新银行卡或获取发票，都在 Polar 的客户门户中完成。可在应用的 Settings → Localify Cloud → Manage billing 中打开，或运行：",
+        "note": "取消后，Pro 会持续到你已付费周期结束。之后你的公开 URL 将停止提供服务，但会连同地址和密码一起保留，重新订阅后即可再次使用。"
+      },
+      "pricing": "查看价格",
+      "docs": "阅读文档"
+    },
+    "subscribed": {
+      "metaTitle": "谢谢",
+      "eyebrow": "Localify Cloud",
+      "title": "谢谢。",
+      "description": "Polar 确认后，你的 Localify Cloud 订阅会在一分钟内生效。你可以关闭此页面，回到 Localify。",
+      "steps": {
+        "check": {
+          "title": "查看你的方案",
+          "body": "方案生效后，应用会立即在 Settings → Localify Cloud 中显示。在终端中运行："
+        },
+        "create": {
+          "title": "创建公开 URL",
+          "body": "方案显示为有效后，在应用中为项目域名创建公开 URL，或运行："
+        }
+      },
+      "trialNote": "如果你开始了 7 天试用，试用结束前不会扣款。",
+      "helpPrefix": "几分钟后仍看不到方案？请写信至",
+      "overview": "了解 Localify Cloud",
+      "docs": "阅读文档"
     }
   },
   "Footer": {
@@ -274,10 +323,12 @@
         "body": [
           "Localify 软件采用 GNU Affero General Public License 第 3 版（仅限此版本，AGPL-3.0-only）授权。你如何使用、修改和再分发软件，由该许可证规定。本页的任何内容都不会剥夺它赋予你的权利。"
         ],
-        "link": {
-          "label": "阅读 AGPL-3.0",
-          "href": "https://www.gnu.org/licenses/agpl-3.0.html"
-        }
+        "links": [
+          {
+            "label": "阅读 AGPL-3.0",
+            "href": "https://www.gnu.org/licenses/agpl-3.0.html"
+          }
+        ]
       },
       {
         "title": "3. 哪些免费，哪些付费",
@@ -301,34 +352,51 @@
         "title": "6. Localify Cloud",
         "body": [
           "公开 URL 的地址为 https://<slug>.localify.fyi，由你的机器提供，运行在 Localify Cloud 上。你通过 GitHub 登录，提供公开 URL 需要付费方案。Localify Cloud Pro 每月 US$7.99 或每年 US$79（以美元计），包含 2 台可同时提供公开 URL 的机器和 10 个公开 URL。",
-          "方案由 Polar（polar.sh）作为记录商户（merchant of record）销售。Polar 是正式的卖方：负责收款、处理销售税和增值税，并开具发票。购买同样适用 Polar 自己的条款。",
-          "我们可以更改或停止 Localify Cloud。与软件本身一样，它不附带任何担保，也不保证持续可用。"
+          "方案由 Polar（polar.sh）作为记录商户（merchant of record）销售。Polar 是正式的卖方：负责收款、处理销售税和增值税，并开具发票。付款同样适用 Polar 的买方条款。",
+          "我们可以更改或停止 Localify Cloud。如有重大变更，我们会至少提前 30 天通知订阅者。如果我们停止该服务，会按比例向每位订阅者退还已预付但未使用的时间对应的费用。我们不提供可用性承诺或服务等级协议（SLA），Localify Cloud 有时可能无法使用。这并不限制你作为消费者依法享有的符合性保证。"
         ],
-        "link": {
-          "label": "查看价格",
-          "href": "/pricing"
-        }
+        "links": [
+          {
+            "label": "查看价格",
+            "href": "/pricing"
+          },
+          {
+            "label": "Polar 买方条款",
+            "href": "https://polar.sh/legal/checkout-buyer-terms"
+          }
+        ]
       },
       {
         "title": "6.1 试用、续订和取消",
         "body": [
           "Pro 先提供 7 天免费试用。结账时需要提供银行卡，但试用结束前不会扣款。如果在此之前取消，你无需付费。每个 GitHub 账户只能试用一次。",
           "试用结束后，方案会按你的选择每月或每年自动续订，在你取消之前，Polar 会在每次续订时从你的银行卡扣款。在 Polar 的客户门户中（可从应用中或用 localify billing 打开），你可以随时取消、在按月和按年之间切换，以及更新银行卡。",
-          "取消后，方案不再续订，你可以继续使用 Pro，直到已付费周期结束。"
+          "取消后，方案不再续订，你可以继续使用 Pro，直到已付费周期结束。",
+          "Pro 结束后，你的公开 URL 将停止提供服务，但会连同地址和密码一起保留，重新订阅后会再次提供服务。你的账户和登录也会保留。删除 URL 或账户需要单独操作：在应用中或用 localify public-url remove 删除 URL；如需删除账户，请写信至 support@localify.dev。"
         ]
       },
       {
         "title": "6.2 退款",
         "body": [
-          "对于首次扣款，请在 14 天内写信至 support@localify.dev，我们会全额退款。这也符合欧盟消费者享有的 14 天撤回权。除此之外，已开始的周期不予退款，除非你所在地的法律另有规定。"
+          "对于首次扣款，请在 14 天内写信至 support@localify.dev，无论原因为何，我们都会全额退款。已开始周期的其他扣款不予退款，第 6 条或法律另有规定的除外。",
+          "如果你是欧盟（包括法国）的消费者，你还依法享有在订阅之日起 14 天内无理由撤回订阅的权利。如果你要求服务在这 14 天内开始（试用即是如此），撤回时需按比例支付截至撤回时已提供的服务费用。免费试用期间不会扣款，因此在试用期间撤回不产生任何费用。",
+          "如需撤回，请在 14 天期满前发送电子邮件至 support@localify.dev 告知我们。你可以使用以下示范表格，但不是必须的。我们会与 Polar 一起处理撤回。"
+        ],
+        "quote": [
+          "致：Téo Goulois，support@localify.dev",
+          "我特此通知，我撤回以下服务的提供合同：Localify Cloud Pro。",
+          "订阅日期：[日期]",
+          "姓名：[你的姓名]",
+          "GitHub 账户和结账时使用的电子邮件：[用户名，电子邮件]",
+          "日期：[日期]"
         ]
       },
       {
         "title": "6.3 可接受的使用",
         "body": [
-          "公开 URL 用于访问你自己的 dev server 和展示进行中的工作，不用于生产环境托管，也不用于向公众提供网站。每个账户都有请求上限，足以应对突发流量，比如一个页面一次加载数百个文件。超出上限的请求会被短暂拒绝。",
+          "公开 URL 用于访问你自己的开发服务器和展示进行中的工作，不用于生产环境托管，也不用于向公众提供网站。每个账户都有请求上限，足以应对突发流量，比如一个页面一次加载数百个文件。超出上限的请求会被短暂拒绝。",
           "请勿将公开 URL 用于网络钓鱼、恶意软件、非法内容，或侵犯他人权利的内容。你要对你的公开 URL 提供的内容负责。",
-          "如果公开 URL 违反这些规则，我们会将其移除并关闭账户，不予退款。举报滥用请写信至 abuse@localify.dev。"
+          "如果公开 URL 违反这些规则，我们会将其移除。如有严重违规，我们还可以关闭账户，并在法律允许的范围内不退还当前周期的费用。举报滥用请写信至 abuse@localify.dev。"
         ]
       },
       {
@@ -395,6 +463,12 @@
         "body": [
           "方案由记录商户 Polar（polar.sh）销售。当你开始试用或订阅时，Polar 及其支付处理商会接收并处理你的姓名、电子邮件地址、支付信息，以及计税所需的账单地址或国家。你的银行卡信息绝不会到我们这里。收据和发票由 Polar 发送，Polar 如何处理这些数据由其自己的隐私政策说明。",
           "Localify Cloud 从 Polar 只保存你的 Polar 客户 ID、订阅 ID 和方案状态（如试用中、有效或已取消，以及试用或当前周期结束的日期），以及你的账户是否已用过试用。订阅变化时 Polar 会通知我们，我们也会向 Polar 查询你的订阅，以保持该状态最新。"
+        ],
+        "links": [
+          {
+            "label": "Polar 隐私政策",
+            "href": "https://polar.sh/legal/privacy-policy"
+          }
         ]
       },
       {

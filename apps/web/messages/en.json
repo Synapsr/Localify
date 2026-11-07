@@ -208,7 +208,7 @@
         },
         {
           "question": "Can I cancel or get a refund?",
-          "answer": "Cancel any time from the customer portal. Pro stays on until the end of the period you paid for, then stops. For your first charge, write to support@localify.dev within 14 days for a full refund.",
+          "answer": "Cancel any time from the customer portal. Pro stays on until the end of the period you paid for, then stops: your public URLs stop serving but are kept, with their addresses and passwords. For your first charge, write to support@localify.dev within 14 days for a full refund.",
           "link": {
             "label": "Read the terms",
             "href": "/terms"
@@ -231,6 +231,55 @@
           }
         }
       ]
+    }
+  },
+  "Cloud": {
+    "overview": {
+      "metaTitle": "Localify Cloud",
+      "eyebrow": "Localify Cloud",
+      "title": "Your dev servers, from anywhere.",
+      "description": "Localify Cloud gives a project domain a public URL at {url}, served from your machine and behind a password by default.",
+      "points": [
+        {
+          "title": "From any device",
+          "body": "Open a project from your phone or another computer, or show work in progress to someone else. Requests go through Cloudflare to your machine."
+        },
+        {
+          "title": "A password by default",
+          "body": "Every public URL asks for a password. Share the link that signs a browser in by itself, or the URL and the password."
+        },
+        {
+          "title": "Every service and worktree",
+          "body": "A wildcard URL on a project reaches each of its services and worktrees, each at its own address."
+        }
+      ],
+      "billing": {
+        "title": "Manage your subscription",
+        "body": "Cancel, switch between monthly and yearly, update your card, or get your invoices in Polar's customer portal. Open it from the app, in Settings → Localify Cloud → Manage billing, or with:",
+        "note": "When you cancel, Pro stays on until the end of the period you paid for. Then your public URLs stop serving, but they're kept with their addresses and passwords, ready for when you subscribe again."
+      },
+      "pricing": "See pricing",
+      "docs": "Read the docs"
+    },
+    "subscribed": {
+      "metaTitle": "Thank you",
+      "eyebrow": "Localify Cloud",
+      "title": "Thank you.",
+      "description": "Your Localify Cloud subscription becomes active within a minute, once Polar confirms it. You can close this page and go back to Localify.",
+      "steps": {
+        "check": {
+          "title": "Check your plan",
+          "body": "The app shows it in Settings → Localify Cloud as soon as it's active. In a terminal, run:"
+        },
+        "create": {
+          "title": "Create a public URL",
+          "body": "Once your plan shows as active, give a project domain a public URL from the app, or run:"
+        }
+      },
+      "trialNote": "If you started the 7-day trial, nothing is charged until it ends.",
+      "helpPrefix": "Plan still not showing after a few minutes? Write to",
+      "overview": "About Localify Cloud",
+      "docs": "Read the docs"
     }
   },
   "Footer": {
@@ -274,10 +323,12 @@
         "body": [
           "The Localify software is licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). That license governs how you can use, modify, and redistribute the software. Nothing on this page takes away a right it gives you."
         ],
-        "link": {
-          "label": "Read the AGPL-3.0",
-          "href": "https://www.gnu.org/licenses/agpl-3.0.html"
-        }
+        "links": [
+          {
+            "label": "Read the AGPL-3.0",
+            "href": "https://www.gnu.org/licenses/agpl-3.0.html"
+          }
+        ]
       },
       {
         "title": "3. What's free and what's paid",
@@ -301,26 +352,43 @@
         "title": "6. Localify Cloud",
         "body": [
           "Public URLs, at https://<slug>.localify.fyi and served from your machine, run on Localify Cloud. You sign in with GitHub, and serving a public URL needs a paid plan. Localify Cloud Pro costs $7.99 a month or $79 a year, in US dollars, and includes 2 machines serving public URLs at the same time and 10 public URLs.",
-          "Polar (polar.sh) sells the plan as merchant of record. Polar is the seller of record: it takes the payment, handles sales tax and VAT, and issues your invoices. Polar's own terms also apply to the purchase.",
-          "We can change or stop Localify Cloud. Like the software, it comes with no warranty and no guarantee that it stays available."
+          "Polar (polar.sh) sells the plan as merchant of record. Polar is the seller of record: it takes the payment, handles sales tax and VAT, and issues your invoices. Polar's checkout buyer terms also apply to the payment.",
+          "We can change Localify Cloud or stop it. We tell subscribers at least 30 days before a material change. If we stop it, each subscriber gets a pro-rata refund of the prepaid time they haven't used. There is no uptime commitment or service level agreement, and Localify Cloud may be unavailable at times. This doesn't limit the legal guarantee of conformity you have as a consumer."
         ],
-        "link": {
-          "label": "See pricing",
-          "href": "/pricing"
-        }
+        "links": [
+          {
+            "label": "See pricing",
+            "href": "/pricing"
+          },
+          {
+            "label": "Polar's checkout buyer terms",
+            "href": "https://polar.sh/legal/checkout-buyer-terms"
+          }
+        ]
       },
       {
         "title": "6.1 Trial, renewal, and cancellation",
         "body": [
           "Pro starts with a 7-day free trial. Checkout asks for a card, and nothing is charged until the trial ends. If you cancel before then, you pay nothing. There is one trial per GitHub account.",
           "After the trial, the plan renews automatically every month or every year, as you chose, and Polar charges your card at each renewal until you cancel. In Polar's customer portal, which you open from the app or with localify billing, you can cancel, switch between monthly and yearly, and update your card at any time.",
-          "When you cancel, the plan doesn't renew, and you keep Pro until the end of the period you've already paid for."
+          "When you cancel, the plan doesn't renew, and you keep Pro until the end of the period you've already paid for.",
+          "When Pro ends, your public URLs stop serving, but they're kept, with their addresses and passwords, and serve again if you subscribe again. Your account and your sign-in stay too. Deleting a URL or the account is a separate step: remove a URL from the app or with localify public-url remove, and write to support@localify.dev to delete the account."
         ]
       },
       {
         "title": "6.2 Refunds",
         "body": [
-          "For your first charge, write to support@localify.dev within 14 days and we'll refund it in full. This honors the 14-day right of withdrawal that consumers have in the European Union. Apart from that, a period that has started isn't refunded, unless the law where you live says otherwise."
+          "For your first charge, write to support@localify.dev within 14 days of it and we'll refund it in full, whatever the reason. Other charges for a period that has started aren't refunded, except as section 6 or the law provides.",
+          "If you're a consumer in the European Union, France included, you also have a legal right to withdraw from the subscription within 14 days of subscribing, without giving a reason. If you asked for the service to start during those 14 days, as a trial does, withdrawing means paying for the service provided until then, pro rata. Nothing is charged during the free trial, so withdrawing during it costs nothing.",
+          "To withdraw, tell us before the 14 days are over, by email to support@localify.dev. You can use this model form, but you don't have to. We handle the withdrawal with Polar."
+        ],
+        "quote": [
+          "To Téo Goulois, support@localify.dev:",
+          "I hereby give notice that I withdraw from my contract for the provision of the following service: Localify Cloud Pro.",
+          "Subscribed on: [date]",
+          "Name: [your name]",
+          "GitHub account and checkout email: [username, email]",
+          "Date: [date]"
         ]
       },
       {
@@ -328,7 +396,7 @@
         "body": [
           "Public URLs are for reaching your own dev servers and showing work in progress. They aren't for production hosting or for serving a site to the public. Each account has a request limit that absorbs bursts, such as a page loading hundreds of files at once. Requests above it are refused for a short while.",
           "Don't use a public URL for phishing, malware, illegal content, or content that infringes someone else's rights. You're responsible for what your public URLs serve.",
-          "If a public URL breaks these rules, we take it down and close the account, without a refund. To report abuse, write to abuse@localify.dev."
+          "If a public URL breaks these rules, we take it down. After a serious breach, we can also close the account, and the current period isn't refunded, to the extent the law allows. To report abuse, write to abuse@localify.dev."
         ]
       },
       {
@@ -395,6 +463,12 @@
         "body": [
           "Plans are sold by Polar (polar.sh), the merchant of record. When you start a trial or subscribe, Polar and its payment processor receive and process your name, your email address, your payment details, and the billing address or country that taxes depend on. Your card details never reach us. Polar sends your receipts and invoices, and its own privacy policy covers what it does with this data.",
           "From Polar, Localify Cloud keeps only your Polar customer ID, your subscription IDs, and your plan's status, such as trial, active, or canceled, with the date its trial or current period ends, plus whether your account has used its one trial. Polar tells us when a subscription changes, and we ask it for your subscriptions to keep that status current."
+        ],
+        "links": [
+          {
+            "label": "Polar's privacy policy",
+            "href": "https://polar.sh/legal/privacy-policy"
+          }
         ]
       },
       {

@@ -42,7 +42,7 @@
       },
       "agents": {
         "title": "Varios agentes, cero conflictos.",
-        "body": "Cursor, Claude Code y tus propios dev servers corren lado a lado. Cada proyecto conserva su URL estable."
+        "body": "Cursor, Claude Code y tus propios servidores de desarrollo corren lado a lado. Cada proyecto conserva su URL estable."
       }
     }
   },
@@ -117,7 +117,7 @@
       },
       {
         "question": "¿En qué se diferencia de ngrok o Cloudflare Tunnel?",
-        "answer": "ngrok y Cloudflare Tunnel están hechos para poner servicios en internet. Localify está hecho para el desarrollo local: URLs limpias y HTTPS confiable en tu máquina, sin nube. Cuando necesitas abrir un dev server desde tu teléfono u otro equipo, una URL pública lo hace, con contraseña por defecto. Las URLs públicas vienen con Localify Cloud Pro.",
+        "answer": "ngrok y Cloudflare Tunnel están hechos para poner servicios en internet. Localify está hecho para el desarrollo local: URLs limpias y HTTPS confiable en tu máquina, sin nube. Cuando necesitas abrir un servidor de desarrollo desde tu teléfono u otro equipo, una URL pública lo hace, con contraseña por defecto. Las URLs públicas vienen con Localify Cloud Pro.",
         "link": {
           "label": "Ver precios",
           "href": "/pricing"
@@ -158,7 +158,7 @@
     "pro": {
       "name": "Pro",
       "badge": "Localify Cloud",
-      "tagline": "URLs públicas para tus dev servers, en {url}.",
+      "tagline": "URLs públicas para tus servidores de desarrollo, en {url}.",
       "interval": "Periodo de facturación",
       "monthly": "Mensual",
       "yearly": "Anual",
@@ -208,7 +208,7 @@
         },
         {
           "question": "¿Puedo cancelar o pedir un reembolso?",
-          "answer": "Cancela cuando quieras desde el portal de cliente. Pro sigue activo hasta el final del periodo que pagaste y después se detiene. Para tu primer cobro, escribe a support@localify.dev en un plazo de 14 días y te lo reembolsamos entero.",
+          "answer": "Cancela cuando quieras desde el portal de cliente. Pro sigue activo hasta el final del periodo que pagaste y después se detiene: tus URLs públicas dejan de servirse, pero se conservan con sus direcciones y contraseñas. Para tu primer cobro, escribe a support@localify.dev en un plazo de 14 días y te lo reembolsamos entero.",
           "link": {
             "label": "Leer los términos",
             "href": "/terms"
@@ -224,13 +224,62 @@
         },
         {
           "question": "¿Para qué puedo usar las URLs públicas?",
-          "answer": "Para acceder a tus propios dev servers desde un teléfono u otro equipo, y para mostrar trabajo en curso. No para alojar producción: cada cuenta tiene un límite de peticiones para los picos de tráfico. El phishing, el malware, el contenido ilegal y las infracciones están prohibidos y hacen que se retire la URL.",
+          "answer": "Para acceder a tus propios servidores de desarrollo desde un teléfono u otro equipo, y para mostrar trabajo en curso. No para alojar producción: cada cuenta tiene un límite de peticiones para los picos de tráfico. El phishing, el malware, el contenido ilegal y las infracciones están prohibidos y hacen que se retire la URL.",
           "link": {
             "label": "Leer las normas de uso",
             "href": "/terms"
           }
         }
       ]
+    }
+  },
+  "Cloud": {
+    "overview": {
+      "metaTitle": "Localify Cloud",
+      "eyebrow": "Localify Cloud",
+      "title": "Tus servidores de desarrollo, desde cualquier lugar.",
+      "description": "Localify Cloud da a un dominio de proyecto una URL pública en {url}, servida desde tu máquina y protegida con contraseña por defecto.",
+      "points": [
+        {
+          "title": "Desde cualquier dispositivo",
+          "body": "Abre un proyecto desde tu teléfono u otro equipo, o muestra trabajo en curso a otra persona. Las peticiones pasan por Cloudflare hasta tu máquina."
+        },
+        {
+          "title": "Contraseña por defecto",
+          "body": "Cada URL pública pide una contraseña. Comparte el enlace que inicia sesión en un navegador por sí solo, o la URL y la contraseña."
+        },
+        {
+          "title": "Cada servicio y cada worktree",
+          "body": "Una URL wildcard en un proyecto llega a cada uno de sus servicios y worktrees, cada uno en su propia dirección."
+        }
+      ],
+      "billing": {
+        "title": "Gestiona tu suscripción",
+        "body": "Cancela, cambia entre mensual y anual, actualiza tu tarjeta o descarga tus facturas en el portal de cliente de Polar. Ábrelo desde la app, en Settings → Localify Cloud → Manage billing, o con:",
+        "note": "Cuando cancelas, Pro sigue activo hasta el final del periodo que pagaste. Después, tus URLs públicas dejan de servirse, pero se conservan con sus direcciones y contraseñas, listas para cuando vuelvas a suscribirte."
+      },
+      "pricing": "Ver precios",
+      "docs": "Leer la documentación"
+    },
+    "subscribed": {
+      "metaTitle": "Gracias",
+      "eyebrow": "Localify Cloud",
+      "title": "Gracias.",
+      "description": "Tu suscripción a Localify Cloud se activa en menos de un minuto, en cuanto Polar la confirma. Puedes cerrar esta página y volver a Localify.",
+      "steps": {
+        "check": {
+          "title": "Comprueba tu plan",
+          "body": "La app lo muestra en Settings → Localify Cloud en cuanto está activo. En una terminal, ejecuta:"
+        },
+        "create": {
+          "title": "Crea una URL pública",
+          "body": "Cuando tu plan aparezca como activo, da una URL pública a un dominio de proyecto desde la app, o ejecuta:"
+        }
+      },
+      "trialNote": "Si empezaste la prueba de 7 días, no se cobra nada hasta que termine.",
+      "helpPrefix": "¿Tu plan sigue sin aparecer después de unos minutos? Escribe a",
+      "overview": "Sobre Localify Cloud",
+      "docs": "Leer la documentación"
     }
   },
   "Footer": {
@@ -274,10 +323,12 @@
         "body": [
           "El software de Localify se distribuye bajo la GNU Affero General Public License, solo versión 3 (AGPL-3.0-only). Esa licencia rige cómo puedes usar, modificar y redistribuir el software. Nada en esta página te quita un derecho que ella te da."
         ],
-        "link": {
-          "label": "Leer la AGPL-3.0",
-          "href": "https://www.gnu.org/licenses/agpl-3.0.html"
-        }
+        "links": [
+          {
+            "label": "Leer la AGPL-3.0",
+            "href": "https://www.gnu.org/licenses/agpl-3.0.html"
+          }
+        ]
       },
       {
         "title": "3. Qué es gratis y qué es de pago",
@@ -301,34 +352,51 @@
         "title": "6. Localify Cloud",
         "body": [
           "Las URLs públicas, en https://<slug>.localify.fyi y servidas desde tu máquina, funcionan sobre Localify Cloud. Inicias sesión con GitHub, y servir una URL pública necesita un plan de pago. Localify Cloud Pro cuesta 7,99 US$ al mes o 79 US$ al año e incluye 2 máquinas sirviendo URLs públicas a la vez y 10 URLs públicas.",
-          "Polar (polar.sh) vende el plan como merchant of record. Polar es el vendedor oficial: cobra el pago, gestiona el IVA y los impuestos, y emite tus facturas. Los términos de Polar también se aplican a la compra.",
-          "Podemos cambiar o detener Localify Cloud. Igual que el software, se ofrece sin garantía de ningún tipo, tampoco de que siga disponible."
+          "Polar (polar.sh) vende el plan como merchant of record. Polar es el vendedor oficial: cobra el pago, gestiona el IVA y los impuestos, y emite tus facturas. Los términos de compra de Polar también se aplican al pago.",
+          "Podemos cambiar o detener Localify Cloud. Avisamos a los suscriptores con al menos 30 días de antelación antes de un cambio importante. Si lo detenemos, cada suscriptor recibe un reembolso proporcional del tiempo prepagado que no haya usado. No hay compromiso de disponibilidad ni acuerdo de nivel de servicio (SLA), y Localify Cloud puede no estar disponible en algunos momentos. Esto no limita la garantía legal de conformidad que tienes como consumidor."
         ],
-        "link": {
-          "label": "Ver precios",
-          "href": "/pricing"
-        }
+        "links": [
+          {
+            "label": "Ver precios",
+            "href": "/pricing"
+          },
+          {
+            "label": "Términos de compra de Polar",
+            "href": "https://polar.sh/legal/checkout-buyer-terms"
+          }
+        ]
       },
       {
         "title": "6.1 Prueba, renovación y cancelación",
         "body": [
           "Pro empieza con 7 días de prueba gratis. El pago pide una tarjeta, y no se cobra nada hasta que termina la prueba. Si cancelas antes, no pagas nada. Hay una prueba por cuenta de GitHub.",
           "Después de la prueba, el plan se renueva automáticamente cada mes o cada año, según elegiste, y Polar cobra tu tarjeta en cada renovación hasta que canceles. En el portal de cliente de Polar, que abres desde la app o con localify billing, puedes cancelar, cambiar entre mensual y anual y actualizar tu tarjeta en cualquier momento.",
-          "Cuando cancelas, el plan no se renueva y conservas Pro hasta el final del periodo que ya pagaste."
+          "Cuando cancelas, el plan no se renueva y conservas Pro hasta el final del periodo que ya pagaste.",
+          "Cuando termina Pro, tus URLs públicas dejan de servirse, pero se conservan, con sus direcciones y contraseñas, y vuelven a servirse si te suscribes de nuevo. Tu cuenta y tu inicio de sesión también se mantienen. Borrar una URL o la cuenta es un paso aparte: elimina una URL desde la app o con localify public-url remove, y escribe a support@localify.dev para borrar la cuenta."
         ]
       },
       {
         "title": "6.2 Reembolsos",
         "body": [
-          "Para tu primer cobro, escribe a support@localify.dev en un plazo de 14 días y te lo reembolsamos entero. Así respetamos el derecho de desistimiento de 14 días que tienen los consumidores en la Unión Europea. Aparte de eso, un periodo ya empezado no se reembolsa, salvo que la ley de tu país diga otra cosa."
+          "Para tu primer cobro, escribe a support@localify.dev en un plazo de 14 días y te lo reembolsamos entero, sea cual sea el motivo. Los demás cobros de un periodo ya empezado no se reembolsan, salvo en los casos previstos en la sección 6 o por la ley.",
+          "Si eres consumidor en la Unión Europea, Francia incluida, también tienes el derecho legal de desistir de la suscripción en un plazo de 14 días desde que te suscribes, sin dar ningún motivo. Si pediste que el servicio empezara durante esos 14 días, como hace una prueba, desistir supone pagar de forma proporcional el servicio prestado hasta entonces. Durante la prueba gratuita no se cobra nada, así que desistir durante ella no cuesta nada.",
+          "Para desistir, avísanos antes de que terminen los 14 días por correo a support@localify.dev. Puedes usar este modelo de formulario, aunque no es obligatorio. Gestionamos el desistimiento con Polar."
+        ],
+        "quote": [
+          "A la atención de Téo Goulois, support@localify.dev:",
+          "Por la presente le comunico que desisto de mi contrato de prestación del siguiente servicio: Localify Cloud Pro.",
+          "Suscrito el: [fecha]",
+          "Nombre: [tu nombre]",
+          "Cuenta de GitHub y correo usado en el pago: [usuario, correo]",
+          "Fecha: [fecha]"
         ]
       },
       {
         "title": "6.3 Uso aceptable",
         "body": [
-          "Las URLs públicas sirven para acceder a tus propios dev servers y mostrar trabajo en curso. No son para alojar producción ni un sitio para el público. Cada cuenta tiene un límite de peticiones que absorbe los picos, como una página que carga cientos de archivos a la vez. Las peticiones por encima se rechazan durante un rato.",
+          "Las URLs públicas sirven para acceder a tus propios servidores de desarrollo y mostrar trabajo en curso. No son para alojar producción ni un sitio para el público. Cada cuenta tiene un límite de peticiones que absorbe los picos, como una página que carga cientos de archivos a la vez. Las peticiones por encima se rechazan durante un rato.",
           "No uses una URL pública para phishing, malware, contenido ilegal o contenido que infrinja los derechos de otros. Eres responsable de lo que sirven tus URLs públicas.",
-          "Si una URL pública incumple estas normas, la retiramos y cerramos la cuenta, sin reembolso. Para denunciar un abuso, escribe a abuse@localify.dev."
+          "Si una URL pública incumple estas normas, la retiramos. Ante un incumplimiento grave, también podemos cerrar la cuenta, y el periodo en curso no se reembolsa, en la medida en que la ley lo permita. Para denunciar un abuso, escribe a abuse@localify.dev."
         ]
       },
       {
@@ -395,6 +463,12 @@
         "body": [
           "Los planes los vende Polar (polar.sh), el merchant of record. Cuando empiezas una prueba o te suscribes, Polar y su procesador de pagos reciben y tratan tu nombre, tu correo electrónico, tus datos de pago y la dirección o el país de facturación de los que dependen los impuestos. Los datos de tu tarjeta nunca nos llegan. Polar te envía los recibos y las facturas, y su propia política de privacidad cubre lo que hace con estos datos.",
           "De Polar, Localify Cloud guarda solo tu ID de cliente de Polar, tus IDs de suscripción y el estado de tu plan, como prueba, activo o cancelado, con la fecha en que termina la prueba o el periodo en curso, además de si tu cuenta ya usó su prueba. Polar nos avisa cuando cambia una suscripción, y le pedimos tus suscripciones para mantener ese estado al día."
+        ],
+        "links": [
+          {
+            "label": "Política de privacidad de Polar",
+            "href": "https://polar.sh/legal/privacy-policy"
+          }
         ]
       },
       {

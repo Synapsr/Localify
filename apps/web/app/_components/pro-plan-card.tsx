@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { CommandLine } from "./command-line";
 import { PlanCard, PlanFeatures, PlanPrice } from "./plan-card";
 
 type Interval = "monthly" | "yearly";
@@ -82,9 +83,7 @@ export const ProPlanCard = ({
       <div className="mt-auto space-y-3">
         <p className="text-[13.5px] leading-[1.55] text-pretty text-muted-foreground">{trial}</p>
         <p className="text-[14px] text-foreground">{start}</p>
-        <code className="block overflow-x-auto rounded-lg border border-border/60 bg-muted/60 px-3 py-2 font-mono text-[13px] whitespace-nowrap text-foreground select-all">
-          {current.command}
-        </code>
+        <CommandLine command={current.command} />
       </div>
     </PlanCard>
   );

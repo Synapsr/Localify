@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 import { getTranslations } from "next-intl/server";
 
-import { LegalPage, LegalSection } from "@/app/_components/legal-page";
+import { type LegalLink, LegalPage, LegalSection } from "@/app/_components/legal-page";
 import { buildPageMetadata } from "@/app/page-metadata";
 import { routing } from "@/i18n/routing";
 
@@ -16,15 +16,18 @@ const PrivacyPage = async () => {
     title: string;
     body?: string[];
     list?: Array<{ name: string; description: string }>;
+    links?: LegalLink[];
   }>;
 
   return (
     <LegalPage title={t("title")} updatedAt={t("updatedAt")} intro={t("intro")}>
       {sections.map((section) => (
-        <LegalSection key={section.title} title={section.title}>
-          {section.body?.map((paragraph) => (
-            <p key={paragraph}>{paragraph}</p>
-          ))}
+        <LegalSection
+          key={section.title}
+          body={section.body}
+          links={section.links}
+          title={section.title}
+        >
           {section.list ? (
             <ul className="list-disc space-y-1.5 pl-5">
               {section.list.map((item) => (

@@ -123,6 +123,8 @@ Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
 
 The pricing page, [`app/pricing/page.tsx`](app/pricing/page.tsx), is a separate route: Free, Pro with a monthly/yearly toggle (`app/_components/pro-plan-card.tsx`), Team, the add-ons line, and its own FAQ. The prices are constants at the top of that file.
 
+Polar sends people back to two `noindex` pages, named in [`docs/public-urls.md`](../../docs/public-urls.md) ("Billing"): `app/cloud/subscribed/page.tsx` after checkout, which never says the plan is active (it starts when Localify Cloud sees the subscription), and `app/cloud/page.tsx` from the customer portal, with an overview and how to manage billing. Neither is in the navigation or the sitemap.
+
 ## 9. How it works videos
 
 `app/_sections/how-it-works.tsx` plays one muted, looping video per row, from `public/videos/`:

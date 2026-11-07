@@ -2,13 +2,14 @@ import type { Metadata } from "next";
 
 import { getFormatter, getTranslations } from "next-intl/server";
 
+import { PageIntro } from "@/app/_components/page-intro";
+import { PageShell } from "@/app/_components/page-shell";
 import { PlanCard, PlanFeatures, PlanPrice } from "@/app/_components/plan-card";
 import { ProPlanCard } from "@/app/_components/pro-plan-card";
 import { type FaqEntry, FaqItem } from "@/app/_sections/faq";
 import { buildPageMetadata } from "@/app/page-metadata";
-import { SiteFooter } from "@/app/site-footer";
-import { sourceUrl } from "@/app/site-metadata";
-import { FadeIn, SiteHeader, sectionClass } from "@/app/site-ui";
+import { publicUrlPattern } from "@/app/site-metadata";
+import { FadeIn, sectionClass } from "@/app/site-ui";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Link } from "@/i18n/navigation";
 import { routing } from "@/i18n/routing";
@@ -19,7 +20,6 @@ const PRO_YEARLY = 79;
 const ADDON_MACHINE = 3;
 const ADDON_URLS = 2;
 
-const PUBLIC_URL_EXAMPLE = "https://<slug>.localify.fyi";
 const SUBSCRIBE_COMMAND = "localify subscribe";
 const TEAM_MAILTO = "mailto:support@localify.dev?subject=Localify%20Cloud%20Team";
 
@@ -29,7 +29,6 @@ export const generateMetadata = (): Promise<Metadata> => {
 
 const PricingPage = async () => {
   const t = await getTranslations("Pricing");
-  const nav = await getTranslations("Navigation");
   const format = await getFormatter();
 
   const usd = (amount: number) => {
@@ -43,29 +42,21 @@ const PricingPage = async () => {
   };
   const yearlySaving = Math.floor((1 - PRO_YEARLY / (PRO_MONTHLY * 12)) * 100) / 100;
 
-  const navItems = [
-    { href: "/#how-it-works", label: nav("howItWorks") },
-    { href: "/#faq", label: nav("faq") },
-    { href: "/pricing", label: nav("pricing") },
-    { href: sourceUrl, label: nav("source") },
-  ];
   const faqItems = t.raw("faq.items") as FaqEntry[];
 
   return (
-    <main className="relative z-10 overflow-x-clip rounded-b-4xl bg-background">
-      <SiteHeader cta={{ href: "/#download", label: nav("cta") }} navItems={navItems} />
-
+    <PageShell>
       <section className={`${sectionClass} pt-16 md:pt-24`}>
-        <div className="mx-auto max-w-4xl space-y-6 text-center">
-          <h1 className="text-heading-gradient text-[44px] leading-none font-semibold tracking-[-0.035em] text-balance md:text-[64px] lg:text-[72px]">
-            {t("titleLine1")}
-            <br />
-            {t("titleLine2")}
-          </h1>
-          <p className="mx-auto max-w-xl text-[17px] leading-[1.55] text-pretty text-muted-foreground md:text-[18px]">
-            {t("description")}
-          </p>
-        </div>
+        <PageIntro
+          description={t("description")}
+          title={
+            <>
+              {t("titleLine1")}
+              <br />
+              {t("titleLine2")}
+            </>
+          }
+        />
 
         <FadeIn className="mt-14 grid gap-4 md:mt-20 md:grid-cols-3 md:gap-5">
           <PlanCard name={t("free.name")} tagline={t("free.tagline")}>
@@ -97,7 +88,7 @@ const PricingPage = async () => {
             name={t("pro.name")}
             saveLabel={t("pro.save", { percent: format.number(yearlySaving, { style: "percent" }) })}
             start={t("pro.start")}
-            tagline={t("pro.tagline", { url: PUBLIC_URL_EXAMPLE })}
+            tagline={t("pro.tagline", { url: publicUrlPattern })}
             trial={t("pro.trial")}
             yearly={{
               label: t("pro.yearly"),
@@ -154,9 +145,7 @@ const PricingPage = async () => {
           ))}
         </FadeIn>
       </section>
-
-      <SiteFooter />
-    </main>
+    </PageShell>
   );
 };
 

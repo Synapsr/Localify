@@ -1,6 +1,6 @@
 # Localify website
 
-The Next.js site behind [localify.dev](https://localify.dev): a landing page, a pricing page, terms, and a privacy policy in nine languages. It sends people to the download and the source. There's no checkout, no accounts, and no API routes: the Localify Cloud trial starts from the app or with `localify subscribe`.
+The Next.js site behind [localify.dev](https://localify.dev): a landing page, a pricing page, terms, a privacy policy, and the two Localify Cloud pages Polar's checkout and customer portal return to, in nine languages. It sends people to the download and the source. There's no checkout, no accounts, and no API routes: the Localify Cloud trial starts from the app or with `localify subscribe`.
 
 ## Run
 
