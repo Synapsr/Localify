@@ -73,10 +73,10 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
     fitAddonRef.current = fitAddon;
 
     const resizeObserver = new ResizeObserver(() => {
-      fitAndSync(session.id, fitAddon, resizeSession);
+      fitAndSync(container, session.id, fitAddon, resizeSession);
     });
     resizeObserver.observe(container);
-    fitAndSync(session.id, fitAddon, resizeSession);
+    fitAndSync(container, session.id, fitAddon, resizeSession);
 
     return () => {
       resizeObserver.disconnect();
@@ -84,6 +84,8 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      // The next terminal starts empty, so it must replay the whole output.
+      consumedChunkCountRef.current = 0;
     };
   }, [resizeSession, session.id, writeToSession]);
 
@@ -105,12 +107,13 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
   // `focusRequestId` refocuses an already active session after a launch.
   useEffect(() => {
     if (!active) return;
+    const container = containerRef.current;
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
-    if (!terminal || !fitAddon) return;
+    if (!container || !terminal || !fitAddon) return;
 
     requestAnimationFrame(() => {
-      fitAndSync(session.id, fitAddon, resizeSession);
+      fitAndSync(container, session.id, fitAddon, resizeSession);
       terminal.focus();
     });
   }, [active, focusRequestId, resizeSession, session.id]);
@@ -127,16 +130,20 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
 };
 
 function fitAndSync(
+  container: HTMLElement,
   sessionId: string,
   fitAddon: FitAddon,
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<void>,
 ) {
+  // A hidden tab has no size: fitting it would shrink its process to a few columns.
+  if (container.clientWidth === 0 || container.clientHeight === 0) return;
+
   try {
     fitAddon.fit();
     const dimensions = fitAddon.proposeDimensions();
     if (!dimensions) return;
     void resizeSession(sessionId, dimensions.cols, dimensions.rows);
   } catch {
-    // xterm can throw while the element is hidden during tab switches.
+    // xterm can throw while the element is being laid out.
   }
 }

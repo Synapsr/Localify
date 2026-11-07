@@ -63,7 +63,7 @@ export const appHotkeyDefinitions = [
     id: "newTerminalTab",
     category: "terminal",
     label: "New terminal tab",
-    description: "Open another terminal tab for the current terminal target.",
+    description: "Open a new shell in the current checkout.",
     defaultHotkey: "Mod+T",
   },
   {
@@ -77,15 +77,29 @@ export const appHotkeyDefinitions = [
     id: "previousTerminalTab",
     category: "terminal",
     label: "Previous terminal tab",
-    description: "Select the previous terminal tab.",
+    description: "Select the previous tab of the current checkout.",
     defaultHotkey: "Mod+Shift+[",
   },
   {
     id: "nextTerminalTab",
     category: "terminal",
     label: "Next terminal tab",
-    description: "Select the next terminal tab.",
+    description: "Select the next tab of the current checkout.",
     defaultHotkey: "Mod+Shift+]",
+  },
+  {
+    id: "previousTerminalEnvironment",
+    category: "terminal",
+    label: "Previous running checkout",
+    description: "Select the previous checkout in the terminal sidebar.",
+    defaultHotkey: "Mod+Alt+[",
+  },
+  {
+    id: "nextTerminalEnvironment",
+    category: "terminal",
+    label: "Next running checkout",
+    description: "Select the next checkout in the terminal sidebar.",
+    defaultHotkey: "Mod+Alt+]",
   },
 ] as const satisfies readonly {
   id: string;

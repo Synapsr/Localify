@@ -1,7 +1,15 @@
 "use client";
 
+import { RiGitBranchLine } from "@remixicon/react";
+import { formatForDisplay } from "@tanstack/react-hotkeys";
 import { useQuery } from "@tanstack/react-query";
-import { useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement,
+} from "react";
 import { toast } from "sonner";
 
 import type {
@@ -9,8 +17,6 @@ import type {
   ProjectEnvironmentInfoDto,
   ProjectInfoDto,
   ProjectServiceInfoDto,
-  TerminalSessionDto,
-  TerminalSessionTargetDto,
   TerminalTargetRequest,
 } from "@/types/localify";
 
@@ -31,51 +37,51 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { bootstrapQueries } from "@/lib/queries";
+import {
+  groupTerminalSessions,
+  type TerminalSessionState,
+  type TerminalTabEnvironment,
+  type TerminalTabItem,
+  type TerminalTabProject,
+} from "@/lib/util.terminal-sessions";
 import { cn } from "@/lib/utils";
-import { toTerminalTargetRequest, useTerminal } from "@/providers/terminal-provider";
+import { useAppHotkeys } from "@/providers/hotkeys-provider";
+import { useSharedProjectOrder } from "@/providers/project-order-provider";
+import { useTerminal } from "@/providers/terminal-provider";
 
 import { TerminalInstance } from "./terminal-instance";
-
-const SIDEBAR_WIDTH = 280;
 
 export const TerminalPanel = () => {
   const {
     activeSession,
     closePanel,
-    closeSession,
     isOpen,
-    newTabFromActiveTarget,
     outputBySessionId,
     panelHeight,
-    selectedTarget,
     sessions,
-    setActiveSessionId,
     setPanelHeight,
-    sidebarCollapsed,
-    toggleSidebar,
   } = useTerminal();
 
   if (!isOpen) {
     return null;
   }
 
-  const activeEnvironmentTarget =
-    selectedTarget ?? (activeSession ? toTerminalTargetRequest(activeSession.target) : null);
-  const scopedSessions = activeEnvironmentTarget
-    ? sessions.filter((session) =>
-        sessionMatchesEnvironment(session.target, activeEnvironmentTarget),
-      )
-    : sessions;
-  const scopedActiveSession =
-    activeSession && scopedSessions.some((session) => session.id === activeSession.id)
-      ? activeSession
-      : (scopedSessions[0] ?? null);
-  const scopedActiveSessionId = scopedActiveSession?.id ?? null;
-  const scopedActiveSessionMeta = scopedActiveSession
-    ? terminalSessionMeta(scopedActiveSession)
-    : null;
+  const currentSession = activeSession ?? sessions[0] ?? null;
+  const projects = groupTerminalSessions(sessions);
+  const currentProject = projects.find(
+    (project) => project.projectId === currentSession?.target.projectId,
+  );
+  const currentEnvironment = currentProject?.environments.find(
+    (environment) => environment.slug === currentSession?.target.environmentSlug,
+  );
+  const environmentCount = projects.reduce(
+    (count, project) => count + project.environments.length,
+    0,
+  );
+  const showSidebar = environmentCount > 1;
 
   const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -108,159 +114,266 @@ export const TerminalPanel = () => {
         className="absolute inset-x-0 top-0 z-20 h-1 cursor-ns-resize bg-transparent hover:bg-neutral-600/50"
       />
 
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-white/10 bg-[#171717] px-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-            {scopedSessions.length === 0 ? (
-              <div className="flex items-center gap-2 px-2 text-sm text-neutral-400">
+      <div className="flex h-full min-h-0">
+        {showSidebar ? (
+          <TerminalSidebar
+            activeEnvironmentSlug={currentSession?.target.environmentSlug ?? null}
+            activeProjectId={currentSession?.target.projectId ?? null}
+            projects={projects}
+          />
+        ) : null}
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex h-10 shrink-0 items-center gap-1 border-b border-white/10 bg-[#171717] px-2">
+            {!currentProject ? (
+              <div className="flex min-w-0 flex-1 items-center gap-2 px-2 text-sm text-neutral-400">
                 <TerminalIcon className="size-4" />
                 <span>Terminal</span>
-                <Kbd>⌘J</Kbd>
+                <Kbd className="bg-white/10 text-neutral-300">⌘J</Kbd>
               </div>
             ) : (
-              scopedSessions.map((session) => (
-                <TerminalTab
-                  key={session.id}
-                  active={session.id === scopedActiveSessionId}
-                  session={session}
-                  onClose={() => void closeSession(session.id)}
-                  onSelect={() => setActiveSessionId(session.id)}
-                />
-              ))
+              <div className="flex min-w-0 flex-1 items-center gap-1">
+                {!showSidebar ? (
+                  <TerminalPickerPopover
+                    align="start"
+                    trigger={
+                      <button
+                        type="button"
+                        className="flex h-7 max-w-48 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-neutral-300 hover:bg-white/5 hover:text-white aria-expanded:bg-white/10 aria-expanded:text-white"
+                      >
+                        <span className="min-w-0 truncate">
+                          {currentProject.projectName}
+                          {currentEnvironment?.label ? ` / ${currentEnvironment.label}` : ""}
+                        </span>
+                        <ChevronDownIcon className="size-3.5 shrink-0 text-neutral-500" />
+                      </button>
+                    }
+                  />
+                ) : null}
+                {currentEnvironment ? (
+                  <TerminalTabStrip
+                    activeSessionId={currentSession?.id ?? null}
+                    tabs={currentEnvironment.tabs}
+                  />
+                ) : null}
+                <NewShellButton />
+              </div>
             )}
+
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="text-neutral-300 hover:bg-white/10 hover:text-white"
+                    onClick={closePanel}
+                    aria-label="Hide terminal"
+                  >
+                    <XIcon className="size-4" />
+                  </Button>
+                }
+              />
+              <TooltipContent>Hide terminal</TooltipContent>
+            </Tooltip>
           </div>
 
-          {scopedActiveSessionMeta ? (
-            <div className="hidden max-w-[45%] min-w-0 shrink items-center gap-1.5 border-l border-white/10 pl-3 text-[11px] text-neutral-500 lg:flex">
-              <span className="shrink-0 text-neutral-300">{scopedActiveSessionMeta.label}</span>
-              <span className="text-neutral-700">/</span>
-              <span
-                className="min-w-0 truncate font-mono"
-                title={scopedActiveSession.workingDirectory}
-              >
-                {scopedActiveSessionMeta.path}
-              </span>
-            </div>
-          ) : null}
-
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className="text-neutral-300 hover:bg-white/10 hover:text-white"
-                  onClick={() => void newTabFromActiveTarget()}
-                  aria-label="New terminal tab"
-                >
-                  <PlusIcon className="size-4" />
-                </Button>
-              }
-            />
-            <TooltipContent>New tab</TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className="text-neutral-300 hover:bg-white/10 hover:text-white"
-                  onClick={toggleSidebar}
-                  aria-label={sidebarCollapsed ? "Show terminal sidebar" : "Hide terminal sidebar"}
-                >
-                  <ChevronDownIcon
-                    className={cn(
-                      "size-4 transition-transform",
-                      sidebarCollapsed ? "rotate-90" : "-rotate-90",
-                    )}
-                  />
-                </Button>
-              }
-            />
-            <TooltipContent>{sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}</TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className="text-neutral-300 hover:bg-white/10 hover:text-white"
-                  onClick={closePanel}
-                  aria-label="Hide terminal"
-                >
-                  <XIcon className="size-4" />
-                </Button>
-              }
-            />
-            <TooltipContent>Hide terminal</TooltipContent>
-          </Tooltip>
-        </div>
-
-        <div className="flex min-h-0 flex-1">
-          <div className="relative min-w-0 flex-1 bg-[#101010]">
-            {scopedSessions.length === 0 ? (
+          <div className="relative min-h-0 flex-1 bg-[#101010]">
+            {sessions.length === 0 ? (
               <TerminalEmptyState />
             ) : (
-              scopedSessions.map((session) => (
+              sessions.map((session) => (
                 <TerminalInstance
                   key={session.id}
-                  active={session.id === scopedActiveSessionId}
+                  active={session.id === currentSession?.id}
                   chunks={outputBySessionId[session.id] ?? []}
                   session={session}
                 />
               ))
             )}
           </div>
-
-          {!sidebarCollapsed ? (
-            <TerminalSidebar
-              activeEnvironmentTarget={activeEnvironmentTarget}
-              sessions={sessions}
-            />
-          ) : null}
         </div>
       </div>
     </section>
   );
 };
 
-function TerminalTab({
+function TerminalSidebar({
+  activeEnvironmentSlug,
+  activeProjectId,
+  projects,
+}: {
+  activeEnvironmentSlug: string | null;
+  activeProjectId: string | null;
+  projects: TerminalTabProject[];
+}) {
+  return (
+    <aside
+      aria-label="Running checkouts"
+      className="flex w-46 shrink-0 flex-col border-r border-white/10 bg-[#141414]"
+    >
+      <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/10 bg-[#171717] pr-2 pl-3">
+        <span className="text-xs font-medium text-neutral-400">Running</span>
+        <TerminalPickerPopover
+          align="start"
+          trigger={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="text-neutral-300 hover:bg-white/10 hover:text-white aria-expanded:bg-white/10 aria-expanded:text-white"
+              aria-label="Open a terminal on another project"
+            >
+              <PlusIcon className="size-4" />
+            </Button>
+          }
+        />
+      </div>
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-1.5">
+        {projects.map((project) => {
+          // A project with only its main checkout running is one line, named after the project.
+          const single = project.environments.length === 1 && !project.environments[0].label;
+
+          return (
+            <div key={project.projectId}>
+              {!single ? (
+                <div className="truncate px-1.5 pb-0.5 text-[11px] font-medium text-neutral-500">
+                  {project.projectName}
+                </div>
+              ) : null}
+              {project.environments.map((environment) => (
+                <TerminalSidebarRow
+                  key={environment.slug}
+                  active={
+                    project.projectId === activeProjectId &&
+                    environment.slug === activeEnvironmentSlug
+                  }
+                  environment={environment}
+                  label={single ? project.projectName : (environment.label ?? "primary")}
+                  projectId={project.projectId}
+                />
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </aside>
+  );
+}
+
+function TerminalSidebarRow({
   active,
-  onClose,
-  onSelect,
-  session,
+  environment,
+  label,
+  projectId,
 }: {
   active: boolean;
-  onClose: () => void;
-  onSelect: () => void;
-  session: TerminalSessionDto;
+  environment: TerminalTabEnvironment;
+  label: string;
+  projectId: string;
 }) {
-  const title = sessionDisplayTitle(session);
+  const { selectEnvironment, sessionStates } = useTerminal();
+  const states = environment.tabs.map((tab) => sessionStates.get(tab.session.id) ?? "idle");
+  const state = states.includes("failed") ? "failed" : states.includes("live") ? "live" : "idle";
 
   return (
     <button
       type="button"
-      onClick={onSelect}
+      aria-current={active ? "true" : undefined}
+      onClick={() => selectEnvironment(projectId, environment.slug)}
       className={cn(
-        "group/tab flex h-8 max-w-48 shrink-0 items-center gap-1.5 rounded-md px-2 text-left text-xs transition-colors",
+        "flex h-7 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs transition-colors",
         active
           ? "bg-white/10 text-white"
           : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100",
       )}
     >
-      <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          session.status === "running" ? "bg-emerald-400" : "bg-neutral-600",
-        )}
-      />
+      <TerminalStateDot state={state} />
+      {environment.label ? (
+        <RiGitBranchLine aria-hidden className="size-3 shrink-0 text-neutral-500" />
+      ) : null}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="shrink-0 font-mono text-[11px] text-neutral-500 tabular-nums">
+        {environment.tabs.length}
+      </span>
+    </button>
+  );
+}
+
+function TerminalStateDot({ state }: { state: TerminalSessionState }) {
+  return (
+    <span
+      title={state === "failed" ? "Stopped in the background" : undefined}
+      className={cn(
+        "size-1.5 shrink-0 rounded-full",
+        state === "live" && "bg-emerald-400",
+        state === "idle" && "bg-neutral-600",
+        state === "failed" && "bg-red-500",
+      )}
+    />
+  );
+}
+
+function TerminalTabStrip({
+  activeSessionId,
+  tabs,
+}: {
+  activeSessionId: string | null;
+  tabs: TerminalTabItem[];
+}) {
+  const { closeSession, setActiveSessionId } = useTerminal();
+
+  return (
+    <div className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {tabs.map((tab) => (
+        <TerminalTab
+          key={tab.session.id}
+          active={tab.session.id === activeSessionId}
+          tab={tab}
+          onClose={() => void closeSession(tab.session.id)}
+          onSelect={() => setActiveSessionId(tab.session.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TerminalTab({
+  active,
+  onClose,
+  onSelect,
+  tab,
+}: {
+  active: boolean;
+  onClose: () => void;
+  onSelect: () => void;
+  tab: TerminalTabItem;
+}) {
+  const { session, title } = tab;
+  const { sessionStates } = useTerminal();
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (active) {
+      buttonRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [active]);
+
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      onClick={onSelect}
+      title={session.workingDirectory}
+      className={cn(
+        "group/tab flex h-7 max-w-48 shrink-0 items-center gap-1.5 rounded-md pr-0.5 pl-2 text-left text-xs transition-colors",
+        active
+          ? "bg-white/10 text-white"
+          : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100",
+      )}
+    >
+      <TerminalStateDot state={sessionStates.get(session.id) ?? "idle"} />
       <span className="min-w-0 truncate">{title}</span>
       <span
         role="button"
@@ -269,7 +382,10 @@ function TerminalTab({
           event.stopPropagation();
           onClose();
         }}
-        className="ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded text-neutral-500 opacity-0 transition-opacity group-hover/tab:opacity-100 hover:bg-white/10 hover:text-white"
+        className={cn(
+          "inline-flex size-4 shrink-0 items-center justify-center rounded text-neutral-500 opacity-0 transition-opacity group-hover/tab:opacity-100 hover:bg-white/10 hover:text-white",
+          active && "opacity-100",
+        )}
         aria-label={`Close ${title}`}
       >
         <XIcon className="size-3" />
@@ -278,246 +394,212 @@ function TerminalTab({
   );
 }
 
-function TerminalSidebar({
-  activeEnvironmentTarget,
-  sessions,
-}: {
-  activeEnvironmentTarget: TerminalTargetRequest | null;
-  sessions: TerminalSessionDto[];
-}) {
-  const { activeSessionId, openTerminal, setActiveSessionId } = useTerminal();
-  const { data } = useQuery(bootstrapQueries.read());
-  const tree = buildTerminalSidebarTree(data, sessions, activeEnvironmentTarget);
+function NewShellButton() {
+  const { newTabFromActiveTarget } = useTerminal();
+  const { hotkeys } = useAppHotkeys();
 
-  const selectEnvironment = async (environment: TerminalTreeEnvironment) => {
-    const firstSession = sidebarEnvironmentSession(environment) ?? environment.sessions[0] ?? null;
-    if (firstSession) {
-      setActiveSessionId(firstSession.id);
-      return;
-    }
-
+  const openNewShell = async () => {
     try {
-      await openTerminal(environment.target);
+      await newTabFromActiveTarget();
     } catch (error) {
-      toast.error("Open terminal failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      showTerminalError("Open terminal failed", error);
     }
   };
 
   return (
-    <aside
-      className="min-h-0 shrink-0 overflow-y-auto border-l border-white/10 bg-[#151515] p-2"
-      style={{ width: SIDEBAR_WIDTH }}
-    >
-      <div className="mb-2 px-1 text-xs font-medium tracking-wide text-neutral-500 uppercase">
-        Sessions
-      </div>
-      {tree.map((project) => (
-        <div key={project.projectId} className="mb-3">
-          <div className="truncate px-1 text-sm font-medium text-neutral-200">
-            {project.projectName}
-          </div>
-          <div className="mt-1 space-y-1">
-            {project.environments.map((environment) => {
-              const visibleSessions = sidebarVisibleSessions(environment);
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="shrink-0 text-neutral-400 hover:bg-white/10 hover:text-white"
+            onClick={() => void openNewShell()}
+            aria-label="New shell"
+          >
+            <PlusIcon className="size-4" />
+          </Button>
+        }
+      />
+      <TooltipContent>
+        New shell
+        <Kbd>{formatForDisplay(hotkeys.newTerminalTab)}</Kbd>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
-              return (
-                <div key={environment.environmentSlug}>
-                  <button
-                    type="button"
-                    onClick={() => void selectEnvironment(environment)}
-                    className={cn(
-                      "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors",
-                      !environment.primary && project.environments.length > 1
-                        ? "ml-3 w-[calc(100%-0.75rem)] border-l border-white/10 pl-3"
-                        : "",
-                      targetEnvironmentMatches(activeEnvironmentTarget, environment.target)
-                        ? "bg-white/10 text-white"
-                        : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "size-1.5 shrink-0 rounded-full",
-                        environment.sessions.some((session) => session.status === "running")
-                          ? "bg-emerald-400"
-                          : "bg-neutral-600",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1 truncate">{environment.environmentLabel}</span>
-                    {environment.sessions.length > 0 ? (
-                      <span className="text-[11px] text-neutral-500">
-                        {environment.sessions.length}
-                      </span>
-                    ) : null}
-                  </button>
-                  {visibleSessions.length > 0 ? (
-                    <div
-                      className={cn(
-                        "mt-1 space-y-1",
-                        !environment.primary && project.environments.length > 1
-                          ? "ml-6 border-l border-white/10 pl-2"
-                          : "ml-3",
-                      )}
-                    >
-                      {visibleSessions.map((session) => (
-                        <button
-                          key={session.id}
-                          type="button"
-                          onClick={() => setActiveSessionId(session.id)}
-                          className={cn(
-                            "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition-colors",
-                            session.id === activeSessionId
-                              ? "bg-white/10 text-white"
-                              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100",
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              "size-1.5 shrink-0 rounded-full",
-                              session.status === "running" ? "bg-emerald-400" : "bg-neutral-600",
-                            )}
-                          />
-                          <span className="min-w-0 truncate">{sessionDisplayTitle(session)}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </aside>
+function TerminalPickerPopover({
+  align,
+  trigger,
+}: {
+  align: "start" | "end";
+  trigger: ReactElement<Record<string, unknown>>;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger render={<PopoverTrigger render={trigger} />} />
+        <TooltipContent>Open a terminal on another project</TooltipContent>
+      </Tooltip>
+      <PopoverContent
+        align={align}
+        collisionAvoidance={{ side: "none" }}
+        finalFocus={false}
+        className="dark flex max-h-[min(26rem,calc(var(--available-height)-0.5rem))] w-96 flex-col overflow-hidden border border-white/10 bg-[#1b1b1b] text-neutral-100"
+      >
+        <TerminalPicker onDone={() => setOpen(false)} />
+      </PopoverContent>
+    </Popover>
   );
 }
 
 function TerminalEmptyState() {
+  return (
+    <div className="mx-auto flex h-full min-h-0 max-w-2xl flex-col">
+      <TerminalPicker />
+    </div>
+  );
+}
+
+function TerminalPicker({ onDone }: { onDone?: () => void }) {
   const { data } = useQuery(bootstrapQueries.read());
+  const { order } = useSharedProjectOrder();
   const [search, setSearch] = useState("");
-  const tree = data ? buildTerminalTree(data, search) : [];
+  const tree = data ? buildTerminalTree(data, order, search) : [];
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#111111]">
-      <div className="border-b border-white/10 p-3">
+    <>
+      <div className="shrink-0 border-b border-white/10 p-2">
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-neutral-500" />
           <Input
+            autoFocus
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search projects, environments, services..."
-            className="h-9 border-white/10 bg-white/[0.03] pl-8 text-sm text-neutral-100 placeholder:text-neutral-500 focus-visible:border-white/20 focus-visible:ring-white/10"
+            placeholder="Search projects, worktrees, services..."
+            className="h-8 border-white/10 bg-white/[0.03] pl-8 text-sm text-neutral-100 placeholder:text-neutral-500 focus-visible:border-white/20 focus-visible:ring-white/10"
           />
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {tree.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-neutral-500">
+          <div className="px-2 py-6 text-center text-sm text-neutral-500">
             No project environment available
           </div>
         ) : (
-          <div className="mx-auto max-w-2xl space-y-3">
-            {tree.map((project) => (
-              <TerminalProjectPicker key={project.projectId} project={project} />
-            ))}
-          </div>
+          tree.map((project) => (
+            <div key={project.projectId} className="pb-1">
+              <div className="truncate px-2 pt-2 pb-1 text-xs font-medium text-neutral-400">
+                {project.projectName}
+              </div>
+              {project.environments.map((environment) => (
+                <TerminalEnvironmentPicker
+                  key={environment.environmentSlug}
+                  environment={environment}
+                  onDone={onDone}
+                />
+              ))}
+            </div>
+          ))
         )}
       </div>
-    </div>
+    </>
   );
 }
 
-function TerminalProjectPicker({ project }: { project: TerminalTreeProject }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
-      <div className="px-1 pb-1 text-sm font-medium text-neutral-100">{project.projectName}</div>
-      <div className="space-y-1">
-        {project.environments.map((environment) => (
-          <TerminalEnvironmentPicker key={environment.environmentSlug} environment={environment} />
-        ))}
-      </div>
-    </div>
-  );
-}
+function TerminalEnvironmentPicker({
+  environment,
+  onDone,
+}: {
+  environment: TerminalTreeEnvironment;
+  onDone?: () => void;
+}) {
+  const { openTerminal } = useTerminal();
 
-function TerminalEnvironmentPicker({ environment }: { environment: TerminalTreeEnvironment }) {
-  const { launchService, openTerminal } = useTerminal();
-
-  const openEnvironment = async () => {
+  const openShell = async () => {
+    onDone?.();
     try {
       await openTerminal(environment.target);
     } catch (error) {
-      toast.error("Open terminal failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      showTerminalError("Open terminal failed", error);
     }
   };
 
   return (
-    <div className="rounded-md">
-      <button
-        type="button"
-        onClick={() => void openEnvironment()}
-        className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-neutral-300 hover:bg-white/5 hover:text-white"
-      >
-        <TerminalIcon className="size-4 shrink-0 text-neutral-500" />
-        <span className="min-w-0 flex-1 truncate">{environment.environmentLabel}</span>
-      </button>
-      {environment.services.length > 0 ? (
-        <div className="ml-4 border-l border-white/10 pl-2">
-          {environment.services.map((service) => (
-            <TerminalServicePicker
-              key={`${environment.environmentSlug}-${service.service.id}`}
-              launchService={launchService}
-              service={service}
-            />
-          ))}
+    <div>
+      {!environment.primary ? (
+        <div className="flex h-7 items-center gap-1.5 px-2 font-mono text-[11px] text-neutral-500">
+          <RiGitBranchLine aria-hidden className="size-3 shrink-0" />
+          <span className="min-w-0 truncate">{environment.environmentSlug}</span>
         </div>
       ) : null}
+      <div className={cn(!environment.primary && "ml-3 border-l border-white/10 pl-1")}>
+        {environment.services.map((service) => (
+          <TerminalServicePicker
+            key={`${environment.environmentSlug}-${service.service.id}`}
+            onDone={onDone}
+            service={service}
+          />
+        ))}
+        <button
+          type="button"
+          onClick={() => void openShell()}
+          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+        >
+          <TerminalIcon className="size-3.5 shrink-0 text-neutral-500" />
+          <span className="min-w-0 truncate">Shell</span>
+        </button>
+      </div>
     </div>
   );
 }
 
 function TerminalServicePicker({
-  launchService,
+  onDone,
   service,
 }: {
-  launchService: (
-    target: TerminalTargetRequest,
-    profile?: string | null,
-  ) => Promise<TerminalSessionDto>;
+  onDone?: () => void;
   service: TerminalTreeService;
 }) {
-  const { openTerminal } = useTerminal();
+  const { findSessionForTarget, launchService, openTerminal } = useTerminal();
+  const hasSession = Boolean(findSessionForTarget(service.target));
+  // A service reachable without a tab here runs elsewhere: a shell is all this row can open.
+  const canLaunch = !hasSession && !service.reachable;
 
-  const openService = async () => {
-    try {
-      await openTerminal(service.target);
-    } catch (error) {
-      toast.error("Open terminal failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  const startService = async (profile: string | null = null) => {
+  const launch = async (profile: string | null = null) => {
+    onDone?.();
     try {
       await launchService(service.target, profile);
     } catch (error) {
-      toast.error("Launch service failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      showTerminalError("Launch service failed", error);
+    }
+  };
+
+  const openRow = async () => {
+    if (canLaunch) {
+      await launch();
+      return;
+    }
+
+    onDone?.();
+    try {
+      await openTerminal(service.target);
+    } catch (error) {
+      showTerminalError("Open terminal failed", error);
     }
   };
 
   return (
-    <div className="flex items-center gap-1 py-0.5">
+    <div className="flex items-center gap-1">
       <button
         type="button"
-        onClick={() => void openService()}
-        className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+        onClick={() => void openRow()}
+        aria-label={canLaunch ? `Start ${service.service.name}` : `Open ${service.service.name}`}
+        className="group/row flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-xs text-neutral-300 hover:bg-white/5 hover:text-white"
       >
         <span
           className={cn(
@@ -525,47 +607,36 @@ function TerminalServicePicker({
             service.reachable ? "bg-emerald-400" : "bg-neutral-600",
           )}
         />
-        <span className="min-w-0 truncate">{service.service.name}</span>
+        <span className="shrink-0">{service.service.name}</span>
         {service.domain ? (
-          <span className="hidden min-w-0 truncate font-mono text-neutral-600 sm:inline">
+          <span className="min-w-0 truncate font-mono text-[11px] text-neutral-600">
             {service.domain}
           </span>
+        ) : null}
+        {canLaunch ? (
+          <PlayIcon className="ml-auto size-3.5 shrink-0 text-neutral-600 group-hover/row:text-neutral-200" />
         ) : null}
       </button>
       {service.launchProfiles.session ? (
         <LaunchProfileBadge session={service.launchProfiles.session} className="dark" />
       ) : null}
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              className="text-neutral-500 hover:bg-white/10 hover:text-white"
-              onClick={() => void startService()}
-              disabled={service.reachable}
-              aria-label={`Launch ${service.service.name}`}
-            >
-              <PlayIcon className="size-3.5" />
-            </Button>
-          }
-        />
-        <TooltipContent>
-          {service.reachable ? "Service already reachable" : "Launch service"}
-        </TooltipContent>
-      </Tooltip>
-      {!service.reachable ? (
+      {canLaunch ? (
         <LaunchProfileMenu
           profiles={service.launchProfiles.profiles}
           error={service.launchProfiles.profilesError}
           serviceName={service.service.name}
-          onLaunch={(profile) => void startService(profile)}
+          onLaunch={(profile) => void launch(profile)}
           className="-ml-1 w-4 text-neutral-500 hover:bg-white/10 hover:text-white aria-expanded:bg-white/10 aria-expanded:text-white"
         />
       ) : null}
     </div>
   );
+}
+
+function showTerminalError(title: string, error: unknown) {
+  toast.error(title, {
+    description: error instanceof Error ? error.message : String(error),
+  });
 }
 
 interface TerminalTreeProject {
@@ -575,12 +646,10 @@ interface TerminalTreeProject {
 }
 
 interface TerminalTreeEnvironment {
-  environmentLabel: string;
   environmentName: string;
   environmentSlug: string;
   primary: boolean;
   services: TerminalTreeService[];
-  sessions: TerminalSessionDto[];
   target: TerminalTargetRequest;
 }
 
@@ -592,18 +661,25 @@ interface TerminalTreeService {
   target: TerminalTargetRequest;
 }
 
-function buildTerminalTree(data: BootstrapDto, search: string): TerminalTreeProject[] {
+function buildTerminalTree(
+  data: BootstrapDto,
+  projectOrder: string[],
+  search: string,
+): TerminalTreeProject[] {
   const query = search.trim().toLowerCase();
   const servicesById = new Map(data.services.map((service) => [service.id, service]));
   const domainsByPattern = new Map(
     data.domains.map((domain) => [domain.registration.pattern, domain]),
   );
 
-  return data.projects
+  const projectsById = new Map(data.projects.map((project) => [project.id, project]));
+
+  return projectOrder
+    .flatMap((id) => projectsById.get(id) ?? [])
     .map((project) => {
       const environments: TerminalTreeEnvironment[] = data.projectEnvironments
         .filter((environment) => environment.projectId === project.id && environment.rootPath)
-        .sort(compareProjectEnvironments)
+        .sort((left, right) => Number(right.primary) - Number(left.primary))
         .map((environment): TerminalTreeEnvironment => {
           const services: TerminalTreeService[] = [];
 
@@ -622,12 +698,10 @@ function buildTerminalTree(data: BootstrapDto, search: string): TerminalTreeProj
           }
 
           return {
-            environmentLabel: environmentDisplayLabel(project, environment),
             environmentName: environment.name,
             environmentSlug: environment.slug,
             primary: environment.primary,
             services,
-            sessions: [],
             target:
               environment.primary && project.rootPath
                 ? projectTarget(project, environment)
@@ -703,225 +777,4 @@ function serviceTarget(
     environmentSlug: environment.slug,
     serviceId: service.id,
   };
-}
-
-function buildTerminalSidebarTree(
-  data: BootstrapDto | undefined,
-  sessions: TerminalSessionDto[],
-  activeEnvironmentTarget: TerminalTargetRequest | null,
-): TerminalTreeProject[] {
-  const projects = new Map<string, TerminalTreeProject>();
-
-  if (data) {
-    for (const project of buildTerminalTree(data, "")) {
-      projects.set(project.projectId, {
-        ...project,
-        environments: project.environments.map((environment) => ({
-          ...environment,
-          sessions: [],
-        })),
-      });
-    }
-  }
-
-  for (const session of sessions) {
-    let project = projects.get(session.target.projectId);
-    if (!project) {
-      project = {
-        projectId: session.target.projectId,
-        projectName: session.target.projectName,
-        environments: [],
-      };
-      projects.set(session.target.projectId, project);
-    }
-
-    let environment = project.environments.find(
-      (candidate) => candidate.environmentSlug === session.target.environmentSlug,
-    );
-    if (!environment) {
-      environment = {
-        environmentLabel: sessionEnvironmentLabel(session.target) ?? session.target.projectName,
-        environmentName: session.target.environmentName,
-        environmentSlug: session.target.environmentSlug,
-        primary: isPrimaryEnvironment(
-          session.target.environmentSlug,
-          session.target.environmentName,
-        ),
-        services: [],
-        sessions: [],
-        target: toTerminalTargetRequest(session.target),
-      };
-      project.environments.push(environment);
-    }
-
-    environment.sessions.push(session);
-  }
-
-  return sortTreeProjects(Array.from(projects.values()), activeEnvironmentTarget)
-    .map((project) => ({
-      ...project,
-      environments: sortTreeEnvironments(project.environments, activeEnvironmentTarget),
-    }))
-    .filter((project) => project.environments.length > 0);
-}
-
-function sessionDisplayTitle(session: TerminalSessionDto) {
-  if (session.target.serviceName) {
-    return session.target.serviceName;
-  }
-
-  if (session.target.kind === "project") {
-    return session.target.projectName;
-  }
-
-  return sessionEnvironmentLabel(session.target) ?? session.target.projectName;
-}
-
-function terminalSessionMeta(session: TerminalSessionDto) {
-  const labels = [session.target.projectName];
-  const environmentLabel = sessionEnvironmentLabel(session.target);
-
-  if (environmentLabel) {
-    labels.push(environmentLabel);
-  }
-
-  if (session.target.serviceName) {
-    labels.push(session.target.serviceName);
-  }
-
-  return {
-    label: labels.join(" / "),
-    path: compactWorkingDirectory(session.workingDirectory),
-  };
-}
-
-function sessionEnvironmentLabel(target: TerminalSessionTargetDto) {
-  return isPrimaryEnvironment(target.environmentSlug, target.environmentName)
-    ? null
-    : target.environmentName;
-}
-
-function environmentDisplayLabel(project: ProjectInfoDto, environment: ProjectEnvironmentInfoDto) {
-  return environment.primary ? project.name : environment.name;
-}
-
-function sidebarVisibleSessions(environment: TerminalTreeEnvironment) {
-  return environment.sessions.filter(
-    (session) => !isSidebarEnvironmentSession(session, environment),
-  );
-}
-
-function sidebarEnvironmentSession(environment: TerminalTreeEnvironment) {
-  return (
-    environment.sessions.find((session) => isSidebarEnvironmentSession(session, environment)) ??
-    null
-  );
-}
-
-function isSidebarEnvironmentSession(
-  session: TerminalSessionDto,
-  environment: TerminalTreeEnvironment,
-) {
-  return (
-    session.target.kind !== "service" &&
-    normalizedLabel(sessionDisplayTitle(session)) === normalizedLabel(environment.environmentLabel)
-  );
-}
-
-function sessionMatchesEnvironment(
-  sessionTarget: TerminalSessionTargetDto,
-  target: TerminalTargetRequest,
-) {
-  return (
-    sessionTarget.projectId === target.projectId &&
-    sessionTarget.environmentSlug === target.environmentSlug
-  );
-}
-
-function targetEnvironmentMatches(
-  left: TerminalTargetRequest | null,
-  right: TerminalTargetRequest | null,
-) {
-  if (!left || !right) {
-    return false;
-  }
-
-  return left.projectId === right.projectId && left.environmentSlug === right.environmentSlug;
-}
-
-function compareProjectEnvironments(
-  left: ProjectEnvironmentInfoDto,
-  right: ProjectEnvironmentInfoDto,
-) {
-  if (left.primary !== right.primary) {
-    return left.primary ? -1 : 1;
-  }
-
-  return left.name.localeCompare(right.name);
-}
-
-function sortTreeProjects(
-  projects: TerminalTreeProject[],
-  activeEnvironmentTarget: TerminalTargetRequest | null,
-) {
-  return [...projects].sort((left, right) => {
-    const leftSelected = projectMatchesTarget(left, activeEnvironmentTarget);
-    const rightSelected = projectMatchesTarget(right, activeEnvironmentTarget);
-    if (leftSelected !== rightSelected) {
-      return leftSelected ? -1 : 1;
-    }
-
-    const leftActive = projectHasSessions(left);
-    const rightActive = projectHasSessions(right);
-    if (leftActive !== rightActive) {
-      return leftActive ? -1 : 1;
-    }
-
-    return left.projectName.localeCompare(right.projectName);
-  });
-}
-
-function sortTreeEnvironments(
-  environments: TerminalTreeEnvironment[],
-  activeEnvironmentTarget: TerminalTargetRequest | null,
-) {
-  return [...environments].sort((left, right) => {
-    const leftSelected = targetEnvironmentMatches(activeEnvironmentTarget, left.target);
-    const rightSelected = targetEnvironmentMatches(activeEnvironmentTarget, right.target);
-    if (leftSelected !== rightSelected) {
-      return leftSelected ? -1 : 1;
-    }
-
-    const leftActive = left.sessions.length > 0;
-    const rightActive = right.sessions.length > 0;
-    if (leftActive !== rightActive) {
-      return leftActive ? -1 : 1;
-    }
-
-    if (left.primary !== right.primary) {
-      return left.primary ? -1 : 1;
-    }
-
-    return left.environmentLabel.localeCompare(right.environmentLabel);
-  });
-}
-
-function projectMatchesTarget(project: TerminalTreeProject, target: TerminalTargetRequest | null) {
-  return Boolean(target && project.projectId === target.projectId);
-}
-
-function projectHasSessions(project: TerminalTreeProject) {
-  return project.environments.some((environment) => environment.sessions.length > 0);
-}
-
-function normalizedLabel(value: string) {
-  return value.trim().toLowerCase();
-}
-
-function compactWorkingDirectory(path: string) {
-  return path.replace(/^\/Users\/[^/]+/, "~").replace(/^\/home\/[^/]+/, "~");
-}
-
-function isPrimaryEnvironment(slug: string, name: string) {
-  return slug === "primary" || name.toLowerCase() === "primary";
 }
