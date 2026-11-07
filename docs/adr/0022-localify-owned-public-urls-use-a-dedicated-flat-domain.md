@@ -1,3 +1,5 @@
+> **Amended.** [ADR 0026](0026-abuse-controls-and-shared-cookies-before-the-public-suffix-list.md) opens the domain to paying strangers before it is on the Public Suffix List, and states the cookie risk that leaves.
+
 # Localify-Owned Public URLs Use a Dedicated Flat Domain
 
 Public URLs live under `localify.fyi`, not `localify.dev`, which serves the website, the API and the downloads. If they shared the product domain, one phishing report or Safe Browsing flag against a user's URL could block the site, and any user app could set cookies the website would receive. Until `localify.fyi` is on the Public Suffix List, sibling URLs still share a registrable domain, so Localify only sets host-only `__Host-` cookies there and the domain serves nothing but public URLs.

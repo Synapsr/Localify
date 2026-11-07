@@ -1,3 +1,5 @@
+> **Amended.** [ADR 0025](0025-tunnels-exist-only-while-a-machine-serves.md) keeps a machine's tunnel only while it serves, instead of from sign-in to sign-out.
+
 # Public URLs Run on Named Cloudflare Tunnels
 
 Public traffic reaches a machine through one named Cloudflare Tunnel per signed-in machine, run by `cloudflared`, instead of a Localify connector multiplexing requests over a WebSocket to a Durable Object. This supersedes ADR 0003 and the data-plane part of ADR 0005. Localify Cloud creates each tunnel through the Cloudflare API with the configuration held by Cloudflare, so the user never touches a Cloudflare account; the daemon downloads a pinned, checksummed `cloudflared` on first use, gives it the tunnel token through its environment, and supervises it like any other child process.
