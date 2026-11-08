@@ -2,11 +2,11 @@
 
 import { motion, useInView, useReducedMotion } from "motion/react";
 import { useTranslations } from "next-intl";
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useState, type ReactNode, type RefObject } from "react";
 
 import { AppFrame, ProjectCard, TerminalPanel } from "@/app/_components/app-replicas";
 import { AGENTS } from "@/app/_components/agent-logos";
-import { CheckIcon, LockIcon, MonitorIcon, ServersIcon } from "@/components/icons";
+import { ArrowRightIcon, CheckIcon, LockIcon, MonitorIcon, ServersIcon } from "@/components/icons";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -173,96 +173,60 @@ export const AppVisual = () => (
   </Stage>
 );
 
-/* 04: you review on your MacBook what agents run on a remote Linux server, through one protected URL. */
-const Browser = ({ url, children }: { url: string; children?: ReactNode }) => (
-  <div className="overflow-hidden rounded-lg border border-border bg-background shadow-[0_20px_40px_-24px_rgba(13,13,13,0.35)]">
-    <div className="flex items-center gap-1.5 border-b border-border/70 bg-neutral-50 px-2.5 py-2">
-      <span className="size-2 rounded-full bg-[#FF5C5F]" />
-      <span className="size-2 rounded-full bg-[#FAC800]" />
-      <span className="size-2 rounded-full bg-[#34C759]" />
-      <span className="ml-1.5 flex min-w-0 flex-1 items-center gap-1.5 rounded-md bg-background px-2 py-1 text-[11.5px] text-foreground/80 ring-1 ring-border">
-        <LockIcon className="size-3 shrink-0 text-muted-foreground" />
-        <span className="truncate">{url}</span>
-      </span>
-    </div>
-    <div className="space-y-2 p-3">{children}</div>
-  </div>
-);
+/* 04: each local URL of the server has a public twin you open from your laptop. */
+const MACHINE_ROWS = [
+  { local: "web.journal.localify", public: "journal--web.localify.fyi" },
+  { local: "web--fix-auth.journal.localify", public: "journal--web--fix-auth.localify.fyi" },
+  { local: "api.journal.localify", public: "journal--api.localify.fyi" },
+];
 
-const MachineLabel = ({ icon, name, role }: { icon: ReactNode; name: string; role: string }) => (
-  <p className="mb-2 flex items-center gap-2 text-[12px] text-muted-foreground">
-    <span className="flex size-6 items-center justify-center rounded-full bg-background text-foreground/80 ring-1 ring-border">
+const MachineHeader = ({ icon, name, role }: { icon: ReactNode; name: string; role: string }) => (
+  <div className="flex items-center gap-2.5">
+    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background text-foreground/80 ring-1 ring-border">
       {icon}
     </span>
-    <span className="font-medium text-foreground">{name}</span>
-    {role}
-  </p>
-);
-
-/* A dot that travels along a short vertical line between the two machines. */
-const Flow = () => {
-  const reduce = useReducedMotion();
-  return (
-    <div aria-hidden="true" className="relative mx-auto h-6 w-px bg-border">
-      {reduce ? null : (
-        <motion.span
-          animate={{ y: [18, 0], opacity: [0, 1, 0] }}
-          className="absolute -left-[3px] size-[7px] rounded-full bg-foreground/60"
-          transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-        />
-      )}
+    <div className="min-w-0">
+      <p className="text-[13px] font-semibold text-foreground">{name}</p>
+      <p className="truncate text-[11.5px] text-muted-foreground">{role}</p>
     </div>
-  );
-};
-
-const SERVER_LINES: Array<{ text: string; color: string }> = [
-  { text: "$ localify public-url create journal.localify --wildcard", color: "#6b7280" },
-  { text: "Public URL for journal.localify:", color: "#dddddd" },
-  { text: "  https://journal.localify.fyi", color: "#7aa2f7" },
-  { text: "  https://journal--<label>.localify.fyi  for <label>.journal.localify", color: "#7aa2f7" },
-  { text: "Password: ••••••••", color: "#dddddd" },
-];
+  </div>
+);
 
 export const MachinesVisual = () => {
   const t = useTranslations("UseCases.machinesDemo");
 
   return (
     <div className="relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-2xl bg-muted/60 p-4 ring-1 ring-border/60 md:aspect-4/3 md:min-h-0 md:p-8">
-      <Sequence className="flex w-full max-w-md flex-col">
-        <motion.div variants={step}>
-          <MachineLabel icon={<MonitorIcon className="size-3.5" />} name={t("laptop")} role={t("laptopRole")} />
-          <Browser url="journal--web--fix-auth.localify.fyi">
-            <div className="h-2.5 w-2/5 rounded-full bg-foreground/80" />
-            <div className="h-2 w-5/6 rounded-full bg-muted" />
-            <div className="h-2 w-2/3 rounded-full bg-muted" />
-            <div className="flex gap-2 pt-1">
-              <div className="h-6 w-20 rounded-md bg-foreground" />
-              <div className="h-6 w-16 rounded-md ring-1 ring-border" />
-            </div>
-          </Browser>
+      <Sequence className="w-full max-w-lg space-y-4">
+        <motion.div className="grid grid-cols-[minmax(0,1fr)_1.25rem_minmax(0,1fr)] items-center gap-2" variants={step}>
+          <MachineHeader icon={<ServersIcon className="size-4" />} name={t("server")} role={t("serverRole")} />
+          <span />
+          <MachineHeader icon={<MonitorIcon className="size-4" />} name={t("laptop")} role={t("laptopRole")} />
         </motion.div>
 
-        <motion.div className="py-1" variants={step}>
-          <Flow />
-          <div className="mx-auto flex w-fit items-center gap-1.5 rounded-full bg-background px-3 py-1.5 text-[12px] font-medium text-foreground shadow-sm ring-1 ring-border">
-            <LockIcon className="size-3.5 text-muted-foreground" />
-            localify.fyi
-            <span className="text-muted-foreground/60">·</span>
-            <span className="text-muted-foreground">{t("password")}</span>
-          </div>
-          <Flow />
-        </motion.div>
+        <div className="space-y-2">
+          {MACHINE_ROWS.map((row) => (
+            <motion.div
+              className="grid grid-cols-[minmax(0,1fr)_1.25rem_minmax(0,1fr)] items-center gap-2"
+              key={row.local}
+              variants={step}
+            >
+              <span className="flex min-w-0 items-center gap-2 rounded-full bg-background px-3 py-2 text-[12px] text-foreground ring-1 ring-border">
+                <span className="size-2 shrink-0 rounded-full bg-success" />
+                <span className="truncate">{row.local}</span>
+              </span>
+              <ArrowRightIcon className="size-4 text-muted-foreground" />
+              <span className="flex min-w-0 items-center gap-2 rounded-full bg-background px-3 py-2 text-[12px] text-foreground ring-1 ring-border">
+                <LockIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{row.public}</span>
+              </span>
+            </motion.div>
+          ))}
+        </div>
 
-        <motion.div variants={step}>
-          <MachineLabel icon={<ServersIcon className="size-3.5" />} name={t("server")} role={t("serverRole")} />
-          <div className="overflow-hidden rounded-lg border border-neutral-800 bg-[#101010] px-4 py-3 font-mono text-[11px] leading-[1.45] shadow-[0_20px_40px_-24px_rgba(13,13,13,0.5)]">
-            {SERVER_LINES.map((line) => (
-              <p className="truncate" key={line.text} style={{ color: line.color }}>
-                {line.text}
-              </p>
-            ))}
-          </div>
-        </motion.div>
+        <motion.p className="text-center text-[12px] text-muted-foreground" variants={step}>
+          {t("password")}
+        </motion.p>
       </Sequence>
     </div>
   );
