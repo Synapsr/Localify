@@ -154,13 +154,14 @@ export class PolarApi {
   }
 
   /**
-   * Sets a subscription to end when its period does, without a refund. One
-   * already canceling, or no longer active, counts as done.
+   * Sets a subscription to end when its period does, without a refund, or
+   * with `false` to renew again. One already canceling, or no longer active,
+   * counts as done.
    */
-  async cancelAtPeriodEnd(id: string): Promise<void> {
+  async setCancelAtPeriodEnd(id: string, cancel: boolean): Promise<void> {
     try {
       await this.call("PATCH", `/v1/subscriptions/${encodeURIComponent(id)}`, {
-        cancel_at_period_end: true,
+        cancel_at_period_end: cancel,
       });
     } catch (error) {
       if (

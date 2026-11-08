@@ -35,9 +35,29 @@ type Billing = Partial<{
   ends_at: number | null;
   ended_at: number | null;
   past_due_at: number | null;
-  addon_machines: number;
-  addon_url_packs: number;
+  addon_grants: string;
 }>;
+
+/** `billing.addon_grants` for active add-ons of these units, with `fields` on each. */
+function grants(machines: number, urls: number, fields: Record<string, unknown> = {}): string {
+  const grant = (id: string, kind: string, units: number) => ({
+    id,
+    kind,
+    units,
+    status: "active",
+    cancel_at_period_end: false,
+    current_period_end: NOW + 30 * DAY,
+    trial_end: null,
+    ends_at: null,
+    ended_at: null,
+    past_due_at: null,
+    ...fields,
+  });
+  return JSON.stringify([
+    ...(machines > 0 ? [grant("sub-machine", "machine", machines)] : []),
+    ...(urls > 0 ? [grant("sub-urls", "urls", urls)] : []),
+  ]);
+}
 
 type Setup = {
   billing?: Billing;
@@ -65,16 +85,15 @@ async function account(setup: Setup = {}, now = NOW) {
       ends_at: null,
       ended_at: null,
       past_due_at: null,
-      addon_machines: 0,
-      addon_url_packs: 0,
+      addon_grants: "[]",
       ...setup.billing,
     };
     sqlite
       .prepare(
         `INSERT INTO billing (user_id, pro_subscription_id, pro_status, pro_interval,
                               cancel_at_period_end, current_period_end, trial_end, ends_at, ended_at,
-                              past_due_at, addon_machines, addon_url_packs, revision, refreshed_at)
-         VALUES ('u', 'sub', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
+                              past_due_at, addon_grants, revision, refreshed_at)
+         VALUES ('u', 'sub', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
       )
       .run(
         billing.pro_status,
@@ -85,8 +104,7 @@ async function account(setup: Setup = {}, now = NOW) {
         billing.ends_at,
         billing.ended_at,
         billing.past_due_at,
-        billing.addon_machines,
-        billing.addon_url_packs,
+        billing.addon_grants,
       );
   }
   if (setup.override) {
@@ -219,7 +237,7 @@ describe("the lifecycle table", () => {
   });
 
   it("adds the add-ons to an entitled plan only", async () => {
-    const addons = { addon_machines: 2, addon_url_packs: 3 };
+    const addons = { addon_grants: grants(2, 3) };
     const entitled = await account({ billing: { pro_status: "active", ...addons } });
     expect(entitled.entitlement).toEqual({
       servingMachines: 4,
@@ -231,12 +249,52 @@ describe("the lifecycle table", () => {
     expect(lapsed.entitlement).toEqual(NONE);
     expect(lapsed.plan.addons).toEqual({ machines: 2, urlPacks: 3 });
   });
+
+  it("reads each add-on's own lifecycle when the entitlement is read, with no refresh", async () => {
+    const HOUR = 60 * 60 * 1000;
+    // Set to cancel, its period ending a second after the refresh.
+    const billing = {
+      pro_status: "active",
+      addon_grants: grants(1, 1, { cancel_at_period_end: true, current_period_end: NOW + 1000 }),
+    };
+    expect((await account({ billing })).entitlement).toEqual({
+      servingMachines: 3,
+      publicUrls: 20,
+      remoteAccess: true,
+    });
+    const later = await account({ billing }, NOW + HOUR);
+    expect(later.entitlement).toEqual(PRO);
+    expect(later.plan.addons).toEqual({ machines: 0, urlPacks: 0 });
+
+    // A past_due add-on counts through the grace only.
+    const pastDue = {
+      pro_status: "active",
+      addon_grants: grants(2, 0, { status: "past_due", past_due_at: NOW - DAY }),
+    };
+    expect((await account({ billing: pastDue })).entitlement.servingMachines).toBe(4);
+    expect((await account({ billing: pastDue }, NOW + 7 * DAY)).entitlement.servingMachines).toBe(
+      2,
+    );
+  });
+
+  it("counts at most 20 units of each add-on, whatever Polar holds", async () => {
+    const { entitlement, plan } = await account({
+      billing: { pro_status: "active", addon_grants: grants(25, 30) },
+    });
+    expect(plan.addons).toEqual({ machines: 20, urlPacks: 20 });
+    expect(entitlement).toEqual({ servingMachines: 22, publicUrls: 210, remoteAccess: true });
+  });
+
+  it("counts unreadable grants as none", async () => {
+    const { plan } = await account({ billing: { pro_status: "active", addon_grants: "{" } });
+    expect(plan.addons).toEqual({ machines: 0, urlPacks: 0 });
+  });
 });
 
 describe("overrides and bans", () => {
   it("lets a live override replace the plan entirely", async () => {
     const { entitlement, plan } = await account({
-      billing: { pro_status: "active", addon_machines: 3 },
+      billing: { pro_status: "active", addon_grants: grants(3, 0) },
       override: { machines: 1, urls: 3, expiresAt: NOW + DAY },
     });
     expect(entitlement).toEqual({ servingMachines: 1, publicUrls: 3, remoteAccess: true });

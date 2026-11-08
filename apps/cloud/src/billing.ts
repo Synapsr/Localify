@@ -22,10 +22,12 @@ import {
 import { constantTimeEqual } from "./crypto";
 import {
   ACCOUNT_SQL,
+  addonsOf,
   loadAccount,
   proLapsed,
   proPlan,
   type AccountRow,
+  type AddonGrant,
   type ProFields,
   type Statement,
 } from "./entitlement";
@@ -89,8 +91,14 @@ const OWED_QUERIES = 4;
 const OWED_PER_RUN = 10;
 /** Revocations a run attempts, each one Polar call and one query, on a Polar budget of their own. */
 const REVOCATIONS_PER_RUN = 10;
-/** Add-on cancellations a run attempts, each one Polar call and one query, on the run's budget. */
+/** Add-on cancellations a run attempts, after the refreshes, on the run's budgets. */
 const CANCELLATIONS_PER_RUN = 10;
+/** The most one cancellation makes: its reads and writes, and a restoration after it. */
+const CANCELLATION_QUERIES = 6;
+const CANCELLATION_CALLS = 2;
+/** What the refreshes leave the cancellations: two of them, and their listing. */
+const CANCELLATION_RESERVE_QUERIES = 1 + 2 * CANCELLATION_QUERIES;
+const CANCELLATION_RESERVE_CALLS = 2 * CANCELLATION_CALLS;
 /** Pages of the organization's subscriptions the daily reconciliation reads. */
 const DAILY_PAGES = 20;
 
@@ -225,8 +233,8 @@ export type RefreshResult = "committed" | "superseded";
 type Snapshot = {
   customerId: string | null;
   pro: PolarSubscription | null;
-  addonMachines: number;
-  addonUrlPacks: number;
+  /** The add-on subscriptions that count now, each with its own lifecycle, by id. */
+  addonGrants: AddonGrant[];
   trialUsed: boolean;
   /** Entitled Pro subscriptions besides the one kept, not recorded yet. */
   duplicates: string[];
@@ -372,23 +380,37 @@ function snapshotOf(
     [...candidates].sort((a, b) => compare(b.startedAt ?? 0, a.startedAt ?? 0))[0] ??
     null;
 
-  // An add-on is read through the lifecycle table too: one set to cancel
-  // counts until its period ends, and a past_due one through the grace.
+  // Each add-on that counts now is kept with its own lifecycle, which the
+  // entitlement reads again at every use: one set to cancel stops counting
+  // when its period ends, and a past_due one when the grace does, with no
+  // refresh in between.
   const machine = env.POLAR_PRODUCT_ADDON_MACHINE?.trim() ?? "";
   const urls = env.POLAR_PRODUCT_ADDON_URLS?.trim() ?? "";
   const addons = subscriptions.filter(
     (s) => s.productId !== "" && (s.productId === machine || s.productId === urls),
   );
-  const addonUnits = (product: string) =>
-    addons
-      .filter((s) => s.productId === product && proPlan(fieldsOf(s), now).entitled)
-      .reduce((sum, s) => sum + (s.units ?? 1), 0);
+  const addonGrants = addons
+    .filter((s) => proPlan(fieldsOf(s), now).entitled)
+    .map(
+      (s): AddonGrant => ({
+        id: s.id,
+        kind: s.productId === machine ? "machine" : "urls",
+        units: s.units ?? 1,
+        status: s.status,
+        cancel_at_period_end: s.cancelAtPeriodEnd,
+        current_period_end: s.currentPeriodEnd,
+        trial_end: s.trialEnd,
+        ends_at: s.endsAt,
+        ended_at: s.endedAt,
+        past_due_at: s.pastDueAt,
+      }),
+    )
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   return {
     customerId: pro?.customerId ?? subscriptions.find((s) => s.customerId)?.customerId ?? null,
     pro,
-    addonMachines: addonUnits(machine),
-    addonUrlPacks: addonUnits(urls),
+    addonGrants,
     trialUsed: pros.some((s) => s.trialStart !== null),
     duplicates: entitled.filter((s) => s !== pro).map((s) => s.id),
     lapsedAddons: proLapsed(fieldsOf(pro), now) ? addons.filter(renews).map((s) => s.id) : [],
@@ -450,8 +472,7 @@ async function commit(
     pro.ends_at,
     pro.ended_at,
     pro.past_due_at,
-    snapshot.addonMachines,
-    snapshot.addonUrlPacks,
+    JSON.stringify(snapshot.addonGrants),
   ];
   const [, duplicates, , , , , held, owed] = await env.DB.batch<Record<string, unknown>>([
     // Any change of the snapshot may change what serves.
@@ -461,8 +482,7 @@ async function commit(
          AND NOT EXISTS (SELECT 1 FROM billing WHERE user_id = ?1
            AND pro_status IS ?6 AND pro_interval IS ?7 AND cancel_at_period_end = ?8
            AND current_period_end IS ?9 AND trial_end IS ?10 AND ends_at IS ?11
-           AND ended_at IS ?12 AND past_due_at IS ?13 AND addon_machines = ?14
-           AND addon_url_packs = ?15)`,
+           AND ended_at IS ?12 AND past_due_at IS ?13 AND addon_grants = ?14)`,
     ).bind(...decides, now, ...fields),
     // Recorded before any call to Polar: a revoked subscription no longer
     // looks like a duplicate, and the operator refunds from this record.
@@ -472,22 +492,23 @@ async function commit(
        ON CONFLICT (subscription_id) DO NOTHING
        RETURNING subscription_id`,
     ).bind(...decides, now),
-    // The 5-minute job cancels them at period end. One canceled before that
+    // At this snapshot's revision: the 5-minute job cancels them at period
+    // end only while `billing` still holds it. One canceled before that
     // renews again, set back in the portal while Pro is still lapsed: it is
-    // canceled again.
+    // canceled again. A pending one keeps its backoff.
     env.DB.prepare(
-      `INSERT INTO addon_cancellations (subscription_id, user_id, created_at)
-       SELECT value, ?1, ?5 FROM json_each(?6) WHERE ${MAY_WRITE}
-       ON CONFLICT (subscription_id) DO UPDATE SET canceled_at = NULL, attempts = 0,
-         next_attempt_at = NULL
-       WHERE addon_cancellations.canceled_at IS NOT NULL`,
+      `INSERT INTO addon_cancellations (subscription_id, user_id, revision, created_at)
+       SELECT value, ?1, ?2, ?5 FROM json_each(?6) WHERE ${MAY_WRITE}
+       ON CONFLICT (subscription_id) DO UPDATE SET revision = excluded.revision,
+         attempts = CASE WHEN state = 'pending' THEN attempts ELSE 0 END,
+         next_attempt_at = CASE WHEN state = 'pending' THEN next_attempt_at END,
+         state = 'pending', canceled_at = NULL`,
     ).bind(...decides, now, JSON.stringify(snapshot.lapsedAddons)),
     env.DB.prepare(
       `INSERT INTO billing (user_id, revision, pro_subscription_id, refreshed_at, pro_status,
                             pro_interval, cancel_at_period_end, current_period_end, trial_end,
-                            ends_at, ended_at, past_due_at, addon_machines, addon_url_packs,
-                            polar_customer_id)
-       SELECT ?1, ?2, ?3, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                            ends_at, ended_at, past_due_at, addon_grants, polar_customer_id)
+       SELECT ?1, ?2, ?3, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
        WHERE ${MAY_WRITE}
        ON CONFLICT (user_id) DO UPDATE SET
          polar_customer_id = excluded.polar_customer_id,
@@ -496,8 +517,8 @@ async function commit(
          cancel_at_period_end = excluded.cancel_at_period_end,
          current_period_end = excluded.current_period_end, trial_end = excluded.trial_end,
          ends_at = excluded.ends_at, ended_at = excluded.ended_at,
-         past_due_at = excluded.past_due_at, addon_machines = excluded.addon_machines,
-         addon_url_packs = excluded.addon_url_packs, revision = excluded.revision,
+         past_due_at = excluded.past_due_at, addon_grants = excluded.addon_grants,
+         revision = excluded.revision,
          refreshed_at = excluded.refreshed_at`,
     ).bind(...decides, now, ...fields, snapshot.customerId),
     env.DB.prepare(
@@ -643,10 +664,10 @@ async function recordFailure(
 // --- The 5-minute job ---
 
 /**
- * Within its budgets: revokes duplicate subscriptions; cancels the add-ons
- * of lapsed plans; refreshes the users with a webhook retry due, then those
- * due for the reconciliation, oldest first; then runs the serving
- * reconciles still owed. Nothing reaches Polar when nothing is due, and
+ * Within its budgets: revokes duplicate subscriptions; refreshes the users
+ * with a webhook retry due, then those due for the reconciliation, oldest
+ * first; cancels the add-ons of lapsed plans against the snapshots those
+ * refreshes left; then runs the serving reconciles still owed. Nothing reaches Polar when nothing is due, and
  * Polar's rate limit ends that part of the run.
  */
 export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<void> {
@@ -658,7 +679,6 @@ export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<voi
     const calls = new CallBudget(JOB_CALL_BUDGET);
     let polar: PolarApi | null = null;
     const api = () => (polar ??= new PolarApi(env, calls));
-    await cancelLapsedAddons(env, now, queries, calls, api);
     const { results: due } = await env.DB.prepare(
       `SELECT user_id FROM (
          SELECT user_id, 0 AS turn, next_attempt_at AS due FROM webhook_events
@@ -670,7 +690,11 @@ export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<voi
       .bind(now, REFRESHES_PER_RUN)
       .all<{ user_id: string }>();
     for (const { user_id: userId } of due) {
-      if (!queries.has(REFRESH_QUERIES + OWED_QUERIES + 1) || !calls.has(1)) break;
+      if (
+        !queries.has(REFRESH_QUERIES + OWED_QUERIES + CANCELLATION_RESERVE_QUERIES + 1) ||
+        !calls.has(1 + CANCELLATION_RESERVE_CALLS)
+      )
+        break;
       try {
         await refreshBilling(env, userId, api(), now);
       } catch (error) {
@@ -682,6 +706,7 @@ export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<voi
         console.error("A billing refresh failed; it is retried", userId, error);
       }
     }
+    await cancelLapsedAddons(env, now, queries, calls, api);
     await runOwedReconciles(env, now, queries);
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
@@ -783,15 +808,36 @@ function retryAt(now: number, attempts: number): number {
   return now + Math.min(POLAR_WRITE_RETRY_BASE_MS * 2 ** (attempts - 1), DAY);
 }
 
-type CancellationRow = ProFields & { subscription_id: string; user_id: string; attempts: number };
+type CancellationRow = {
+  subscription_id: string;
+  user_id: string;
+  revision: number;
+  state: "pending" | "restoring";
+  attempts: number;
+};
+
+/** The user's snapshot as D1 holds it now: its revision and its Pro plan. */
+type BillingState = ProFields & { revision: number };
+
+async function billingState(env: Env, userId: string): Promise<BillingState | null> {
+  return env.DB.prepare(
+    `SELECT revision, pro_status, pro_interval, cancel_at_period_end, current_period_end,
+            trial_end, ends_at, ended_at, past_due_at
+     FROM billing WHERE user_id = ?1`,
+  )
+    .bind(userId)
+    .first<BillingState>();
+}
 
 /**
  * Cancels at period end the add-ons a refresh found renewing while their
- * Pro plan has lapsed, within the run's Polar budget, without a refund: an
- * add-on needs Pro, so it stops charging for nothing. Each is checked
- * against the snapshot first: one whose plan came back is left alone. Those
- * never tried go first, then the others by their next attempt; one that
- * fails waits like a failed revocation. Polar's rate limit ends them.
+ * Pro plan had lapsed, after the run's refreshes and within its budgets,
+ * without a refund: an add-on needs Pro, so it stops charging for nothing.
+ * Each is fenced by the snapshot's revision (`cancelAddon`), and one
+ * canceled while the plan came back is set to renew again
+ * (`restoreAddon`). Those never tried go first, then the others by their
+ * next attempt; one that fails waits like a failed revocation. Polar's rate
+ * limit ends them.
  */
 async function cancelLapsedAddons(
   env: Env,
@@ -800,40 +846,22 @@ async function cancelLapsedAddons(
   calls: CallBudget,
   api: () => PolarApi,
 ): Promise<void> {
-  if (!queries.has(1 + CANCELLATIONS_PER_RUN) || !calls.has(1)) return;
+  if (!queries.has(1 + CANCELLATION_QUERIES + OWED_QUERIES + 1)) return;
+  if (!calls.has(CANCELLATION_CALLS)) return;
   const { results } = await env.DB.prepare(
-    `SELECT c.subscription_id, c.user_id, c.attempts, b.pro_status, b.pro_interval,
-            COALESCE(b.cancel_at_period_end, 0) AS cancel_at_period_end, b.current_period_end,
-            b.trial_end, b.ends_at, b.ended_at, b.past_due_at
-     FROM addon_cancellations c LEFT JOIN billing b ON b.user_id = c.user_id
-     WHERE c.canceled_at IS NULL AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= ?1)
-     ORDER BY c.next_attempt_at IS NOT NULL, c.next_attempt_at, c.created_at, c.subscription_id
+    `SELECT subscription_id, user_id, revision, state, attempts FROM addon_cancellations
+     WHERE state != 'canceled' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
+     ORDER BY next_attempt_at IS NOT NULL, next_attempt_at, created_at, subscription_id
      LIMIT ?2`,
   )
     .bind(now, CANCELLATIONS_PER_RUN)
     .all<CancellationRow>();
   for (const row of results) {
-    if (!proLapsed(row, now)) {
-      // The plan came back since: the add-on counts again.
-      await env.DB.prepare(
-        `DELETE FROM addon_cancellations WHERE subscription_id = ?1 AND canceled_at IS NULL`,
-      )
-        .bind(row.subscription_id)
-        .run();
-      continue;
-    }
-    if (!calls.has(1)) return;
+    if (!queries.has(CANCELLATION_QUERIES + OWED_QUERIES + 1)) return;
+    if (!calls.has(CANCELLATION_CALLS)) return;
     try {
-      await api().cancelAtPeriodEnd(row.subscription_id);
-      await env.DB.prepare(
-        `UPDATE addon_cancellations SET canceled_at = ?2, attempts = 0, next_attempt_at = NULL
-         WHERE subscription_id = ?1`,
-      )
-        .bind(row.subscription_id, now)
-        .run();
-      console.warn(
-        `Add-on subscription ${row.subscription_id} of user ${row.user_id} ends with its period: its Pro plan lapsed`,
-      );
+      if (row.state === "pending") await cancelAddon(env, row, api, now);
+      else await restoreAddon(env, row, api, now);
     } catch (error) {
       if (error instanceof ConfigError) throw error;
       if (isRateLimited(error)) {
@@ -853,11 +881,106 @@ async function cancelLapsedAddons(
         .bind(row.subscription_id, attempts, retryAt(now, attempts))
         .run();
       console.error(
-        `Canceling add-on subscription ${row.subscription_id} of user ${row.user_id} failed; it is retried`,
+        `Canceling or restoring add-on subscription ${row.subscription_id} of user ${row.user_id} failed; it is retried`,
         error,
       );
     }
   }
+}
+
+/**
+ * Cancels one add-on, fenced by the revision of the refresh that recorded
+ * it. Right before the call, D1 must still hold that revision with the plan
+ * lapsed; otherwise a newer refresh overtook it, and the record goes (a
+ * newer refresh that still finds the plan lapsed records it again, at its
+ * own revision). After the call, it is marked canceled only while that
+ * still holds. If a refresh committed while Polar answered: still lapsed,
+ * the cancellation stands; Pro back, the add-on is set to renew again.
+ */
+async function cancelAddon(
+  env: Env,
+  row: CancellationRow,
+  api: () => PolarApi,
+  now: number,
+): Promise<void> {
+  const before = await billingState(env, row.user_id);
+  if (before?.revision !== row.revision || !proLapsed(before, now)) {
+    await env.DB.prepare(
+      `DELETE FROM addon_cancellations
+       WHERE subscription_id = ?1 AND state = 'pending' AND revision = ?2`,
+    )
+      .bind(row.subscription_id, row.revision)
+      .run();
+    return;
+  }
+  await api().setCancelAtPeriodEnd(row.subscription_id, true);
+  const fenced = await env.DB.prepare(
+    `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?3, attempts = 0,
+       next_attempt_at = NULL
+     WHERE subscription_id = ?1 AND revision = ?2
+       AND EXISTS (SELECT 1 FROM billing WHERE user_id = ?4 AND revision = ?2)`,
+  )
+    .bind(row.subscription_id, row.revision, now, row.user_id)
+    .run();
+  if (fenced.meta.changes > 0) {
+    console.warn(
+      `Add-on subscription ${row.subscription_id} of user ${row.user_id} ends with its period: its Pro plan lapsed`,
+    );
+    return;
+  }
+  const after = await billingState(env, row.user_id);
+  if (after !== null && proLapsed(after, now)) {
+    await env.DB.prepare(
+      `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?3, revision = ?2,
+         attempts = 0, next_attempt_at = NULL
+       WHERE subscription_id = ?1`,
+    )
+      .bind(row.subscription_id, after.revision, now)
+      .run();
+    return;
+  }
+  // Pro came back while the cancellation was on its way.
+  await env.DB.prepare(
+    `UPDATE addon_cancellations SET state = 'restoring', revision = ?2, attempts = 0,
+       next_attempt_at = NULL
+     WHERE subscription_id = ?1`,
+  )
+    .bind(row.subscription_id, after?.revision ?? row.revision)
+    .run();
+  await restoreAddon(env, { ...row, state: "restoring" }, api, now);
+}
+
+/**
+ * Sets an add-on canceled while its plan came back to renew again, then
+ * forgets it. A plan lapsed again since keeps the cancellation instead.
+ * Setting it twice is harmless, so a retry is too.
+ */
+async function restoreAddon(
+  env: Env,
+  row: CancellationRow,
+  api: () => PolarApi,
+  now: number,
+): Promise<void> {
+  const state = await billingState(env, row.user_id);
+  if (state !== null && proLapsed(state, now)) {
+    await env.DB.prepare(
+      `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?3, revision = ?2,
+         attempts = 0, next_attempt_at = NULL
+       WHERE subscription_id = ?1 AND state = 'restoring'`,
+    )
+      .bind(row.subscription_id, state.revision, now)
+      .run();
+    return;
+  }
+  await api().setCancelAtPeriodEnd(row.subscription_id, false);
+  await env.DB.prepare(
+    `DELETE FROM addon_cancellations WHERE subscription_id = ?1 AND state = 'restoring'`,
+  )
+    .bind(row.subscription_id)
+    .run();
+  console.warn(
+    `Add-on subscription ${row.subscription_id} of user ${row.user_id} renews again: its Pro plan came back`,
+  );
 }
 
 // --- The daily reconciliation ---
@@ -913,7 +1036,9 @@ export async function reconcileBilling(env: Env, now = Date.now()): Promise<void
   )
     .bind(now - EVENT_RETENTION_MS)
     .run();
-  await env.DB.prepare(`DELETE FROM addon_cancellations WHERE canceled_at < ?1`)
+  await env.DB.prepare(
+    `DELETE FROM addon_cancellations WHERE state = 'canceled' AND canceled_at < ?1`,
+  )
     .bind(now - CANCELLATION_RETENTION_MS)
     .run();
 }
@@ -1052,8 +1177,8 @@ async function hasAddon(
   productId: string,
   now: number,
 ): Promise<boolean> {
-  const counted = kind === "addon_machine" ? row.addon_machines : row.addon_url_packs;
-  if ((counted ?? 0) > 0) return true;
+  const counted = addonsOf(row.addon_grants, now);
+  if ((kind === "addon_machine" ? counted.machines : counted.urlPacks) > 0) return true;
   const { items } = await new PolarApi(env).listSubscriptions(userId, 1);
   return items.some(
     (s) =>

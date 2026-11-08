@@ -57,6 +57,14 @@
       "name": "REMOTE_CONNECT_LIMITER",
       "namespace_id": "1005",
       "simple": { "limit": 6, "period": 60 }
+    },
+    // /v1/pricing's calls to Polar, one key for all: at most one a minute
+    // per location, whatever the public traffic, since billing shares
+    // Polar's rate limit (docs/public-urls.md, "Pricing").
+    {
+      "name": "PRICING_LIMITER",
+      "namespace_id": "1006",
+      "simple": { "limit": 1, "period": 60 }
     }
   ],
   // The relay between an account's machines, one object per account, named
@@ -147,7 +155,8 @@
         { "name": "DEVICE_LIMITER", "namespace_id": "2002", "simple": { "limit": 60, "period": 60 } },
         { "name": "OWNER_LIMITER", "namespace_id": "2003", "simple": { "limit": 2000, "period": 60 } },
         { "name": "REMOTE_IP_LIMITER", "namespace_id": "2004", "simple": { "limit": 30, "period": 60 } },
-        { "name": "REMOTE_CONNECT_LIMITER", "namespace_id": "2005", "simple": { "limit": 6, "period": 60 } }
+        { "name": "REMOTE_CONNECT_LIMITER", "namespace_id": "2005", "simple": { "limit": 6, "period": 60 } },
+        { "name": "PRICING_LIMITER", "namespace_id": "2006", "simple": { "limit": 1, "period": 60 } }
       ],
       "durable_objects": {
         "bindings": [{ "name": "RELAY", "class_name": "RemoteRelay" }]

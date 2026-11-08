@@ -56,6 +56,27 @@ function setBilling(userId: string, fields: Record<string, string | number | nul
   );
 }
 
+/** `billing.addon_grants` for active add-ons of these units, with `fields` on each. */
+function addonGrants(machines: number, urls: number, fields: Record<string, unknown> = {}): string {
+  const grant = (id: string, kind: string, units: number) => ({
+    id,
+    kind,
+    units,
+    status: "active",
+    cancel_at_period_end: false,
+    current_period_end: Date.now() + 30 * DAY,
+    trial_end: null,
+    ends_at: null,
+    ended_at: null,
+    past_due_at: null,
+    ...fields,
+  });
+  return JSON.stringify([
+    ...(machines > 0 ? [grant("sub-machine", "machine", machines)] : []),
+    ...(urls > 0 ? [grant("sub-urls", "urls", urls)] : []),
+  ]);
+}
+
 let slugCount = 0;
 /** A slug no other test used, since the public path's cache outlives a test. */
 function freshSlug(): string {
@@ -129,8 +150,7 @@ describe("/v1/me", () => {
       pro_status: "active",
       pro_interval: "year",
       current_period_end: renews,
-      addon_machines: 1,
-      addon_url_packs: 1,
+      addon_grants: addonGrants(1, 1),
     });
     sql("UPDATE users SET trial_used_at = 1 WHERE id = ?", userId);
     const url = await createUrl(token, "journal.localify");
@@ -658,11 +678,11 @@ describe("upgrade hints", () => {
     context.env.ADDONS = "on";
     const laptop = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
     const runner = await signIn(context, "teo-goulois", 1, "runner", { entitled: false });
-    setBilling(laptop.userId, { pro_status: "active", addon_url_packs: 1 });
+    setBilling(laptop.userId, { pro_status: "active", addon_grants: addonGrants(0, 1) });
     let last = "";
     for (let i = 0; i < 11; i++)
       last = (await createUrl(laptop.token, `u${i}.localify`)).body.publicUrl.id;
-    sql("UPDATE billing SET addon_url_packs = 0 WHERE user_id = ?", laptop.userId);
+    sql("UPDATE billing SET addon_grants = '[]' WHERE user_id = ?", laptop.userId);
 
     const claim = await api(context, "POST", `/v1/public-urls/${last}/claim`, {
       token: runner.token,
@@ -700,5 +720,80 @@ describe("upgrade hints", () => {
         });
       }
     }
+  });
+});
+
+describe("add-ons that end by time alone", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stop counting when their period ends, and the sweep suspends what they gave", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.parse("2026-11-08T10:00:00Z");
+    vi.setSystemTime(t0);
+    const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
+      entitled: false,
+    });
+    // Pro renews; the URL add-on is set to cancel, its period ending a second
+    // after the refresh that wrote it.
+    setBilling(userId, {
+      pro_status: "active",
+      current_period_end: t0 + 30 * DAY,
+      addon_grants: addonGrants(0, 1, {
+        cancel_at_period_end: true,
+        current_period_end: t0 + 1000,
+      }),
+    });
+    const slugs: string[] = [];
+    for (let i = 0; i < 11; i++)
+      slugs.push((await createUrl(token, `u${i}.localify`)).body.publicUrl.slug);
+    expect(Object.values(await states(token)).every((state) => state === "serving")).toBe(true);
+
+    // An hour later, with no refresh and no call to Polar.
+    vi.setSystemTime(t0 + 60 * 60 * 1000);
+    expect((await me(token)).body.plan).toMatchObject({
+      limits: { servingMachines: 2, publicUrls: 10 },
+      addons: { machines: 0, urlPacks: 0 },
+    });
+    await runSweep(context.env, Date.now());
+    const after = await states(token);
+    expect(after[slugs[10]!]).toBe("suspended");
+    expect(slugs.slice(0, 10).every((slug) => after[slug] === "serving")).toBe(true);
+    expect(
+      context.sqlite.prepare("SELECT suspended_at FROM public_urls WHERE slug = ?").get(slugs[10]!),
+    ).toEqual({ suspended_at: t0 + 60 * 60 * 1000 });
+  });
+});
+
+describe("signed-in machines", () => {
+  it("make room for every serving machine a plan pays for, and 8 more", async () => {
+    const first = await signIn(context, "teo-goulois", 1, "machine-0", { entitled: false });
+    setBilling(first.userId, { pro_status: "active", addon_grants: addonGrants(20, 0) });
+    // 22 serving machines: up to 30 may be signed in.
+    for (let i = 1; i < 30; i++) {
+      await signIn(context, "teo-goulois", 1, `machine-${i}`, { entitled: false });
+    }
+    fakeSignIn(context, "teo-goulois", 1, "tunnel-31");
+    const refused = await api(context, "POST", "/v1/auth/device/token", {
+      body: { deviceCode: "d", machineName: "machine-30", ingressPort: 7381 },
+    });
+    expect(refused.status).toBe(403);
+    expect(await errorOf(refused)).toBe("quota_exceeded");
+  });
+
+  it("let an account with 20 machine units sign in its 22nd machine and serve from it", async () => {
+    const first = await signIn(context, "teo-goulois", 1, "machine-0", { entitled: false });
+    setBilling(first.userId, { pro_status: "active", addon_grants: addonGrants(20, 0) });
+    let last = first;
+    for (let i = 1; i < 22; i++) {
+      last = await signIn(context, "teo-goulois", 1, `machine-${i}`, { entitled: false });
+    }
+    const machines = context.sqlite
+      .prepare("SELECT COUNT(*) AS n FROM machines WHERE status = 'active'")
+      .get() as { n: number };
+    expect(machines.n).toBe(22);
+    expect((await createUrl(last.token, "last.localify")).status).toBe(201);
+    expect((await serve(context, last.token)).body.state).toBe("provisioning");
   });
 });

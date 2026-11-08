@@ -25,6 +25,7 @@ import {
   entitlementOf,
   isEntitled,
   loadAccount,
+  MAX_ADDON_UNITS,
   MAX_LINKED_MACHINES,
   servingUrlLimit,
   type Account,
@@ -50,8 +51,6 @@ import { addonUpgrade, PRO_UPGRADE, type Upgrade } from "./upgrade";
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 256;
 const MAX_MACHINE_NAME_LENGTH = 64;
-/** The most units of one add-on a checkout sells at once. */
-const MAX_ADDON_UNITS = 20;
 const SLUG_ATTEMPTS = 5;
 /** GitHub asks for this much more time between polls after `slow_down`. */
 const SLOW_DOWN_SECONDS = 5;

@@ -5,17 +5,27 @@
 //
 // One Polar call reads the four products in both currencies. The answer is
 // kept an hour per currency in the Cache API and in the isolate, and served
-// stale when Polar fails; with nothing kept and Polar failing, it is a 503.
+// stale for up to 7 days when it cannot be read again; with nothing kept, it
+// is a 503. The public traffic shares Polar's rate limit with billing, so
+// whatever the traffic, a location asks Polar at most once a minute, and
+// after a failure waits 5 minutes or what `Retry-After` asks: a refresh
+// marker in the Cache API and in the isolate, and the `PRICING_LIMITER`
+// binding before any call.
 
 import { setting } from "./config";
 import { PRO, URLS_PER_PACK } from "./entitlement";
-import { PolarApi, type PolarProduct } from "./polar";
+import { isRateLimited, PolarApi, type PolarProduct } from "./polar";
 
-const HOUR = 60 * 60 * 1000;
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
 /** A price is read again from Polar after this. */
 const FRESH_MS = HOUR;
-/** How long the Cache API keeps a copy to serve stale when Polar fails. */
-const STALE_SECONDS = 7 * 24 * 60 * 60;
+/** The longest a price is served, stale, when it cannot be read again. */
+const STALE_MS = 7 * 24 * HOUR;
+/** At most one Polar call per location in this time, for both currencies. */
+const REFRESH_INTERVAL_MS = MINUTE;
+/** After a failed call, the next one waits this long, or what `Retry-After` asks. */
+const FAILURE_BACKOFF_MS = 5 * MINUTE;
 /** How long a browser may reuse an answer. */
 const BROWSER_MAX_AGE_SECONDS = 300;
 
@@ -56,10 +66,13 @@ export type Pricing = {
 
 /** The prices each isolate keeps, by currency. */
 const kept = new Map<Currency, Pricing>();
+/** When this isolate may next ask Polar. */
+let nextAttemptAt = 0;
 
-/** Forgets what this isolate keeps, for the tests. */
+/** Forgets what this isolate keeps, for the tests: a new isolate. */
 export function forgetPricing(): void {
   kept.clear();
+  nextAttemptAt = 0;
 }
 
 export async function handlePricing(
@@ -109,7 +122,7 @@ function corsHeaders(request: Request): Record<string, string> {
 
 /**
  * The prices in `currency`: fresh from the isolate or the Cache API, else
- * from Polar, else stale, else null.
+ * from Polar when a refresh may run, else stale up to 7 days, else null.
  */
 async function pricingIn(
   currency: Currency,
@@ -119,13 +132,14 @@ async function pricingIn(
 ): Promise<Pricing | null> {
   const now = Date.now();
   const cache = typeof caches === "undefined" ? null : caches.default;
-  const key = (c: Currency) => new Request(`${origin}/v1/pricing/cached/${c.toLowerCase()}`);
-  let stale = kept.get(currency) ?? null;
+  const key = (name: string) => new Request(`${origin}/v1/pricing/cached/${name}`);
+  let stale = usable(kept.get(currency), now);
+  if (stale === null) kept.delete(currency);
   if (stale !== null && isFresh(stale, now)) return stale;
   if (cache !== null) {
     try {
-      const hit = await cache.match(key(currency));
-      const cached = hit ? ((await hit.json()) as Pricing) : null;
+      const hit = await cache.match(key(currency.toLowerCase()));
+      const cached = usable(hit ? ((await hit.json()) as Pricing) : null, now);
       if (cached !== null && (stale === null || cached.updatedAt > stale.updatedAt)) {
         kept.set(currency, cached);
         stale = cached;
@@ -135,10 +149,16 @@ async function pricingIn(
       console.error("Reading the cached prices failed", error);
     }
   }
+  if (!(await mayRefresh(env, cache, key("refresh"), now))) return stale;
+
   let read: Map<Currency, Pricing>;
   try {
     read = await readPricing(env, now);
   } catch (error) {
+    const wait = isRateLimited(error)
+      ? Math.max(error.retryAfterMs, FAILURE_BACKOFF_MS)
+      : FAILURE_BACKOFF_MS;
+    await holdRefreshes(cache, key("refresh"), now + wait);
     console.error(
       stale === null
         ? "Reading the prices from Polar failed, with none kept: /v1/pricing answers 503"
@@ -151,16 +171,70 @@ async function pricingIn(
     kept.set(c, pricing);
     if (cache !== null) {
       const response = Response.json(pricing, {
-        headers: { "cache-control": `max-age=${STALE_SECONDS}` },
+        headers: { "cache-control": `max-age=${STALE_MS / 1000}` },
       });
       ctx.waitUntil(
         cache
-          .put(key(c), response)
+          .put(key(c.toLowerCase()), response)
           .catch((error: unknown) => console.error("Caching the prices failed", error)),
       );
     }
   }
   return read.get(currency) ?? null;
+}
+
+/**
+ * Whether this request may ask Polar: no refresh attempted here within the
+ * interval, in this isolate or by the marker in the Cache API, and room left
+ * in `PRICING_LIMITER`. A refresh that may run claims the interval first,
+ * so the requests behind it serve what is kept. Concurrent isolates can both
+ * pass the marker, which has no compare-and-set: the limiter bounds them.
+ */
+async function mayRefresh(
+  env: Env,
+  cache: Cache | null,
+  marker: Request,
+  now: number,
+): Promise<boolean> {
+  if (now < nextAttemptAt) return false;
+  if (cache !== null) {
+    try {
+      const hit = await cache.match(marker);
+      const until = hit ? Number(((await hit.json()) as { until?: unknown }).until) : 0;
+      if (Number.isFinite(until) && until > now) {
+        nextAttemptAt = until;
+        return false;
+      }
+    } catch (error) {
+      console.error("Reading the prices' refresh marker failed", error);
+    }
+  }
+  if (!(await env.PRICING_LIMITER.limit({ key: "polar-products" })).success) {
+    nextAttemptAt = now + REFRESH_INTERVAL_MS;
+    return false;
+  }
+  await holdRefreshes(cache, marker, now + REFRESH_INTERVAL_MS);
+  return true;
+}
+
+/** No refresh before `until`, in this isolate and, through the marker, at this location. */
+async function holdRefreshes(cache: Cache | null, marker: Request, until: number): Promise<void> {
+  nextAttemptAt = Math.max(nextAttemptAt, until);
+  if (cache === null) return;
+  try {
+    const seconds = Math.max(1, Math.ceil((until - Date.now()) / 1000));
+    await cache.put(
+      marker,
+      Response.json({ until }, { headers: { "cache-control": `max-age=${seconds}` } }),
+    );
+  } catch (error) {
+    console.error("Writing the prices' refresh marker failed", error);
+  }
+}
+
+/** The prices when they are at most 7 days old, else null. */
+function usable(pricing: Pricing | null | undefined, now: number): Pricing | null {
+  return pricing && Date.parse(pricing.updatedAt) > now - STALE_MS ? pricing : null;
 }
 
 function isFresh(pricing: Pricing, now: number): boolean {

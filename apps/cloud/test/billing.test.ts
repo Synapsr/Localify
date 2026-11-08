@@ -49,7 +49,7 @@ type FakePolar = {
   /** Answers `POST /v1/checkouts/`. */
   checkout: (body: Raw) => Response | Promise<Response>;
   revoked: string[];
-  /** Subscriptions set to cancel at period end, with the body that asked. */
+  /** Subscriptions set to cancel at period end, or to renew again, with the body that asked. */
   canceled: { id: string; body: Raw }[];
 };
 
@@ -110,11 +110,12 @@ function fakePolar(context: TestContext): FakePolar {
     if (subscription.ended_at) {
       return jsonResponse({ error: "InactiveSubscription", detail: "Inactive" }, 403);
     }
-    if (subscription.cancel_at_period_end) {
+    const update = JSON.parse(body ?? "{}") as { cancel_at_period_end: boolean };
+    if (update.cancel_at_period_end && subscription.cancel_at_period_end) {
       return jsonResponse({ error: "AlreadyCanceledSubscription", detail: "Already" }, 403);
     }
-    fake.canceled.push({ id, body: JSON.parse(body ?? "{}") as Raw });
-    subscription.cancel_at_period_end = true;
+    fake.canceled.push({ id, body: update });
+    subscription.cancel_at_period_end = update.cancel_at_period_end;
     return jsonResponse(subscription);
   });
   context.routes.set(`POST ${POLAR}/v1/checkouts/`, (body) =>
@@ -1800,6 +1801,25 @@ describe("add-ons", () => {
       });
     });
 
+    it("stops counting an add-on when its period ends, with no refresh and no Polar call", async () => {
+      const { token, userId } = await proUser();
+      const now = Date.now();
+      addon(userId, MACHINE, 2, {
+        cancel_at_period_end: true,
+        current_period_end: iso(now + 1000),
+      });
+      await refresh(userId);
+      expect(await plan(token)).toMatchObject({ limits: { servingMachines: 4 } });
+
+      const calls = context.calls.length;
+      vi.spyOn(Date, "now").mockReturnValue(now + 60 * 60 * 1000);
+      expect(await plan(token)).toMatchObject({
+        limits: { servingMachines: 2, publicUrls: 10 },
+        addons: { machines: 0, urlPacks: 0 },
+      });
+      expect(context.calls.length).toBe(calls);
+    });
+
     it("counts add-ons even while they are not on sale", async () => {
       context.env.ADDONS = "off";
       const { token, userId } = await proUser();
@@ -1862,7 +1882,10 @@ describe("add-ons", () => {
       expect(polar.canceled).toHaveLength(1);
 
       // A cancellation Polar already applied counts as done.
-      run("UPDATE addon_cancellations SET canceled_at = NULL");
+      run(
+        `UPDATE addon_cancellations SET state = 'pending', canceled_at = NULL,
+           revision = (SELECT revision FROM billing)`,
+      );
       await runBillingJobs(context.env, Date.now());
       expect(polarCalls("PATCH", "/v1/subscriptions/")).toHaveLength(2);
       expect(cancellations()[0]!.canceled_at).not.toBeNull();
@@ -1878,6 +1901,94 @@ describe("add-ons", () => {
       await refresh(userId);
       await runBillingJobs(context.env, Date.now());
       expect(polar.canceled.map((c) => c.id)).toEqual([urls.id, urls.id]);
+    });
+
+    it("refreshes first, so a plan back since the cancellation was recorded keeps its add-ons", async () => {
+      const { userId } = await proUser();
+      addon(userId, MACHINE, 1);
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      expect(cancellations()).toHaveLength(1);
+
+      // Pro comes back; the refresh that sees it is due in the same run.
+      subscription(userId);
+      run("UPDATE billing_revisions SET check_due_at = ? WHERE user_id = ?", Date.now(), userId);
+      await runBillingJobs(context.env, Date.now());
+      expect(polar.canceled).toEqual([]);
+      expect(cancellations()).toEqual([]);
+    });
+
+    it("re-reads the snapshot before each call, and restores an add-on canceled while Pro came back", async () => {
+      const { token, userId } = await proUser();
+      const machine = addon(userId, MACHINE, 1);
+      const urls = addon(userId, URLS, 1);
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      expect(cancellations().map((c) => c.subscription_id)).toEqual([machine.id, urls.id]);
+
+      // While Polar applies the first cancellation, Pro comes back and a
+      // refresh commits it.
+      const key = `PATCH ${POLAR}/v1/subscriptions/`;
+      const answer = context.routes.get(key)!;
+      let interleaved = false;
+      context.routes.set(key, async (body, url) => {
+        if (!interleaved) {
+          interleaved = true;
+          subscription(userId);
+          await refresh(userId);
+        }
+        return answer(body, url);
+      });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      await runBillingJobs(context.env, Date.now());
+
+      // The first is set to renew again in the same run; the second, read
+      // again before its call, is never canceled.
+      expect(polar.canceled).toEqual([
+        { id: machine.id, body: { cancel_at_period_end: true } },
+        { id: machine.id, body: { cancel_at_period_end: false } },
+      ]);
+      expect(machine.cancel_at_period_end).toBe(false);
+      expect(urls.cancel_at_period_end).toBe(false);
+      expect(cancellations()).toEqual([]);
+      await refresh(userId);
+      expect(await plan(token)).toMatchObject({ limits: { servingMachines: 3, publicUrls: 20 } });
+
+      // Nothing is left to do.
+      await runBillingJobs(context.env, Date.now());
+      expect(polar.canceled).toHaveLength(2);
+    });
+
+    it("retries a restoration that fails, until the add-on renews again", async () => {
+      const { userId } = await proUser();
+      const machine = addon(userId, MACHINE, 1);
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const key = `PATCH ${POLAR}/v1/subscriptions/`;
+      const answer = context.routes.get(key)!;
+      context.routes.set(key, async (body, url) => {
+        if ((JSON.parse(body!) as { cancel_at_period_end: boolean }).cancel_at_period_end) {
+          subscription(userId);
+          await refresh(userId);
+          return answer(body, url);
+        }
+        return jsonResponse({ error: "Internal" }, 500);
+      });
+      const now = Date.now();
+      await runBillingJobs(context.env, now);
+      expect(get("SELECT state, attempts FROM addon_cancellations")).toEqual({
+        state: "restoring",
+        attempts: 1,
+      });
+      expect(machine.cancel_at_period_end).toBe(true);
+
+      context.routes.set(key, answer);
+      await runBillingJobs(context.env, now + 5 * 60 * 1000);
+      expect(machine.cancel_at_period_end).toBe(false);
+      expect(cancellations()).toEqual([]);
     });
 
     it("leaves them alone when Pro comes back before the job runs", async () => {

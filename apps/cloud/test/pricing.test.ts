@@ -11,7 +11,8 @@ const HOUR = 60 * 60 * 1000;
 
 let context: TestContext;
 let cache: FakeCache;
-let failing: boolean;
+/** What the fake Polar answers instead of the products, while set. */
+let failing: false | (() => Response);
 
 /** The Cache API's `caches.default`, kept in memory. */
 class FakeCache {
@@ -73,7 +74,7 @@ beforeEach(() => {
   failing = false;
   context.routes.set(`GET ${POLAR}/v1/products/`, () =>
     failing
-      ? jsonResponse({ error: "Internal" }, 500)
+      ? failing()
       : jsonResponse({ items: PRODUCTS, pagination: { total_count: 4, max_page: 1 } }),
   );
 });
@@ -87,6 +88,19 @@ async function pricing(query = "", headers: Record<string, string> = {}) {
   const response = await api(context, "GET", `/v1/pricing${query}`, { headers });
   await settle(context);
   return { response, body: (await response.json()) as Record<string, unknown> };
+}
+
+const serverError = () => jsonResponse({ error: "Internal" }, 500);
+
+/** The clock moves to `at`, and `PRICING_LIMITER` starts a new period. */
+function moveTo(at: number): void {
+  vi.spyOn(Date, "now").mockReturnValue(at);
+  context.pricingLimiter.counts.clear();
+}
+
+/** The cached prices, without the refresh marker. */
+function cachedPrices(): string[] {
+  return [...cache.entries.keys()].filter((key) => !key.endsWith("/refresh"));
 }
 
 function productCalls() {
@@ -163,7 +177,7 @@ describe("GET /v1/pricing", () => {
     expect((await pricing("?currency=usd")).body).toEqual(first.body);
     expect(productCalls()).toHaveLength(1);
 
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(first.body.updatedAt as string) + HOUR + 1);
+    moveTo(Date.parse(first.body.updatedAt as string) + HOUR + 1);
     const later = await pricing("?currency=usd");
     expect(productCalls()).toHaveLength(2);
     expect(later.body.updatedAt).not.toBe(first.body.updatedAt);
@@ -172,12 +186,13 @@ describe("GET /v1/pricing", () => {
   it("serves the prices kept when Polar fails once they are stale", async () => {
     const first = await pricing("?currency=eur");
     vi.spyOn(console, "error").mockImplementation(() => {});
-    failing = true;
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse(first.body.updatedAt as string) + 3 * HOUR);
+    failing = serverError;
+    moveTo(Date.parse(first.body.updatedAt as string) + 3 * HOUR);
 
     const stale = await pricing("?currency=eur");
     expect(stale.response.status).toBe(200);
     expect(stale.body).toEqual(first.body);
+    expect(productCalls()).toHaveLength(2);
     // From the Cache API too, in a new isolate.
     forgetPricing();
     expect((await pricing("?currency=eur")).body).toEqual(first.body);
@@ -185,12 +200,12 @@ describe("GET /v1/pricing", () => {
 
   it("answers 503 when nothing is kept and Polar fails", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    failing = true;
+    failing = serverError;
     const { response, body } = await pricing("?currency=usd", { origin: "https://localify.dev" });
     expect(response.status).toBe(503);
     expect(body.error).toBe("pricing_unavailable");
     expect(response.headers.get("access-control-allow-origin")).toBe("https://localify.dev");
-    expect(cache.entries.size).toBe(0);
+    expect(cachedPrices()).toEqual([]);
   });
 
   it("answers 503 rather than a partial answer when a price is missing", async () => {
@@ -216,6 +231,99 @@ describe("GET /v1/pricing", () => {
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
     expect((await api(context, "POST", "/v1/pricing")).status).toBe(405);
+  });
+
+  it("asks Polar once per interval when a flood arrives while it fails, across isolates", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    failing = serverError;
+    const t0 = Date.now();
+    const flood = async (count: number) => {
+      const statuses = new Set<number>();
+      for (let i = 0; i < count; i++) {
+        // Every other request lands in a new isolate.
+        if (i % 2 === 0) forgetPricing();
+        statuses.add(
+          (await pricing(i % 3 === 0 ? "?currency=eur" : "?currency=usd")).response.status,
+        );
+      }
+      return statuses;
+    };
+    expect(await flood(50)).toEqual(new Set([503]));
+    expect(productCalls()).toHaveLength(1);
+
+    // A minute later, the failure still holds them back: 5 minutes.
+    moveTo(t0 + 61 * 1000);
+    await flood(20);
+    expect(productCalls()).toHaveLength(1);
+
+    moveTo(t0 + 5 * 60 * 1000 + 1);
+    await flood(20);
+    expect(productCalls()).toHaveLength(2);
+  });
+
+  it("waits what Retry-After asks after Polar's rate limit, when longer", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    failing = () =>
+      new Response(JSON.stringify({ error: "RateLimited" }), {
+        status: 429,
+        headers: { "retry-after": "600" },
+      });
+    const t0 = Date.now();
+    await pricing();
+    moveTo(t0 + 5 * 60 * 1000 + 1);
+    forgetPricing();
+    await pricing();
+    expect(productCalls()).toHaveLength(1);
+    moveTo(t0 + 10 * 60 * 1000 + 1);
+    forgetPricing();
+    await pricing();
+    expect(productCalls()).toHaveLength(2);
+  });
+
+  it("serves the prices kept to a flood while Polar fails, asking once", async () => {
+    const first = await pricing("?currency=usd");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    failing = serverError;
+    moveTo(Date.parse(first.body.updatedAt as string) + 2 * HOUR);
+    for (let i = 0; i < 30; i++) {
+      if (i % 2 === 0) forgetPricing();
+      const { response, body } = await pricing("?currency=usd");
+      expect(response.status).toBe(200);
+      expect(body).toEqual(first.body);
+    }
+    expect(productCalls()).toHaveLength(2);
+  });
+
+  it("lets PRICING_LIMITER bound isolates when the Cache API keeps nothing", async () => {
+    vi.stubGlobal("caches", undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    failing = serverError;
+    for (let i = 0; i < 10; i++) {
+      forgetPricing();
+      await pricing();
+    }
+    expect(productCalls()).toHaveLength(1);
+    // The limiter's next period lets one more through.
+    context.pricingLimiter.counts.clear();
+    for (let i = 0; i < 10; i++) {
+      forgetPricing();
+      await pricing();
+    }
+    expect(productCalls()).toHaveLength(2);
+  });
+
+  it("never serves prices more than 7 days old, from the isolate or the cache", async () => {
+    const first = await pricing("?currency=usd");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    failing = serverError;
+    const updated = Date.parse(first.body.updatedAt as string);
+    moveTo(updated + 7 * 24 * HOUR - 1000);
+    expect((await pricing("?currency=usd")).response.status).toBe(200);
+    moveTo(updated + 7 * 24 * HOUR + 1000);
+    expect((await pricing("?currency=usd")).response.status).toBe(503);
+    forgetPricing();
+    moveTo(updated + 7 * 24 * HOUR + 10 * 60 * 1000);
+    expect((await pricing("?currency=usd")).response.status).toBe(503);
   });
 
   it("is on no other route's path", async () => {

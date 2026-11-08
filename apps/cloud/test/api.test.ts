@@ -280,8 +280,10 @@ describe("signing in", () => {
     expect(context.sqlite.prepare("SELECT COUNT(*) AS n FROM machines").get()).toEqual({ n: 2 });
   });
 
-  it("keeps a user to 10 signed-in machines", async () => {
-    for (let i = 0; i < 10; i++) await signIn(context, "teo-goulois", 1, `machine-${i}`);
+  it("keeps a user without a plan to 10 signed-in machines", async () => {
+    for (let i = 0; i < 10; i++) {
+      await signIn(context, "teo-goulois", 1, `machine-${i}`, { entitled: false });
+    }
     fakeSignIn(context, "teo-goulois", 1, "tunnel-11");
     const response = await api(context, "POST", "/v1/auth/device/token", {
       body: { deviceCode: "d", machineName: "machine-11", ingressPort: 7381 },

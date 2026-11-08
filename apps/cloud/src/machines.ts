@@ -7,10 +7,10 @@
 import { CallBudget, CloudflareApi, REMOVE_TUNNEL_CALLS } from "./cloudflare";
 import { setting } from "./config";
 import { hmacHex, randomHex, sha256Hex } from "./crypto";
+import { entitlementOf, signedInMachineCap } from "./entitlement";
 import { ApiError } from "./http";
 import { pushToRelay } from "./relay";
 
-const MAX_SIGNED_IN_MACHINES = 10;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
 const DELETED_URL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** A revoked machine costs at most two lookups by name, the tunnel's removal, and the record. */
@@ -86,6 +86,9 @@ export async function signInMachine(
   const id = newId();
   const now = Date.now();
   const token = `lfy_${randomHex(32)}`;
+  // Every serving slot the account pays for can be used, with room for
+  // machines that serve nothing.
+  const cap = signedInMachineCap(await entitlementOf(env, userId, now));
   // `?1` user, `?2` name, `?3` the new machine. The replaced machines are
   // found inside the batch, so a concurrent sign-in with the same name is
   // replaced too, and at most one machine per name stays active.
@@ -100,7 +103,7 @@ export async function signInMachine(
        SELECT ?1, ?2, ?3, 'active', ?4, ?5
        WHERE (SELECT COUNT(*) FROM machines
               WHERE user_id = ?2 AND status != 'revoked' AND NOT (status = 'active' AND name = ?3)) < ?6`,
-    ).bind(id, userId, name, ingressPort, now, MAX_SIGNED_IN_MACHINES),
+    ).bind(id, userId, name, ingressPort, now, cap),
     env.DB.prepare(
       `UPDATE public_urls SET machine_id = ?3 WHERE machine_id IN (${replaced}) AND ${exists("?3")}`,
     ).bind(userId, name, id),
@@ -121,7 +124,7 @@ export async function signInMachine(
     throw new ApiError(
       403,
       "quota_exceeded",
-      `Your account already has ${MAX_SIGNED_IN_MACHINES} machines signed in, the most it can have. Run \`localify logout\` on one of them, or sign in with the name of a machine you no longer use to replace it.`,
+      `Your account already has ${cap} machines signed in, the most it can have. Run \`localify logout\` on one of them, or sign in with the name of a machine you no longer use to replace it.`,
     );
   }
   // The replaced machine's relay socket closes, and its peers drop its pin.
