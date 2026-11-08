@@ -28,9 +28,11 @@ use localify::infrastructure::test_pause::PAUSE_DIR_ENV;
 
 /// Children that ignore SIGINT and SIGTERM, and never listen on their port.
 const STUBBORN: &str = r#"echo started
-sh -c 'trap "" INT TERM; while :; do sleep 1; done' &
-sh -c 'trap "" INT TERM; sleep 300' &
+sh -c 'trap "" INT TERM; exec sleep 300' &
+sh -c 'trap "" INT TERM; exec sleep 300' &
 wait"#;
+/// The executor, its service and STUBBORN's two children.
+const STUBBORN_MEMBERS: usize = 4;
 
 struct Sandbox {
     _dir: tempfile::TempDir,
@@ -74,7 +76,6 @@ impl Sandbox {
             .env("PATH", &self.path)
             .env_remove("LOCALIFY_PROFILE")
             .env_remove("LOCALIFY_SERVICE_ORIGIN")
-            .env_remove("LOCALIFY_SERVICE_OUTPUT")
             .stdin(Stdio::null());
         command
     }
@@ -320,14 +321,14 @@ fn the_end_of_a_run_whose_executor_was_killed() {
     let sandbox = Sandbox::new();
     let mut executor = sandbox.spawn_background(STUBBORN);
     let sid = executor.id();
-    let record = wait_for_proof(&sandbox, sid, 5);
+    let record = wait_for_proof(&sandbox, sid, STUBBORN_MEMBERS);
     assert_eq!(record.run.as_ref().unwrap().sid, Some(sid));
 
     kill_executor(&mut executor);
     let left = session_members(sid);
-    assert!(left.len() >= 4, "{left:?}");
+    assert!(left.len() >= STUBBORN_MEMBERS - 1, "{left:?}");
 
-    let finished = sandbox.store().finish_background_runs().unwrap();
+    let finished = sandbox.store().finish_unread_runs().unwrap();
 
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0].1, Finish::Finalized(EndReason::Interrupted));
@@ -351,9 +352,9 @@ fn a_launch_ends_what_a_killed_executor_left_then_starts() {
     let sandbox = Sandbox::new();
     let mut executor = sandbox.spawn_background(STUBBORN);
     let sid = executor.id();
-    let record = wait_for_proof(&sandbox, sid, 5);
+    let record = wait_for_proof(&sandbox, sid, STUBBORN_MEMBERS);
     kill_executor(&mut executor);
-    assert!(session_members(sid).len() >= 4);
+    assert!(session_members(sid).len() >= STUBBORN_MEMBERS - 1);
 
     // Proven leftovers of a dead executor: the launch ends them itself, the
     // ones that ignore SIGTERM after the grace period, and starts.
@@ -405,7 +406,7 @@ fn a_finisher_killed_mid_way_lets_the_next_one_complete_and_never_two_at_once() 
     let sandbox = Sandbox::new();
     let mut executor = sandbox.spawn_background(STUBBORN);
     let sid = executor.id();
-    let record = wait_for_proof(&sandbox, sid, 5);
+    let record = wait_for_proof(&sandbox, sid, STUBBORN_MEMBERS);
     let dir = sandbox.run_dir(&record);
     kill_executor(&mut executor);
 
@@ -430,7 +431,7 @@ fn a_finisher_killed_mid_way_lets_the_next_one_complete_and_never_two_at_once() 
     let services = sandbox.services_dir();
     let second = thread::spawn(move || {
         RunningServiceStore::new(services)
-            .finish_background_runs()
+            .finish_unread_runs()
             .unwrap()
     });
     thread::sleep(Duration::from_secs(1));
@@ -488,7 +489,9 @@ fn a_background_run_reads_by_run_id_and_offset_and_stops_complete() {
         sandbox.record().unwrap().run_id().map(RunId::as_str)
     );
 
-    let again = sandbox.run(&["logs", "web", "--project", "app", "--cursor", &cursor]);
+    // In one argument: a run id may start with `-`.
+    let cursor_arg = format!("--cursor={cursor}");
+    let again = sandbox.run(&["logs", "web", "--project", "app", &cursor_arg]);
     assert!(again.status.success(), "{}", stderr(&again));
     assert!(!String::from_utf8_lossy(&again.stdout).contains("hello-from-web"));
 
@@ -992,17 +995,65 @@ fn witnesses_that_always_vanish_leave_the_run_open() {
 }
 
 #[test]
-fn a_start_in_the_tick_of_the_last_proof_proves_nothing() {
+fn a_durable_child_forked_after_the_last_proof_keeps_the_run_open() {
     let dir = run_folder();
-    // Started exactly when the session was last proven, and first seen once
-    // its parent was killed: nothing ties it to the run.
+    // A proven member forks a long-lived worker after the session was last
+    // proven, then dies: nothing ties the worker to the run, so it is never
+    // signalled, and the run is never called over while it lives.
     let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), true)]);
     *table.fork_on_kill.borrow_mut() = Some((4243, (fake_process(4246, 4242, FAKE_NOW), true)));
 
-    finisher(&table)
+    let first = finisher(&table)
         .finish(dir.path(), &recorded_session("boot-a"), true)
         .unwrap();
 
+    assert_eq!(first, Finish::Unconfirmed(vec![4246]));
+    assert!(output::read_end(dir.path()).unwrap().is_none());
+    assert!(!table.signals.borrow().iter().any(|(pid, _)| *pid == 4246));
+    assert!(Finish::unconfirmed_message(&[4246]).contains("process 4246 in this run's session"));
+
+    // The next finisher sees no proof at all, and still keeps it open.
+    let again = finisher(&table)
+        .finish(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+    assert_eq!(again, Finish::Unconfirmed(vec![4246]));
+    assert!(output::read_end(dir.path()).unwrap().is_none());
+
+    // Once the worker is gone, the next finisher finalizes as usual.
+    table
+        .processes
+        .borrow_mut()
+        .retain(|(process, _)| process.pid != 4246);
+    let last = finisher(&table)
+        .finish(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+    assert_eq!(last, Finish::Finalized(EndReason::Interrupted));
+    assert!(!table.signals.borrow().iter().any(|(pid, _)| *pid == 4246));
+}
+
+#[test]
+fn an_unconfirmed_worker_that_leaves_the_session_no_longer_keeps_the_run_open() {
+    let dir = run_folder();
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), true)]);
+    *table.fork_on_kill.borrow_mut() = Some((4243, (fake_process(4246, 4242, FAKE_NOW), true)));
+    let first = finisher(&table)
+        .finish(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+    assert_eq!(first, Finish::Unconfirmed(vec![4246]));
+
+    // The worker daemonizes: the same process, in a session of its own.
+    for (process, _) in table.processes.borrow_mut().iter_mut() {
+        if process.pid == 4246 {
+            process.sid = Some(4246);
+            process.pgid = 4246;
+        }
+    }
+
+    // The next launch's finisher finalizes, and so admits it.
+    let next = finisher(&table)
+        .finish(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+    assert_eq!(next, Finish::Finalized(EndReason::Interrupted));
     assert!(!table.signals.borrow().iter().any(|(pid, _)| *pid == 4246));
 }
 
@@ -1615,7 +1666,7 @@ fn a_launch_gives_up_on_a_suspended_cleanup_of_the_previous_run() {
     let sandbox = Sandbox::new();
     let mut executor = sandbox.spawn_background(STUBBORN);
     let sid = executor.id();
-    let record = wait_for_proof(&sandbox, sid, 5);
+    let record = wait_for_proof(&sandbox, sid, STUBBORN_MEMBERS);
     kill_executor(&mut executor);
     // A stop that holds the run's finalization lock, suspended while it waits
     // for leftovers that ignore SIGTERM.
@@ -1669,7 +1720,11 @@ fn a_launch_gives_up_on_a_suspended_cleanup_of_the_previous_run() {
         "{said}"
     );
     assert!(stop.status.success(), "{}", stderr(&stop));
-    assert!(session_members(sid).is_empty());
+    assert!(
+        session_members(sid).is_empty(),
+        "{:?}",
+        session_members(sid)
+    );
 }
 
 #[test]
@@ -1827,7 +1882,7 @@ fn a_run_folder_that_cannot_be_inspected_admits_nothing() {
     let sandbox = Sandbox::new();
     let mut executor = sandbox.spawn_background(STUBBORN);
     let sid = executor.id();
-    let record = wait_for_proof(&sandbox, sid, 5);
+    let record = wait_for_proof(&sandbox, sid, STUBBORN_MEMBERS);
     kill_executor(&mut executor);
     // Every look at the run's folder fails, as a permission or I/O error would.
     let outputs = sandbox.run_dir(&record).parent().unwrap().to_path_buf();
@@ -1847,7 +1902,7 @@ fn a_run_folder_that_cannot_be_inspected_admits_nothing() {
     let error = admission.unwrap();
     assert!(error.contains("Failed to inspect"), "{error}");
     assert!(after.exit.is_none(), "the previous run was marked ended");
-    assert!(survivors >= 4, "{survivors}");
+    assert!(survivors >= STUBBORN_MEMBERS - 1, "{survivors}");
     assert!(stop.status.success(), "{}", stderr(&stop));
     assert!(session_members(sid).is_empty());
 }

@@ -40,10 +40,12 @@ use tauri::async_runtime;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
-use crate::terminal::{
+use localify::desktop::dto::{ServiceRunRequest, ServiceStopDto};
+use localify::desktop::shell_environment::ShellEnvironmentDto;
+use localify::desktop::terminal::{
     TerminalCreateSessionRequest, TerminalLaunchServiceRequest, TerminalLaunchServiceResultDto,
-    TerminalManager, TerminalResizeRequest, TerminalSessionDto, TerminalSessionRequest,
-    TerminalWriteRequest,
+    TerminalManager, TerminalResizeRequest, TerminalRestartServiceRequest, TerminalSessionDto,
+    TerminalSessionRequest, TerminalWriteRequest,
 };
 
 pub struct AppState {
@@ -1146,26 +1148,52 @@ pub fn terminal_list_sessions(
 
 #[tauri::command]
 pub fn terminal_create_session(
-    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     terminal: tauri::State<'_, TerminalManager>,
     request: TerminalCreateSessionRequest,
 ) -> Result<TerminalSessionDto, String> {
     terminal
-        .create_session(app, &state.api, request)
+        .create_session(&state.api, request)
         .map_err(map_error)
 }
 
+/// Blocking: the first launch may wait for the shell environment.
 #[tauri::command]
-pub fn terminal_launch_service(
-    app: tauri::AppHandle,
+pub async fn terminal_launch_service(
     state: tauri::State<'_, AppState>,
     terminal: tauri::State<'_, TerminalManager>,
     request: TerminalLaunchServiceRequest,
 ) -> Result<TerminalLaunchServiceResultDto, String> {
-    terminal
-        .launch_service(app, &state.api, request)
-        .map_err(map_error)
+    let api = state.api.clone();
+    let terminal = terminal.inner().clone();
+    async_runtime::spawn_blocking(move || terminal.launch_service(&api, request))
+        .await
+        .map_err(map_error)?
+}
+
+/// Blocking: the stop waits until the old run has ended.
+#[tauri::command]
+pub async fn terminal_restart_service(
+    state: tauri::State<'_, AppState>,
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalRestartServiceRequest,
+) -> Result<TerminalLaunchServiceResultDto, String> {
+    let api = state.api.clone();
+    let terminal = terminal.inner().clone();
+    async_runtime::spawn_blocking(move || terminal.restart_service(&api, request))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn terminal_stop_service(
+    terminal: tauri::State<'_, TerminalManager>,
+    request: TerminalSessionRequest,
+) -> Result<(), String> {
+    let terminal = terminal.inner().clone();
+    async_runtime::spawn_blocking(move || terminal.stop_service(request))
+        .await
+        .map_err(map_error)?
 }
 
 #[tauri::command]
@@ -1184,20 +1212,52 @@ pub fn terminal_resize(
     terminal.resize(request).map_err(map_error)
 }
 
+/// Blocking: closing a running service tab stops its run first.
 #[tauri::command]
-pub fn terminal_interrupt(
+pub async fn terminal_close(
     terminal: tauri::State<'_, TerminalManager>,
     request: TerminalSessionRequest,
 ) -> Result<(), String> {
-    terminal.interrupt(request).map_err(map_error)
+    let terminal = terminal.inner().clone();
+    async_runtime::spawn_blocking(move || terminal.close(request))
+        .await
+        .map_err(map_error)?
+}
+
+/// Stops a service's last run through its session, wherever it runs.
+/// `false` when it was not running.
+#[tauri::command]
+pub async fn stop_service_run(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: ServiceRunRequest,
+) -> Result<ServiceStopDto, String> {
+    let api = state.api.clone();
+    let stopped = async_runtime::spawn_blocking(move || {
+        api.stop_service_run(request)
+            .map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(map_error)??;
+    super::sync_tray_menu(&app).map_err(map_error)?;
+    Ok(stopped)
 }
 
 #[tauri::command]
-pub fn terminal_close(
+pub fn shell_environment_status(
     terminal: tauri::State<'_, TerminalManager>,
-    request: TerminalSessionRequest,
-) -> Result<(), String> {
-    terminal.close(request).map_err(map_error)
+) -> Result<ShellEnvironmentDto, String> {
+    Ok(terminal.shell_environment())
+}
+
+#[tauri::command]
+pub async fn reload_shell_environment(
+    terminal: tauri::State<'_, TerminalManager>,
+) -> Result<ShellEnvironmentDto, String> {
+    let terminal = terminal.inner().clone();
+    async_runtime::spawn_blocking(move || terminal.reload_shell_environment())
+        .await
+        .map_err(map_error)
 }
 
 #[tauri::command]

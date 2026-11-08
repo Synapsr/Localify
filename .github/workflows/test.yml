@@ -41,6 +41,15 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked -- -D warnings
 
+      # Shells for the shell-environment gate; Nushell stays skipped.
+      - name: Install fish
+        if: runner.os == 'macOS'
+        run: brew install fish
+
+      - name: Install zsh and fish
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+
       - name: Run unit tests
         run: cargo test --locked
 

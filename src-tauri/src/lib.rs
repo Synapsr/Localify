@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use commands::{AppState, DeepLinkLaunchDto, DeepLinkPayloadDto, DeepLinkRouteDto};
@@ -15,6 +16,10 @@ use localify::desktop::DesktopApi;
 use localify::desktop::dto::{
     DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest,
 };
+use localify::desktop::run_pty::AppInstallation;
+use localify::desktop::terminal::TerminalManager;
+use localify::infrastructure::running_services::RunningServiceStore;
+use localify::infrastructure::shell_env;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -26,7 +31,6 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_deep_link::DeepLinkExt;
 #[cfg(target_os = "macos")]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use terminal::TerminalManager;
 
 #[cfg(desktop)]
 const AUTOSTART_ARG: &str = "--autostart";
@@ -1085,6 +1089,7 @@ pub fn run() {
         ));
     }
 
+    let executable = api.binary_path().to_path_buf();
     let builder = builder
         .on_menu_event(|app, event| {
             #[cfg(target_os = "macos")]
@@ -1100,14 +1105,23 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::with_api(api))
-        .manage(TerminalManager::new())
         .manage(TrayState::default());
 
     #[cfg(target_os = "macos")]
     let builder = builder.manage(UpdateMenuState::default());
 
     builder
-        .setup(|app| {
+        .setup(move |app| {
+            // In setup: the panel's events need the app's handle.
+            let terminal = TerminalManager::new(
+                executable.clone(),
+                shell_env::user_shell(),
+                RunningServiceStore::new_default()?,
+                AppInstallation::of_this_process(),
+                Arc::new(terminal::WindowEvents(app.handle().clone())),
+            );
+            terminal.warm_shell_environment();
+            app.manage(terminal);
             app.handle().plugin(
                 tauri_plugin_updater::Builder::new()
                     .pubkey(updater_public_key())
@@ -1226,10 +1240,14 @@ pub fn run() {
             commands::terminal_list_sessions,
             commands::terminal_create_session,
             commands::terminal_launch_service,
+            commands::terminal_restart_service,
+            commands::terminal_stop_service,
             commands::terminal_write,
             commands::terminal_resize,
-            commands::terminal_interrupt,
             commands::terminal_close,
+            commands::stop_service_run,
+            commands::shell_environment_status,
+            commands::reload_shell_environment,
             commands::consume_pending_deep_link
         ])
         .run(tauri::generate_context!())

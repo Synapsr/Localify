@@ -8,7 +8,7 @@
 //! When `localify dev` leads the run's session, it also ends whatever the
 //! service left in it before returning.
 
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -28,10 +28,10 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
 use crate::infrastructure::process::{
-    Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities,
+    Identity, ProcessInfo, ProcessTable, Signal, all_processes, helpers, signal_identities,
     terminal_foreground_group, track_tree,
 };
-use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT};
+use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT, STOP_GRACE};
 use crate::infrastructure::runs::output::StreamSink;
 
 /// How often the service's exit is checked: a cheap wait on the child.
@@ -45,6 +45,28 @@ const SCAN_WHILE_STOPPING: Duration = POLL_INTERVAL;
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the run's record says its executor is alive.
 pub const RUN_HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// A write to the terminal failed as only a terminal nobody holds any more
+/// fails: in a run PTY, the app is gone.
+static TERMINAL_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Writes `text` to stderr, never panicking. In a run PTY whose app died,
+/// every write fails, and `eprintln!` would abort `localify dev` before it
+/// ended its service. A failure that says the terminal is gone is kept, so a
+/// run in the app's terminal stops.
+pub fn report(text: &str) {
+    let mut stderr = io::stderr().lock();
+    if let Err(error) = stderr
+        .write_all(text.as_bytes())
+        .and_then(|()| stderr.flush())
+        && matches!(
+            error.raw_os_error(),
+            Some(libc::EIO | libc::EPIPE | libc::ENXIO)
+        )
+    {
+        TERMINAL_LOST.store(true, Ordering::SeqCst);
+    }
+}
 
 pub struct SupervisedLaunch<'a> {
     pub command: &'a [String],
@@ -64,7 +86,67 @@ pub struct SupervisedLaunch<'a> {
     /// `localify dev` leads the run's session: what the service leaves in it
     /// is ended before the run returns, by `finisher`.
     pub leads_session: bool,
+    /// The terminal is the app's run PTY. Losing it, a SIGHUP or a write that
+    /// fails as on a closed terminal, means the app is gone: the run stops,
+    /// as for a SIGTERM. In any other terminal a SIGHUP is only forwarded.
+    pub app_terminal: bool,
+    /// Stop signals already watched, since before the profile resolved
+    /// (`localify dev`); `None` starts watching with the service.
+    pub supervision: Option<Supervision>,
     pub finisher: &'a Finisher<'a>,
+}
+
+/// The watch of the stop signals sent to `localify dev`, from before its
+/// profile resolves until it exits. While the profile resolves there is no
+/// service to stop: a Ctrl+C, SIGTERM or SIGHUP then ends the helpers the
+/// profile runs, such as `infisical`, and what they started, and exits.
+#[derive(Clone)]
+pub struct Supervision {
+    stops: Arc<StopRequests>,
+    forwarding: Arc<Mutex<Forwarding>>,
+}
+
+impl Supervision {
+    /// Watches from now on, in the resolving phase.
+    pub fn start(app_terminal: bool) -> Self {
+        let supervision = Self {
+            stops: Arc::new(StopRequests::default()),
+            forwarding: Arc::new(Mutex::new(Forwarding {
+                resolving: true,
+                ..Forwarding::default()
+            })),
+        };
+        watch_stop_signals(
+            Arc::clone(&supervision.forwarding),
+            Arc::clone(&supervision.stops),
+            app_terminal,
+        );
+        supervision
+    }
+
+    /// The profile resolved: stop signals now wait for the service, and
+    /// reach it once it runs. When a stop already began ending the
+    /// resolution, nothing may start: this waits for that stop to exit.
+    pub fn resolved(&self) {
+        let resolved = self
+            .forwarding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .finish_resolution();
+        if !resolved {
+            loop {
+                thread::park();
+            }
+        }
+    }
+}
+
+/// A stop while the profile resolves: its helpers are ended, and so is
+/// `localify dev`, with the shell's code for that signal.
+fn end_resolution(code: i32) -> ! {
+    report("\nStopped while the launch profile resolved.\n");
+    helpers::helpers().end_all(STOP_GRACE, KILL_WAIT);
+    std::process::exit(code);
 }
 
 pub enum LaunchOutcome {
@@ -158,25 +240,34 @@ impl StopRequests {
     fn any(&self) -> bool {
         self.stopping() || self.hung_up.load(Ordering::SeqCst)
     }
+
+    /// The app's run PTY is gone: a stop, as `localify stop` asks for one,
+    /// once.
+    fn lose_terminal(&self, stopping: &Stopping<'_>) {
+        if !self.terminated.swap(true, Ordering::SeqCst) {
+            stopping.signal(&stopping.stop_targets(), Signal::Terminate);
+        }
+    }
 }
 
 /// Starts the service and waits for it, returning why it stopped.
 pub fn run(launch: SupervisedLaunch<'_>) -> Result<LaunchEnd> {
-    run_with(launch, Arc::new(StopRequests::default()), true)
+    // Watching first: a Ctrl+C right after the service starts must not end
+    // `localify dev` before it can stop the service.
+    let supervision = match &launch.supervision {
+        Some(supervision) => supervision.clone(),
+        None => Supervision::start(launch.app_terminal),
+    };
+    supervision.resolved();
+    run_with(launch, supervision.stops, supervision.forwarding)
 }
 
 /// `run`, with stop requests a test can make without signalling itself.
 fn run_with(
     launch: SupervisedLaunch<'_>,
     stops: Arc<StopRequests>,
-    watch_signals: bool,
+    forwarding: Arc<Mutex<Forwarding>>,
 ) -> Result<LaunchEnd> {
-    // Watching first: a Ctrl+C right after the service starts must not end
-    // `localify dev` before it can stop the service.
-    let forwarding = Arc::new(Mutex::new(Forwarding::default()));
-    if watch_signals {
-        watch_stop_signals(Arc::clone(&forwarding), Arc::clone(&stops));
-    }
     let mut child = spawn(&launch)?;
     // A service that already exited is a zombie no table shows: nothing to signal.
     let root = launch
@@ -208,7 +299,9 @@ fn run_with(
     if let Some(session) = &launch.session
         && let Err(error) = session.stop(&outcome.reason())
     {
-        eprintln!("Warning: could not report the stop to the daemon: {error:#}");
+        report(&format!(
+            "Warning: could not report the stop to the daemon: {error:#}\n"
+        ));
     }
     Ok(LaunchEnd {
         outcome,
@@ -384,6 +477,11 @@ impl<'a> Stopping<'a> {
         targets
     }
 
+    /// What a stop is after: the service's tree and the session's members.
+    fn stop_targets(&self) -> Vec<Identity> {
+        self.targets_on_interrupt()
+    }
+
     fn signal(&self, targets: &[Identity], signal: Signal) {
         for target in targets {
             let unchanged = self
@@ -544,13 +642,16 @@ fn supervise(
             && stopping.expiring_since.is_none()
             && now.duration_since(started) >= duration
         {
-            eprintln!(
-                "\n{}: the launch profile reached its max_duration of {}. Stopping the service.",
+            report(&format!(
+                "\n{}: the launch profile reached its max_duration of {}. Stopping the service.\n",
                 BRANDING.app_name,
                 humantime::format_duration(duration)
-            );
+            ));
             stopping.expiring_since = Some(now);
             stopping.signal(&stopping.targets(), Signal::Terminate);
+        }
+        if launch.app_terminal && TERMINAL_LOST.load(Ordering::SeqCst) {
+            stops.lose_terminal(&stopping);
         }
         // Before the exit: a service a Ctrl+C just ended leaves its stop to run.
         respond_to_stop_requests(&mut stopping, stops, now, &scan);
@@ -624,6 +725,10 @@ fn respond_to_stop_requests(
 struct Forwarding {
     root: Option<Identity>,
     pending: Vec<Signal>,
+    /// The profile still resolves: a stop ends its helpers and exits.
+    resolving: bool,
+    /// A stop ends the resolution: the service must never start.
+    ending: bool,
 }
 
 impl Forwarding {
@@ -632,6 +737,23 @@ impl Forwarding {
             Some(root) => signal_identities(&track_tree(&[root], &all_processes()), signal),
             None => self.pending.push(signal),
         }
+    }
+
+    /// A stop arrived: whether it ends the resolution. Decided under the
+    /// lock `finish_resolution` takes, so exactly one of them wins.
+    fn begin_stop(&mut self) -> bool {
+        self.ending |= self.resolving;
+        self.ending
+    }
+
+    /// The profile resolved: whether the service may start, which it may not
+    /// once a stop began ending the resolution.
+    fn finish_resolution(&mut self) -> bool {
+        if self.ending {
+            return false;
+        }
+        self.resolving = false;
+        true
     }
 
     fn publish(&mut self, root: Identity) {
@@ -643,8 +765,14 @@ impl Forwarding {
 }
 
 /// Counts each Ctrl+C, keeping Localify alive to stop the service in bounds,
-/// and forwards SIGTERM and SIGHUP sent to Localify alone to the service's tree.
-fn watch_stop_signals(forwarding: Arc<Mutex<Forwarding>>, stops: Arc<StopRequests>) {
+/// and forwards SIGTERM and SIGHUP sent to Localify alone to the service's
+/// tree. In the app's run PTY a SIGHUP means the app closed the terminal: it
+/// stops the run as a SIGTERM does.
+fn watch_stop_signals(
+    forwarding: Arc<Mutex<Forwarding>>,
+    stops: Arc<StopRequests>,
+    app_terminal: bool,
+) {
     let (ready_sender, ready_receiver) = mpsc::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -674,19 +802,39 @@ fn watch_stop_signals(forwarding: Arc<Mutex<Forwarding>>, stops: Arc<StopRequest
                     .unwrap_or_else(PoisonError::into_inner)
                     .forward(signal);
             };
+            let resolving = || {
+                forwarding
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .begin_stop()
+            };
             loop {
                 tokio::select! {
                     _ = interrupt.recv() => {
+                        if resolving() {
+                            end_resolution(128 + libc::SIGINT);
+                        }
                         stops.interrupts.fetch_add(1, Ordering::SeqCst);
                     }
                     _ = terminate.recv() => {
+                        if resolving() {
+                            end_resolution(128 + libc::SIGTERM);
+                        }
                         stops.terminated.store(true, Ordering::SeqCst);
                         forward(Signal::Terminate);
                         crate::infrastructure::test_pause::pause_at("terminate-handled");
                     }
                     _ = hangup.recv() => {
-                        stops.hung_up.store(true, Ordering::SeqCst);
-                        forward(Signal::Hangup);
+                        if resolving() {
+                            end_resolution(128 + libc::SIGHUP);
+                        }
+                        if app_terminal {
+                            stops.terminated.store(true, Ordering::SeqCst);
+                            forward(Signal::Terminate);
+                        } else {
+                            stops.hung_up.store(true, Ordering::SeqCst);
+                            forward(Signal::Hangup);
+                        }
                     }
                 }
             }
@@ -767,8 +915,33 @@ mod tests {
             heartbeat,
             heartbeat_every: RUN_HEARTBEAT,
             leads_session: false,
+            app_terminal: false,
+            supervision: None,
             finisher: Box::leak(Box::new(Finisher::native())),
         }
+    }
+
+    #[test]
+    fn a_stop_during_resolution_and_the_end_of_resolution_never_both_win() {
+        let mut stopped_first = Forwarding {
+            resolving: true,
+            ..Forwarding::default()
+        };
+        assert!(stopped_first.begin_stop());
+        assert!(
+            !stopped_first.finish_resolution(),
+            "the service would start"
+        );
+
+        let mut resolved_first = Forwarding {
+            resolving: true,
+            ..Forwarding::default()
+        };
+        assert!(resolved_first.finish_resolution());
+        assert!(
+            !resolved_first.begin_stop(),
+            "the stop would exit over a service"
+        );
     }
 
     fn shell(script: &str) -> Vec<String> {
@@ -1073,7 +1246,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
         (end, started.elapsed())
     }
 
@@ -1156,7 +1329,7 @@ mod tests {
             let stops = Arc::new(StopRequests::default());
             press(&stops, Duration::from_millis(500), 1);
 
-            let end = run_with(request, stops, false).unwrap();
+            let end = run_with(request, stops, Arc::default()).unwrap();
 
             assert!(matches!(end.outcome, LaunchOutcome::Interrupted));
             assert!(
@@ -1183,7 +1356,7 @@ mod tests {
         press(&stops, Duration::from_millis(500), 1);
         let started = Instant::now();
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert!(end.cleanup.is_ok());
         let took = started.elapsed();
@@ -1212,7 +1385,7 @@ mod tests {
         press(&stops, Duration::from_millis(500), 2);
         let started = Instant::now();
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert!(end.cleanup.is_ok());
         assert!(
@@ -1266,7 +1439,7 @@ mod tests {
             drop(held);
         });
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert_eq!(end.outcome.exit_code(), 130);
         assert!(
@@ -1307,7 +1480,7 @@ mod tests {
             crate::infrastructure::process::send_signal(service, Signal::Hangup);
         });
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert!(end.cleanup.is_ok());
         assert!(done.exists(), "a SIGHUP ended the service");

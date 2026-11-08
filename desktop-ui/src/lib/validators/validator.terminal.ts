@@ -43,6 +43,17 @@ export const terminalLaunchServiceRequestSchema = z.object({
   profile: launchProfileNameSchema.nullish(),
 });
 
+export const terminalRestartServiceRequestSchema = z.object({
+  sessionId: z.string().trim().min(1),
+  ...terminalSizeSchema,
+});
+
+export const serviceRunRequestSchema = z.object({
+  projectId: z.string().trim().min(1),
+  environmentSlug: z.string().trim().min(1),
+  serviceId: z.string().trim().min(1),
+});
+
 export const terminalWriteRequestSchema = z.object({
   sessionId: z.string().trim().min(1),
   data: z.string(),

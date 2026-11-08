@@ -421,6 +421,13 @@ enum Commands {
         /// Shell to generate completions for
         shell: Shell,
     },
+
+    /// For the desktop app: prints this environment framed by the nonce, NUL-separated, so the app can read what the user's shell init sets up (docs/remote-machines.md).
+    #[command(hide = true)]
+    ShellEnv {
+        /// 32 hex digits the app chose for this read
+        nonce: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -900,6 +907,10 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    // Before any config is read, so nothing but the frame reaches stdout.
+    if let Commands::ShellEnv { nonce } = &cli.command {
+        return infrastructure::shell_env::print_environment(nonce);
+    }
 
     refuse_sudo()?;
 
@@ -1362,6 +1373,6 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Completions { .. } => unreachable!(),
+        Commands::Completions { .. } | Commands::ShellEnv { .. } => unreachable!(),
     }
 }

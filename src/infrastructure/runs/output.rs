@@ -23,6 +23,7 @@ pub const MAX_READ: usize = 1024 * 1024;
 
 const END_FILE: &str = "end.json";
 const LOCK_FILE: &str = "finalize.lock";
+const READER_LOCK_FILE: &str = "reader.lock";
 
 /// Makes a run's folder and its `finalize.lock`, before the run's record names it.
 pub fn create_run_dir(dir: &Path) -> Result<()> {
@@ -153,6 +154,56 @@ impl FinalizeLock {
                     });
                 }
             }
+        }
+    }
+}
+
+/// An exclusive `flock` on the run's `reader.lock`, held by the reader of a
+/// run PTY, the desktop app, for as long as it reads the PTY. The run is then
+/// the app's to finalize, `complete`, once it read the PTY to its end. When
+/// the app dies the kernel releases it, and the next finisher finalizes what
+/// was written as `interrupted`.
+#[allow(dead_code)] // Used by the desktop app through the library crate.
+pub struct ReaderLock {
+    _file: File,
+}
+
+#[allow(dead_code)] // Used by the desktop app through the library crate.
+impl ReaderLock {
+    /// Takes the lock of a new run's folder, which nobody else reads yet.
+    pub fn acquire(dir: &Path) -> Result<Self> {
+        let path = dir.join(READER_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("Failed to create '{}'", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => bail!("'{}' is already read", dir.display()),
+            Err(TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("Failed to lock '{}'", path.display()))
+            }
+        }
+    }
+}
+
+/// Whether a run PTY's reader still reads the run, and so finalizes it
+/// itself. Only a run PTY has a `reader.lock`.
+pub fn reader_alive(dir: &Path) -> Result<bool> {
+    let path = dir.join(READER_LOCK_FILE);
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to open '{}'", path.display()));
+        }
+    };
+    match file.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("Failed to lock '{}'", path.display()))
         }
     }
 }

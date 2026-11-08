@@ -22,6 +22,8 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const { focusRequestId, resizeSession, writeToSession } = useTerminal();
+  // A service tab whose run ended takes no input: its PTY is gone.
+  const ended = Boolean(session.run?.ended);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -103,6 +105,13 @@ export const TerminalInstance = ({ active, chunks, session }: TerminalInstancePr
 
     consumedChunkCountRef.current = chunks.length;
   }, [chunks]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.disableStdin = ended;
+    terminal.options.cursorBlink = !ended;
+  }, [ended]);
 
   // `focusRequestId` refocuses an already active session after a launch.
   useEffect(() => {

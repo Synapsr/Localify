@@ -342,8 +342,7 @@ fn run_facts(
     record: &RunningService,
     profiles: &Result<Option<LaunchProfiles>>,
 ) -> RunFacts {
-    let legacy =
-        record.run.is_none() || (record.origin == ServiceOrigin::App && !record.has_stream());
+    let legacy = record.is_legacy();
     RunFacts {
         run_id: record.run_id().filter(|_| !legacy).map(ToString::to_string),
         origin: match record.origin {

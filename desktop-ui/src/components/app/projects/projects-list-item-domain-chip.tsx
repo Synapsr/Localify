@@ -35,11 +35,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { bootstrapQueries, projectMutations } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
@@ -60,10 +56,7 @@ interface ProjectDomainChipProps {
   terminalTarget?: TerminalTargetRequest | null;
 }
 
-function portSegment(
-  scheme: "http" | "https",
-  port: number | undefined,
-): string {
+function portSegment(scheme: "http" | "https", port: number | undefined): string {
   if (!port) return "";
   if (scheme === "http" && port === 80) return "";
   if (scheme === "https" && port === 443) return "";
@@ -75,9 +68,7 @@ function buildUrl(
   ports: { httpPort: number; httpsPort: number } | undefined,
 ): string {
   const scheme = domain.registration.httpsEnabled ? "https" : "http";
-  const port = domain.registration.httpsEnabled
-    ? ports?.httpsPort
-    : ports?.httpPort;
+  const port = domain.registration.httpsEnabled ? ports?.httpsPort : ports?.httpPort;
   return `${scheme}://${domain.registration.domain}${portSegment(scheme, port)}`;
 }
 
@@ -96,9 +87,7 @@ function extractPort(target: string | undefined): string | null {
 }
 
 function getPrimaryLaunchTarget(domain: DomainInfoDto): string | null {
-  const rootRoute = domain.registration.routes.find(
-    (route) => route.path === "/",
-  );
+  const rootRoute = domain.registration.routes.find((route) => route.path === "/");
   const candidate = rootRoute ?? domain.registration.routes[0];
   return candidate?.target ?? null;
 }
@@ -110,27 +99,19 @@ export const ProjectDomainChip = ({
 }: ProjectDomainChipProps) => {
   const { data } = useQuery(bootstrapQueries.read());
   const queryClient = useQueryClient();
-  const {
-    findSessionForTarget,
-    hasOwnedServiceSession,
-    interruptSession,
-    launchService,
-    openTerminal,
-  } = useTerminal();
+  const { findSessionForTarget, hasOwnedServiceSession, launchService, openTerminal, stopSession } =
+    useTerminal();
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [publicUrlDialogOpen, setPublicUrlDialogOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] =
-    useState(false);
+  const [environmentFileDialogOpen, setEnvironmentFileDialogOpen] = useState(false);
   const [selectedEnvironmentFileTarget, setSelectedEnvironmentFileTarget] =
     useState<EnvironmentFileRequest | null>(null);
   const [serviceActionInFlight, setServiceActionInFlight] = useState(false);
   const { copy: copyUrl, copied: urlCopied } = useCopyToClipboard();
   const { copy: copyPort, copied: portCopied } = useCopyToClipboard();
-  const stopLocalDevServer = useMutation(
-    projectMutations.stopLocalDevServer(queryClient),
-  );
+  const stopLocalDevServer = useMutation(projectMutations.stopLocalDevServer(queryClient));
   const publicUrl = usePublicUrl(domain.registration.domain, domain.projectId);
   const { pattern, routes } = domain.registration;
   const url = buildUrl(domain, data?.config.daemon);
@@ -138,8 +119,7 @@ export const ProjectDomainChip = ({
   const port = extractPort(routes[0]?.target);
   const launchTarget = getPrimaryLaunchTarget(domain);
   const hasTerminalTarget = Boolean(terminalTarget);
-  const serviceTerminalTarget =
-    terminalTarget?.kind === "service" ? terminalTarget : null;
+  const serviceTerminalTarget = terminalTarget?.kind === "service" ? terminalTarget : null;
   const environmentFileTarget = serviceTerminalTarget?.serviceId
     ? {
         projectId: serviceTerminalTarget.projectId,
@@ -157,14 +137,25 @@ export const ProjectDomainChip = ({
     ? hasOwnedServiceSession(serviceTerminalTarget)
     : false;
   const launchProfiles = serviceLaunchProfiles(data, serviceTerminalTarget);
+  // Still running from a shell tab of the previous version: kept as it is.
+  const legacyRun = serviceTerminalTarget
+    ? data?.serviceRuns.find(
+        (run) =>
+          run.legacy &&
+          run.state === "running" &&
+          run.origin === "app" &&
+          run.projectId === serviceTerminalTarget.projectId &&
+          run.serviceId === serviceTerminalTarget.serviceId &&
+          (run.environment ?? serviceTerminalTarget.environmentSlug) ===
+            serviceTerminalTarget.environmentSlug,
+      )
+    : undefined;
   const serviceTarget = service?.target ?? launchTarget;
-  const serviceActionPending =
-    stopLocalDevServer.isPending || serviceActionInFlight;
+  const serviceActionPending = stopLocalDevServer.isPending || serviceActionInFlight;
   const serviceActionUnavailable = reachable
     ? !serviceTarget && !ownedServiceSession
     : !serviceTerminalTarget;
-  const serviceActionDisabled =
-    serviceActionPending || serviceActionUnavailable;
+  const serviceActionDisabled = serviceActionPending || serviceActionUnavailable;
   const serviceActionLabel = reachable ? "Stop service" : "Launch service";
   const serviceActionStatusLabel = serviceActionPending
     ? reachable
@@ -198,8 +189,7 @@ export const ProjectDomainChip = ({
         browser: data?.launcherPreferences.browser ?? "default",
       });
     } catch (error) {
-      const description =
-        error instanceof Error ? error.message : "Unable to open this URL.";
+      const description = error instanceof Error ? error.message : "Unable to open this URL.";
       toast.error("Open in browser failed", { description });
     }
   };
@@ -234,19 +224,22 @@ export const ProjectDomainChip = ({
       if (reachable) {
         const ownedSession = findSessionForTarget(serviceTerminalTarget);
         if (ownedSession) {
-          await interruptSession(ownedSession.id);
+          await stopSession(ownedSession.id);
           return;
         }
 
-        if (!serviceTarget) {
+        // A run Localify recorded, in the background or a closed tab: through its session.
+        const stop = await tauriClient.stopServiceRun({
+          projectId: serviceTerminalTarget.projectId,
+          environmentSlug: serviceTerminalTarget.environmentSlug,
+          serviceId: serviceTerminalTarget.serviceId ?? "",
+        });
+        await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+        if (!stop.offerPortStop || !serviceTarget) {
           return;
         }
 
-        if (
-          !window.confirm(
-            "Stop the process currently listening on this service port?",
-          )
-        ) {
+        if (!window.confirm("Stop the process currently listening on this service port?")) {
           return;
         }
 
@@ -258,10 +251,7 @@ export const ProjectDomainChip = ({
 
       await launchService(serviceTerminalTarget);
     } catch (error) {
-      const description =
-        error instanceof Error
-          ? error.message
-          : "Unable to update this service.";
+      const description = error instanceof Error ? error.message : "Unable to update this service.";
       toast.error(`${serviceActionLabel} failed`, { description });
     } finally {
       setServiceActionInFlight(false);
@@ -277,10 +267,7 @@ export const ProjectDomainChip = ({
     try {
       await launchService(serviceTerminalTarget, profile);
     } catch (error) {
-      const description =
-        error instanceof Error
-          ? error.message
-          : "Unable to launch this service.";
+      const description = error instanceof Error ? error.message : "Unable to launch this service.";
       toast.error("Launch service failed", { description });
     } finally {
       setServiceActionInFlight(false);
@@ -308,9 +295,7 @@ export const ProjectDomainChip = ({
               />
             }
           />
-          <TooltipContent>
-            {reachable ? "Target reachable" : "Target offline"}
-          </TooltipContent>
+          <TooltipContent>{reachable ? "Target reachable" : "Target offline"}</TooltipContent>
         </Tooltip>
 
         <Tooltip>
@@ -348,21 +333,34 @@ export const ProjectDomainChip = ({
                 <span>:{port}</span>
               )}
             </TooltipTrigger>
-            <TooltipContent>
-              {portCopied ? "Port copied" : `Copy port ${port}`}
-            </TooltipContent>
+            <TooltipContent>{portCopied ? "Port copied" : `Copy port ${port}`}</TooltipContent>
           </Tooltip>
         )}
 
         {publicUrl?.url ? (
-          <PublicUrlBadge
-            url={publicUrl.url}
-            onOpen={() => setPublicUrlDialogOpen(true)}
-          />
+          <PublicUrlBadge url={publicUrl.url} onOpen={() => setPublicUrlDialogOpen(true)} />
         ) : null}
 
-        {launchProfiles.session ? (
-          <LaunchProfileBadge session={launchProfiles.session} />
+        {launchProfiles.session ? <LaunchProfileBadge session={launchProfiles.session} /> : null}
+
+        {legacyRun ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="inline-flex h-5 shrink-0 items-center rounded bg-muted px-1.5 text-xs text-muted-foreground" />
+              }
+            >
+              Started before this update
+            </TooltipTrigger>
+            <TooltipContent>
+              PID {legacyRun.pid}, since{" "}
+              {new Date(legacyRun.startedAt * 1000).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+              . It keeps running in the shell it started from. Relaunch it to give it its own tab.
+            </TooltipContent>
+          </Tooltip>
         ) : null}
 
         {serviceTerminalTarget ? (
@@ -446,11 +444,7 @@ export const ProjectDomainChip = ({
                 void handleCopyUrl();
               }}
             >
-              {urlCopied ? (
-                <CheckIcon className="text-emerald-500" />
-              ) : (
-                <CopyIcon />
-              )}
+              {urlCopied ? <CheckIcon className="text-emerald-500" /> : <CopyIcon />}
               {urlCopied ? "URL copied" : "Copy URL"}
             </DropdownMenuItem>
             <DropdownMenuItem

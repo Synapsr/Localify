@@ -17,7 +17,9 @@ use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::project_env::{current_worktree_environment, ensure_implicit_worktree_environment};
-use super::service_supervisor::{self, Capture, LaunchEnd, LaunchOutcome, SupervisedLaunch};
+use super::service_supervisor::{
+    self, Capture, LaunchEnd, LaunchOutcome, SupervisedLaunch, Supervision,
+};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
@@ -36,7 +38,7 @@ use crate::infrastructure::project_marker::{
 };
 use crate::infrastructure::running_services::{
     Admission, NewRun, RunLock, RunOutput, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV,
-    SERVICE_OUTPUT_ENV, ServiceKey, ServiceOrigin,
+    ServiceKey, ServiceOrigin,
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::Finisher;
@@ -302,12 +304,19 @@ pub fn run(
     } = launch_plan::resolve(&service, command, port)?;
     warn_if_daemon_is_stopped(ctx);
 
+    // Before the profile resolves: a stop meanwhile ends the helpers it runs.
+    let origin = run_origin(launch_id.is_some());
+    let supervision = Supervision::start(origin == ServiceOrigin::App);
     let profile = launch_profile::prepare(
         &launch_profile,
         &project_root,
         &workdir,
         &effective_current_dir()?,
-    )?;
+    );
+    // Also when it failed: a stop that refused its next helper is still
+    // ending the others, and `localify dev` exits only once it has.
+    supervision.resolved();
+    let profile = profile?;
 
     let endpoint = service_endpoint(&service, ports, ctx)?;
     let url = service_url(&service, endpoint);
@@ -338,7 +347,6 @@ pub fn run(
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
-    let origin = ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref());
     let background = origin == ServiceOrigin::Background;
     let record = store.register(
         &lock,
@@ -352,10 +360,11 @@ pub fn run(
                 .as_ref()
                 .and_then(|profile| profile.name())
                 .map(str::to_string),
-            log_file: env::var_os(SERVICE_OUTPUT_ENV)
-                .filter(|_| !background)
-                .map(PathBuf::from),
-            output: background.then_some(RunOutput::Pipe),
+            output: match origin {
+                ServiceOrigin::Background => Some(RunOutput::Pipe),
+                ServiceOrigin::App => Some(RunOutput::Pty),
+                ServiceOrigin::Terminal => None,
+            },
         },
     )?;
 
@@ -378,6 +387,7 @@ pub fn run(
             stream,
             run: &run,
             socket_path: &paths.socket_path,
+            supervision,
         })
     });
     run.finish(end.as_ref().ok())?;
@@ -385,8 +395,19 @@ pub fn run(
     launch_outcome(profile.as_ref(), &service, end?.outcome)
 }
 
-/// A run whose record is written: whatever happens next, it is finalized
-/// before `localify dev` exits.
+/// Who started this `localify dev`. The app's run PTY, which reads the run's
+/// output, always passes the launch id it chose: without one, `app` comes
+/// from a shell tab of an app from before run PTYs, a terminal like any other.
+fn run_origin(dispatched: bool) -> ServiceOrigin {
+    match ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref()) {
+        ServiceOrigin::App if !dispatched => ServiceOrigin::Terminal,
+        origin => origin,
+    }
+}
+
+/// A run whose record is written: whatever happens next, its processes are
+/// ended before `localify dev` exits, and it is finalized unless the app
+/// reads its run PTY and finalizes it once it has read it all.
 struct RegisteredRun<'a> {
     store: &'a RunningServiceStore,
     record: &'a RunningService,
@@ -401,9 +422,10 @@ impl RegisteredRun<'_> {
     }
 
     /// The executor's own end of its run: the stream finalized, `complete`
-    /// unless some output could not be read, then the exit recorded.
-    /// A run whose processes outlived the cleanup stays unfinalized, so its
-    /// next launch is refused as for a live run.
+    /// unless some output could not be read, then the exit recorded. A run
+    /// PTY's stream is left to the app. A run whose processes outlived the
+    /// cleanup stays unfinalized, so its next launch is refused as for a live
+    /// run.
     fn finish(&self, end: Option<&LaunchEnd>) -> Result<()> {
         let Some(run_id) = self.record.run_id() else {
             return Ok(());
@@ -415,7 +437,9 @@ impl RegisteredRun<'_> {
             );
         }
         let dir = self.store.run_dir(run_id);
-        if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
+        if self.record.origin == ServiceOrigin::App {
+            self.leave_to_reader(&dir)?;
+        } else if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
             let offset = self.stream.as_ref().map_or(0, StreamSink::close);
             let capture = end.map_or(Capture::Complete, |end| end.capture.clone());
             let mut finished = match capture {
@@ -425,10 +449,10 @@ impl RegisteredRun<'_> {
                 }
             };
             if let Capture::Failed(error) = capture {
-                eprintln!(
-                    "Warning: writing the output of '{}' failed ({error}). The service ran on, and what it printed after that was dropped.",
+                service_supervisor::report(&format!(
+                    "Warning: writing the output of '{}' failed ({error}). The service ran on, and what it printed after that was dropped.\n",
                     self.record.key.service_id
-                );
+                ));
                 finished.error = Some(error);
             }
             if run_output::read_end(&dir)?.is_none() {
@@ -437,6 +461,26 @@ impl RegisteredRun<'_> {
         }
         let code = end.and_then(|end| end.outcome.code());
         self.store.mark_exited(&self.record.key, run_id, code)
+    }
+}
+
+impl RegisteredRun<'_> {
+    /// A run PTY's stream is the app's to finalize, once it has read it all.
+    /// When the app is gone, nobody reads the PTY any more: what it wrote is
+    /// finalized `interrupted` here, so the run ends without waiting for
+    /// another finisher.
+    fn leave_to_reader(&self, dir: &Path) -> Result<()> {
+        if run_output::reader_alive(dir)? {
+            return Ok(());
+        }
+        if let Some(_finalizing) = FinalizeLock::acquire(dir)?
+            && run_output::read_end(dir)?.is_none()
+            && !run_output::reader_alive(dir)?
+        {
+            let (_, written) = run_output::extent(dir)?;
+            run_output::publish_end(dir, &RunEnd::now(EndReason::Interrupted, written))?;
+        }
+        Ok(())
     }
 }
 
@@ -450,6 +494,7 @@ struct Supervised<'a> {
     stream: Option<StreamSink>,
     run: &'a RegisteredRun<'a>,
     socket_path: &'a Path,
+    supervision: Supervision,
 }
 
 /// Runs the service under the supervisor, with or without a launch profile.
@@ -496,6 +541,8 @@ fn supervise(launch: Supervised<'_>) -> Result<LaunchEnd> {
             .run
             .as_ref()
             .is_some_and(|run| run.sid.is_some()),
+        app_terminal: launch.run.record.origin == ServiceOrigin::App,
+        supervision: Some(launch.supervision),
     });
     if dangerous_name.is_some() {
         launch_profile::reset_title();
@@ -870,7 +917,7 @@ fn launch_outcome(
 ) -> Result<i32> {
     match outcome {
         LaunchOutcome::Exited(status) if !status.success() => {
-            eprintln!("Service '{}' exited with {status}", service.id);
+            service_supervisor::report(&format!("Service '{}' exited with {status}\n", service.id));
             Ok(outcome.exit_code())
         }
         LaunchOutcome::Expired(duration) => bail!(

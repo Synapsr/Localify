@@ -1,12 +1,17 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 pub use crate::infrastructure::launch_sessions::LaunchSessionDto;
+pub use crate::infrastructure::running_services::{RunState, ServiceOrigin};
 
 use crate::config::{AgentConfig, DaemonConfig, DockerConfig, LocalifyPaths};
 use crate::desktop::{
     BrowserPreference, EditorPreference, LauncherPreferences, RunActionPreference,
     TerminalPreference,
 };
+use crate::infrastructure::running_services::{OutputAvailability, RunningService};
 
 fn default_project_enabled() -> bool {
     true
@@ -492,6 +497,103 @@ pub struct BootstrapDto {
     /// Services currently running with a launch profile, from the daemon.
     #[serde(default)]
     pub launch_sessions: Vec<LaunchSessionDto>,
+    /// The last run of every service Localify started.
+    #[serde(default)]
+    pub service_runs: Vec<ServiceRunDto>,
+}
+
+/// A service's last run, wherever it runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRunDto {
+    pub project_id: String,
+    pub environment: Option<String>,
+    pub service_id: String,
+    /// `None` for a legacy run.
+    pub run_id: Option<String>,
+    /// Started from a shell tab by an app from before run PTYs: it keeps
+    /// running as it is, exports no output, and has no session to stop.
+    pub legacy: bool,
+    pub state: RunState,
+    pub origin: ServiceOrigin,
+    /// The executor's PID.
+    pub pid: u32,
+    /// Unix seconds.
+    pub started_at: u64,
+    /// The run's output stream, when it has one.
+    pub output_run_id: Option<String>,
+}
+
+impl ServiceRunDto {
+    /// `primary` is the slug of the project's primary checkout: a record
+    /// without an environment is that one's.
+    pub fn new(record: &RunningService, state: RunState, primary: Option<&str>) -> Self {
+        Self {
+            project_id: record.key.project_id.clone(),
+            environment: record
+                .key
+                .environment
+                .clone()
+                .or_else(|| primary.map(str::to_string)),
+            service_id: record.key.service_id.clone(),
+            run_id: record.run_id().map(|id| id.to_string()),
+            legacy: record.is_legacy(),
+            state,
+            origin: record.origin,
+            pid: record.pid,
+            started_at: record.started_at,
+            output_run_id: match record.output_availability() {
+                OutputAvailability::Available(run_id) => Some(run_id.to_string()),
+                OutputAvailability::Terminal | OutputAvailability::LegacyRun => None,
+            },
+        }
+    }
+}
+
+/// What a service's run PTY runs, before the app adds its launch id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRunCommand {
+    pub executable: PathBuf,
+    pub args: Vec<OsString>,
+}
+
+/// What stopping a service's last run did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceStopOutcome {
+    Stopped,
+    /// Its last run had already ended.
+    AlreadyStopped,
+    /// Localify has no record of it: what listens on its port, if anything,
+    /// is not a run it knows.
+    NoRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStopDto {
+    pub outcome: ServiceStopOutcome,
+    /// Whether the app may offer to stop whatever listens on the port: only
+    /// for a service with no record, never over a run Localify knows.
+    pub offer_port_stop: bool,
+}
+
+impl From<ServiceStopOutcome> for ServiceStopDto {
+    fn from(outcome: ServiceStopOutcome) -> Self {
+        Self {
+            outcome,
+            offer_port_stop: outcome == ServiceStopOutcome::NoRecord,
+        }
+    }
+}
+
+/// One service in one project environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRunRequest {
+    pub project_id: String,
+    pub environment_slug: String,
+    pub service_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

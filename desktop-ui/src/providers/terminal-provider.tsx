@@ -15,7 +15,9 @@ import {
 import { toast } from "sonner";
 
 import type {
+  ShellEnvironmentDto,
   TerminalExitPayload,
+  TerminalLaunchServiceResultDto,
   TerminalOutputPayload,
   TerminalSessionDto,
   TerminalSessionTargetDto,
@@ -26,6 +28,7 @@ import { setDeepLinkLaunchHandler } from "@/lib/deep-link";
 import { bootstrapQueries } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 import {
+  laterSession,
   reachableServiceSessionIds,
   sortTerminalSessions,
   type TerminalSessionState,
@@ -51,7 +54,6 @@ interface TerminalContextValue {
   /** Bumped when the active session should take keyboard focus again. */
   focusRequestId: number;
   hasOwnedServiceSession: (target: TerminalTargetRequest) => boolean;
-  interruptSession: (sessionId?: string) => Promise<void>;
   isOpen: boolean;
   launchService: (
     target: TerminalTargetRequest,
@@ -63,13 +65,20 @@ interface TerminalContextValue {
   openTerminal: (target: TerminalTargetRequest) => Promise<TerminalSessionDto>;
   outputBySessionId: OutputBySessionId;
   panelHeight: number;
+  reloadShellEnvironment: () => Promise<void>;
   resizeSession: (sessionId: string, cols: number, rows: number) => Promise<void>;
+  /** Stops the tab's run, then starts the service again in a fresh run PTY in the same tab. */
+  restartSession: (sessionId: string) => Promise<void>;
   selectEnvironment: (projectId: string, environmentSlug: string) => void;
   selectNextEnvironment: () => void;
   selectNextSession: () => void;
   selectPreviousEnvironment: () => void;
   selectPreviousSession: () => void;
   sessionStates: Map<string, TerminalSessionState>;
+  /** Whether the environment services start with was read from the user's shell. */
+  shellEnvironment: ShellEnvironmentDto | null;
+  /** Stops a service tab's run through its session, never with a Ctrl-C. */
+  stopSession: (sessionId: string) => Promise<void>;
   /** Every session, in tab order. */
   sessions: TerminalSessionDto[];
   setActiveSessionId: (sessionId: string) => void;
@@ -93,6 +102,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   const [panelHeight, setPanelHeightState] = useState(loadStoredPanelHeight);
   const [selectedTarget, setSelectedTargetState] = useState<TerminalTargetRequest | null>(null);
   const [focusRequestId, setFocusRequestId] = useState(0);
+  const [shellEnvironment, setShellEnvironment] = useState<ShellEnvironmentDto | null>(null);
   const projectEnvironments = bootstrap?.projectEnvironments;
   const sessions = useMemo(
     () => sortTerminalSessions(unsortedSessions, projectOrder, projectEnvironments ?? []),
@@ -100,6 +110,13 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   );
   const sessionsRef = useRef(sessions);
   const lastSessionByEnvironmentRef = useRef(new Map<string, string>());
+  // The newest known state of every session, events and answers alike.
+  const latestSessionsRef = useRef(new Map<string, TerminalSessionDto>());
+  const reconcile = useCallback((incoming: TerminalSessionDto) => {
+    const next = laterSession(latestSessionsRef.current.get(incoming.id), incoming);
+    latestSessionsRef.current.set(incoming.id, next);
+    return next;
+  }, []);
   const [stoppedSessionIds, setStoppedSessionIds] = useState<ReadonlySet<string>>(new Set());
   const previousReachableIdsRef = useRef<ReadonlySet<string>>(new Set());
   const expectedStopIdsRef = useRef(new Set<string>());
@@ -121,7 +138,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       .then((nextSessions) => {
         if (cancelled) return;
         const initialSession = nextSessions[0] ?? null;
-        setSessions(nextSessions);
+        setSessions(nextSessions.map(reconcile));
         setActiveSessionIdState((current) => current ?? initialSession?.id ?? null);
         setSelectedTargetState(
           (current) =>
@@ -137,12 +154,40 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reconcile]);
 
   useEffect(() => {
     let unlistenOutput: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
+    let unlistenSession: (() => void) | null = null;
+    let unlistenShellEnvironment: (() => void) | null = null;
     let cancelled = false;
+
+    void tauriClient
+      .shellEnvironmentStatus()
+      .then((status) => {
+        if (!cancelled) setShellEnvironment(status);
+      })
+      .catch(() => {});
+
+    // A service tab's run ended and its output was finalized. Kept even before the answer
+    // that opened the tab arrives, so that answer cannot show it running again.
+    void listen<TerminalSessionDto>("terminal-session", (event) => {
+      if (cancelled) return;
+      const ended = reconcile(event.payload);
+      setSessions((current) =>
+        current.map((session) => (session.id === ended.id ? ended : session)),
+      );
+      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+    }).then((unlisten) => {
+      unlistenSession = unlisten;
+    });
+
+    void listen<ShellEnvironmentDto>("shell-environment", (event) => {
+      if (!cancelled) setShellEnvironment(event.payload);
+    }).then((unlisten) => {
+      unlistenShellEnvironment = unlisten;
+    });
 
     void listen<TerminalOutputPayload>("terminal-output", (event) => {
       if (cancelled) return;
@@ -156,7 +201,9 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       if (cancelled) return;
       setSessions((current) =>
         current.map((session) =>
-          session.id === event.payload.sessionId ? { ...session, status: "exited" } : session,
+          session.id === event.payload.sessionId
+            ? reconcile({ ...session, status: "exited" })
+            : session,
         ),
       );
       void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
@@ -168,8 +215,10 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       cancelled = true;
       unlistenOutput?.();
       unlistenExit?.();
+      unlistenSession?.();
+      unlistenShellEnvironment?.();
     };
-  }, [queryClient]);
+  }, [queryClient, reconcile]);
 
   // Bootstrap polling is what sees a service stop. A stop the user just asked for, or watches
   // in the active tab, needs no warning, and looking at the tab clears it.
@@ -226,33 +275,84 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     setIsOpen(true);
   }, []);
 
-  const upsertSession = useCallback((session: TerminalSessionDto) => {
-    setSessions((current) => {
-      const index = current.findIndex((candidate) => candidate.id === session.id);
-      if (index === -1) {
-        return [...current, session];
-      }
+  const upsertSession = useCallback(
+    (incoming: TerminalSessionDto) => {
+      const session = reconcile(incoming);
+      setSessions((current) => {
+        const index = current.findIndex((candidate) => candidate.id === session.id);
+        if (index === -1) {
+          return [...current, session];
+        }
 
-      const next = [...current];
-      next[index] = session;
-      return next;
-    });
-    setActiveSessionIdState(session.id);
-    setSelectedTargetState(toTerminalTargetRequest(session.target));
-    setIsOpen(true);
-  }, []);
+        const next = [...current];
+        next[index] = session;
+        return next;
+      });
+      setActiveSessionIdState(session.id);
+      setSelectedTargetState(toTerminalTargetRequest(session.target));
+      setIsOpen(true);
+    },
+    [reconcile],
+  );
 
+  // A service target's running tab is its run; any other target's is a shell.
   const findSessionForTarget = useCallback((target: TerminalTargetRequest) => {
     return (
       sessionsRef.current.find(
-        (session) => session.status === "running" && terminalTargetMatches(session.target, target),
+        (session) =>
+          session.status === "running" &&
+          Boolean(session.run) === (target.kind === "service") &&
+          terminalTargetMatches(session.target, target),
       ) ?? null
     );
   }, []);
 
+  // Always a shell, also for a service: `Open a terminal here` next to its tab.
+  const findShellForTarget = useCallback((target: TerminalTargetRequest) => {
+    return (
+      sessionsRef.current.find(
+        (session) =>
+          session.status === "running" &&
+          !session.run &&
+          terminalTargetMatches(session.target, target),
+      ) ?? null
+    );
+  }, []);
+
+  // A new run that took over an ended tab, or a restart, keeps the tab's place.
+  const placeRun = useCallback(
+    (result: TerminalLaunchServiceResultDto) => {
+      const { replaced } = result;
+      const session = reconcile(result.session);
+      setSessions((current) => {
+        const index = replaced ? current.findIndex((candidate) => candidate.id === replaced) : -1;
+        const others = current.filter(
+          (candidate) => candidate.id !== session.id && candidate.id !== replaced,
+        );
+        if (index === -1) {
+          return current.some((candidate) => candidate.id === session.id)
+            ? current.map((candidate) => (candidate.id === session.id ? session : candidate))
+            : [...others, session];
+        }
+        return [...others.slice(0, index), session, ...others.slice(index)];
+      });
+      if (replaced) {
+        setOutputBySessionId((current) => {
+          const next = { ...current };
+          delete next[replaced];
+          return next;
+        });
+      }
+      setActiveSessionIdState(session.id);
+      setSelectedTargetState(toTerminalTargetRequest(session.target));
+      setIsOpen(true);
+    },
+    [reconcile],
+  );
+
   const openTerminal = useCallback(
     async (target: TerminalTargetRequest) => {
-      const existing = findSessionForTarget(target);
+      const existing = findShellForTarget(target);
       if (existing) {
         setActiveSessionId(existing.id);
         return existing;
@@ -266,7 +366,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       upsertSession(session);
       return session;
     },
-    [findSessionForTarget, setActiveSessionId, upsertSession],
+    [findShellForTarget, setActiveSessionId, upsertSession],
   );
 
   // `profile` is never remembered: every launch starts from the default profile
@@ -279,15 +379,35 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
         rows: DEFAULT_ROWS,
         profile,
       });
-      upsertSession(result.session);
-      // `localify dev` may prompt (for example the service selector),
-      // so focus the terminal even when the launch reused the active session.
+      placeRun(result);
+      // `localify dev` may prompt (for example to confirm a profile),
+      // so focus the terminal even when the launch returned the active session.
       setFocusRequestId((current) => current + 1);
       await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
       return result.session;
     },
-    [queryClient, upsertSession],
+    [placeRun, queryClient],
   );
+
+  const restartSession = useCallback(
+    async (sessionId: string) => {
+      expectedStopIdsRef.current.add(sessionId);
+      const result = await tauriClient.terminalRestartService({
+        sessionId,
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+      });
+      placeRun(result);
+      setFocusRequestId((current) => current + 1);
+      await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+    },
+    [placeRun, queryClient],
+  );
+
+  const reloadShellEnvironment = useCallback(async () => {
+    setShellEnvironment((current) => (current ? { ...current, state: "resolving" } : current));
+    setShellEnvironment(await tauriClient.reloadShellEnvironment());
+  }, []);
 
   // `localify dev --in-app` and agents start services through a deep link, which
   // takes the same path as the launch button.
@@ -329,16 +449,15 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     await tauriClient.terminalResize({ sessionId, cols, rows });
   }, []);
 
-  const interruptSession = useCallback(
-    async (sessionId = activeSessionId ?? undefined) => {
-      if (!sessionId) return;
+  const stopSession = useCallback(
+    async (sessionId: string) => {
       if (previousReachableIdsRef.current.has(sessionId)) {
         expectedStopIdsRef.current.add(sessionId);
       }
-      await tauriClient.terminalInterrupt({ sessionId });
+      await tauriClient.terminalStopService({ sessionId });
       await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     },
-    [activeSessionId, queryClient],
+    [queryClient],
   );
 
   const closeSession = useCallback(
@@ -349,9 +468,9 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       if (!session) return;
 
       if (
+        session.run &&
         session.status === "running" &&
-        session.target.kind === "service" &&
-        !window.confirm("Close this service terminal and stop its process?")
+        !window.confirm("Close this service tab and stop the service?")
       ) {
         return;
       }
@@ -457,8 +576,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   const sessionStates = useMemo(() => {
     const states = new Map<string, TerminalSessionState>();
     for (const session of sessions) {
-      const live =
-        session.status === "running" && (!session.target.serviceId || reachableIds.has(session.id));
+      const live = session.status === "running" && (!session.run || reachableIds.has(session.id));
       states.set(session.id, stoppedSessionIds.has(session.id) ? "failed" : live ? "live" : "idle");
     }
     return states;
@@ -489,7 +607,6 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       findSessionForTarget,
       focusRequestId,
       hasOwnedServiceSession: (target) => Boolean(findSessionForTarget(target)),
-      interruptSession,
       isOpen,
       launchService,
       newTabFromActiveTarget,
@@ -498,7 +615,9 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       openTerminal,
       outputBySessionId,
       panelHeight,
+      reloadShellEnvironment,
       resizeSession,
+      restartSession,
       selectEnvironment,
       selectNextEnvironment: () => selectAdjacentEnvironment(1),
       selectNextSession,
@@ -510,6 +629,8 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       setPanelHeight,
       selectedTarget,
       setSelectedTarget,
+      shellEnvironment,
+      stopSession,
       togglePanel: () => setIsOpen((current) => !current),
       writeToSession,
     }),
@@ -519,7 +640,6 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       closeSession,
       findSessionForTarget,
       focusRequestId,
-      interruptSession,
       isOpen,
       launchService,
       newTabFromActiveTarget,
@@ -527,7 +647,9 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       openTerminal,
       outputBySessionId,
       panelHeight,
+      reloadShellEnvironment,
       resizeSession,
+      restartSession,
       selectAdjacentEnvironment,
       selectEnvironment,
       selectNextSession,
@@ -538,6 +660,8 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       setPanelHeight,
       setSelectedTarget,
       selectedTarget,
+      shellEnvironment,
+      stopSession,
       writeToSession,
     ],
   );

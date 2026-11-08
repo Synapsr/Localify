@@ -180,10 +180,27 @@ pub enum Finish {
     /// The executor still runs, so the run is not over.
     ExecutorAlive,
     /// Another finisher still held the run's lock when the wait ran out
-    /// ([`Finisher::finish_within`] only).
+    /// ([`Finisher::finish_within`] only), or the run is a run PTY whose
+    /// reader, the app, still reads it and finalizes it itself.
     Busy,
     /// The run's folder is gone: nothing is left to finalize.
     Gone,
+    /// The run's proven processes are gone, but these still carry its
+    /// session: they started after the last proof, so nothing ties them to
+    /// the run, and they are never signalled. The run stays open until they
+    /// are gone.
+    Unconfirmed(Vec<u32>),
+}
+
+impl Finish {
+    /// What a person is told about an [`Finish::Unconfirmed`] run.
+    pub fn unconfirmed_message(pids: &[u32]) -> String {
+        let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
+        let pids = pids.join(", ");
+        format!(
+            "process {pids} in this run's session could not be confirmed as part of it; stop it yourself, then try again."
+        )
+    }
 }
 
 /// What a finisher proved, kept in the run's folder for the next one.
@@ -193,6 +210,10 @@ struct FinalizeState {
     /// The session is proven unbroken until this time, in the processes' time.
     proven_through: u64,
     targets: Vec<Target>,
+    /// Processes left in the session that nothing proved to be the run's:
+    /// the run stays open while one of them lives.
+    #[serde(default)]
+    unconfirmed: Vec<Target>,
 }
 
 /// A process found to be the run's.
@@ -285,10 +306,35 @@ impl Journal<'_> {
         let state = FinalizeState {
             proven_through: horizon.max(self.saved.proven_through),
             targets,
+            unconfirmed: self.saved.unconfirmed.clone(),
         };
         if state == self.saved {
             return Ok(());
         }
+        let _lock = match self.locked {
+            true => None,
+            false => match FinalizeLock::acquire(self.dir)? {
+                Some(lock) => Some(lock),
+                None => return Ok(()),
+            },
+        };
+        state.save(self.dir)?;
+        self.saved = state;
+        Ok(())
+    }
+
+    /// Keeps the processes left in the session that nothing proved, so the
+    /// next finisher keeps the run open while one of them lives.
+    fn record_unconfirmed(&mut self, unconfirmed: &[ProcessInfo]) -> Result<()> {
+        let mut state = self.saved.clone();
+        state.unconfirmed = unconfirmed
+            .iter()
+            .map(|process| Target {
+                pid: process.pid,
+                start: process.start,
+                member: true,
+            })
+            .collect();
         let _lock = match self.locked {
             true => None,
             false => match FinalizeLock::acquire(self.dir)? {
@@ -320,6 +366,8 @@ enum Ended {
     /// The executor died while it was being stopped without the lock; what it
     /// proved is in the journal, for the locked end.
     ExecutorGone,
+    /// No proven process is left, but these carry the session still.
+    Unconfirmed(Vec<u32>),
 }
 
 /// Ends runs. The native one acts on the kernel's processes; tests give a table
@@ -343,34 +391,50 @@ impl Finisher<'_> {
     /// lock throughout, from what an earlier finisher proved if one did: its
     /// proven processes are ended, then its stream is finalized. The daemon,
     /// `stop` and the next launcher all finish a run this way.
-    /// `captured_by_executor` says the executor read the run's output itself,
-    /// so its death lost what was still in the pipe.
+    /// `captured_elsewhere` says another process read the run's output: the
+    /// executor through pipes, or the app from a run PTY. Once that reader is
+    /// gone, what it had not read yet is lost, so the stream ends
+    /// `interrupted`. A run PTY whose reader still reads is left for it to
+    /// finalize, after its processes are ended.
     pub fn finish(
         &self,
         dir: &Path,
         session: &RunSession,
-        captured_by_executor: bool,
+        captured_elsewhere: bool,
     ) -> Result<Finish> {
         match FinalizeLock::acquire(dir)? {
-            Some(lock) => self.finish_locked(&lock, dir, session, captured_by_executor),
+            Some(lock) => self.finish_locked(&lock, dir, session, captured_elsewhere),
             None => Ok(Finish::Gone),
         }
     }
 
     /// `finish`, for a launcher, which holds its service's lock meanwhile: it
-    /// waits at most `limit` for another finisher of the run, so a stuck or
-    /// suspended one never holds the service forever.
+    /// waits at most `limit` for another finisher of the run, the app reading
+    /// a run PTY to its end included, so a stuck or suspended one never holds
+    /// the service forever.
     pub fn finish_within(
         &self,
         dir: &Path,
         session: &RunSession,
-        captured_by_executor: bool,
+        captured_elsewhere: bool,
         limit: Duration,
     ) -> Result<Finish> {
-        match FinalizeLock::acquire_within(dir, limit)? {
-            Acquired::Locked(lock) => self.finish_locked(&lock, dir, session, captured_by_executor),
-            Acquired::Gone => Ok(Finish::Gone),
-            Acquired::Busy => Ok(Finish::Busy),
+        let deadline = Instant::now() + limit;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let finish = match FinalizeLock::acquire_within(dir, left)? {
+                Acquired::Locked(lock) => {
+                    self.finish_locked(&lock, dir, session, captured_elsewhere)?
+                }
+                Acquired::Gone => return Ok(Finish::Gone),
+                Acquired::Busy => return Ok(Finish::Busy),
+            };
+            // A run PTY's reader finalizes it once it has read it all: the
+            // lock is released meanwhile, so it can.
+            if finish != Finish::Busy || Instant::now() >= deadline {
+                return Ok(finish);
+            }
+            thread::sleep(POLL);
         }
     }
 
@@ -379,7 +443,7 @@ impl Finisher<'_> {
         _lock: &FinalizeLock,
         dir: &Path,
         session: &RunSession,
-        captured_by_executor: bool,
+        captured_elsewhere: bool,
     ) -> Result<Finish> {
         let finalized = output::read_end(dir)?.is_some();
         // Another boot ended every process of the run: nothing it saved is
@@ -388,7 +452,7 @@ impl Finisher<'_> {
             FinalizeState::discard(dir)?;
             return match finalized {
                 true => Ok(Finish::AlreadyFinalized),
-                false => self.publish_end(dir, captured_by_executor),
+                false => self.publish_end(dir, captured_elsewhere),
             };
         }
         let saved = FinalizeState::load(dir)?;
@@ -410,9 +474,13 @@ impl Finisher<'_> {
         if session.executor_alive(self.table) {
             return Ok(Finish::ExecutorAlive);
         }
-        // What an earlier finisher proved extends the executor's heartbeat.
+        // What an earlier finisher proved extends the executor's heartbeat. Its
+        // horizon is the moment just before a read, so, as for that finisher,
+        // a start in that same tick proves nothing.
         let session = RunSession {
-            last_alive_at: session.last_alive_at.max(saved.proven_through),
+            last_alive_at: session
+                .last_alive_at
+                .max(saved.proven_through.saturating_sub(1)),
             ..session.clone()
         };
         let mut members = match membership(self.table, &session) {
@@ -433,13 +501,39 @@ impl Finisher<'_> {
                 locked: true,
                 saved,
             };
-            self.end_until(&mut journal, &session, members, escaped, Scope::Run)?;
+            if let Ended::Unconfirmed(pids) =
+                self.end_until(&mut journal, &session, members, escaped, Scope::Run)?
+            {
+                return Ok(Finish::Unconfirmed(pids));
+            }
+        } else {
+            // What an earlier finisher could not confirm keeps the run open
+            // while it lives as itself and still carries the session, though
+            // no scan proves the session now. One that left it, by setsid or
+            // by daemonizing, is the run's no more.
+            let alive: Vec<u32> = saved
+                .unconfirmed
+                .iter()
+                .filter(|target| {
+                    self.table.process(target.pid).is_some_and(|process| {
+                        process.start == target.start && session.contains(&process)
+                    })
+                })
+                .map(|target| target.pid)
+                .collect();
+            if !alive.is_empty() {
+                return Ok(Finish::Unconfirmed(alive));
+            }
         }
-        self.publish_end(dir, captured_by_executor)
+        self.publish_end(dir, captured_elsewhere)
     }
 
-    fn publish_end(&self, dir: &Path, captured_by_executor: bool) -> Result<Finish> {
-        let reason = if captured_by_executor {
+    fn publish_end(&self, dir: &Path, captured_elsewhere: bool) -> Result<Finish> {
+        // The app reads what is left in the PTY, then finalizes it itself.
+        if output::reader_alive(dir)? {
+            return Ok(Finish::Busy);
+        }
+        let reason = if captured_elsewhere {
             EndReason::Interrupted
         } else {
             EndReason::Complete
@@ -459,7 +553,7 @@ impl Finisher<'_> {
         &self,
         dir: &Path,
         session: &RunSession,
-        captured_by_executor: bool,
+        captured_elsewhere: bool,
     ) -> Result<Finish> {
         if session.same_boot(self.table)
             && let Proof::Proven(members, scan) = prove(self.table, session)
@@ -485,7 +579,7 @@ impl Finisher<'_> {
                 Scope::WhileExecutorLives,
             )?;
         }
-        self.finish(dir, session, captured_by_executor)
+        self.finish(dir, session, captured_elsewhere)
     }
 
     /// Signals SIGTERM to `members` and `tree`, SIGKILL to those left after
@@ -561,7 +655,23 @@ impl Finisher<'_> {
             }
             let left = targets(&known, &retained);
             if left.is_empty() {
-                return Ok(Ended::Empty);
+                // Never empty while the session is carried: what started after
+                // the last proof is not signalled, and not forgotten either.
+                let unconfirmed: Vec<ProcessInfo> = match scope {
+                    Scope::SavedOnly => Vec::new(),
+                    Scope::Run | Scope::WhileExecutorLives => scan
+                        .iter()
+                        .filter(|process| session.contains(process))
+                        .copied()
+                        .collect(),
+                };
+                if unconfirmed.is_empty() {
+                    return Ok(Ended::Empty);
+                }
+                journal.record_unconfirmed(&unconfirmed)?;
+                return Ok(Ended::Unconfirmed(
+                    unconfirmed.iter().map(|process| process.pid).collect(),
+                ));
             }
             if scope == Scope::WhileExecutorLives && !session.executor_alive(self.table) {
                 journal.record(horizon, &known, &retained)?;

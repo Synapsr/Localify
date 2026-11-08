@@ -4,6 +4,18 @@ import type {
   TerminalSessionDto,
 } from "@/types/localify";
 
+/**
+ * What the panel knows of a session, newest first: a session only moves forward. Once a tab
+ * has exited, a message about it that arrives late, such as the answer to the launch that
+ * started it, never shows it running again.
+ */
+export function laterSession(
+  known: TerminalSessionDto | undefined,
+  incoming: TerminalSessionDto,
+): TerminalSessionDto {
+  return known?.status === "exited" && incoming.status === "running" ? known : incoming;
+}
+
 /** `failed` is a service that stopped while its tab was in the background. */
 export type TerminalSessionState = "live" | "idle" | "failed";
 
@@ -51,12 +63,17 @@ export function sortTerminalSessions(
   const rankOf = (session: TerminalSessionDto) => {
     const { environmentSlug, projectId, serviceId } = session.target;
     const key = environmentKey(projectId, environmentSlug);
-    const service = serviceId ? (serviceRank.get(key)?.indexOf(serviceId) ?? -1) : -1;
+    const service =
+      session.run && serviceId ? (serviceRank.get(key)?.indexOf(serviceId) ?? -1) : -1;
 
     return [
       projectRank.get(projectId) ?? Number.MAX_SAFE_INTEGER,
       environmentRank.get(key) ?? Number.MAX_SAFE_INTEGER,
-      !serviceId ? Number.MAX_SAFE_INTEGER : service === -1 ? Number.MAX_SAFE_INTEGER - 1 : service,
+      !session.run
+        ? Number.MAX_SAFE_INTEGER
+        : service === -1
+          ? Number.MAX_SAFE_INTEGER - 1
+          : service,
     ];
   };
 
@@ -97,9 +114,9 @@ export function groupTerminalSessions(sessions: TerminalSessionDto[]): TerminalT
       project.environments.push(environment);
     }
 
-    const baseTitle = session.target.serviceName ?? "Shell";
+    const baseTitle = tabTitle(session);
     const sameTitleCount = environment.tabs.filter(
-      (tab) => (tab.session.target.serviceName ?? "Shell") === baseTitle,
+      (tab) => tabTitle(tab.session) === baseTitle,
     ).length;
     environment.tabs.push({
       session,
@@ -110,7 +127,12 @@ export function groupTerminalSessions(sessions: TerminalSessionDto[]): TerminalT
   return projects;
 }
 
-/** Service sessions whose domain answers. A service runs in a shell, so the session cannot say. */
+// A service tab is named after its service; a shell, even in a service's folder, is a shell.
+function tabTitle(session: TerminalSessionDto) {
+  return session.run ? (session.target.serviceName ?? "Service") : "Shell";
+}
+
+/** Service tabs whose domain answers: a run can be up before its port is. */
 export function reachableServiceSessionIds(
   sessions: TerminalSessionDto[],
   environments: ProjectEnvironmentInfoDto[],
@@ -120,7 +142,7 @@ export function reachableServiceSessionIds(
 
   for (const session of sessions) {
     const { environmentSlug, projectId, serviceId } = session.target;
-    if (!serviceId) continue;
+    if (!session.run || !serviceId) continue;
 
     const pattern = environments
       .find(

@@ -936,7 +936,6 @@ mod tests {
             port: 3000,
             origin: ServiceOrigin::Background,
             profile: None,
-            log_file: None,
             output: None,
         };
         let lock = store.lock(&key).unwrap().admitted();

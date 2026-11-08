@@ -332,13 +332,14 @@ pub fn print_danger_banner(profile: &PreparedProfile, service_label: &str) {
 pub fn set_danger_title(profile_name: &str, service_label: &str) {
     if io::stderr().is_terminal() {
         let title = format!("[{}] {service_label}", profile_name.to_uppercase());
-        eprint!("\x1b]0;{title}\x07");
+        super::service_supervisor::report(&format!("\x1b]0;{title}\x07"));
     }
 }
 
+/// After the service: the terminal may be gone, so the write may fail.
 pub fn reset_title() {
     if io::stderr().is_terminal() {
-        eprint!("\x1b]0;\x07");
+        super::service_supervisor::report("\x1b]0;\x07");
     }
 }
 

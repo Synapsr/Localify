@@ -8,6 +8,7 @@
 //! [`monotonic_now`], never with the wall clock, and only within one boot
 //! ([`boot_id`]).
 
+pub mod helpers;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
