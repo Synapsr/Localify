@@ -42,6 +42,14 @@ export const UseCases = async () => {
                 <p className="max-w-lg text-[16.5px] leading-[1.55] text-pretty text-muted-foreground">
                   {t(`items.${item.key}.body`)}
                 </p>
+                {item.key === "machines" ? (
+                  <p className="flex max-w-lg flex-wrap items-center gap-2 text-[14px] text-muted-foreground">
+                    <span className="rounded-full bg-muted px-2.5 py-0.5 text-[12px] font-medium text-foreground ring-1 ring-border/60">
+                      {t("items.machines.soonLabel")}
+                    </span>
+                    {t("items.machines.soon")}
+                  </p>
+                ) : null}
                 {item.key === "agent" ? (
                   <div className="flex flex-wrap items-center gap-3 pt-1">
                     <InstallPromptButton source="use_case_agent" variant="outline" />

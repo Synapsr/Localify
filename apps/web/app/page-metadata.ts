@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { getTranslations } from "next-intl/server";
 
 import { routing, type Locale } from "@/i18n/routing";
+import { formatMoney, getPricing } from "@/lib/pricing";
 
 import { publicUrlPattern, siteName } from "./site-metadata";
 
@@ -27,6 +28,15 @@ const openGraphLocales: Record<Locale, string> = {
   ru: "ru_RU",
 };
 
+const pricingDescription = async (locale: Locale) => {
+  const t = await getTranslations({ locale, namespace: "Pricing" });
+  const { currency, pro } = await getPricing();
+  return t("metaDescription", {
+    monthly: formatMoney(pro.monthly.amount, currency, locale),
+    yearly: formatMoney(pro.yearly.amount, currency, locale),
+  });
+};
+
 export const buildPageMetadata = async (locale: Locale, route: SiteRoute): Promise<Metadata> => {
   const t = await getTranslations({ locale });
   const { title, description } = {
@@ -39,7 +49,11 @@ export const buildPageMetadata = async (locale: Locale, route: SiteRoute): Promi
       title: t("Cloud.subscribed.metaTitle"),
       description: t("Cloud.subscribed.description"),
     },
-    "/pricing": { title: t("Pricing.metaTitle"), description: t("Pricing.metaDescription") },
+    // The pricing description names live prices, so it is only fetched for that page.
+    "/pricing": {
+      title: t("Pricing.metaTitle"),
+      description: route === "/pricing" ? await pricingDescription(locale) : "",
+    },
     "/privacy": { title: t("Privacy.title"), description: t("Privacy.intro") },
     "/terms": { title: t("Terms.title"), description: t("Terms.intro") },
   }[route];

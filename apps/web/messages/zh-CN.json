@@ -8,7 +8,6 @@
     "howItWorks": "工作方式",
     "pricing": "价格",
     "faq": "FAQ",
-    "source": "源代码",
     "cta": "下载"
   },
   "Hero": {
@@ -61,7 +60,9 @@
       },
       "machines": {
         "title": "你的每台机器都行。",
-        "body": "让智能体在远程 Linux 服务器或闲置的 Mac 上工作，你在笔记本上审查。每个项目一个公开 URL，即可访问其下所有服务和 worktree，默认受密码保护。"
+        "body": "让智能体在远程 Linux 服务器或闲置的 Mac 上工作，你在笔记本上审查。每个项目一个公开 URL，即可访问其下所有服务和 worktree，默认受密码保护。",
+        "soonLabel": "即将推出",
+        "soon": "在应用中查看你其他机器上的服务和输出。"
       }
     },
     "agentDemo": {
@@ -137,11 +138,12 @@
   },
   "Pricing": {
     "metaTitle": "价格",
-    "metaDescription": "Localify 免费且开源，无需账户。通过 Localify Cloud 使用公开 URL 需要 Pro：每月 US$7.99 或每年 US$79，先享 7 天免费试用。",
+    "metaDescription": "Localify 免费且开源，无需账户。通过 Localify Cloud 使用公开 URL 需要 Pro：每月 {monthly} 或每年 {yearly}，先享 7 天免费试用。",
     "section": {
       "titleLine1": "本机免费，",
       "titleLine2": "跨机用 Pro。",
-      "description": "在你电脑上运行的一切都免费开源。Localify Cloud Pro 增加公开 URL，让你随时随地访问它们。"
+      "description": "在你电脑上运行的一切都免费开源。Localify Cloud Pro 增加公开 URL，让你随时随地访问它们。",
+      "more": "价格详情与常见问题"
     },
     "titleLine1": "本机使用免费。",
     "titleLine2": "公开 URL 用 Pro。",
@@ -173,14 +175,15 @@
       "yearlyNote": "折合每月 {price}，每年计费一次。",
       "features": [
         "从你的机器提供的公开 URL",
-        "10 个公开 URL",
-        "2 台机器同时提供服务",
+        "{urls} 个公开 URL",
+        "{machines} 台机器同时提供服务",
         "每个 URL 默认设有密码",
         "通配符 URL，可访问项目的每个服务和每个 worktree",
         "包含免费方案的全部内容"
       ],
       "trial": "7 天免费试用。结账时需要提供银行卡，但试用结束前不会扣款。在此之前可随时取消。每个 GitHub 账户只能试用一次。",
-      "start": "在应用中或用以下命令开始 7 天试用："
+      "cta": "开始 7 天免费试用",
+      "steps": "安装 Localify，然后运行："
     },
     "team": {
       "name": "团队",
@@ -190,11 +193,12 @@
       "cta": "告诉我们你想要"
     },
     "addons": {
-      "title": "附加项，发布后不久推出",
+      "title": "Pro 附加项",
       "machine": "+1 台提供服务的机器，每月 {price}",
-      "urls": "+10 个公开 URL，每月 {price}"
+      "urls": "+{count} 个公开 URL，每月 {price}",
+      "how": "按月计费，数量不限，需有效的 Pro 方案。从应用的下一个版本起，可在 Settings → Localify Cloud 中购买，并在账单门户中管理。"
     },
-    "billing": "价格以美元计。Polar 是记录商户（merchant of record）：由它销售方案、处理销售税和增值税，并向你发送发票。取消、在按月和按年之间切换或更新银行卡，都在 Polar 的客户门户中完成，可从应用中或用 localify billing 打开。",
+    "billing": "在欧盟和欧洲经济区以欧元计价，其他地区以美元计价，结账页面会显示含税总额。Polar 是记录商户（merchant of record）：由它销售方案、处理销售税和增值税，并向你发送发票。取消、在按月和按年之间切换或更新银行卡，都在 Polar 的客户门户中完成，可从应用中或用 localify billing 打开。",
     "faq": {
       "title": "价格相关问题",
       "items": [
@@ -381,7 +385,7 @@
   },
   "Terms": {
     "title": "服务条款",
-    "updatedAt": "2026 年 11 月 7 日",
+    "updatedAt": "2026 年 11 月 8 日",
     "intro": "Localify 免费且开源，你能如何使用它，大部分由许可证规定。这些条款补充其余部分：支撑公开 URL 的付费服务 Localify Cloud，以及网站。如有不清楚的地方，请写信至 support@localify.dev。",
     "sections": [
       {
@@ -423,7 +427,7 @@
       {
         "title": "6. Localify Cloud",
         "body": [
-          "公开 URL 的地址为 https://<slug>.localify.fyi，由你的机器提供，运行在 Localify Cloud 上。你通过 GitHub 登录，提供公开 URL 需要付费方案。Localify Cloud Pro 每月 US$7.99 或每年 US$79（以美元计），包含 2 台可同时提供公开 URL 的机器和 10 个公开 URL。",
+          "公开 URL 的地址为 https://<slug>.localify.fyi，由你的机器提供，运行在 Localify Cloud 上。你通过 GitHub 登录，提供公开 URL 需要付费方案。Localify Cloud Pro 以美元计每月 US$7.99 或每年 US$79，以欧元计每月 €7.99 或每年 €79，包含 2 台可同时提供公开 URL 的机器和 10 个公开 URL。拥有有效的 Pro 方案时，你可以添加提供服务的机器，每台每月 US$3（€3），以及公开 URL，每 10 个每月 US$2（€2）。附加项按月续订，没有试用，Pro 结束时会在其当期结束时取消。付款前，结账页面会显示价格和币种。",
           "方案由 Polar（polar.sh）作为记录商户（merchant of record）销售。Polar 是正式的卖方：负责收款、处理销售税和增值税，并开具发票。付款同样适用 Polar 的买方条款。",
           "我们可以更改或停止 Localify Cloud。如有重大变更，我们会至少提前 30 天通知订阅者。如果我们停止该服务，会按比例向每位订阅者退还已预付但未使用的时间对应的费用。我们不提供可用性承诺或服务等级协议（SLA），Localify Cloud 有时可能无法使用。这并不限制你作为消费者依法享有的符合性保证。"
         ],
@@ -497,7 +501,7 @@
   },
   "Privacy": {
     "title": "隐私政策",
-    "updatedAt": "2026 年 11 月 7 日",
+    "updatedAt": "2026 年 11 月 8 日",
     "intro": "你的本地开发环境留在你的机器上。桌面应用和 CLI 把 DNS、TLS、路由、项目和请求日志都保存在那里。本页说明数据离开你设备的情况，以及网站收集的内容。",
     "sections": [
       {
@@ -534,7 +538,7 @@
         "title": "5. 为 Localify Cloud 付款",
         "body": [
           "方案由记录商户 Polar（polar.sh）销售。当你开始试用或订阅时，Polar 及其支付处理商会接收并处理你的姓名、电子邮件地址、支付信息，以及计税所需的账单地址或国家。你的银行卡信息绝不会到我们这里。收据和发票由 Polar 发送，Polar 如何处理这些数据由其自己的隐私政策说明。",
-          "Localify Cloud 从 Polar 只保存你的 Polar 客户 ID、订阅 ID 和方案状态（如试用中、有效或已取消，以及试用或当前周期结束的日期），以及你的账户是否已用过试用。订阅变化时 Polar 会通知我们，我们也会向 Polar 查询你的订阅，以保持该状态最新。"
+          "Localify Cloud 从 Polar 只保存你的 Polar 客户 ID、订阅 ID 和方案状态（如试用中、有效或已取消，以及试用或当前周期结束的日期），以及你的账户是否已用过试用。订阅变化时 Polar 会通知我们，我们也会向 Polar 查询你的订阅，以保持该状态最新。它还会保存你拥有的附加项数量。"
         ],
         "links": [
           {
@@ -553,7 +557,7 @@
       {
         "title": "7. 网站",
         "body": [
-          "生产环境的网站使用两个分析工具：Umami 和 PostHog。它们记录页面浏览和下载等按钮的点击。我们不使用广告跟踪器，也不做跨站再营销。",
+          "生产环境的网站使用两个分析工具：Umami 和 PostHog。它们记录页面浏览和下载等按钮的点击。我们不使用广告跟踪器，也不做跨站再营销。为了以你的货币显示价格，网站会读取 Cloudflare 根据你的 IP 地址判断的国家。网站不会保存它。",
           "Umami 对所有访客运行。它从 analytics.teogoulois.com 加载，不使用 Cookie。",
           "PostHog 只有在你通过 Cookie 横幅接受后才会运行。此后，它会在 Cookie 和本地存储中保存访客标识符，并记录你已接受。它的 autocapture 和会话录制已关闭。如果你拒绝，PostHog 不会发送或存储任何内容。如果你接受后改变主意，它会停止记录并清除已保存在浏览器中的内容。无论哪种选择，本地存储中都会有一条记录保存你的选择，你可以通过页脚的 Cookie 链接更改。",
           "如果你已接受，点击下载按钮时，网站可能会把一个简短的 Localify 归因令牌复制到你的剪贴板，替换其中原有的内容。如果你没有接受，网站不会动你的剪贴板。桌面应用启动时会读取剪贴板，并忽略此令牌以外的所有内容。如果找到令牌，它会在我们的分析数据中把你的网站访问与应用关联起来。令牌包含 PostHog 访客标识符、归因 ID、来源标签和时间戳。它不包含项目数据、域名、本地路径或流量。"

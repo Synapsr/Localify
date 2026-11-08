@@ -8,7 +8,6 @@
     "howItWorks": "Fonctionnement",
     "pricing": "Tarifs",
     "faq": "FAQ",
-    "source": "Code source",
     "cta": "Télécharger"
   },
   "Hero": {
@@ -61,7 +60,9 @@
       },
       "machines": {
         "title": "Sur toutes tes machines.",
-        "body": "Laisse les agents travailler sur un serveur Linux distant ou un Mac qui ne te sert plus pendant que tu relis depuis ton portable. Une URL publique par projet ouvre chacun de ses services et worktrees, protégée par défaut par un mot de passe."
+        "body": "Laisse les agents travailler sur un serveur Linux distant ou un Mac qui ne te sert plus pendant que tu relis depuis ton portable. Une URL publique par projet ouvre chacun de ses services et worktrees, protégée par défaut par un mot de passe.",
+        "soonLabel": "Bientôt",
+        "soon": "Les services et la sortie de tes autres machines, dans l'app."
       }
     },
     "agentDemo": {
@@ -137,11 +138,12 @@
   },
   "Pricing": {
     "metaTitle": "Tarifs",
-    "metaDescription": "Localify est gratuit et open source, sans compte. Les URLs publiques via Localify Cloud nécessitent Pro : 7,99 $US par mois ou 79 $US par an, après 7 jours d'essai gratuit.",
+    "metaDescription": "Localify est gratuit et open source, sans compte. Les URLs publiques via Localify Cloud nécessitent Pro : {monthly} par mois ou {yearly} par an, après 7 jours d'essai gratuit.",
     "section": {
       "titleLine1": "Gratuit sur tes machines.",
       "titleLine2": "Pro pour les relier.",
-      "description": "Tout ce qui tourne sur tes ordinateurs est gratuit et open source. Localify Cloud Pro ajoute des URLs publiques pour y accéder de n'importe où."
+      "description": "Tout ce qui tourne sur tes ordinateurs est gratuit et open source. Localify Cloud Pro ajoute des URLs publiques pour y accéder de n'importe où.",
+      "more": "Détails des prix et FAQ"
     },
     "titleLine1": "Gratuit sur ta machine.",
     "titleLine2": "Pro pour les URLs publiques.",
@@ -173,14 +175,15 @@
       "yearlyNote": "{price} par mois, facturé une fois par an.",
       "features": [
         "Des URLs publiques servies depuis ta machine",
-        "10 URLs publiques",
-        "2 machines qui servent en même temps",
+        "{urls} URLs publiques",
+        "{machines} machines qui servent en même temps",
         "Un mot de passe sur chaque URL par défaut",
         "Des URLs wildcard qui atteignent chaque service et chaque worktree d'un projet",
         "Tout ce qu'il y a dans Gratuit"
       ],
       "trial": "7 jours d'essai gratuit. Une carte est demandée au paiement, et rien n'est prélevé avant la fin de l'essai. Tu peux annuler à tout moment avant. Un essai par compte GitHub.",
-      "start": "Lance un essai de 7 jours depuis l'app ou avec :"
+      "cta": "Commence ton essai gratuit de 7 jours",
+      "steps": "Installe Localify, puis lance :"
     },
     "team": {
       "name": "Équipe",
@@ -190,11 +193,12 @@
       "cta": "Dis-nous que ça t'intéresse"
     },
     "addons": {
-      "title": "Options, bientôt après le lancement",
+      "title": "Options pour Pro",
       "machine": "+1 machine qui sert, {price} par mois",
-      "urls": "+10 URLs publiques, {price} par mois"
+      "urls": "+{count} URLs publiques, {price} par mois",
+      "how": "Facturées chaque mois, en la quantité que tu veux, avec un abonnement Pro actif. Tu pourras les acheter dans l'app, dans Settings → Localify Cloud, dès sa prochaine version, et les gérer dans ton portail de facturation."
     },
-    "billing": "Prix en dollars américains. Polar est le marchand officiel (merchant of record) : il vend l'abonnement, gère la TVA et les taxes, et t'envoie les factures. Annule, passe du mensuel à l'annuel ou change ta carte dans le portail client de Polar, depuis l'app ou avec localify billing.",
+    "billing": "Les prix sont en euros dans l'UE et l'EEE et en dollars américains ailleurs, et le paiement affiche le total, taxes comprises. Polar est le marchand officiel (merchant of record) : il vend l'abonnement, gère la TVA et les taxes, et t'envoie les factures. Annule, passe du mensuel à l'annuel ou change ta carte dans le portail client de Polar, depuis l'app ou avec localify billing.",
     "faq": {
       "title": "Questions sur les tarifs",
       "items": [
@@ -381,7 +385,7 @@
   },
   "Terms": {
     "title": "Conditions d'utilisation",
-    "updatedAt": "7 novembre 2026",
+    "updatedAt": "8 novembre 2026",
     "intro": "Localify est gratuit et open source, et sa licence couvre l'essentiel de ce que tu peux en faire. Ces conditions ajoutent le reste : le service payant Localify Cloud derrière les URLs publiques, et le site. Si quelque chose n'est pas clair, écris à support@localify.dev.",
     "sections": [
       {
@@ -423,7 +427,7 @@
       {
         "title": "6. Localify Cloud",
         "body": [
-          "Les URLs publiques, sur https://<slug>.localify.fyi et servies depuis ta machine, tournent sur Localify Cloud. Tu te connectes avec GitHub, et servir une URL publique nécessite un abonnement payant. Localify Cloud Pro coûte 7,99 $US par mois ou 79 $US par an, et comprend 2 machines qui servent des URLs publiques en même temps et 10 URLs publiques.",
+          "Les URLs publiques, sur https://<slug>.localify.fyi et servies depuis ta machine, tournent sur Localify Cloud. Tu te connectes avec GitHub, et servir une URL publique nécessite un abonnement payant. Localify Cloud Pro coûte 7,99 $US par mois ou 79 $US par an en dollars américains, ou 7,99 € par mois ou 79 € par an en euros, et comprend 2 machines qui servent des URLs publiques en même temps et 10 URLs publiques. Avec un abonnement Pro actif, tu peux ajouter des machines qui servent, à 3 $US (3 €) par mois chacune, et des URLs publiques, à 2 $US (2 €) par mois par lot de 10. Les options se renouvellent chaque mois, n'ont pas d'essai et sont annulées à la fin de leur période quand Pro prend fin. Le paiement affiche le prix et la devise avant que tu paies.",
           "Polar (polar.sh) vend l'abonnement en tant que marchand officiel (merchant of record). Polar est le vendeur officiel : il encaisse le paiement, gère la TVA et les taxes, et émet tes factures. Les conditions d'achat de Polar s'appliquent aussi au paiement.",
           "Nous pouvons modifier ou arrêter Localify Cloud. Nous prévenons les abonnés au moins 30 jours avant une modification importante. Si nous l'arrêtons, chaque abonné est remboursé au prorata du temps prépayé qu'il n'a pas utilisé. Il n'y a ni engagement de disponibilité ni accord de niveau de service (SLA), et Localify Cloud peut être indisponible par moments. Cela ne limite pas la garantie légale de conformité dont tu bénéficies en tant que consommateur."
         ],
@@ -497,7 +501,7 @@
   },
   "Privacy": {
     "title": "Politique de confidentialité",
-    "updatedAt": "7 novembre 2026",
+    "updatedAt": "8 novembre 2026",
     "intro": "Ton environnement de développement local reste sur ta machine. L'app desktop et le CLI y gardent DNS, TLS, routage, projets et logs de requêtes. Cette page couvre les cas où des données quittent ton appareil, et ce que le site collecte.",
     "sections": [
       {
@@ -534,7 +538,7 @@
         "title": "5. Payer Localify Cloud",
         "body": [
           "Les abonnements sont vendus par Polar (polar.sh), le marchand officiel. Quand tu lances un essai ou t'abonnes, Polar et son prestataire de paiement reçoivent et traitent ton nom, ton adresse e-mail, tes informations de paiement, et l'adresse ou le pays de facturation dont dépendent les taxes. Les données de ta carte ne nous parviennent jamais. Polar t'envoie les reçus et les factures, et sa propre politique de confidentialité couvre ce qu'il fait de ces données.",
-          "De Polar, Localify Cloud ne garde que ton identifiant client Polar, tes identifiants d'abonnement et le statut de ton abonnement, comme essai, actif ou annulé, avec la date de fin de l'essai ou de la période en cours, ainsi que le fait que ton compte a déjà utilisé son essai ou non. Polar nous prévient quand un abonnement change, et nous lui demandons tes abonnements pour garder ce statut à jour."
+          "De Polar, Localify Cloud ne garde que ton identifiant client Polar, tes identifiants d'abonnement et le statut de ton abonnement, comme essai, actif ou annulé, avec la date de fin de l'essai ou de la période en cours, ainsi que le fait que ton compte a déjà utilisé son essai ou non. Polar nous prévient quand un abonnement change, et nous lui demandons tes abonnements pour garder ce statut à jour. Il garde aussi le nombre d'options que tu as."
         ],
         "links": [
           {
@@ -553,7 +557,7 @@
       {
         "title": "7. Le site",
         "body": [
-          "En production, le site utilise deux outils d'analytics, Umami et PostHog. Ils enregistrent les pages vues et les clics sur des boutons comme le téléchargement. Nous n'utilisons ni traceurs publicitaires ni reciblage inter-sites.",
+          "En production, le site utilise deux outils d'analytics, Umami et PostHog. Ils enregistrent les pages vues et les clics sur des boutons comme le téléchargement. Nous n'utilisons ni traceurs publicitaires ni reciblage inter-sites. Pour afficher les prix dans ta devise, le site lit le pays que Cloudflare déduit de ton adresse IP. Il ne le garde pas.",
           "Umami tourne pour tous les visiteurs. Il est chargé depuis analytics.teogoulois.com et n'utilise aucun cookie.",
           "PostHog ne tourne que si tu acceptes dans le bandeau cookies. Il garde alors un identifiant de visiteur dans un cookie et dans le stockage local, et enregistre que tu as accepté. Son autocapture et son enregistrement de session sont désactivés. Si tu refuses, PostHog n'envoie et ne stocke rien. Si tu avais accepté et que tu changes d'avis, il arrête d'enregistrer et efface ce qu'il avait stocké dans ton navigateur. Dans les deux cas, une entrée du stockage local retient ton choix, et tu peux le changer depuis le lien Cookies du pied de page.",
           "Si tu as accepté, cliquer sur un bouton de téléchargement peut copier un court jeton d'attribution Localify dans ton presse-papiers, à la place de ce qui s'y trouvait. Sinon, le site ne touche pas à ton presse-papiers. Au démarrage, l'app desktop lit le presse-papiers et ignore tout ce qui n'est pas un tel jeton. Si elle en trouve un, elle relie ta visite du site à l'app dans nos analytics. Le jeton contient un identifiant de visiteur PostHog, un identifiant d'attribution, un libellé de source et un horodatage. Il ne contient ni données de projet, ni domaines, ni chemins locaux, ni trafic."

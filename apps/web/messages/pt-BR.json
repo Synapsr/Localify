@@ -8,7 +8,6 @@
     "howItWorks": "Como funciona",
     "pricing": "Preços",
     "faq": "FAQ",
-    "source": "Código-fonte",
     "cta": "Baixar"
   },
   "Hero": {
@@ -61,7 +60,9 @@
       },
       "machines": {
         "title": "Em todas as suas máquinas.",
-        "body": "Deixe os agentes trabalhando em um servidor Linux remoto ou em um Mac sobrando enquanto você revisa no notebook. Uma URL pública por projeto alcança todos os serviços e worktrees dele, protegida por senha por padrão."
+        "body": "Deixe os agentes trabalhando em um servidor Linux remoto ou em um Mac sobrando enquanto você revisa no notebook. Uma URL pública por projeto alcança todos os serviços e worktrees dele, protegida por senha por padrão.",
+        "soonLabel": "Em breve",
+        "soon": "Ver os serviços e a saída das suas outras máquinas no app."
       }
     },
     "agentDemo": {
@@ -137,11 +138,12 @@
   },
   "Pricing": {
     "metaTitle": "Preços",
-    "metaDescription": "O Localify é grátis e open source, sem conta. URLs públicas pelo Localify Cloud exigem o Pro: US$ 7,99 por mês ou US$ 79 por ano, depois de 7 dias de teste grátis.",
+    "metaDescription": "O Localify é grátis e open source, sem conta. URLs públicas pelo Localify Cloud exigem o Pro: {monthly} por mês ou {yearly} por ano, depois de 7 dias de teste grátis.",
     "section": {
       "titleLine1": "Grátis nas suas máquinas.",
       "titleLine2": "Pro entre elas.",
-      "description": "Tudo o que roda nos seus computadores é grátis e open source. O Localify Cloud Pro adiciona URLs públicas para acessá-los de qualquer lugar."
+      "description": "Tudo o que roda nos seus computadores é grátis e open source. O Localify Cloud Pro adiciona URLs públicas para acessá-los de qualquer lugar.",
+      "more": "Detalhes de preços e perguntas frequentes"
     },
     "titleLine1": "Grátis na sua máquina.",
     "titleLine2": "Pro para URLs públicas.",
@@ -173,14 +175,15 @@
       "yearlyNote": "{price} por mês, cobrado uma vez por ano.",
       "features": [
         "URLs públicas servidas da sua máquina",
-        "10 URLs públicas",
-        "2 máquinas servindo ao mesmo tempo",
+        "{urls} URLs públicas",
+        "{machines} máquinas servindo ao mesmo tempo",
         "Senha em toda URL por padrão",
         "URLs wildcard que alcançam cada serviço e cada worktree de um projeto",
         "Tudo do Grátis"
       ],
       "trial": "7 dias de teste grátis. O checkout pede um cartão, e nada é cobrado até o fim do teste. Cancele quando quiser antes disso. Um teste por conta do GitHub.",
-      "start": "Comece um teste de 7 dias pelo app ou com:"
+      "cta": "Comece seu teste grátis de 7 dias",
+      "steps": "Instale o Localify e depois rode:"
     },
     "team": {
       "name": "Equipe",
@@ -190,11 +193,12 @@
       "cta": "Diga que você quer"
     },
     "addons": {
-      "title": "Adicionais, logo depois do lançamento",
+      "title": "Adicionais do Pro",
       "machine": "+1 máquina servindo, {price} por mês",
-      "urls": "+10 URLs públicas, {price} por mês"
+      "urls": "+{count} URLs públicas, {price} por mês",
+      "how": "Cobrados por mês, na quantidade que você quiser, com um plano Pro ativo. Você vai poder comprá-los no app, em Settings → Localify Cloud, a partir da próxima versão, e gerenciá-los no seu portal de cobrança."
     },
-    "billing": "Preços em dólares americanos. A Polar é a merchant of record: ela vende o plano, cuida dos impostos e envia as suas faturas. Cancele, troque entre mensal e anual ou atualize o cartão no portal do cliente da Polar, pelo app ou com localify billing.",
+    "billing": "Os preços são em euros na UE e no EEE e em dólares americanos no resto do mundo, e o checkout mostra o total com impostos. A Polar é a merchant of record: ela vende o plano, cuida dos impostos e envia as suas faturas. Cancele, troque entre mensal e anual ou atualize o cartão no portal do cliente da Polar, pelo app ou com localify billing.",
     "faq": {
       "title": "Perguntas sobre preços",
       "items": [
@@ -381,7 +385,7 @@
   },
   "Terms": {
     "title": "Termos de serviço",
-    "updatedAt": "7 de novembro de 2026",
+    "updatedAt": "8 de novembro de 2026",
     "intro": "O Localify é grátis e open source, e a licença cobre quase tudo o que você pode fazer com ele. Estes termos acrescentam o resto: o serviço pago Localify Cloud por trás das URLs públicas, e o site. Se algo não estiver claro, escreva para support@localify.dev.",
     "sections": [
       {
@@ -423,7 +427,7 @@
       {
         "title": "6. Localify Cloud",
         "body": [
-          "As URLs públicas, em https://<slug>.localify.fyi e servidas da sua máquina, rodam no Localify Cloud. Você entra com o GitHub, e servir uma URL pública exige um plano pago. O Localify Cloud Pro custa US$ 7,99 por mês ou US$ 79 por ano e inclui 2 máquinas servindo URLs públicas ao mesmo tempo e 10 URLs públicas.",
+          "As URLs públicas, em https://<slug>.localify.fyi e servidas da sua máquina, rodam no Localify Cloud. Você entra com o GitHub, e servir uma URL pública exige um plano pago. O Localify Cloud Pro custa US$ 7,99 por mês ou US$ 79 por ano em dólares americanos, ou € 7,99 por mês ou € 79 por ano em euros, e inclui 2 máquinas servindo URLs públicas ao mesmo tempo e 10 URLs públicas. Com um plano Pro ativo, você pode adicionar máquinas servindo por US$ 3 (€ 3) por mês cada e URLs públicas por US$ 2 (€ 2) por mês a cada 10. Os adicionais renovam todo mês, não têm teste e são cancelados no fim do período quando o Pro termina. O checkout mostra o preço e a moeda antes de você pagar.",
           "A Polar (polar.sh) vende o plano como merchant of record. A Polar é a vendedora oficial: recebe o pagamento, cuida dos impostos e emite as suas faturas. Os termos de compra da Polar também se aplicam ao pagamento.",
           "Podemos mudar ou descontinuar o Localify Cloud. Avisamos os assinantes com pelo menos 30 dias de antecedência antes de uma mudança importante. Se o descontinuarmos, cada assinante recebe um reembolso proporcional do tempo pré-pago que não usou. Não há compromisso de disponibilidade nem acordo de nível de serviço (SLA), e o Localify Cloud pode ficar indisponível em alguns momentos. Isso não limita a garantia legal de conformidade que você tem como consumidor."
         ],
@@ -497,7 +501,7 @@
   },
   "Privacy": {
     "title": "Política de privacidade",
-    "updatedAt": "7 de novembro de 2026",
+    "updatedAt": "8 de novembro de 2026",
     "intro": "Seu ambiente de desenvolvimento local fica na sua máquina. O app desktop e o CLI mantêm lá DNS, TLS, roteamento, projetos e logs de requisição. Esta página cobre os casos em que dados saem do seu dispositivo e o que o site coleta.",
     "sections": [
       {
@@ -534,7 +538,7 @@
         "title": "5. Pagamento do Localify Cloud",
         "body": [
           "Os planos são vendidos pela Polar (polar.sh), a merchant of record. Quando você começa um teste ou assina, a Polar e o processador de pagamentos dela recebem e tratam o seu nome, o seu e-mail, os seus dados de pagamento e o endereço ou o país de cobrança dos quais os impostos dependem. Os dados do seu cartão nunca chegam até nós. A Polar envia os seus recibos e faturas, e a política de privacidade dela cobre o que ela faz com esses dados.",
-          "Da Polar, o Localify Cloud guarda só o seu ID de cliente na Polar, os seus IDs de assinatura e o status do seu plano, como teste, ativo ou cancelado, com a data em que o teste ou o período atual termina, além de se a sua conta já usou o teste. A Polar nos avisa quando uma assinatura muda, e pedimos a ela as suas assinaturas para manter esse status em dia."
+          "Da Polar, o Localify Cloud guarda só o seu ID de cliente na Polar, os seus IDs de assinatura e o status do seu plano, como teste, ativo ou cancelado, com a data em que o teste ou o período atual termina, além de se a sua conta já usou o teste. A Polar nos avisa quando uma assinatura muda, e pedimos a ela as suas assinaturas para manter esse status em dia. Ele também guarda quantos adicionais você tem."
         ],
         "links": [
           {
@@ -553,7 +557,7 @@
       {
         "title": "7. O site",
         "body": [
-          "Em produção, o site usa duas ferramentas de analytics, Umami e PostHog. Elas registram visualizações de página e cliques em botões como o de download. Não usamos rastreadores de publicidade nem retargeting entre sites.",
+          "Em produção, o site usa duas ferramentas de analytics, Umami e PostHog. Elas registram visualizações de página e cliques em botões como o de download. Não usamos rastreadores de publicidade nem retargeting entre sites. Para mostrar os preços na sua moeda, o site lê o país que a Cloudflare deduz do seu endereço IP. Ele não o guarda.",
           "O Umami roda para todos os visitantes. Ele é carregado de analytics.teogoulois.com e não usa cookies.",
           "O PostHog só roda se você aceitar no aviso de cookies. Ele então guarda um identificador de visitante em um cookie e no armazenamento local, e registra que você aceitou. O autocapture e a gravação de sessão dele ficam desligados. Se você recusar, o PostHog não envia nem guarda nada. Se você tinha aceitado e mudar de ideia, ele para de registrar e apaga o que guardou no seu navegador. Nos dois casos, uma entrada no armazenamento local lembra sua escolha, e você pode mudá-la pelo link Cookies no rodapé.",
           "Se você aceitou, clicar em um botão de download pode copiar um pequeno token de atribuição do Localify para a sua área de transferência, substituindo o que havia lá. Caso contrário, o site não mexe na sua área de transferência. Ao iniciar, o app desktop lê a área de transferência e ignora tudo o que não for esse token. Se encontrar um, ele liga sua visita ao site ao app nas nossas analytics. O token contém um identificador de visitante do PostHog, um identificador de atribuição, um rótulo de origem e um carimbo de data e hora. Ele não contém dados de projeto, domínios, caminhos locais nem tráfego."

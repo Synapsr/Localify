@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 
+import { buttonVariants } from "@/components/ui/button-variants";
+import { Link } from "@/i18n/navigation";
+
 import { CommandLine } from "./command-line";
 import { PlanCard, PlanFeatures, PlanPrice } from "./plan-card";
 
@@ -25,7 +28,10 @@ type ProPlanCardProps = {
   yearly: IntervalOption;
   features: string[];
   trial: string;
-  start: string;
+  cta: string;
+  steps: string;
+  loginCommand: string;
+  source: string;
 };
 
 export const ProPlanCard = ({
@@ -38,7 +44,10 @@ export const ProPlanCard = ({
   yearly,
   features,
   trial,
-  start,
+  cta,
+  steps,
+  loginCommand,
+  source,
 }: ProPlanCardProps) => {
   const [interval, setBillingInterval] = useState<Interval>("monthly");
   const current = interval === "monthly" ? monthly : yearly;
@@ -82,7 +91,17 @@ export const ProPlanCard = ({
 
       <div className="mt-auto space-y-3">
         <p className="text-[13.5px] leading-[1.55] text-pretty text-muted-foreground">{trial}</p>
-        <p className="text-[14px] text-foreground">{start}</p>
+        {/* The trial starts from the command line: install first, then sign in and subscribe. */}
+        <Link
+          className={`${buttonVariants({ size: "lg" })} w-full`}
+          data-umami-event="cloud_trial_clicked"
+          data-umami-event-source={source}
+          href="/#download"
+        >
+          {cta}
+        </Link>
+        <p className="pt-1 text-[14px] text-foreground">{steps}</p>
+        <CommandLine command={loginCommand} />
         <CommandLine command={current.command} />
       </div>
     </PlanCard>

@@ -1,6 +1,10 @@
 # Localify website
 
-The Next.js site behind [localify.dev](https://localify.dev): a landing page, a pricing page, terms, a privacy policy, and the two Localify Cloud pages Polar's checkout and customer portal return to, in nine languages. It sends people to the download and the source. There's no checkout, no accounts, and no API routes: the Localify Cloud trial starts from the app or with `localify subscribe`.
+The Next.js site behind [localify.dev](https://localify.dev): a landing page, a pricing page, terms, a privacy policy, and the two Localify Cloud pages Polar's checkout and customer portal return to, in nine languages. It sends people to the download and the source. There's no checkout, no accounts, and no API routes: the Localify Cloud trial starts with `localify login` and `localify subscribe`.
+
+## Prices
+
+The landing and pricing pages show Localify Cloud prices from [`lib/pricing.ts`](lib/pricing.ts). On each request it reads the visitor's country from Cloudflare's `CF-IPCountry` header (euros in the EU and EEA, US dollars elsewhere) and fetches `GET https://api.localify.dev/v1/pricing?currency=…`, kept an hour per Worker isolate. When the endpoint fails, it uses the built-in prices, so the site never breaks. Without the header, as in `pnpm web:dev`, prices show in US dollars.
 
 ## Run
 
@@ -41,6 +45,7 @@ The `Privacy` messages describe what the code does, so they change with it. Upda
 
 - [`lib/analytics.ts`](lib/analytics.ts), [`instrumentation-client.ts`](instrumentation-client.ts), and [`app/_components/cookie-banner.tsx`](app/_components/cookie-banner.tsx): website PostHog, its consent, and the download attribution token.
 - [`app/layout.tsx`](app/layout.tsx): Umami.
+- [`lib/pricing.ts`](lib/pricing.ts): the visitor's country, read to pick the currency.
 - [`desktop-ui/src/lib/analytics.ts`](../../desktop-ui/src/lib/analytics.ts): desktop analytics, error reports, and session replay.
 
 ## Licensing
