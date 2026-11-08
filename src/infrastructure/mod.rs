@@ -12,6 +12,7 @@ pub mod file_security;
 pub mod filesystem;
 pub mod inventory;
 pub mod ios_simulator_trust;
+pub mod launch_plan;
 pub mod launch_profiles;
 pub mod launch_rev;
 pub mod launch_sessions;

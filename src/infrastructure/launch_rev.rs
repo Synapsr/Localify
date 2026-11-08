@@ -1,8 +1,9 @@
 //! A service's launch revision, `configRev` (docs/remote-machines.md,
 //! "Inventory"): the first 16 hex digits of HMAC-SHA-256, under a secret of
 //! this machine, over the canonical JSON of what a launch of the service would
-//! use. It changes whenever its config entry or any launch profile of its
-//! checkout does, inline `[profiles.<name>.env]` values included. The HMAC
+//! use. It changes whenever its config entry, the plan `localify dev` resolves
+//! from it, the manifests that plan was read from, or any launch profile of
+//! its checkout does, inline `[profiles.<name>.env]` values included. The HMAC
 //! keeps a low-entropy value from being guessed from a revision, so the
 //! revision is the only thing derived from those values that ever leaves this
 //! module.
@@ -18,6 +19,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::infrastructure::config::ConfiguredService;
+use crate::infrastructure::launch_plan::LaunchPlan;
 use crate::infrastructure::launch_profiles::{LaunchProfile, LaunchProfiles, ProfileSource};
 
 /// In the data directory.
@@ -138,14 +140,49 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 /// What a launch of one service would use, in a fixed field order so its
 /// JSON is canonical: the service's entry as the config gives it for its
-/// environment, and every effective launch profile of its checkout as
-/// [`LaunchProfiles::load`] gives them. The executor builds the same one from
-/// the definition it runs.
+/// environment; the effective plan that `localify dev` resolves from it
+/// (argv, folder and the arguments Localify adds); the profile it would
+/// choose; every effective launch profile of its checkout as
+/// [`LaunchProfiles::load`] gives them; and the `package.json` files the
+/// plan was resolved from. The executor of a remote launch (PR 4) builds the
+/// same one, then runs the plan it checked without resolving it again.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchDefinition {
     service: ServiceEntry,
+    plan: PlanEntry,
+    profile: ProfileChoice,
     profiles: Profiles,
+    manifests: Vec<Manifest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum PlanEntry {
+    #[serde(rename_all = "camelCase")]
+    Resolved {
+        argv: Vec<String>,
+        injected: Vec<String>,
+        workdir: PathBuf,
+        project_root: PathBuf,
+    },
+    /// No launch can start: the message says why.
+    Unavailable(String),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ProfileChoice {
+    /// The profile the launch would use, `None` for no profile.
+    Selected(Option<String>),
+    Refused(String),
+}
+
+/// One `package.json` the plan's resolution reads, `None` when absent.
+#[derive(Debug, Serialize)]
+struct Manifest {
+    path: PathBuf,
+    content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -202,20 +239,16 @@ enum SourceEntry {
 }
 
 impl LaunchDefinition {
-    /// `service` as it runs in `environment` (the record's slug), and the
-    /// result of `LaunchProfiles::load` on its checkout.
+    /// `service` as it runs in `environment` (the record's slug), the plan
+    /// resolved from it, the profile `requested` (`None`: the effective
+    /// default), and the result of `LaunchProfiles::load` on its checkout.
     pub fn new(
         service: &ConfiguredService,
         environment: Option<&str>,
+        plan: &Result<LaunchPlan>,
         profiles: &Result<Option<LaunchProfiles>>,
+        requested: Option<&str>,
     ) -> Self {
-        let profiles = match profiles {
-            Ok(None) => Profiles::None,
-            Ok(Some(profiles)) => {
-                Profiles::Loaded(profiles.profiles().map(profile_entry).collect())
-            }
-            Err(error) => Profiles::Invalid(format!("{error:#}")),
-        };
         Self {
             service: ServiceEntry {
                 project_id: service.project_id.clone(),
@@ -227,9 +260,66 @@ impl LaunchDefinition {
                 target: service.primary_target.as_ref().map(ToString::to_string),
                 domains: service.domains.clone(),
             },
-            profiles,
+            plan: match plan {
+                Ok(plan) => PlanEntry::Resolved {
+                    argv: plan.argv.clone(),
+                    injected: plan.injected.clone(),
+                    workdir: plan.workdir.clone(),
+                    project_root: plan.project_root.clone(),
+                },
+                Err(error) => PlanEntry::Unavailable(format!("{error:#}")),
+            },
+            profile: profile_choice(profiles, requested),
+            profiles: match profiles {
+                Ok(None) => Profiles::None,
+                Ok(Some(profiles)) => {
+                    Profiles::Loaded(profiles.profiles().map(profile_entry).collect())
+                }
+                Err(error) => Profiles::Invalid(format!("{error:#}")),
+            },
+            manifests: manifests(service, plan.as_ref().ok()),
         }
     }
+}
+
+fn profile_choice(
+    profiles: &Result<Option<LaunchProfiles>>,
+    requested: Option<&str>,
+) -> ProfileChoice {
+    match profiles {
+        Ok(None) => ProfileChoice::Selected(requested.map(str::to_string)),
+        Ok(Some(profiles)) => match profiles.select(requested) {
+            Ok(profile) => {
+                ProfileChoice::Selected(profile.map(|profile| profile.name.as_str().to_string()))
+            }
+            Err(error) => ProfileChoice::Refused(format!("{error:#}")),
+        },
+        Err(error) => ProfileChoice::Refused(format!("{error:#}")),
+    }
+}
+
+/// The service folder's and the checkout root's `package.json`: what the
+/// detection of its package manager, script and framework reads.
+fn manifests(service: &ConfiguredService, plan: Option<&LaunchPlan>) -> Vec<Manifest> {
+    let mut folders: Vec<PathBuf> = match plan {
+        Some(plan) => vec![plan.workdir.clone(), plan.project_root.clone()],
+        None => service
+            .project_root_path
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+    };
+    folders.dedup();
+    folders
+        .into_iter()
+        .map(|folder| {
+            let path = folder.join("package.json");
+            Manifest {
+                content: fs::read_to_string(&path).ok(),
+                path,
+            }
+        })
+        .collect()
 }
 
 fn profile_entry(profile: &LaunchProfile) -> ProfileEntry {
@@ -337,6 +427,9 @@ mod tests {
     #[test]
     fn a_revision_is_16_hex_digits_that_depend_on_the_key() {
         let definition = LaunchDefinition {
+            plan: PlanEntry::Unavailable("no folder".into()),
+            profile: ProfileChoice::Selected(None),
+            manifests: Vec::new(),
             service: ServiceEntry {
                 project_id: "app".into(),
                 environment: Some("primary".into()),

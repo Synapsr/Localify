@@ -1,16 +1,18 @@
 //! Gathers the facts of this machine's inventory (docs/remote-machines.md,
 //! "Inventory") and projects them: the configured projects, environments and
-//! services, the launch profiles of their checkouts, the run records in
-//! `services/`, a TCP connect to each service's port, and the public URLs the
-//! daemon last learned from Localify Cloud. A profile's values never leave
-//! this module: only each service's revision does.
+//! services, the plan `localify dev` resolves for each, the launch profiles of
+//! their checkouts, the run records in `services/`, a TCP connect to each
+//! service's port, and the public URLs the daemon last learned from Localify
+//! Cloud. A profile's values never leave this module: only each service's
+//! revision does.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use base64::Engine;
@@ -26,14 +28,20 @@ use crate::infrastructure::cloud::types::{PublicUrl, PublicUrlState};
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredProjectEnvironment, ConfiguredService,
 };
+use crate::infrastructure::launch_plan::{self, LaunchPlan, service_with_project_root};
 use crate::infrastructure::launch_profiles::LaunchProfiles;
 use crate::infrastructure::launch_rev::{LaunchDefinition, LaunchRevKey, random_bytes};
 use crate::infrastructure::running_services::{
     RunState, RunningService, RunningServiceStore, ServiceKey, ServiceOrigin,
 };
 
-/// How long a port has to accept a connection.
+/// How long one port has to accept a connection.
 const PORT_TIMEOUT: Duration = Duration::from_millis(200);
+/// How long all the ports of one snapshot have: a port not probed by then is
+/// unknown.
+const PROBE_DEADLINE: Duration = Duration::from_secs(1);
+/// Threads that probe ports, whatever their number.
+const PROBE_WORKERS: usize = 16;
 /// `<slug>--<label>` is one DNS label.
 const MAX_DNS_LABEL: usize = 63;
 
@@ -46,14 +54,52 @@ pub struct PublicFacts {
     pub tunnel_connected: bool,
 }
 
-/// The daemon's inventory: where its config and secret live, and the counter
-/// that numbers its snapshots for as long as it runs.
+/// How many probe threads run at once, and the most that ever did.
+#[derive(Debug, Default)]
+pub struct ProbeGauge {
+    live: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl ProbeGauge {
+    /// The most probe threads that ran at once.
+    #[cfg(test)]
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    fn enter(&self) -> ProbeSlot<'_> {
+        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(live, Ordering::SeqCst);
+        ProbeSlot(self)
+    }
+}
+
+/// One running probe thread, counted until it ends.
+struct ProbeSlot<'a>(&'a ProbeGauge);
+
+impl Drop for ProbeSlot<'_> {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The daemon's inventory: where its config and secret live, the counter
+/// that numbers its snapshots for as long as it runs, and the build in
+/// progress, of which there is at most one.
 pub struct LocalInventory {
     config_path: PathBuf,
     data_dir: PathBuf,
     /// `None`: the user's own `services/`, found when a snapshot is taken.
     services_dir: Option<PathBuf>,
     revisions: Mutex<Revisions>,
+    /// Held for a whole build.
+    building: Mutex<()>,
+    /// How many builds completed, and the last one's snapshot.
+    built: AtomicU64,
+    last: Mutex<Option<Snapshot>>,
+    /// Its probe threads: at most [`PROBE_WORKERS`], since builds never overlap.
+    probes: ProbeGauge,
 }
 
 impl LocalInventory {
@@ -66,6 +112,10 @@ impl LocalInventory {
             data_dir,
             services_dir: None,
             revisions: Mutex::new(Revisions::new(URL_SAFE_NO_PAD.encode(epoch))),
+            building: Mutex::new(()),
+            built: AtomicU64::new(0),
+            last: Mutex::new(None),
+            probes: ProbeGauge::default(),
         })
     }
 
@@ -77,9 +127,34 @@ impl LocalInventory {
     }
 
     /// A fresh snapshot, numbered: the revision only moves when its content
-    /// changed. Settings and the app bridge come later (PR 2 and PR 4), so
-    /// until then every control is off and the app counts as absent.
-    pub fn snapshot(&self, public: &PublicFacts) -> Result<Snapshot> {
+    /// changed. One build runs at a time: a request that arrives during one
+    /// waits for it and shares its snapshot. `project_roots` are the local
+    /// checkouts the app knows, as `localify dev` reads them. Settings and the
+    /// app bridge come later (PR 2 and PR 4), so until then every control is
+    /// off and the app counts as absent.
+    pub fn snapshot(
+        &self,
+        public: &PublicFacts,
+        project_roots: &HashMap<String, PathBuf>,
+    ) -> Result<Snapshot> {
+        let seen = self.built.load(Ordering::SeqCst);
+        let _building = lock(&self.building);
+        if self.built.load(Ordering::SeqCst) != seen
+            && let Some(last) = lock(&self.last).clone()
+        {
+            return Ok(last);
+        }
+        let snapshot = self.build(public, project_roots)?;
+        *lock(&self.last) = Some(snapshot.clone());
+        self.built.fetch_add(1, Ordering::SeqCst);
+        Ok(snapshot)
+    }
+
+    fn build(
+        &self,
+        public: &PublicFacts,
+        project_roots: &HashMap<String, PathBuf>,
+    ) -> Result<Snapshot> {
         let config = ConfigStore::new(self.config_path.clone()).load()?;
         let store = match &self.services_dir {
             Some(dir) => RunningServiceStore::new(dir.clone()),
@@ -91,15 +166,36 @@ impl LocalInventory {
             app: AppPresence::Absent,
             tunnel_connected: public.tunnel_connected,
         };
-        let items = gather(&config, &store, &key, public)?
+        let observed = Observed {
+            config: &config,
+            store: &store,
+            key: &key,
+            public,
+            project_roots,
+            probes: &self.probes,
+        };
+        let items = gather(&observed)?
             .into_iter()
             .map(|facts| inventory_item(facts, &context))
             .collect();
-        self.revisions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .snapshot(items)
+        lock(&self.revisions).snapshot(items)
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// What a snapshot is gathered from.
+pub struct Observed<'a> {
+    pub config: &'a Config,
+    pub store: &'a RunningServiceStore,
+    pub key: &'a LaunchRevKey,
+    pub public: &'a PublicFacts,
+    pub project_roots: &'a HashMap<String, PathBuf>,
+    pub probes: &'a ProbeGauge,
 }
 
 /// One service in one environment, with the port it listens on.
@@ -111,49 +207,37 @@ struct Placed {
 
 /// The facts of every configured service with a proxy target, in every
 /// environment of its project. A static or targetless service runs nothing.
-pub fn gather(
-    config: &Config,
-    store: &RunningServiceStore,
-    key: &LaunchRevKey,
-    public: &PublicFacts,
-) -> Result<Vec<ServiceFacts>> {
-    let placed = place_services(config);
-    let reachable = probe_ports(placed.iter().map(|placed| placed.port).collect());
-    let records = store.list()?;
-    let observed = Observed {
-        config,
-        store,
-        key,
-        public,
-        records: &records,
-    };
+pub fn gather(observed: &Observed<'_>) -> Result<Vec<ServiceFacts>> {
+    let placed = place_services(observed.config, observed.project_roots);
+    let ports = placed.iter().map(|placed| placed.port).collect();
+    let reachable = probe_ports(ports, PROBE_DEADLINE, observed.probes);
+    let records = observed.store.list()?;
     // Services of one checkout share its profiles.
-    let mut checkouts: HashMap<Option<String>, Result<Option<LaunchProfiles>>> = HashMap::new();
+    let mut checkouts: HashMap<Option<PathBuf>, Result<Option<LaunchProfiles>>> = HashMap::new();
     placed
         .into_iter()
         .map(|placed| {
+            let plan = launch_plan::dev_plan(placed.service.clone(), placed.port);
+            let root = profiles_root(&placed.service, plan.as_ref().ok());
             let profiles = checkouts
-                .entry(placed.service.project_root_path.clone())
-                .or_insert_with(|| load_profiles(placed.service.project_root_path.as_deref()));
-            let reachable = reachable.get(&placed.port).copied().unwrap_or(false);
-            service_facts(placed, reachable, profiles, &observed)
+                .entry(root.clone())
+                .or_insert_with(|| load_profiles(root.as_deref()));
+            let reachable = reachable.get(&placed.port).copied();
+            let record = records.iter().find(|record| record.key == key_of(&placed));
+            service_facts(placed, reachable, &plan, profiles, record, observed)
         })
         .collect()
 }
 
-/// What every service's facts are read against.
-struct Observed<'a> {
-    config: &'a Config,
-    store: &'a RunningServiceStore,
-    key: &'a LaunchRevKey,
-    public: &'a PublicFacts,
-    records: &'a [RunningService],
-}
-
 /// Every service of the primary checkout, as `localify dev` runs it without
-/// `--env`, and the services each other environment maps.
-fn place_services(config: &Config) -> Vec<Placed> {
-    let services = config.configured_services();
+/// `--env`, and the services each other environment maps, each with the
+/// local checkout the app knows when the config's is gone.
+fn place_services(config: &Config, project_roots: &HashMap<String, PathBuf>) -> Vec<Placed> {
+    let services: Vec<_> = config
+        .configured_services()
+        .into_iter()
+        .map(|service| service_with_project_root(service, project_roots))
+        .collect();
     let mut placed = Vec::new();
     for environment in config.configured_project_environments(None) {
         let of_project = services
@@ -163,7 +247,7 @@ fn place_services(config: &Config) -> Vec<Placed> {
             let service = if environment.primary {
                 Some(service.clone())
             } else {
-                config.environment_service(service.clone(), &environment)
+                launch_plan::environment_service(config, service.clone(), &environment)
             };
             let Some(service) = service else { continue };
             let Some(RouteTarget::Proxy(target)) = &service.primary_target else {
@@ -180,31 +264,45 @@ fn place_services(config: &Config) -> Vec<Placed> {
     placed
 }
 
-fn load_profiles(root: Option<&str>) -> Result<Option<LaunchProfiles>> {
+fn key_of(placed: &Placed) -> ServiceKey {
+    ServiceKey {
+        project_id: placed.service.project_id.clone(),
+        environment: Some(placed.environment.slug.clone()),
+        service_id: placed.service.id.clone(),
+    }
+}
+
+/// Where `localify dev` reads the service's launch profiles: its plan's
+/// project root, or the configured one when no plan resolves.
+fn profiles_root(service: &ConfiguredService, plan: Option<&LaunchPlan>) -> Option<PathBuf> {
+    match plan {
+        Some(plan) => Some(plan.project_root.clone()),
+        None => service.project_root_path.as_deref().map(PathBuf::from),
+    }
+}
+
+fn load_profiles(root: Option<&Path>) -> Result<Option<LaunchProfiles>> {
     match root {
-        Some(root) => LaunchProfiles::load(Path::new(root)),
+        Some(root) => LaunchProfiles::load(root),
         None => Ok(None),
     }
 }
 
 fn service_facts(
     placed: Placed,
-    reachable: bool,
+    reachable: Option<bool>,
+    plan: &Result<LaunchPlan>,
     profiles: &Result<Option<LaunchProfiles>>,
+    record: Option<&RunningService>,
     observed: &Observed<'_>,
 ) -> Result<ServiceFacts> {
+    let environment_slug = placed.environment.slug.clone();
     let Placed {
         environment,
         service,
         port,
     } = placed;
-    let key = ServiceKey {
-        project_id: service.project_id.clone(),
-        environment: Some(environment.slug.clone()),
-        service_id: service.id.clone(),
-    };
-    let definition = LaunchDefinition::new(&service, key.environment.as_deref(), profiles);
-    let record = observed.records.iter().find(|record| record.key == key);
+    let definition = LaunchDefinition::new(&service, Some(&environment_slug), plan, profiles, None);
     Ok(ServiceFacts {
         project: ProjectRef {
             id: service.project_id.clone(),
@@ -356,25 +454,55 @@ fn local_url(config: &Config, service: &ConfiguredService) -> String {
     }
 }
 
-/// Connects to every port on 127.0.0.1 at once, so a snapshot waits at most
-/// one timeout.
-fn probe_ports(ports: BTreeSet<u16>) -> HashMap<u16, bool> {
+/// Connects to each port on 127.0.0.1 from at most [`PROBE_WORKERS`] threads
+/// until `deadline` passes. A port missing from the answer was not probed in
+/// time, or its probe failed: it is unknown. A thread that cannot be created
+/// leaves its share to the others, or every port unknown; nothing panics.
+fn probe_ports(ports: BTreeSet<u16>, deadline: Duration, gauge: &ProbeGauge) -> HashMap<u16, bool> {
+    let ports: Vec<u16> = ports.into_iter().collect();
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(HashMap::new());
+    let until = Instant::now() + deadline;
     thread::scope(|scope| {
-        let probes: Vec<_> = ports
-            .into_iter()
-            .map(|port| {
-                let address = SocketAddr::from(([127, 0, 0, 1], port));
-                (
-                    port,
-                    scope.spawn(move || TcpStream::connect_timeout(&address, PORT_TIMEOUT).is_ok()),
-                )
+        let workers: Vec<_> = (0..PROBE_WORKERS.min(ports.len()))
+            .map_while(|_| {
+                thread::Builder::new()
+                    .name("inventory-probe".into())
+                    .spawn_scoped(scope, || {
+                        let _slot = gauge.enter();
+                        probe_worker(&ports, &next, &results, until);
+                    })
+                    .ok()
             })
             .collect();
-        probes
-            .into_iter()
-            .map(|(port, probe)| (port, probe.join().unwrap_or(false)))
-            .collect()
-    })
+        // Joined by hand, so a worker's panic is not the scope's.
+        for worker in workers {
+            let _ = worker.join();
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn probe_worker(
+    ports: &[u16],
+    next: &AtomicUsize,
+    results: &Mutex<HashMap<u16, bool>>,
+    until: Instant,
+) {
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        let Some(&port) = ports.get(next.fetch_add(1, Ordering::SeqCst)) else {
+            return;
+        };
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let reachable = TcpStream::connect_timeout(&address, PORT_TIMEOUT.min(left)).is_ok();
+        lock(results).insert(port, reachable);
+    }
 }
 
 fn rfc3339(unix_seconds: u64) -> String {
@@ -391,6 +519,13 @@ mod tests {
     use crate::infrastructure::process;
     use crate::infrastructure::running_services::{RunIdentity, RunOutput};
     use crate::infrastructure::runs::RunId;
+
+    /// Ports below the ephemeral range, which answer or refuse at once on
+    /// loopback. Nothing is bound for them, so no other test, whose free
+    /// ports are ephemeral, finds one of its ports taken.
+    fn low_ports(count: u16) -> BTreeSet<u16> {
+        (1024..1024 + count).collect()
+    }
 
     const PROFILES: &str = r#"
 [profiles.default]
@@ -489,7 +624,15 @@ domain = "web.feature.localify"
         }
 
         fn gather_with(&self, config: &Config) -> Vec<ServiceFacts> {
-            gather(config, &self.store(), &self.key(), &PublicFacts::default()).unwrap()
+            gather(&Observed {
+                config,
+                store: &self.store(),
+                key: &self.key(),
+                public: &PublicFacts::default(),
+                project_roots: &HashMap::new(),
+                probes: &ProbeGauge::default(),
+            })
+            .unwrap()
         }
 
         /// The primary checkout's service.
@@ -638,7 +781,7 @@ domain = "web.feature.localify"
 
         assert_eq!(item.process, ProcessState::Running);
         assert_eq!(item.owner, Some(Owner::Background));
-        assert!(!item.port.reachable);
+        assert_eq!(item.port.reachable, Some(false));
         assert!(item.output.available);
         assert_eq!(
             item.output.run_id.as_deref(),
@@ -657,7 +800,7 @@ domain = "web.feature.localify"
 
         let item = inventory_item(machine.primary(), &open());
 
-        assert!(item.port.reachable);
+        assert_eq!(item.port.reachable, Some(true));
         assert_eq!(item.process, ProcessState::Stopped);
         assert_eq!(item.owner, Some(Owner::Unknown));
         assert_eq!(item.output.reason, Some(OutputReason::UnknownOwner));
@@ -697,14 +840,19 @@ domain = "web.feature.localify"
             .unwrap()
             .with_services_dir(machine.path("services"));
 
-        let snapshot = inventory.snapshot(&PublicFacts::default()).unwrap();
+        let snapshot = inventory
+            .snapshot(&PublicFacts::default(), &HashMap::new())
+            .unwrap();
 
         assert_eq!(snapshot.items.len(), 2);
         assert!(snapshot.items.iter().all(|item| {
             item.controls.start.code == Some(Refusal::ControlDisabled)
                 && item.controls.restart.code == Some(Refusal::ControlDisabled)
         }));
-        assert_eq!(inventory.snapshot(&PublicFacts::default()).unwrap().rev, 1);
+        let again = inventory
+            .snapshot(&PublicFacts::default(), &HashMap::new())
+            .unwrap();
+        assert_eq!(again.rev, 1);
     }
 
     #[test]
@@ -765,5 +913,118 @@ domain = "web.feature.localify"
         let long = format!("{}.app.localify", "x".repeat(60));
         assert!(public_url_facts(&long, &public).is_none());
         assert!(public_url_facts("other.localify", &public).is_none());
+    }
+
+    #[test]
+    fn changing_only_the_package_manager_changes_the_revision() {
+        let machine = Machine::new();
+        let manifest = machine.path("app").join("package.json");
+        let with_manager = |manager: &str| {
+            format!(r#"{{"packageManager":"{manager}","scripts":{{"dev":"vite"}}}}"#)
+        };
+        fs::write(&manifest, with_manager("pnpm@9.0.0")).unwrap();
+        let pnpm = machine.primary().service.config_rev;
+        let again = machine.primary().service.config_rev;
+
+        fs::write(&manifest, with_manager("npm@10.0.0")).unwrap();
+        let npm = machine.primary().service.config_rev;
+
+        assert_eq!(pnpm, again);
+        assert_ne!(pnpm, npm);
+    }
+
+    #[test]
+    fn the_revision_covers_the_plan_dev_would_run() {
+        let machine = Machine::new();
+        fs::write(
+            machine.path("app").join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0","scripts":{"dev":"vite"}}"#,
+        )
+        .unwrap();
+        let service = machine
+            .config()
+            .configured_services()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let plan = launch_plan::dev_plan(service, machine.port).unwrap();
+
+        let port = machine.port.to_string();
+        assert_eq!(
+            plan.argv,
+            ["pnpm", "run", "dev", "--host", "127.0.0.1", "--port", &port]
+        );
+        assert_eq!(plan.injected, ["--host", "127.0.0.1", "--port", &port]);
+        assert_eq!(plan.workdir, machine.path("app"));
+    }
+
+    #[test]
+    fn many_ports_are_probed_by_a_bounded_pool_within_the_deadline() {
+        let ports = low_ports(500);
+        let gauge = ProbeGauge::default();
+
+        let started = Instant::now();
+        let probed = probe_ports(ports.clone(), PROBE_DEADLINE, &gauge);
+
+        assert!(started.elapsed() < PROBE_DEADLINE + Duration::from_millis(500));
+        assert!(gauge.peak() <= PROBE_WORKERS, "{}", gauge.peak());
+        assert!(probed.keys().all(|port| ports.contains(port)));
+        assert!(!probed.is_empty());
+    }
+
+    #[test]
+    fn ports_not_probed_before_the_deadline_are_unknown() {
+        let probed = probe_ports(low_ports(20), Duration::ZERO, &ProbeGauge::default());
+
+        assert!(probed.is_empty());
+    }
+
+    #[test]
+    fn overlapping_snapshots_share_one_build_at_a_time() {
+        let machine = Machine::new();
+        let mut config = machine.config_toml();
+        for (index, port) in low_ports(500).into_iter().enumerate() {
+            config.push_str(&format!(
+                r#"
+[domains."s{index}.localify"]
+pattern = "s{index}.localify"
+project = "many"
+
+[[domains."s{index}.localify".routes]]
+path = "/"
+target = "127.0.0.1:{port}"
+"#
+            ));
+        }
+        config.push_str("\n[projects.many]\nname = \"Many\"\n");
+        fs::write(machine.path("config.toml"), config).unwrap();
+        let inventory = LocalInventory::new(machine.path("config.toml"), machine.path("data"))
+            .unwrap()
+            .with_services_dir(machine.path("services"));
+
+        let started = Instant::now();
+        let snapshots: Vec<Snapshot> = thread::scope(|scope| {
+            let requests: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        inventory
+                            .snapshot(&PublicFacts::default(), &HashMap::new())
+                            .unwrap()
+                    })
+                })
+                .collect();
+            requests
+                .into_iter()
+                .map(|request| request.join().unwrap())
+                .collect()
+        });
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let peak = inventory.probes.peak();
+        assert!(peak > 0 && peak <= PROBE_WORKERS, "{peak}");
+        assert!(inventory.built.load(Ordering::SeqCst) < 8, "shared builds");
+        assert!(snapshots.iter().all(|snapshot| snapshot.rev == 1));
+        assert_eq!(snapshots[0].items.len(), 502);
     }
 }

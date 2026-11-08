@@ -25,9 +25,10 @@ use crate::domain::value_objects::{ProxyTarget, RouteTarget};
 use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
-use crate::infrastructure::local_dev::{
-    LocalDevLaunchPlan, resolve_local_dev_launch, resolve_localify_dev_launch,
-    resolve_portable_local_dev_launch,
+use crate::infrastructure::launch_plan::{
+    self, LaunchCommand, LaunchPlan, apply_local_dev_launch, local_dev_launch_for_service,
+    service_cwd_match_path, service_with_dev_launch, service_with_local_dev_launch,
+    service_with_project_root, service_workdir,
 };
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::project_marker::{
@@ -44,7 +45,7 @@ use crate::infrastructure::runs::output::{
 };
 use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
-    find_existing_vite_config_path, next_dev_host,
+    find_existing_vite_config_path,
 };
 
 const DEFAULT_URL_ENV_KEYS: &[&str] = &[
@@ -262,7 +263,7 @@ pub fn run(
     let effective_environment = effective_environment.as_deref();
 
     let command = if !has_override_command {
-        service.command.clone().ok_or_else(|| {
+        LaunchCommand::Detected(service.command.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "Service '{}' has no detected command. Run it with an override, for example: {} {} {} -- pnpm dev",
                 service.id,
@@ -270,9 +271,9 @@ pub fn run(
                 mode.command_name(),
                 service.id
             )
-        })?
+        })?)
     } else {
-        override_command
+        LaunchCommand::Override(override_command)
     };
 
     let proxy_target = service_proxy_target(&service)?;
@@ -293,18 +294,17 @@ pub fn run(
     let lock = admit(&store, &key, replace)?;
     ensure_port_available(port, &service)?;
 
-    let workdir = service_workdir(&service)?;
-    let command = if !has_override_command {
-        let project_root = service_project_root(&service, &workdir);
-        prepare_local_dev_command(command, &workdir, &project_root, port)?
-    } else {
-        command
-    };
+    let LaunchPlan {
+        argv: command,
+        workdir,
+        project_root,
+        ..
+    } = launch_plan::resolve(&service, command, port)?;
     warn_if_daemon_is_stopped(ctx);
 
     let profile = launch_profile::prepare(
         &launch_profile,
-        &service_project_root(&service, &workdir),
+        &project_root,
         &workdir,
         &effective_current_dir()?,
     )?;
@@ -927,14 +927,6 @@ fn profile_keys(profile: Option<&PreparedProfile>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn service_project_root(service: &ConfiguredService, workdir: &Path) -> PathBuf {
-    service
-        .project_root_path
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workdir.to_path_buf())
-}
-
 /// Slug of the project environment the service runs in, so the desktop can
 /// put the launch profile badge on the right row.
 fn environment_slug(
@@ -1465,19 +1457,6 @@ fn service_cwd_match(
         .or_else(|| local_dev_service_cwd_match(service, cwd, &root_path))
 }
 
-fn service_cwd_match_path(service: &ConfiguredService, root_path: &Path) -> Option<PathBuf> {
-    let path = service.path.as_deref()?.trim();
-    if path.is_empty() {
-        return None;
-    }
-    let path = Path::new(path);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root_path.join(path)
-    })
-}
-
 fn pathless_service_cwd_match(
     service: &ConfiguredService,
     cwd: &Path,
@@ -1534,377 +1513,11 @@ fn local_dev_service_cwd_match(
     Some((service, launch.package_dir))
 }
 
-fn service_with_local_dev_launch(service: ConfiguredService) -> ConfiguredService {
-    let service = service_without_legacy_dev_localify_command(service);
-    let Some(root_path) = service.project_root_path.as_ref().map(PathBuf::from) else {
-        return service;
-    };
-
-    if let Some(launch) = local_dev_launch_for_service(&service, &root_path) {
-        let service = apply_local_dev_launch(service, &root_path, &launch);
-        if !is_legacy_dev_localify_launch(&launch) {
-            return service;
-        }
-
-        return portable_local_dev_launch_for_service(&service, &root_path)
-            .map(|launch| apply_local_dev_launch(service.clone(), &root_path, &launch))
-            .unwrap_or(service);
-    }
-
-    portable_local_dev_launch_for_service(&service, &root_path)
-        .map(|launch| apply_local_dev_launch(service.clone(), &root_path, &launch))
-        .unwrap_or(service)
-}
-
 fn service_with_launch_for_mode(service: ConfiguredService, mode: RunMode) -> ConfiguredService {
     match mode {
         RunMode::Run => service_with_local_dev_launch(service),
         RunMode::Dev => service_with_dev_launch(service),
     }
-}
-
-fn service_with_dev_launch(service: ConfiguredService) -> ConfiguredService {
-    let service = service_without_legacy_dev_localify_command(service);
-    let Some(root_path) = service.project_root_path.as_ref().map(PathBuf::from) else {
-        return service;
-    };
-    let launch = localify_dev_launch_for_service(&service, &root_path);
-    let Some(launch) = launch else {
-        return service;
-    };
-
-    let mut service = service;
-    service.command = None;
-    apply_local_dev_launch(service, &root_path, &launch)
-}
-
-fn localify_dev_launch_for_service(
-    service: &ConfiguredService,
-    root_path: &Path,
-) -> Option<LocalDevLaunchPlan> {
-    if let Some(package_scope) = service_cwd_match_path(service, root_path) {
-        return resolve_localify_dev_launch(root_path, Some(&package_scope)).ok();
-    }
-
-    if let Some(legacy_launch) = local_dev_launch_for_service(service, root_path)
-        && let Ok(launch) = resolve_localify_dev_launch(root_path, Some(&legacy_launch.package_dir))
-    {
-        return Some(launch);
-    }
-
-    if let Some(package_scope) = package_scope_for_service_name(service, root_path)
-        && let Ok(launch) = resolve_localify_dev_launch(root_path, Some(&package_scope))
-    {
-        return Some(launch);
-    }
-
-    resolve_localify_dev_launch(root_path, None).ok()
-}
-
-fn package_scope_for_service_name(
-    service: &ConfiguredService,
-    root_path: &Path,
-) -> Option<PathBuf> {
-    let labels = [
-        service.id.trim().to_ascii_lowercase(),
-        service.name.trim().to_ascii_lowercase(),
-    ];
-
-    for directory in ["apps", "packages", "services"] {
-        let parent = root_path.join(directory);
-        let Ok(entries) = fs::read_dir(parent) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.join("package.json").is_file() {
-                continue;
-            }
-
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let name = name.trim().to_ascii_lowercase();
-            if labels
-                .iter()
-                .any(|label| !label.is_empty() && label == &name)
-            {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
-fn local_dev_launch_for_service(
-    service: &ConfiguredService,
-    root_path: &Path,
-) -> Option<LocalDevLaunchPlan> {
-    if service
-        .path
-        .as_deref()
-        .is_some_and(|path| !path.trim().is_empty())
-        && service.command.is_some()
-    {
-        return None;
-    }
-
-    let target = match service.primary_target.as_ref()? {
-        RouteTarget::Proxy(target) => target.to_string(),
-        RouteTarget::StaticFiles(_) => return None,
-    };
-    resolve_local_dev_launch(root_path, &target).ok()
-}
-
-fn inferred_path_from_configured_route_launch(service: &ConfiguredService) -> Option<String> {
-    let root_path = service.project_root_path.as_ref().map(PathBuf::from)?;
-    let launch = local_dev_launch_for_service(service, &root_path)?;
-    let relative_path = launch
-        .package_dir
-        .strip_prefix(&root_path)
-        .unwrap_or(&launch.package_dir);
-    if relative_path.as_os_str().is_empty() {
-        return None;
-    }
-
-    Some(relative_path.display().to_string())
-}
-
-fn portable_local_dev_launch_for_service(
-    service: &ConfiguredService,
-    root_path: &Path,
-) -> Option<LocalDevLaunchPlan> {
-    if service.command.is_some() {
-        return None;
-    }
-
-    let package_scope = service_cwd_match_path(service, root_path);
-    resolve_portable_local_dev_launch(root_path, package_scope.as_deref()).ok()
-}
-
-fn apply_local_dev_launch(
-    mut service: ConfiguredService,
-    root_path: &Path,
-    launch: &LocalDevLaunchPlan,
-) -> ConfiguredService {
-    if service
-        .path
-        .as_deref()
-        .is_none_or(|path| path.trim().is_empty())
-    {
-        let relative_path = launch
-            .package_dir
-            .strip_prefix(root_path)
-            .unwrap_or(&launch.package_dir);
-        if !relative_path.as_os_str().is_empty() {
-            service.path = Some(relative_path.display().to_string());
-        }
-    }
-    // `dev-localify` is legacy metadata only. Localify can use it to recover
-    // old service paths, but should never choose it as a launch command.
-    if service.command.is_none() && !is_legacy_dev_localify_launch(launch) {
-        service.command = Some(launch.command_parts());
-    }
-
-    service
-}
-
-fn service_without_legacy_dev_localify_command(
-    mut service: ConfiguredService,
-) -> ConfiguredService {
-    if service
-        .command
-        .as_deref()
-        .is_some_and(command_invokes_dev_localify)
-    {
-        service.command = None;
-    }
-    service
-}
-
-fn is_legacy_dev_localify_launch(launch: &LocalDevLaunchPlan) -> bool {
-    launch.script_name == "dev-localify"
-}
-
-fn command_invokes_dev_localify(command: &[String]) -> bool {
-    match command {
-        [binary, script] if binary == "yarn" && script == "dev-localify" => true,
-        [binary, script]
-            if matches!(binary.as_str(), "pnpm" | "bun") && script == "dev-localify" =>
-        {
-            true
-        }
-        [binary, run, script, ..]
-            if matches!(binary.as_str(), "npm" | "pnpm" | "bun")
-                && run == "run"
-                && script == "dev-localify" =>
-        {
-            true
-        }
-        _ => false,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PackageScriptRunner {
-    Npm,
-    DirectArgs,
-    Yarn,
-}
-
-fn prepare_local_dev_command(
-    command: Vec<String>,
-    workdir: &Path,
-    project_root: &Path,
-    port: u16,
-) -> Result<Vec<String>> {
-    let Some((runner, script_name)) = package_script_invocation(&command) else {
-        return Ok(command);
-    };
-    let Some(script) = read_package_script(workdir, script_name)? else {
-        return Ok(command);
-    };
-    let next_host = if script.contains("next dev") {
-        next_dev_host(workdir, project_root)
-    } else {
-        "127.0.0.1"
-    };
-    let args = localify_dev_args_for_script(&script, port, next_host);
-    if args.is_empty() {
-        return Ok(command);
-    }
-
-    Ok(append_package_script_args(command, runner, args))
-}
-
-fn package_script_invocation(command: &[String]) -> Option<(PackageScriptRunner, &str)> {
-    match command {
-        [binary, script] if binary == "yarn" => Some((PackageScriptRunner::Yarn, script.as_str())),
-        [binary, run, script, ..] if binary == "npm" && run == "run" => {
-            Some((PackageScriptRunner::Npm, script.as_str()))
-        }
-        [binary, run, script, ..] if matches!(binary.as_str(), "pnpm" | "bun") && run == "run" => {
-            Some((PackageScriptRunner::DirectArgs, script.as_str()))
-        }
-        _ => None,
-    }
-}
-
-fn read_package_script(workdir: &Path, script_name: &str) -> Result<Option<String>> {
-    let package_json_path = workdir.join("package.json");
-    if !package_json_path.is_file() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(&package_json_path)
-        .with_context(|| format!("Failed to read '{}'", package_json_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse '{}'", package_json_path.display()))?;
-
-    Ok(manifest
-        .get("scripts")
-        .and_then(|scripts| scripts.get(script_name))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string))
-}
-
-fn localify_dev_args_for_script(script: &str, port: u16, next_host: &str) -> Vec<String> {
-    let trimmed = script.trim();
-    if trimmed.contains("next dev") {
-        return host_and_port_args(
-            trimmed,
-            "--hostname",
-            &["--hostname", "-H"],
-            next_host,
-            port,
-        );
-    }
-    if is_vite_dev_script(trimmed) || contains_dev_command(trimmed, "astro dev") {
-        return host_and_port_args(trimmed, "--host", &["--host"], "127.0.0.1", port);
-    }
-    if contains_dev_command(trimmed, "nuxt dev") {
-        return host_and_port_args(trimmed, "--host", &["--host"], "127.0.0.1", port);
-    }
-    if contains_dev_command(trimmed, "email dev") {
-        return arg_if_needed(trimmed, "--port", &["--port", "-p"], &port.to_string());
-    }
-
-    Vec::new()
-}
-
-fn host_and_port_args(
-    script: &str,
-    host_flag: &str,
-    host_flags: &[&str],
-    host: &str,
-    port: u16,
-) -> Vec<String> {
-    let mut args = arg_if_needed(script, host_flag, host_flags, host);
-    args.extend(arg_if_needed(
-        script,
-        "--port",
-        &["--port", "-p"],
-        &port.to_string(),
-    ));
-    args
-}
-
-fn arg_if_needed(script: &str, flag: &str, aliases: &[&str], desired: &str) -> Vec<String> {
-    if script_has_flag_value(script, aliases, desired) {
-        Vec::new()
-    } else {
-        vec![flag.into(), desired.into()]
-    }
-}
-
-fn script_has_flag_value(script: &str, flags: &[&str], desired: &str) -> bool {
-    let parts = script.split_whitespace().collect::<Vec<_>>();
-
-    for (index, part) in parts.iter().enumerate() {
-        for flag in flags {
-            if part == flag && parts.get(index + 1).is_some_and(|value| *value == desired) {
-                return true;
-            }
-
-            let prefix = format!("{flag}=");
-            if part
-                .strip_prefix(&prefix)
-                .is_some_and(|value| value == desired)
-            {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn is_vite_dev_script(script: &str) -> bool {
-    script == "vite" || script.starts_with("vite ") || script.contains(" vite ")
-}
-
-fn contains_dev_command(script: &str, command: &str) -> bool {
-    script == command
-        || script.starts_with(&format!("{command} "))
-        || script.contains(&format!(" {command}"))
-}
-
-fn append_package_script_args(
-    mut command: Vec<String>,
-    runner: PackageScriptRunner,
-    args: Vec<String>,
-) -> Vec<String> {
-    match runner {
-        PackageScriptRunner::Npm => {
-            if !command.iter().any(|part| part == "--") {
-                command.push("--".into());
-            }
-            command.extend(args);
-        }
-        PackageScriptRunner::DirectArgs | PackageScriptRunner::Yarn => command.extend(args),
-    }
-    command
 }
 
 fn prompt_service_selection(
@@ -2036,31 +1649,17 @@ fn service_for_environment(
     environment: &ConfiguredProjectEnvironment,
     ctx: &AppContext,
 ) -> Result<ConfiguredService> {
-    let inferred_service_path = service
-        .path
-        .clone()
-        .or_else(|| inferred_path_from_configured_route_launch(&service));
     let (service_id, project_id) = (service.id.clone(), service.project_id.clone());
-    let mut service = ctx
-        .config_store
-        .load()?
-        .environment_service(service, environment)
-        .ok_or_else(|| {
+    launch_plan::environment_service(&ctx.config_store.load()?, service, environment).ok_or_else(
+        || {
             anyhow::anyhow!(
                 "Service '{service_id}' is unavailable in environment '{}'. Re-run '{} project env ensure --project {project_id} --name {}'.",
                 environment.slug,
                 BRANDING.cli_command(),
                 environment.slug
             )
-        })?;
-    if service
-        .path
-        .as_deref()
-        .is_none_or(|path| path.trim().is_empty())
-    {
-        service.path = inferred_service_path;
-    }
-    Ok(service)
+        },
+    )
 }
 
 fn project_id_for_cwd(services: &[ConfiguredService], cwd: &Path) -> Option<String> {
@@ -2108,21 +1707,6 @@ fn load_project_roots() -> HashMap<String, PathBuf> {
         .into_iter()
         .map(|(project_id, root_path)| (project_id, PathBuf::from(root_path)))
         .collect()
-}
-
-fn service_with_project_root(
-    mut service: ConfiguredService,
-    project_roots: &HashMap<String, PathBuf>,
-) -> ConfiguredService {
-    let should_use_local_root = service
-        .project_root_path
-        .as_deref()
-        .map(|root_path| !Path::new(root_path).exists())
-        .unwrap_or(true);
-    if should_use_local_root && let Some(root_path) = project_roots.get(&service.project_id) {
-        service.project_root_path = Some(root_path.display().to_string());
-    }
-    service
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2242,47 +1826,6 @@ fn ensure_port_available(port: u16, service: &ConfiguredService) -> Result<()> {
             service.id
         ),
     }
-}
-
-fn service_workdir(service: &ConfiguredService) -> Result<PathBuf> {
-    let root_path = service.project_root_path.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Service '{}' is unavailable: project '{}' has no root path metadata.",
-            service.id,
-            service.project_id
-        )
-    })?;
-
-    let root_path = PathBuf::from(root_path);
-    let workdir = service
-        .path
-        .as_deref()
-        .map(Path::new)
-        .map(|path| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                root_path.join(path)
-            }
-        })
-        .unwrap_or(root_path);
-
-    if !workdir.exists() {
-        bail!(
-            "Service '{}' is unavailable: '{}' does not exist.",
-            service.id,
-            workdir.display()
-        );
-    }
-    if !workdir.is_dir() {
-        bail!(
-            "Service '{}' is unavailable: '{}' is not a directory.",
-            service.id,
-            workdir.display()
-        );
-    }
-
-    Ok(workdir)
 }
 
 fn warn_if_daemon_is_stopped(ctx: &AppContext) {
@@ -2515,6 +2058,10 @@ fn env_key_list(envs: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::launch_plan::{
+        command_invokes_dev_localify, inferred_path_from_configured_route_launch,
+        prepare_local_dev_command,
+    };
 
     fn running_web() -> RunningService {
         serde_json::from_value(serde_json::json!({

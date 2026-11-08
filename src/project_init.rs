@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::branding::BRANDING;
 use crate::domain::DomainName;
+use crate::infrastructure::launch_plan::next_dev_host;
 use crate::infrastructure::local_dev::extract_script_port;
 
 const SYNTHETIC_PRIMARY_SERVICE_ID: &str = "__primary__";
@@ -1139,54 +1140,6 @@ fn plan_dev_script_update(script: &str, port: &str, next_host: &str) -> Option<S
 }
 
 const LOOPBACK_HOST: &str = "127.0.0.1";
-
-/// The host a Next.js dev server should listen on behind Localify.
-///
-/// Next.js listening on 127.0.0.1 sends next-intl's locale rewrites back to
-/// itself over the network, as https, which fails with EPROTO
-/// (vercel/next.js#94745). On 0.0.0.0 the rewrite stays inside Next.js, but the
-/// dev server is open to the local network, so only next-intl apps get it.
-/// A monorepo can list next-intl in a parent package.json, up to the project
-/// root. Go back to 127.0.0.1 for every app once Next.js ships a fix.
-pub fn next_dev_host(package_dir: &Path, project_root: &Path) -> &'static str {
-    if uses_next_intl(package_dir, project_root) {
-        "0.0.0.0"
-    } else {
-        LOOPBACK_HOST
-    }
-}
-
-/// Detection only: a folder or package.json Localify cannot read counts as
-/// no next-intl, so it never stops a launch.
-fn uses_next_intl(package_dir: &Path, project_root: &Path) -> bool {
-    let (Ok(package_dir), Ok(project_root)) =
-        (package_dir.canonicalize(), project_root.canonicalize())
-    else {
-        return false;
-    };
-    if !package_dir.starts_with(&project_root) {
-        return lists_next_intl(&package_dir);
-    }
-    package_dir
-        .ancestors()
-        .take_while(|dir| dir.starts_with(&project_root))
-        .any(lists_next_intl)
-}
-
-fn lists_next_intl(dir: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(dir.join("package.json")) else {
-        return false;
-    };
-    let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
-        return false;
-    };
-    ["dependencies", "devDependencies"].iter().any(|field| {
-        manifest
-            .get(field)
-            .and_then(|deps| deps.get("next-intl"))
-            .is_some()
-    })
-}
 
 fn is_next_dev_script(script: &str) -> bool {
     script.trim().contains("next dev")

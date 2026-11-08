@@ -14,6 +14,7 @@ use crate::application::inventory::Have;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
+use localify::desktop::ProjectRootStore;
 
 /// Management commands sent over the Unix socket.
 #[derive(Debug, Deserialize)]
@@ -287,7 +288,17 @@ async fn inventory_answer(
         tunnel_connected: tunnel.status().await.tunnel == TunnelState::Connected,
     };
     let inventory = Arc::clone(inventory);
-    let built = tokio::task::spawn_blocking(move || inventory.snapshot(&public)).await;
+    let built = tokio::task::spawn_blocking(move || {
+        // The checkouts the app knows, as `localify dev` reads them.
+        let project_roots = ProjectRootStore::new_default()
+            .and_then(|store| store.load())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(project_id, root)| (project_id, PathBuf::from(root)))
+            .collect();
+        inventory.snapshot(&public, &project_roots)
+    })
+    .await;
     let snapshot = match built {
         Ok(Ok(snapshot)) => snapshot,
         Ok(Err(error)) => return MgmtResponse::error(format!("{error:#}")),

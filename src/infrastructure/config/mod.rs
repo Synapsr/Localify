@@ -336,7 +336,7 @@ impl Config {
     /// A service as it runs in one environment of its project: that
     /// environment's domain, checkout and route target in place of the
     /// primary ones. `None` when the environment does not map the service.
-    /// `localify dev --env` and the inventory both read a service this way.
+    /// `launch_plan::environment_service` adds the folder the route detects.
     pub fn environment_service(
         &self,
         mut service: ConfiguredService,

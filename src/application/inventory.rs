@@ -28,8 +28,9 @@ pub struct ServiceFacts {
     pub service: ServiceRef,
     pub local_url: String,
     pub port: u16,
-    /// A TCP connect to the port on 127.0.0.1 succeeded.
-    pub reachable: bool,
+    /// Whether a TCP connect to the port on 127.0.0.1 succeeded. `None`: it
+    /// could not be tried before the snapshot's deadline.
+    pub reachable: Option<bool>,
     /// The service's last recorded run.
     pub run: Option<RunFacts>,
     pub public_url: Option<PublicUrlFacts>,
@@ -202,7 +203,8 @@ pub enum ProcessState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PortState {
     pub number: u16,
-    pub reachable: bool,
+    /// `null`: not probed before the snapshot's deadline.
+    pub reachable: Option<bool>,
 }
 
 /// `{available: true, runId}` or `{available: false, reason}`.
@@ -355,36 +357,39 @@ fn process_state(run: Option<&RunFacts>) -> ProcessState {
 }
 
 /// Who holds the service: the running run's origin, or `Unknown` when the
-/// port answers and no running record explains it.
-fn owner(run: Option<&RunFacts>, reachable: bool) -> Option<Owner> {
+/// port answers and no running record explains it. A port not probed in time
+/// is not known to answer.
+fn owner(run: Option<&RunFacts>, reachable: Option<bool>) -> Option<Owner> {
     match run {
         Some(run) if run.process == RunProcess::Running => Some(match run.origin {
             RunOrigin::App => Owner::App,
             RunOrigin::Background => Owner::Background,
             RunOrigin::Terminal => Owner::Terminal,
         }),
-        _ if reachable => Some(Owner::Unknown),
+        _ if reachable == Some(true) => Some(Owner::Unknown),
         _ => None,
     }
 }
 
-/// From the run's stream only. A legacy run never exports anything, not even
-/// its whole-shell file.
+/// From the recorded run's stream, whoever holds the port now: a stopped
+/// run's output stays readable while another process listens. A legacy run
+/// never exports anything, not even its whole-shell file. `unknown_owner` is
+/// for a listener with no stream to attribute.
 fn output_state(run: Option<&RunFacts>, owner: Option<Owner>) -> OutputState {
+    let unknown_listener = owner == Some(Owner::Unknown);
     let Some(run) = run else {
-        return OutputState::unavailable(match owner {
-            Some(Owner::Unknown) => OutputReason::UnknownOwner,
-            _ => OutputReason::NoRun,
+        return OutputState::unavailable(if unknown_listener {
+            OutputReason::UnknownOwner
+        } else {
+            OutputReason::NoRun
         });
     };
     if run.legacy {
         return OutputState::unavailable(OutputReason::LegacyRun);
     }
-    if owner == Some(Owner::Unknown) {
-        return OutputState::unavailable(OutputReason::UnknownOwner);
-    }
     match (&run.run_id, run.has_stream) {
         (Some(run_id), true) => OutputState::available(run_id.clone()),
+        _ if unknown_listener => OutputState::unavailable(OutputReason::UnknownOwner),
         _ => OutputState::unavailable(OutputReason::Terminal),
     }
 }
@@ -602,7 +607,7 @@ mod tests {
             },
             local_url: "https://web.localify".into(),
             port: 3000,
-            reachable: false,
+            reachable: Some(false),
             run: None,
             public_url: None,
             profiles: ProfileChecks {
@@ -638,7 +643,7 @@ mod tests {
     fn with(run: Option<RunFacts>, reachable: bool) -> ServiceFacts {
         ServiceFacts {
             run,
-            reachable,
+            reachable: Some(reachable),
             ..facts()
         }
     }
@@ -672,7 +677,7 @@ mod tests {
         ));
 
         assert_eq!(item.process, ProcessState::Running);
-        assert!(!item.port.reachable);
+        assert_eq!(item.port.reachable, Some(false));
         assert_eq!(item.owner, Some(Owner::Background));
         assert_eq!(item.output, OutputState::available(RUN_ID.into()));
     }
@@ -691,15 +696,41 @@ mod tests {
     }
 
     #[test]
-    fn reachable_after_the_run_stopped_is_unknown_too() {
+    fn a_listener_after_the_run_stopped_is_unknown_but_keeps_the_run_s_output() {
         let item = item(with(Some(run(RunOrigin::App, RunProcess::Stopped)), true));
 
         assert_eq!(item.process, ProcessState::Stopped);
+        assert_eq!(item.owner, Some(Owner::Unknown));
+        assert_eq!(item.output, OutputState::available(RUN_ID.into()));
+        assert_eq!(item.controls, Controls::all(refused(Refusal::NotOwned)));
+    }
+
+    #[test]
+    fn a_listener_after_a_run_with_no_stream_is_unknown_with_no_output() {
+        let item = item(with(
+            Some(run(RunOrigin::Terminal, RunProcess::Stopped)),
+            true,
+        ));
+
         assert_eq!(item.owner, Some(Owner::Unknown));
         assert_eq!(
             item.output,
             OutputState::unavailable(OutputReason::UnknownOwner)
         );
+    }
+
+    #[test]
+    fn a_port_not_probed_in_time_is_unknown_and_claims_no_owner() {
+        let mut facts = with(None, false);
+        facts.reachable = None;
+
+        let item = item(facts);
+
+        assert_eq!(item.port.reachable, None);
+        assert_eq!(item.owner, None);
+        assert_eq!(item.output, OutputState::unavailable(OutputReason::NoRun));
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["port"]["reachable"], serde_json::Value::Null);
     }
 
     #[test]
@@ -925,7 +956,7 @@ mod tests {
         });
         let quiet = item(serving.clone());
         let listening = item(ServiceFacts {
-            reachable: true,
+            reachable: Some(true),
             ..serving
         });
 

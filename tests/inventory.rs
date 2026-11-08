@@ -2,24 +2,33 @@
 //! daemon builds it, `localify inventory` reads it over the management
 //! socket, and a real `localify dev` runs the service. Everything lives in a
 //! temporary home on free ports, so an installed Localify is never touched.
+//! Every port is reserved by a listener held until the moment it is used, so
+//! no two ports of the test collide, and the daemon is started again on fresh
+//! ports if another program took one in between.
 
 use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+/// Tries for a daemon on fresh ports.
+const DAEMON_ATTEMPTS: usize = 3;
+
 struct Sandbox {
     _dir: tempfile::TempDir,
     root: PathBuf,
     app: PathBuf,
     port: u16,
+    /// Holds the service's port until the test frees it.
+    service: Option<TcpListener>,
+    ingress: TcpListener,
     daemon: Option<Child>,
 }
 
@@ -29,13 +38,14 @@ impl Sandbox {
         let root = dir.path().canonicalize().unwrap();
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
-        let port = free_port();
-        fs::write(root.join("config.toml"), config_toml(&root, port)).unwrap();
+        let service = reserve();
         Self {
             _dir: dir,
             root,
             app,
-            port,
+            port: service.local_addr().unwrap().port(),
+            service: Some(service),
+            ingress: reserve(),
             daemon: None,
         }
     }
@@ -49,7 +59,10 @@ impl Sandbox {
             .current_dir(&self.app)
             .env("HOME", &self.root)
             .env("XDG_STATE_HOME", self.root.join("state"))
-            .env("LOCALIFY_PUBLIC_INGRESS_PORT", free_port().to_string())
+            .env(
+                "LOCALIFY_PUBLIC_INGRESS_PORT",
+                self.ingress.local_addr().unwrap().port().to_string(),
+            )
             .env_remove("LOCALIFY_PROFILE")
             .env_remove("LOCALIFY_SERVICE_ORIGIN")
             .env_remove("LOCALIFY_SERVICE_OUTPUT")
@@ -58,15 +71,39 @@ impl Sandbox {
         command
     }
 
+    /// Writes the config with the daemon's ports reserved, frees them only
+    /// to start the daemon, and starts it again on fresh ones when it exits,
+    /// as it does when another program took one meanwhile.
     fn start_daemon(&mut self) {
-        let daemon = self
-            .localify(&["start", "--foreground"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+        for _ in 0..DAEMON_ATTEMPTS {
+            let ports = [reserve(), reserve(), reserve()];
+            let [http, https, dns] = ports
+                .each_ref()
+                .map(|port| port.local_addr().unwrap().port());
+            fs::write(
+                self.root.join("config.toml"),
+                config_toml(&self.root, self.port, http, https, dns),
+            )
             .unwrap();
-        self.daemon = Some(daemon);
-        wait_for("the daemon", || self.try_inventory(None));
+            drop(ports);
+            let mut daemon = self
+                .localify(&["start", "--foreground"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let started = wait_for("the daemon", || {
+                if daemon.try_wait().unwrap().is_some() {
+                    return Some(false);
+                }
+                self.try_inventory(None).map(|_| true)
+            });
+            if started {
+                self.daemon = Some(daemon);
+                return;
+            }
+        }
+        panic!("the daemon did not start in {DAEMON_ATTEMPTS} attempts");
     }
 
     fn try_inventory(&self, have: Option<&str>) -> Option<Value> {
@@ -130,7 +167,7 @@ impl Drop for Sandbox {
     }
 }
 
-fn config_toml(root: &std::path::Path, port: u16) -> String {
+fn config_toml(root: &Path, port: u16, http: u16, https: u16, dns: u16) -> String {
     format!(
         r#"[daemon]
 http_port = {http}
@@ -167,19 +204,13 @@ name = "web"
 primary_domain = "web.localify"
 command = ["sh", "-c", "exit 0"]
 "#,
-        http = free_port(),
-        https = free_port(),
-        dns = free_port(),
         root = root.display(),
     )
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A port of its own, held while the listener lives.
+fn reserve() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
 fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
@@ -203,21 +234,26 @@ DRY_RUN = "inline-secret-1"
 #[test]
 fn the_daemon_reports_each_state_and_revision_of_a_service() {
     let mut sandbox = Sandbox::new();
+    fs::write(
+        sandbox.root.join("config.toml"),
+        config_toml(&sandbox.root, sandbox.port, 1, 1, 1),
+    )
+    .unwrap();
     assert!(
         sandbox.try_inventory(None).is_none(),
         "no daemon, no inventory"
     );
     sandbox.start_daemon();
 
-    // Nothing runs, the port is free.
+    // The reserved port listens, and no record explains it.
     let snapshot = sandbox.inventory();
     let epoch = snapshot["epoch"].as_str().unwrap().to_string();
     let rev = snapshot["rev"].as_u64().unwrap();
     let item = &snapshot["items"][0];
     assert_eq!(snapshot["schema"], 1);
-    assert_eq!(item["owner"], Value::Null);
-    assert_eq!(item["process"], "stopped");
-    assert_eq!(item["output"]["reason"], "no_run");
+    assert_eq!(item["owner"], "unknown");
+    assert_eq!(item["port"]["reachable"], true);
+    assert_eq!(item["output"]["reason"], "unknown_owner");
     assert_eq!(item["controls"]["start"]["code"], "control_disabled");
     let config_rev = item["service"]["configRev"].as_str().unwrap().to_string();
     assert_eq!(config_rev.len(), 16);
@@ -229,15 +265,15 @@ fn the_daemon_reports_each_state_and_revision_of_a_service() {
     assert_eq!(unchanged["unchanged"], true);
     assert!(unchanged.get("items").is_none());
 
-    // A listener with no record.
-    let listener = TcpListener::bind(("127.0.0.1", sandbox.port)).unwrap();
+    // Nothing runs, the port is free.
+    drop(sandbox.service.take());
     let snapshot = sandbox.inventory();
     assert!(snapshot["rev"].as_u64().unwrap() > rev);
     let item = &snapshot["items"][0];
-    assert_eq!(item["owner"], "unknown");
-    assert_eq!(item["port"]["reachable"], true);
-    assert_eq!(item["output"]["reason"], "unknown_owner");
-    drop(listener);
+    assert_eq!(item["owner"], Value::Null);
+    assert_eq!(item["process"], "stopped");
+    assert_eq!(item["port"]["reachable"], false);
+    assert_eq!(item["output"]["reason"], "no_run");
 
     // A background run, not listening yet: running, owned, with its output.
     let mut executor = sandbox.spawn_background("echo started; sleep 300");
@@ -263,6 +299,13 @@ fn the_daemon_reports_each_state_and_revision_of_a_service() {
     assert_eq!(stopped["owner"], Value::Null);
     assert_eq!(stopped["output"]["runId"], item["run"]["runId"]);
     assert_ne!(stopped["run"]["exit"], Value::Null);
+
+    // Another program on the port takes the owner, not the run's output.
+    let other = TcpListener::bind(("127.0.0.1", sandbox.port)).unwrap();
+    let taken = sandbox.item();
+    assert_eq!(taken["owner"], "unknown");
+    assert_eq!(taken["output"]["runId"], item["run"]["runId"]);
+    drop(other);
 
     // An inline profile value is part of the revision, never of the output.
     let profiles = sandbox.app.join("localify.toml");
