@@ -18,6 +18,7 @@ import {
   isRotation,
   reconcileStatements,
   servingUrlLimit,
+  SLOW_STAMP_MS,
   STAMP_STOP,
   stopStatements,
   type AccountRow,
@@ -93,10 +94,18 @@ export function wranglerDb(local: boolean): AdminDb {
       "--command",
       command,
     ]);
-    const results = JSON.parse(output) as { results?: Row[] }[];
+    const results = JSON.parse(output) as { results?: Row[]; meta?: { duration?: number } }[];
     if (!Array.isArray(results) || results.length !== statements.length) {
       throw new Error(
         `wrangler returned ${results.length} results for ${statements.length} statements`,
+      );
+    }
+    // The quiet period's margin assumes a stamping batch commits in
+    // milliseconds after its stamp: D1 reports how long it took.
+    const took = results.reduce((sum, result) => sum + (result.meta?.duration ?? 0), 0);
+    if (took > SLOW_STAMP_MS) {
+      console.error(
+        `This command's batch took ${Math.round(took)} ms in D1; the quiet period's margin assumes milliseconds`,
       );
     }
     return results.map((result) => result.results ?? []);
@@ -213,12 +222,15 @@ async function ban(db: AdminDb, args: string[], now: number): Promise<string[]> 
     lines: [describeUser(user), `Banned: ${reason}.`],
     change: [
       statement(
-        `UPDATE users SET banned_at = ?2, banned_reason = ?3, ${STAMP_STOP}
-         WHERE id = ?1 AND banned_at IS NULL`,
+        `UPDATE users SET banned_at = ?2, banned_reason = ?3 WHERE id = ?1 AND banned_at IS NULL`,
         user.id,
         now,
         reason,
       ),
+    ],
+    // The ban's own quiet period, stamped last in the batch.
+    last: [
+      statement(`UPDATE users SET ${STAMP_STOP} WHERE id = ?1 AND banned_at = ?2`, user.id, now),
     ],
     predict: ({ row, urls }) => ({ row: { ...row, banned_at: now }, urls }),
   });
@@ -425,6 +437,8 @@ type Change = {
   change?: Statement[];
   /** The owner's state once `change` applied. */
   predict?: (before: Snapshot) => Snapshot;
+  /** Statements that go last in the batch, after the reconcile. */
+  last?: Statement[];
 };
 
 /**
@@ -441,7 +455,7 @@ async function applyChange(
   db: AdminDb,
   user: User,
   now: number,
-  { lines, change = [], predict = (before) => before }: Change,
+  { lines, change = [], predict = (before) => before, last = [] }: Change,
 ): Promise<string[]> {
   const before = await snapshot(db, user.id);
   const after = predict(before);
@@ -453,7 +467,7 @@ async function applyChange(
     out.push("Nothing changed.");
     return out;
   }
-  const statements = [...change, ...reconcile];
+  const statements = [...change, ...reconcile, ...last];
   const results = await db(statements);
   const rotated = statements.flatMap((written, index) =>
     isRotation(written) ? (results[index] ?? []) : [],

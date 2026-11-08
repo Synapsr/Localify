@@ -1023,4 +1023,50 @@ describe("a routing decision held past the cache lifetime", () => {
     expect((await pending).status).toBe(402);
     expect(machineCalls()).toEqual([]);
   });
+
+  it("answers 503 when the re-read itself took too long, and never forwards", async () => {
+    await makePublic();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.parse("2026-11-08T13:00:00Z");
+    vi.setSystemTime(t0);
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    context.env.OWNER_LIMITER = {
+      limit: async () => {
+        entered = true;
+        await gate;
+        return { success: true };
+      },
+    } as RateLimit;
+    // The re-read of the URL, started at 20 s, returns at 31 s.
+    const db = context.env.DB;
+    let slow = false;
+    const slowed = (statement: D1PreparedStatement): D1PreparedStatement =>
+      ({
+        bind: (...values: unknown[]) => slowed(statement.bind(...values)),
+        first: async () => {
+          vi.setSystemTime(t0 + 31_000);
+          return statement.first();
+        },
+      }) as unknown as D1PreparedStatement;
+    context.env.DB = {
+      prepare: (sql: string) => {
+        const statement = db.prepare(sql);
+        return slow && sql.includes("live_rank") ? slowed(statement) : statement;
+      },
+      batch: (statements: D1PreparedStatement[]) => db.batch(statements),
+    } as unknown as D1Database;
+
+    const pending = visit(context, `https://${host()}/`);
+    await vi.waitFor(() => expect(entered).toBe(true));
+    slow = true;
+    vi.setSystemTime(t0 + 20_000);
+    release();
+
+    const response = await pending;
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("10");
+    expect(machineCalls()).toEqual([]);
+  });
 });

@@ -32,6 +32,7 @@ import {
   servingUrlIds,
   servingUrlLimit,
   D1_NOW_MS,
+  SLOW_STAMP_MS,
   STAMP_STOP,
   type AccountRow,
   type Entitlement,
@@ -57,6 +58,22 @@ import { SITE_CACHE_TTL_MS } from "./sites";
  * between a Worker's clock and D1's.
  */
 export const QUIET_AFTER_STOP_MS = SITE_CACHE_TTL_MS + 5_000;
+/** Runs a batch that stamps a quiet period, logging it as an error when it is slow. */
+async function stampingBatch<T>(
+  env: Env,
+  name: string,
+  statements: D1PreparedStatement[],
+): Promise<D1Result<T>[]> {
+  const started = Date.now();
+  const results = await env.DB.batch<T>(statements);
+  const took = Date.now() - started;
+  if (took > SLOW_STAMP_MS) {
+    console.error(
+      `The ${name} batch took ${took} ms; the quiet period's margin assumes milliseconds`,
+    );
+  }
+  return results;
+}
 /** An operation older than this is abandoned. */
 const OP_STALE_MS = 2 * 60 * 1000;
 /** Two down readings this far apart, on a tunnel ready this long, reap it. */
@@ -505,7 +522,7 @@ async function releaseTunnel(
   const op = newOp();
   // Claiming the release stamps the owner's quiet period in the same batch:
   // a request routed before it cannot reach the generation that follows.
-  const [claim] = await env.DB.batch<{ tunnel_id: string | null }>([
+  const [claim] = await stampingBatch<{ tunnel_id: string | null }>(env, "release", [
     env.DB.prepare(
       `UPDATE machines SET tunnel_state = 'releasing', tunnel_op = ?3, tunnel_op_at = ?4,
             rotate_requested_at = CASE WHEN ?6 THEN COALESCE(rotate_requested_at, ?4)
@@ -636,7 +653,11 @@ export async function reconcileServing(
   for (const batch of batches) {
     if (queries && !queries.budget.has(1 + queries.reserve)) return;
     try {
-      await env.DB.batch(batch.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)));
+      await stampingBatch(
+        env,
+        "reconcile",
+        batch.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)),
+      );
     } catch (error) {
       console.error("A reconcile batch failed; the next sweep retries it", error);
     }

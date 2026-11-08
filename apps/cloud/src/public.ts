@@ -154,7 +154,8 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   // (docs/public-urls.md, "Quiet period"), so it is made again first.
   let machineId = site.machineId;
   let ingressSecret = site.ingressSecret;
-  if (Date.now() - site.readAt > SITE_CACHE_TTL_MS) {
+  let readAt = site.readAt;
+  if (Date.now() - readAt > SITE_CACHE_TTL_MS) {
     let fresh: Site | null;
     try {
       fresh = await reloadSite(env, target.slug);
@@ -177,7 +178,10 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     }
     machineId = fresh.machineId;
     ingressSecret = fresh.ingressSecret;
+    readAt = fresh.readAt;
   }
+  // A re-read that itself took too long is not forwarded on, nor read again.
+  if (Date.now() - readAt > SITE_CACHE_TTL_MS) return retryLater(unavailablePage(method));
 
   // 6. and 7. Forward, then keep the app's cookies on this host, and its HTML
   // out of every cache, so no cache can skip the warning.

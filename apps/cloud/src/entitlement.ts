@@ -239,14 +239,21 @@ export const ALL_ACCOUNTS_SQL = `${SELECT_ACCOUNTS}
  * period after a stop is stamped and checked on it, never on a Worker's.
  * `julianday('now')` is core SQLite, in D1 and in `node:sqlite` alike.
  */
-export const D1_NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+export const D1_NOW_MS = "CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)";
 
 /**
- * Moves an owner's last serving stop to now, on D1's clock as the write
- * commits, and never backwards: an older operation cannot shorten a newer
- * quiet period.
+ * Moves an owner's last serving stop to now, on D1's clock as the stamping
+ * statement runs, and never backwards: an older operation cannot shorten a
+ * newer quiet period. Each batch places it as late as its guard allows.
  */
 export const STAMP_STOP = `serving_stopped_at = MAX(COALESCE(serving_stopped_at, 0), ${D1_NOW_MS})`;
+
+/**
+ * The quiet period's margin assumes a stamping batch, a few indexed
+ * writes, commits within milliseconds of its stamp: one slower than this is
+ * logged as an error.
+ */
+export const SLOW_STAMP_MS = 2_000;
 
 /** A statement with its values, for D1 or for `wrangler d1 execute`. */
 export type Statement = { sql: string; params: (string | number | null)[] };

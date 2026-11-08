@@ -1,6 +1,9 @@
+/// <reference types="node" />
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 
 import {
+  D1_NOW_MS,
   isRotation,
   loadAccount,
   PAST_DUE_GRACE_MS,
@@ -8,6 +11,17 @@ import {
   type OwnedUrl,
 } from "../src/entitlement";
 import { createTestDb } from "./support";
+
+describe("D1's clock", () => {
+  it("reads now in milliseconds, rounded, from SQLite itself", () => {
+    // The real expression, without the test database's substitution.
+    const sqlite = new DatabaseSync(":memory:");
+    const before = Date.now();
+    const { now } = sqlite.prepare(`SELECT ${D1_NOW_MS} AS now`).get() as { now: number };
+    expect(Number.isInteger(now)).toBe(true);
+    expect(Math.abs(now - before)).toBeLessThanOrEqual(50);
+  });
+});
 
 const NOW = Date.parse("2026-11-07T12:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
