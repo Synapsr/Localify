@@ -133,9 +133,10 @@ localify stop web
 `stop`, `restart` and `logs` work on any `localify dev`, in the app, in the background, or
 in a terminal; only the output of a service run in your own terminal stays in that
 terminal. Without a service, `stop`, `restart` and `logs` act on the daemon, as before.
-When `logs` writes to something other than a terminal, it ends with `Next cursor: N`;
-`--cursor N` then prints only the lines that came after. Agents use this to follow a
-service.
+A service run in the background keeps its own output, stdout and stderr only, and the
+last 4 to 8 MiB of it. When `logs` writes to something other than a terminal, it ends
+with `Next cursor: C` (`<run id>:<offset>` for a background run); `--cursor C` then
+prints only the lines that came after. Agents use this to follow a service.
 
 The link `localify://action/launch-service?project=<id>&env=<slug>&service=<id>`, with an
 optional `&profile=<name>`, does the same as `--in-app`.

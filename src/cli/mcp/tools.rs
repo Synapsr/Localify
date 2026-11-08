@@ -239,7 +239,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "service_logs",
-        description: "Returns a service's output, the same lines the app's terminal shows, without colors: the last `lines` lines, or with `cursor` only what came after it. The result ends with the next cursor: pass it back to read what follows.",
+        description: "Returns a service's output without colors, what the app's terminal shows or a background run's stdout and stderr: the last `lines` lines, or with `cursor` only what came after it. The result ends with the next cursor: pass it back to read what follows.",
         params: &[
             SERVICE,
             PROJECT,
@@ -247,8 +247,8 @@ pub const TOOLS: &[Tool] = &[
             LINES,
             param(
                 "cursor",
-                Kind::Integer,
-                "Cursor from the previous service_logs call, to read only newer lines.",
+                Kind::String,
+                "Cursor from the previous service_logs call, as it returned it, to read only newer lines.",
             ),
         ],
         uses_cwd: true,
@@ -260,7 +260,14 @@ pub const TOOLS: &[Tool] = &[
                 .option("--project", args.string("project")?)
                 .option("--env", args.string("env")?)
                 .option("--lines", args.integer("lines")?)
-                .option("--cursor", args.integer("cursor")?)
+                .option(
+                    "--cursor",
+                    args.string("cursor").or_else(|_| args.integer("cursor")).map_err(|_| {
+                        anyhow::anyhow!(
+                            "'cursor' must be the cursor the previous service_logs call returned."
+                        )
+                    })?,
+                )
                 .done()
         },
     },
@@ -1144,6 +1151,14 @@ mod tests {
         assert_eq!(
             build("service_logs", json!({ "service": "web", "cursor": 0 })).unwrap(),
             ["logs", "web", "--cursor=0"]
+        );
+        assert_eq!(
+            build(
+                "service_logs",
+                json!({ "service": "web", "cursor": "AAAAAAAAAAAAAAAAAAAAAA:12" })
+            )
+            .unwrap(),
+            ["logs", "web", "--cursor=AAAAAAAAAAAAAAAAAAAAAA:12"]
         );
     }
 
