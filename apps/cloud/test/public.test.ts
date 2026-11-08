@@ -477,14 +477,29 @@ describe("forwarding", () => {
 
 const navigation = { "sec-fetch-dest": "document", accept: "text/html,*/*;q=0.8" };
 
-async function acknowledge(publicHost = host(), next = "/docs?page=2"): Promise<Response> {
+/** The form token in the page a navigation to `url` gets. */
+async function formToken(url: string, cookie?: string): Promise<string> {
+  const headers: Record<string, string> = { ...navigation };
+  if (cookie) headers.cookie = cookie;
+  const page = await visit(context, url, { headers });
+  const token = /name="notice" value="([^"]+)"/.exec(await page.text())?.[1];
+  if (!token) throw new Error(`No form token in the page of ${url}`);
+  return token;
+}
+
+async function acknowledge(
+  publicHost = host(),
+  next = "/docs?page=2",
+  options: { origin?: string | null; notice?: string } = {},
+): Promise<Response> {
+  const notice = options.notice ?? (await formToken(`https://${publicHost}/`));
+  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
+  const origin = options.origin === undefined ? `https://${publicHost}` : options.origin;
+  if (origin !== null) headers.origin = origin;
   return visit(context, `https://${publicHost}/__localify/notice`, {
     method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: `https://${publicHost}`,
-    },
-    body: new URLSearchParams({ next }).toString(),
+    headers,
+    body: new URLSearchParams({ next, notice }).toString(),
   });
 }
 
@@ -516,23 +531,75 @@ describe("the warning page", () => {
     expect(html).toContain('href="mailto:abuse@localify.dev"');
     expect(html).toContain('action="/__localify/notice"');
     expect(html).toContain('name="next" value="/docs?page=2"');
+    expect(html).toMatch(/name="notice" value="\d+\.[0-9a-f]{64}"/);
     expect(html).not.toContain('name="password"');
     expect(html).not.toMatch(/<(script|link|img)\b/);
     expect(machineCalls()).toHaveLength(0);
   });
 
-  it("shows on open URLs, in frames, and to browsers without Sec-Fetch-Dest", async () => {
+  it("shows on open URLs, and to browsers without Sec-Fetch-Dest", async () => {
     await makePublic();
     const navigations: Record<string, string>[] = [
       navigation,
-      { "sec-fetch-dest": "iframe" },
-      { "sec-fetch-dest": "frame" },
       { accept: "text/html,application/xhtml+xml" },
     ];
     for (const headers of navigations) {
       const page = await visit(context, `https://${host("web")}/`, { headers });
       expect(page.status, JSON.stringify(headers)).toBe(200);
-      expect(await page.text()).toContain("Before you continue");
+      expect(await page.text()).toContain('action="/__localify/notice"');
+    }
+    expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("comes before a form a navigation posts, which comes back as a GET", async () => {
+    await makePublic();
+    const post = await visit(context, `https://${host()}/signup?step=1`, {
+      method: "POST",
+      headers: {
+        ...navigation,
+        origin: `https://${host()}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: "email=a%40example.com",
+    });
+    expect(post.status).toBe(200);
+    const html = await post.text();
+    expect(html).toContain('action="/__localify/notice"');
+    expect(html).toContain('name="next" value="/signup?step=1"');
+
+    const head = await visit(context, `https://${host()}/`, {
+      method: "HEAD",
+      headers: navigation,
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toContain("text/html");
+    expect(machineCalls()).toHaveLength(0);
+
+    const back = await acknowledge(host(), "/signup?step=1");
+    expect(back.status).toBe(303);
+    expect(back.headers.get("location")).toBe("/signup?step=1");
+  });
+
+  it("shows inside a frame without a form, linking to the URL in a new tab", async () => {
+    await makePublic();
+    for (const dest of ["iframe", "frame", "object", "embed"]) {
+      for (const method of ["GET", "POST"]) {
+        const page = await visit(context, `https://${host("web")}/docs?page=2`, {
+          method,
+          headers: { "sec-fetch-dest": dest, origin: `https://${host()}` },
+          body: method === "POST" ? "x=1" : undefined,
+        });
+        expect(page.status, `${method} ${dest}`).toBe(200);
+        const policy = page.headers.get("content-security-policy")!;
+        expect(policy).toContain("frame-ancestors https://*.localify.fyi;");
+        expect(policy).not.toContain("frame-ancestors 'none'");
+        const html = await page.text();
+        expect(html).toContain("teo-goulois");
+        expect(html).toContain(
+          `<a href="https://${host("web")}/docs?page=2" target="_blank" rel="noopener">`,
+        );
+        expect(html).not.toContain("<form");
+      }
     }
     expect(machineCalls()).toHaveLength(0);
   });
@@ -597,13 +664,21 @@ describe("the warning page", () => {
   });
 
   it("returns only to a path on the same host, outside Localify's paths", async () => {
-    for (const next of ["https://evil.example/", "//evil.example/", "/__localify/notice"]) {
+    for (const next of [
+      "https://evil.example/",
+      "//evil.example/",
+      "/\\evil.example/",
+      "/a/..//evil.example/phish",
+      "/a/%2e%2e//evil.example/phish",
+      "/__localify/notice",
+    ]) {
       const response = await acknowledge(host(), next);
+      expect(response.status, next).toBe(303);
       expect(response.headers.get("location"), next).toBe("/");
     }
   });
 
-  it("keeps its path from the app, and refuses Continue from another public URL", async () => {
+  it("keeps its path from the app, and takes Continue only from this exact host", async () => {
     const get = await visit(context, `https://${host()}/__localify/notice`, {
       headers: navigation,
     });
@@ -611,22 +686,39 @@ describe("the warning page", () => {
     expect(get.headers.get("location")).toBe("/");
     expect(get.headers.get("set-cookie")).toBeNull();
 
-    const foreign = await visit(context, `https://${host()}/__localify/notice`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        origin: "https://other-site.localify.fyi",
-      },
-      body: "next=%2F",
-    });
-    expect(foreign.status).toBe(403);
-    expect(foreign.headers.get("set-cookie")).toBeNull();
+    const tokenHere = await formToken(`https://${host()}/`);
+    const tokenOfSibling = await formToken(`https://${host("web")}/`);
+    const refused: { origin?: string | null; notice?: string }[] = [
+      { origin: "https://other-site.localify.fyi", notice: tokenHere },
+      // A sibling label of the same URL passes the Origin rule, not this one.
+      { origin: `https://${host("web")}`, notice: tokenHere },
+      { origin: null, notice: tokenHere },
+      { notice: "" },
+      { notice: tokenOfSibling },
+      { notice: tokenHere.replace(/.$/, (c) => (c === "0" ? "1" : "0")) },
+    ];
+    for (const options of refused) {
+      const response = await acknowledge(host(), "/", options);
+      expect(response.status, JSON.stringify(options)).toBe(403);
+      expect(response.headers.get("set-cookie"), JSON.stringify(options)).toBeNull();
+    }
     expect(machineCalls()).toHaveLength(0);
+  });
+
+  it("shows the warning again, with a fresh token, after its form expired", async () => {
+    const expiry = Math.floor(Date.now() / 1000) - 1;
+    const expired = `${expiry}.${await hmacHex("cookie-key", `notice-form|${host()}|${expiry}`)}`;
+    const response = await acknowledge(host(), "/docs", { notice: expired });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("set-cookie")).toBeNull();
+    const html = await response.text();
+    expect(html).toContain('name="next" value="/docs"');
+    const fresh = /name="notice" value="([^"]+)"/.exec(html)![1]!;
+    expect((await acknowledge(host(), "/docs", { notice: fresh })).status).toBe(303);
   });
 
   it("never interrupts assets, fetch, HMR, WebSockets, webhooks or tools", async () => {
     await makePublic();
-    context.routes.set(`HEAD https://m-${machineId}.localify.dev/`, () => new Response(null));
     const requests: { method?: string; headers: Record<string, string>; body?: string }[] = [
       { headers: { "sec-fetch-dest": "script", accept: "*/*" } },
       { headers: { "sec-fetch-dest": "style", accept: "text/css,*/*;q=0.1" } },
@@ -635,9 +727,9 @@ describe("the warning page", () => {
       { headers: { "sec-fetch-dest": "empty", accept: "text/html" } },
       { headers: { "sec-fetch-dest": "websocket", upgrade: "websocket", connection: "Upgrade" } },
       { headers: { upgrade: "websocket", connection: "Upgrade", accept: "text/html" } },
-      { method: "HEAD", headers: navigation },
-      // A webhook.
+      // Webhooks, even one that asks for HTML.
       { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+      { method: "POST", headers: { accept: "text/html" }, body: "{}" },
       { headers: {} },
       { headers: { accept: "application/json" } },
       { headers: { ...navigation, "localify-skip-warning": "1" } },
@@ -648,6 +740,44 @@ describe("the warning page", () => {
     }
     expect(machineCalls()).toHaveLength(requests.length);
     expect(machineCalls().at(-1)!.headers.has("localify-skip-warning")).toBe(false);
+  });
+
+  it("keeps the app's answers without the cookie from being reused for a navigation", async () => {
+    await makePublic();
+    context.routes.set(`GET https://m-${machineId}.localify.dev/`, (_body, url) =>
+      url.endsWith(".js")
+        ? new Response("export {}", {
+            headers: { "content-type": "text/javascript", "cache-control": "public, max-age=600" },
+          })
+        : new Response("<!doctype html><p>the app</p>", {
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "cache-control": "public, max-age=600",
+              vary: "Accept-Encoding",
+            },
+          }),
+    );
+    // Another page of the same site prefetches this host's HTML.
+    const prefetch = await visit(context, `https://${host()}/`, {
+      headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" },
+    });
+    expect(prefetch.status).toBe(200);
+    expect(prefetch.headers.get("cache-control")).toBe("no-store");
+    expect(prefetch.headers.get("vary")).toBe("Accept-Encoding, Sec-Fetch-Dest, Sec-Fetch-Mode");
+    expect(await prefetch.text()).toContain("the app");
+
+    const script = await visit(context, `https://${host()}/main.js`, {
+      headers: { "sec-fetch-dest": "script" },
+    });
+    expect(script.headers.get("cache-control")).toBe("public, max-age=600");
+    expect(script.headers.get("vary")).toBe("Sec-Fetch-Dest, Sec-Fetch-Mode");
+
+    const cookie = await noticeCookie();
+    const acknowledged = await visit(context, `https://${host()}/`, {
+      headers: { ...navigation, cookie },
+    });
+    expect(acknowledged.headers.get("cache-control")).toBe("public, max-age=600");
+    expect(acknowledged.headers.get("vary")).toBe("Accept-Encoding");
   });
 });
 
@@ -662,7 +792,7 @@ describe("a shared link", () => {
     expect(html).toContain("teo-goulois");
     expect(html).toContain('href="mailto:abuse@localify.dev"');
     expect(html).toContain('action="/__localify/access"');
-    expect(html).toContain('name="notice" value="1"');
+    expect(html).toMatch(/name="notice" value="\d+\.[0-9a-f]{64}"/);
     expect(html).toContain('name="password"');
     expect(html).toContain("location.hash");
     expect(html).toContain("history.replaceState");
@@ -670,19 +800,22 @@ describe("a shared link", () => {
     const nonce = /<script nonce="([0-9a-f-]{36})">/.exec(html)?.[1];
     expect(nonce).toBeDefined();
     expect(page.headers.get("content-security-policy")).toContain(`script-src 'nonce-${nonce}'`);
+    expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(page.headers.get("referrer-policy")).toBe("same-origin");
     expect(machineCalls()).toHaveLength(0);
   });
 
-  it("sets both cookies on Continue, and then opens the app", async () => {
-    const response = await visit(context, `https://${host()}/__localify/access`, {
+  async function postLink(origin: string, notice: string, password = PASSWORD): Promise<Response> {
+    return visit(context, `https://${host()}/__localify/access`, {
       method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        origin: `https://${host()}`,
-      },
-      body: new URLSearchParams({ next: "/", notice: "1", password: PASSWORD }).toString(),
+      headers: { "content-type": "application/x-www-form-urlencoded", origin },
+      body: new URLSearchParams({ next: "/", notice, password }).toString(),
     });
+  }
+
+  it("sets both cookies on Continue, and then opens the app", async () => {
+    const notice = await formToken(`https://${host()}/__localify/access`);
+    const response = await postLink(`https://${host()}`, notice);
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("/");
     const cookies = response.headers.getSetCookie();
@@ -693,12 +826,23 @@ describe("a shared link", () => {
     expect(await app.text()).toBe("from the machine");
   });
 
+  it("acknowledges the warning only from this exact host", async () => {
+    const notice = await formToken(`https://${host()}/__localify/access`);
+    // A sibling label of the same URL may sign in, but not acknowledge.
+    const sibling = await postLink(`https://${host("web")}`, notice);
+    expect(sibling.status).toBe(303);
+    expect(sibling.headers.getSetCookie().map((cookie) => cookie.split("=")[0])).toEqual([
+      ACCESS_COOKIE,
+    ]);
+    const untokened = await postLink(`https://${host()}`, "1");
+    expect(untokened.headers.getSetCookie().map((cookie) => cookie.split("=")[0])).toEqual([
+      ACCESS_COOKIE,
+    ]);
+  });
+
   it("keeps the acknowledgement when the password is wrong", async () => {
-    const response = await visit(context, `https://${host()}/__localify/access`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: "next=%2F&notice=1&password=wrong",
-    });
+    const notice = await formToken(`https://${host()}/__localify/access`);
+    const response = await postLink(`https://${host()}`, notice, "wrong");
     expect(response.status).toBe(401);
     const cookies = response.headers.getSetCookie();
     expect(cookies).toHaveLength(1);

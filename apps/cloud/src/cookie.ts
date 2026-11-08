@@ -83,6 +83,33 @@ function noticeMessage(scope: NoticeScope, expiry: number): string {
   return `notice|${scope.host}|${scope.urlId}|${expiry}`;
 }
 
+/** How long a warning page's form can be posted after it was served. */
+export const NOTICE_FORM_TTL_SECONDS = 24 * 60 * 60;
+
+/**
+ * The token a warning form posts, `<expiry>.<hex HMAC-SHA-256(key,
+ * "notice-form"|host|expiry)>`: only a page this Worker served for this exact
+ * host can acknowledge the warning, never a sibling label's page.
+ */
+export async function signNoticeForm(key: string, host: string, now = Date.now()): Promise<string> {
+  const expiry = Math.floor(now / 1000) + NOTICE_FORM_TTL_SECONDS;
+  return `${expiry}.${await hmacHex(key, `notice-form|${host}|${expiry}`)}`;
+}
+
+export async function verifyNoticeForm(
+  key: string,
+  value: string,
+  host: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const match = /^(\d{1,12})\.([0-9a-f]{64})$/.exec(value);
+  if (!match) return false;
+  const [, expiryText, signature] = match as unknown as [string, string, string];
+  const expiry = Number(expiryText);
+  if (expiry * 1000 <= now) return false;
+  return constantTimeEqual(await hmacHex(key, `notice-form|${host}|${expiry}`), signature);
+}
+
 /** No `Domain`, so the acknowledgement belongs to this exact host only. */
 export function noticeCookieHeader(value: string): string {
   return `${NOTICE_COOKIE}=${value}; Max-Age=${NOTICE_TTL_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Lax`;

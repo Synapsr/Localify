@@ -107,18 +107,18 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05; step 5 comes with the p
 
    The add-on products and "Enable subscription unit changes" come when add-ons ship.
 
-The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route, and a rate-limiting rule per client IP (docs/public-urls.md, "Public traffic"). The rule runs before the Worker, so a flood from one address costs no Worker requests; the Worker's own `OWNER_LIMITER` (2,000 requests a minute per owner) caps the rest.
+The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route, and a rate-limiting rule per client IP (docs/public-urls.md, "Public traffic"). The rule runs before the Worker, so a flood from one address costs no Worker requests.
 
 The zone is on the Free plan, which allows one rate-limiting rule, matching on the URI path and verified bots only, counting by IP, over 10 seconds, with a 10-second block and Cloudflare's default response (a custom response needs Pro). The rule fits those limits. Create it under Security rules → Create rule → Rate limiting rules:
 
 - **Name:** `Per-IP flood limit`
 - **If incoming requests match:** `(http.request.uri.path wildcard "/*")`, every request
 - **With the same characteristics:** IP
-- **When rate exceeds:** 1,000 requests per 10 seconds
+- **When rate exceeds:** 5,000 requests per 10 seconds
 - **Then take action:** Block, with the default response (429)
 - **For duration:** 10 seconds
 
-1,000 requests in 10 seconds is more than a Vite page that loads a thousand modules at once, from an office or a phone network behind one shared address, and about 100 requests a second sustained before the block. Through the API (`CLOUDFLARE_OPS_TOKEN`), it is one rule in the zone's `http_ratelimit` phase entrypoint:
+The rule targets floods, not normal use, so its threshold sits far above any real visitor. A cold load of a Vite app in dev can request a thousand modules or more within a few seconds. Many people can also share one address: an office, a school, or a phone carrier's NAT (CGNAT), where everyone behind it counts as one IP. A block there would cut all of them off for 10 seconds at a time. 5,000 requests in 10 seconds leaves room for several such cold loads at once, and still blocks one address sending more than 500 requests a second. Through the API (`CLOUDFLARE_OPS_TOKEN`), it is one rule in the zone's `http_ratelimit` phase entrypoint:
 
 ```json
 {
@@ -128,11 +128,13 @@ The zone is on the Free plan, which allows one rate-limiting rule, matching on t
   "ratelimit": {
     "characteristics": ["ip.src", "cf.colo.id"],
     "period": 10,
-    "requests_per_period": 1000,
+    "requests_per_period": 5000,
     "mitigation_timeout": 10
   }
 }
 ```
+
+The Worker's own `OWNER_LIMITER` (2,000 requests a minute per owner) is approximate load shedding, not a global allowance or a cost cap. Workers rate limiting counts per Cloudflare location and is eventually consistent, so an owner whose visitors reach several locations gets up to that much at each one, and a burst can pass a little over it. A request it refuses has already run the Worker and is billed. It keeps one owner's traffic from crowding the others' at a location; the zone rule is what stops a flood before it costs anything.
 
 The `localify.dev` zone needs two rules, so that nobody holding a tunnel token can serve pages on a machine hostname directly (docs/public-urls.md, "Edge rule"):
 

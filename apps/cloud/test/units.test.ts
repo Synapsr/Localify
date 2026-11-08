@@ -8,8 +8,10 @@ import {
   readCookie,
   signAccess,
   signNotice,
+  signNoticeForm,
   verifyAccess,
   verifyNotice,
+  verifyNoticeForm,
   withoutCookies,
 } from "../src/cookie";
 import { hashPassword, hmacHex, verifyPassword } from "../src/crypto";
@@ -276,6 +278,21 @@ describe("notice cookie", () => {
     expect(await verifyNotice("key", access, scope, now)).toBe(false);
   });
 
+  it("is acknowledged with a form token for the same host, valid a day", async () => {
+    const value = await signNoticeForm("key", scope.host, now);
+    expect(value).toMatch(/^\d+\.[0-9a-f]{64}$/);
+    expect(await verifyNoticeForm("key", value, scope.host, now + 24 * 3600 * 1000 - 1000)).toBe(
+      true,
+    );
+    expect(await verifyNoticeForm("key", value, scope.host, now + 24 * 3600 * 1000)).toBe(false);
+    expect(await verifyNoticeForm("key", value, "journal-a8f3--web.localify.fyi", now)).toBe(false);
+    expect(await verifyNoticeForm("other", value, scope.host, now)).toBe(false);
+    // A notice cookie's value is not a form token.
+    expect(
+      await verifyNoticeForm("key", await signNotice("key", scope, now), scope.host, now),
+    ).toBe(false);
+  });
+
   it("is set host-only, secure, HTTP-only and Lax", () => {
     expect(noticeCookieHeader("v")).toBe(
       `${NOTICE_COOKIE}=v; Max-Age=604800; Path=/; Secure; HttpOnly; SameSite=Lax`,
@@ -395,9 +412,13 @@ describe("upstream Set-Cookie", () => {
 describe("the next path after the password", () => {
   const host = "journal-a8f3.localify.fyi";
 
-  it("keeps a path and query on the same host", () => {
+  it("keeps a path and query on the same host, as resolved", () => {
     expect(safeNext("/docs?page=2", host)).toBe("/docs?page=2");
     expect(safeNext("/", host)).toBe("/");
+    expect(safeNext("/a/../docs?x=1", host)).toBe("/docs?x=1");
+    // Encoded slashes stay in one path segment.
+    expect(safeNext("/%2F%2Fevil.example/x", host)).toBe("/%2F%2Fevil.example/x");
+    expect(safeNext("/%5Cevil.example", host)).toBe("/%5Cevil.example");
   });
 
   it("falls back to / for anything that could leave the host", () => {
@@ -407,9 +428,15 @@ describe("the next path after the password", () => {
       "https://evil.example/",
       "//evil.example/",
       "/\\evil.example",
+      "/\\/evil.example",
+      "/a/..//evil.example/phish",
+      "/a/%2e%2e//evil.example/phish",
+      "/a/.%2E/\\evil.example",
+      "/\t/evil.example",
       "docs",
       "/__localify/access",
       "/__localify/notice?x=1",
+      "/a/../__localify/notice",
     ]) {
       expect(safeNext(next, host), String(next)).toBe("/");
     }

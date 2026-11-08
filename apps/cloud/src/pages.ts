@@ -30,13 +30,15 @@ footer{margin-top:20px;font-size:.85rem;color:var(--muted)}
 footer a{color:inherit}
 `;
 
-const CSP =
-  "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+/** Every page refuses to be framed, except the framed warning (see `framedWarningPage`). */
+function csp(frameAncestors = "'none'"): string {
+  return `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors ${frameAncestors}; base-uri 'none'`;
+}
 
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
-  "content-security-policy": CSP,
+  "content-security-policy": csp(),
   // `no-referrer` would make the browser send `Origin: null` with the form.
   "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
@@ -76,11 +78,11 @@ function page(
   body: string,
   method = "GET",
   script?: string,
+  frameAncestors?: string,
 ): Response {
   const nonce = script ? crypto.randomUUID() : null;
-  const headers = nonce
-    ? { ...SECURITY_HEADERS, "content-security-policy": `${CSP}; script-src 'nonce-${nonce}'` }
-    : SECURITY_HEADERS;
+  const policy = csp(frameAncestors) + (nonce ? `; script-src 'nonce-${nonce}'` : "");
+  const headers = { ...SECURITY_HEADERS, "content-security-policy": policy };
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -108,19 +110,72 @@ function noticeText(host: string, login: string): string {
 <p>Continue only if you trust whoever sent you this link. Never enter passwords or payment details for another site here.</p>`;
 }
 
-export type WarningPageOptions = { host: string; login: string; next: string; method?: string };
+export type WarningPageOptions = {
+  host: string;
+  login: string;
+  next: string;
+  /** The form token (`signNoticeForm`) that `Continue` posts as `notice`. */
+  token: string;
+  status?: number;
+  method?: string;
+};
 
-/** Shown before anything else, the password included, on a browser's first visit to a host. */
-export function warningPage({ host, login, next, method }: WarningPageOptions): Response {
+/**
+ * Shown before anything else, the password included, on a browser's first
+ * visit to a host. `Continue` comes back to `next` with a `GET`: the body of
+ * a form posted before the warning is not kept.
+ */
+export function warningPage({
+  host,
+  login,
+  next,
+  token,
+  status = 200,
+  method,
+}: WarningPageOptions): Response {
   return page(
-    200,
+    status,
     "Before you continue",
     `${noticeText(host, login)}
 <form method="post" action="${NOTICE_PATH}">
 <input type="hidden" name="next" value="${escapeHtml(next)}">
+<input type="hidden" name="notice" value="${escapeHtml(token)}">
 <button type="submit">Continue</button>
 </form>`,
     method,
+  );
+}
+
+export type FramedWarningPageOptions = {
+  host: string;
+  login: string;
+  next: string;
+  /** Who may frame it: the public URLs, `https://*.<PUBLIC_BASE_DOMAIN>`. */
+  frameAncestors: string;
+  method?: string;
+};
+
+/**
+ * The warning inside a frame. It has nothing to click through: its link opens
+ * the URL in a new tab, where the top-level warning, which no page can frame,
+ * takes the acknowledgement. Reloading the frame then loads the app.
+ */
+export function framedWarningPage({
+  host,
+  login,
+  next,
+  frameAncestors,
+  method,
+}: FramedWarningPageOptions): Response {
+  const target = `https://${host}${next}`;
+  return page(
+    200,
+    "Before you continue",
+    `${noticeText(host, login)}
+<p><a href="${escapeHtml(target)}" target="_blank" rel="noopener">Open it in a new tab to continue</a>, then reload this page.</p>`,
+    method,
+    undefined,
+    frameAncestors,
   );
 }
 
@@ -133,11 +188,11 @@ export type PasswordPageOptions = {
   /** The page a shared link opens: it posts the password the link carries. */
   fromLink?: boolean;
   /**
-   * The owner's login, when this browser has not acknowledged the warning yet:
-   * the page then says what the warning says, and posts the acknowledgement
-   * with the password.
+   * When this browser has not acknowledged the warning yet: the owner's login
+   * and a form token. The page then says what the warning says, and posts the
+   * token as the acknowledgement with the password.
    */
-  noticeFor?: string;
+  notice?: { login: string; token: string };
 };
 
 export function passwordPage({
@@ -147,12 +202,11 @@ export function passwordPage({
   status = 401,
   method,
   fromLink = false,
-  noticeFor,
+  notice,
 }: PasswordPageOptions): Response {
   const errorId = error ? ` aria-describedby="password-error" aria-invalid="true"` : "";
-  const notice = noticeFor !== undefined;
   const intro = notice
-    ? noticeText(host, noticeFor)
+    ? noticeText(host, notice.login)
     : `<h1>Password required</h1>
 <p><span class="host">${escapeHtml(host)}</span> is protected. Enter the password its owner shared with you.</p>`;
   let script: string | undefined;
@@ -163,7 +217,7 @@ export function passwordPage({
     `${intro}
 <form method="post" action="${ACCESS_PATH}">
 <input type="hidden" name="next" value="${escapeHtml(next)}">
-${notice ? `<input type="hidden" name="notice" value="1">\n` : ""}<label for="password">Password</label>
+${notice ? `<input type="hidden" name="notice" value="${escapeHtml(notice.token)}">\n` : ""}<label for="password">Password</label>
 <input id="password" name="password" type="password" autocomplete="current-password" required autofocus${errorId}>
 ${error ? `<p id="password-error" class="error" role="alert">${escapeHtml(error)}</p>` : ""}
 <button type="submit">Continue</button>

@@ -12,15 +12,23 @@ import {
   readCookie,
   signAccess,
   signNotice,
+  signNoticeForm,
   verifyAccess,
   verifyNotice,
+  verifyNoticeForm,
 } from "./cookie";
 import { verifyPassword } from "./crypto";
-import { upstreamHeaders, withHostOnlyCookies, type LocalifyHeaders } from "./headers";
+import {
+  upstreamHeaders,
+  withHostOnlyCookies,
+  withoutNavigationReuse,
+  type LocalifyHeaders,
+} from "./headers";
 import { readLimitedText } from "./http";
 import { isOriginOfUrl, localHostFor, parsePublicHost } from "./names";
 import {
   ACCESS_PATH,
+  framedWarningPage,
   NOTICE_PATH,
   notFoundPage,
   offlinePage,
@@ -35,6 +43,10 @@ import { findSite, type Site } from "./sites";
 
 const MAX_FORM_BYTES = 8 * 1024;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+/** Scripts and tools skip the warning with it; a browser cannot add it to a navigation. */
+const SKIP_WARNING = "localify-skip-warning";
+/** The `Sec-Fetch-Dest` values of a navigation inside another page. */
+const FRAME_DESTINATIONS = new Set(["iframe", "frame", "object", "embed"]);
 
 export async function handlePublic(request: Request, env: Env): Promise<Response> {
   try {
@@ -65,9 +77,7 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   // 2. The owner's traffic limit, across all their URLs.
   if (!(await withinOwnerLimit(env, site))) {
     await request.body?.cancel();
-    if ((method === "GET" || method === "HEAD") && isNavigation(request)) {
-      return tooManyRequestsPage(method);
-    }
+    if (isNavigation(request)) return tooManyRequestsPage(method);
     return plain(429, "Too many requests to this owner's public URLs. Retry in a minute.", {
       "retry-after": String(RETRY_AFTER_SECONDS),
     });
@@ -100,17 +110,26 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   if (url.pathname === NOTICE_PATH) return handleNotice(request, env, site, host);
 
   // 4. The warning page, on a browser's first visit to this host. Assets,
-  // `fetch`, HMR, WebSockets and webhooks are never navigations.
-  if (
-    method === "GET" &&
-    !webSocket &&
-    isNavigation(request) &&
-    !(await acknowledgedWarning(request, env, site, host))
-  ) {
+  // `fetch`, HMR, WebSockets and webhooks are never navigations. A form
+  // posted before the warning comes back as a `GET` without its body.
+  const noticed = await hasNoticeCookie(request, env, site, host);
+  if (!noticed && !webSocket && !request.headers.has(SKIP_WARNING) && isNavigation(request)) {
+    await request.body?.cancel();
+    const next = safeNext(url.pathname + url.search, host);
+    if (FRAME_DESTINATIONS.has(request.headers.get("sec-fetch-dest") ?? "")) {
+      return framedWarningPage({
+        host,
+        login: site.ownerLogin,
+        next,
+        frameAncestors: `https://*.${baseDomain}`,
+        method,
+      });
+    }
     return warningPage({
       host,
       login: site.ownerLogin,
-      next: safeNext(url.pathname + url.search, host),
+      next,
+      token: await signNoticeForm(setting(env, "COOKIE_KEY"), host),
       method,
     });
   }
@@ -125,8 +144,9 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // 6. and 7. Forward, then keep the app's cookies on this host.
-  return forward(
+  // 6. and 7. Forward, then keep the app's cookies on this host. Without the
+  // notice cookie, the browser must not reuse the answer for a navigation.
+  const response = await forward(
     request,
     env,
     site.machineId,
@@ -140,6 +160,7 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     },
     url,
   );
+  return noticed ? response : withoutNavigationReuse(response);
 }
 
 /**
@@ -155,8 +176,28 @@ function fromItsOwnPages(request: Request, site: Site, baseDomain: string): bool
 }
 
 /**
- * `OWNER_LIMITER`, keyed by the owner's user id. A failing limiter lets the
- * request through: it caps cost, and must not take every URL down.
+ * The acknowledgement a form posts as `notice`: a token this Worker signed for
+ * this exact host, from a page of this exact host. A sibling label of the same
+ * URL passes `fromItsOwnPages`, but must not acknowledge the warning here.
+ */
+async function acknowledgedHere(
+  request: Request,
+  env: Env,
+  host: string,
+  token: string | null,
+): Promise<boolean> {
+  const origin = request.headers.get("origin");
+  const sameOrigin =
+    origin === `https://${host}` ||
+    (origin === "null" && request.headers.get("sec-fetch-site") === "same-origin");
+  return sameOrigin && token !== null && verifyNoticeForm(setting(env, "COOKIE_KEY"), token, host);
+}
+
+/**
+ * `OWNER_LIMITER`, keyed by the owner's user id. Its counts are approximate
+ * and kept per Cloudflare location: it sheds load, it is not a global
+ * allowance. A failing limiter lets the request through, so it never takes
+ * every URL down.
  */
 async function withinOwnerLimit(env: Env, site: Site): Promise<boolean> {
   try {
@@ -168,26 +209,23 @@ async function withinOwnerLimit(env: Env, site: Site): Promise<boolean> {
 }
 
 /**
- * A browser's navigation: `Sec-Fetch-Dest` says a document or a frame, or,
- * from a browser too old to send it, `Accept` asks for HTML.
+ * A browser's navigation, whatever its method: `Sec-Fetch-Dest` names a
+ * document or a frame. From a browser too old to send it, a `GET` whose
+ * `Accept` asks for HTML; only a `GET`, since a webhook may ask for HTML too.
  */
 function isNavigation(request: Request): boolean {
   const dest = request.headers.get("sec-fetch-dest");
-  if (dest !== null) return dest === "document" || dest === "iframe" || dest === "frame";
-  return (request.headers.get("accept") ?? "").includes("text/html");
+  if (dest !== null) return dest === "document" || FRAME_DESTINATIONS.has(dest);
+  return request.method === "GET" && (request.headers.get("accept") ?? "").includes("text/html");
 }
 
-/**
- * A valid notice cookie for this host, or the `Localify-Skip-Warning` header,
- * which a browser cannot add to a navigation.
- */
-async function acknowledgedWarning(
+/** A valid notice cookie for this exact host and URL. */
+async function hasNoticeCookie(
   request: Request,
   env: Env,
   site: Site,
   host: string,
 ): Promise<boolean> {
-  if (request.headers.has("localify-skip-warning")) return true;
   const key = setting(env, "COOKIE_KEY");
   const scope = { host, urlId: site.id };
   for (const value of readCookie(request.headers.get("cookie"), NOTICE_COOKIE)) {
@@ -196,7 +234,11 @@ async function acknowledgedWarning(
   return false;
 }
 
-/** The warning page's `Continue`: sets the notice cookie, and redirects to `next`. */
+/**
+ * The warning page's `Continue`: sets the notice cookie, and redirects to
+ * `next` with a `GET`. Without a token and an origin of this exact host, it
+ * shows the warning again, with a fresh token.
+ */
 async function handleNotice(
   request: Request,
   env: Env,
@@ -209,7 +251,17 @@ async function handleNotice(
   }
   const form = await readForm(request);
   if (!form) return plain(413, "The form is too large.");
-  const response = redirect(safeNext(form.get("next"), host));
+  const next = safeNext(form.get("next"), host);
+  if (!(await acknowledgedHere(request, env, host, form.get("notice")))) {
+    return warningPage({
+      host,
+      login: site.ownerLogin,
+      next,
+      token: await signNoticeForm(setting(env, "COOKIE_KEY"), host),
+      status: 403,
+    });
+  }
+  const response = redirect(next);
   response.headers.append("set-cookie", await noticeCookie(env, site, host));
   return response;
 }
@@ -244,14 +296,20 @@ async function handleAccess(
 ): Promise<Response> {
   const method = request.method;
   if (method === "GET" || method === "HEAD") {
-    const acknowledged = await acknowledgedWarning(request, env, site, host);
+    const acknowledged =
+      request.headers.has(SKIP_WARNING) || (await hasNoticeCookie(request, env, site, host));
     return passwordPage({
       host,
       next: "/",
       status: 200,
       method,
       fromLink: true,
-      noticeFor: acknowledged ? undefined : site.ownerLogin,
+      notice: acknowledged
+        ? undefined
+        : {
+            login: site.ownerLogin,
+            token: await signNoticeForm(setting(env, "COOKIE_KEY"), host),
+          },
     });
   }
   if (method !== "POST") return redirect("/");
@@ -272,8 +330,11 @@ async function handleAccess(
   if (!form) return plain(413, "The form is too large.");
   const next = safeNext(form.get("next"), host);
   // The shared link's page posts the warning's `Continue` with the password.
-  // The acknowledgement holds whether or not the password is right.
-  const notice = form.get("notice") === "1" ? await noticeCookie(env, site, host) : null;
+  // The acknowledgement holds whether or not the password is right, and only
+  // when it comes from this exact host.
+  const notice = (await acknowledgedHere(request, env, host, form.get("notice")))
+    ? await noticeCookie(env, site, host)
+    : null;
 
   const password = form.get("password") ?? "";
   const valid =
@@ -308,17 +369,20 @@ async function readForm(request: Request): Promise<URLSearchParams | null> {
 
 /**
  * A relative path on this same host to return to after the warning or the
- * password, outside Localify's own paths; `/` otherwise.
+ * password, outside Localify's own paths; `/` otherwise. It is resolved
+ * against the host first, and the resolved path is what comes back: `..` and
+ * `\` can turn a path into `//other.host/`, which a browser would follow to
+ * that other host.
  */
 export function safeNext(next: string | null, host: string): string {
-  if (!next || !next.startsWith("/") || next.startsWith("//") || next.includes("\\")) return "/";
+  if (!next || !next.startsWith("/")) return "/";
   let parsed: URL;
   try {
     parsed = new URL(next, `https://${host}`);
   } catch {
     return "/";
   }
-  if (parsed.origin !== `https://${host}`) return "/";
+  if (parsed.origin !== `https://${host}` || parsed.pathname.startsWith("//")) return "/";
   if (parsed.pathname === ACCESS_PATH || parsed.pathname === NOTICE_PATH) return "/";
   return parsed.pathname + parsed.search;
 }

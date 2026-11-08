@@ -53,6 +53,27 @@ export function withoutDomainAttribute(setCookie: string): string {
   return [pair, ...kept].join(";");
 }
 
+/**
+ * An app's response to a request without the notice cookie, which a browser
+ * must not reuse for a navigation: another page of the same site could fetch
+ * the app's HTML first, and the navigation would then skip the warning from
+ * the browser's cache. It varies on the fetch metadata, and HTML is never
+ * stored. A WebSocket upgrade (101) is never cached and passes as it is.
+ */
+export function withoutNavigationReuse(response: Response): Response {
+  if (response.status === 101 || response.webSocket) return response;
+  const headers = new Headers(response.headers);
+  headers.append("vary", "Sec-Fetch-Dest, Sec-Fetch-Mode");
+  if ((headers.get("content-type") ?? "").toLowerCase().includes("text/html")) {
+    headers.set("cache-control", "no-store");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 /** The upstream response, with `Domain` removed from every `Set-Cookie`. The body still streams. */
 export function withHostOnlyCookies(response: Response): Response {
   const cookies = response.headers.getSetCookie();
