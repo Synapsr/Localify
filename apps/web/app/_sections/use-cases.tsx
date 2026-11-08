@@ -44,7 +44,7 @@ export const UseCases = async () => {
                 </p>
                 {item.key === "agent" ? (
                   <div className="flex flex-wrap items-center gap-3 pt-1">
-                    <InstallPromptButton size="default" source="use_case_agent" variant="outline" />
+                    <InstallPromptButton source="use_case_agent" variant="outline" />
                     <span className="text-[13px] text-muted-foreground">{t("items.agent.hint")}</span>
                   </div>
                 ) : null}

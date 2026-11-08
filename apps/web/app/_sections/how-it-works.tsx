@@ -4,10 +4,12 @@ import type { ComponentType, ReactNode, SVGProps } from "react";
 import { InstallPromptButton } from "@/app/_components/install-prompt-button";
 import { AskDemo, ConnectDemo, PromptDemo } from "@/app/_components/step-demos";
 import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
+import { buttonVariants } from "@/components/ui/button-variants";
 import { FadeIn, SectionHeading, sectionClass } from "@/app/site-ui";
 import {
   ArrowRightIcon,
   CloudIcon,
+  DownloadSolidIcon,
   GitBranchIcon,
   GlobeIcon,
   LockIcon,
@@ -24,6 +26,7 @@ const demos = [<PromptDemo key="prompt" />, <ConnectDemo key="connect" />, <AskD
 
 export const HowItWorks = async () => {
   const t = await getTranslations("HowItWorks");
+  const hero = await getTranslations("Hero");
   const steps = t.raw("steps") as Array<{ title: string; body: string }>;
 
   return (
@@ -58,15 +61,16 @@ export const HowItWorks = async () => {
         ))}
       </div>
 
-      <FadeIn className="mt-10 flex flex-wrap items-center justify-center gap-x-5 gap-y-3" delay={0.2}>
-        <InstallPromptButton size="default" source="how_it_works" />
+      <FadeIn className="mt-12 flex flex-wrap items-center justify-center gap-3" delay={0.2}>
+        <InstallPromptButton source="how_it_works" />
         <Link
-          className="text-[14px] text-muted-foreground underline decoration-border decoration-[1.5px] underline-offset-4 hover:text-foreground hover:decoration-foreground"
+          className={buttonVariants({ variant: "outline", size: "lg" })}
           data-umami-event="download_clicked"
           data-umami-event-source="how_it_works"
           href={MACOS_APP_DOWNLOAD_URL}
         >
-          {t("dashboardLink")}
+          <DownloadSolidIcon className="h-4 w-4" />
+          {hero("download")}
         </Link>
       </FadeIn>
 

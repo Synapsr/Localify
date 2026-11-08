@@ -111,7 +111,6 @@
         "body": "Frag nach der App in einem Worktree. Der Worktree erscheint mit eigener URL in der App."
       }
     ],
-    "dashboardLink": "Oder lade die App für macOS herunter",
     "demo": {
       "ask": "Starte die App im Worktree fix-auth."
     },
