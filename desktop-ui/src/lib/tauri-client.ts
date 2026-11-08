@@ -231,6 +231,8 @@ export interface DesktopClient {
   /** Opens the Polar checkout, or the portal when the plan is active, in the browser. */
   startCloudCheckout(request: StartCloudCheckoutRequest): Promise<CloudBillingPageDto>;
   openCloudBillingPortal(): Promise<void>;
+  /** Opens an http(s) link in the default browser, through Tauri's opener plugin. */
+  openExternalUrl(url: string): Promise<void>;
   /** Makes the daemon fetch what this Mac may serve, after a plan change. */
   refreshPublicTunnel(): Promise<void>;
   listPublicUrls(): Promise<PublicUrlDto[]>;
@@ -362,6 +364,7 @@ export function createDesktopClient(): DesktopClient {
         request: startCloudCheckoutRequestSchema.parse(request),
       }),
     openCloudBillingPortal: () => tauriInvoke("open_cloud_billing_portal"),
+    openExternalUrl: (url) => tauriInvoke("plugin:opener|open_url", { url }),
     refreshPublicTunnel: () => tauriInvoke("refresh_public_tunnel"),
     listPublicUrls: () => tauriInvoke("list_public_urls"),
     createPublicUrl: (request) =>

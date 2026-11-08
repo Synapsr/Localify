@@ -190,7 +190,7 @@ export function SiteHeader({ navItems, cta }: Props) {
                 onMouseEnter={() => setHoveredKey(item.href)}
                 onFocus={() => setHoveredKey(item.href)}
                 onBlur={() => setHoveredKey(null)}
-                className="pointer-events-auto relative rounded-full px-3.5 py-2 font-medium transition-[color,transform] duration-200 ease-[cubic-bezier(0.25,0.46,0.45,0.94)] before:absolute before:inset-x-0 before:-inset-y-2.5 before:content-['']"
+                className="pointer-events-auto relative rounded-full px-3.5 py-2 font-medium whitespace-nowrap transition-[color,transform] duration-200 ease-[cubic-bezier(0.25,0.46,0.45,0.94)] before:absolute before:inset-x-0 before:-inset-y-2.5 before:content-['']"
                 style={{ color: isHovered ? "var(--ink)" : undefined }}
               >
                 <AnimatePresence initial={false}>

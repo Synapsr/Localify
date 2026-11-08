@@ -3,10 +3,14 @@ import type { Metadata } from "next";
 import { getTranslations } from "next-intl/server";
 
 import { routing, type Locale } from "@/i18n/routing";
+import { formatMoney, getPricing } from "@/lib/pricing";
 
-import { siteName } from "./site-metadata";
+import { publicUrlPattern, siteName } from "./site-metadata";
 
-export type SiteRoute = "" | "/privacy" | "/terms";
+export type SiteRoute = "" | "/cloud" | "/cloud/subscribed" | "/pricing" | "/privacy" | "/terms";
+
+// Pages people reach from Polar's checkout and customer portal: kept out of search results.
+const noindexRoutes: ReadonlySet<SiteRoute> = new Set(["/cloud", "/cloud/subscribed"]);
 
 export const localizedPath = (locale: Locale, route: SiteRoute) => {
   return locale === routing.defaultLocale ? route || "/" : `/${locale}${route}`;
@@ -24,10 +28,32 @@ const openGraphLocales: Record<Locale, string> = {
   ru: "ru_RU",
 };
 
+const pricingDescription = async (locale: Locale) => {
+  const t = await getTranslations({ locale, namespace: "Pricing" });
+  const { currency, pro } = await getPricing();
+  return t("metaDescription", {
+    monthly: formatMoney(pro.monthly.amount, currency, locale),
+    yearly: formatMoney(pro.yearly.amount, currency, locale),
+  });
+};
+
 export const buildPageMetadata = async (locale: Locale, route: SiteRoute): Promise<Metadata> => {
   const t = await getTranslations({ locale });
   const { title, description } = {
     "": { title: t("Metadata.title"), description: t("Metadata.description") },
+    "/cloud": {
+      title: t("Cloud.overview.metaTitle"),
+      description: t("Cloud.overview.description", { url: publicUrlPattern }),
+    },
+    "/cloud/subscribed": {
+      title: t("Cloud.subscribed.metaTitle"),
+      description: t("Cloud.subscribed.description"),
+    },
+    // The pricing description names live prices, so it is only fetched for that page.
+    "/pricing": {
+      title: t("Pricing.metaTitle"),
+      description: route === "/pricing" ? await pricingDescription(locale) : "",
+    },
     "/privacy": { title: t("Privacy.title"), description: t("Privacy.intro") },
     "/terms": { title: t("Terms.title"), description: t("Terms.intro") },
   }[route];
@@ -37,6 +63,7 @@ export const buildPageMetadata = async (locale: Locale, route: SiteRoute): Promi
     // The home page title already names the site, so it skips the layout's title template.
     title: route === "" ? { absolute: title } : title,
     description,
+    ...(noindexRoutes.has(route) && { robots: { index: false, follow: true } }),
     alternates: {
       canonical: path,
       languages: Object.fromEntries(

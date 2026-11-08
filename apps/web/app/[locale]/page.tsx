@@ -5,14 +5,16 @@ import { getTranslations, setRequestLocale } from "next-intl/server";
 import { notFound } from "next/navigation";
 
 import { Faq } from "@/app/_sections/faq";
+import { Features } from "@/app/_sections/features";
 import { FinalCta } from "@/app/_sections/final-cta";
 import { HeroSection } from "@/app/_sections/hero";
 import { HowItWorks } from "@/app/_sections/how-it-works";
-import { Problem } from "@/app/_sections/problem";
+import { Pricing } from "@/app/_sections/pricing";
+import { UseCases } from "@/app/_sections/use-cases";
 import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { buildPageMetadata } from "@/app/page-metadata";
 import { SiteFooter } from "@/app/site-footer";
-import { siteAuthor, siteName, siteUrl, sourceUrl } from "@/app/site-metadata";
+import { siteAuthor, siteName, siteUrl } from "@/app/site-metadata";
 import { SiteHeader } from "@/app/site-ui";
 import { routing } from "@/i18n/routing";
 
@@ -73,9 +75,10 @@ const HomePage = async ({ params }: HomePageProps) => {
   const faq = await getTranslations("Faq");
 
   const navItems = [
+    { href: "#use-cases", label: nav("useCases") },
     { href: "#how-it-works", label: nav("howItWorks") },
+    { href: "#pricing", label: nav("pricing") },
     { href: "#faq", label: nav("faq") },
-    { href: sourceUrl, label: nav("source") },
   ];
 
   return (
@@ -92,8 +95,10 @@ const HomePage = async ({ params }: HomePageProps) => {
       <SiteHeader cta={{ href: "#download", label: nav("cta") }} navItems={navItems} />
 
       <HeroSection />
-      <Problem />
+      <UseCases />
+      <Features />
       <HowItWorks />
+      <Pricing />
       <Faq />
       <FinalCta />
       <SiteFooter />

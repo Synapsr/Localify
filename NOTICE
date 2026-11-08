@@ -11,8 +11,7 @@ contains its copyright notice and license text.
 The Localify name and logo are not licensed under the AGPL or under any other
 license.
 
-Media in apps/web/public/ and desktop-ui/public/videos/ is not licensed under
-the AGPL.
+Media in apps/web/public/ is not licensed under the AGPL.
 
 progresive-blur.tsx, in desktop-ui/src/components/ and apps/web/components/, is
 adapted from Skiper 41 Canvas_Landing_004 by Skiper UI. Author: gurvinder-singh02

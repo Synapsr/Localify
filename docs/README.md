@@ -650,9 +650,9 @@ does in a container. Set `lan_access = false` to keep it on this machine.
 A public URL opens a project domain of this machine from anywhere, such as your
 laptop or phone on another network: `https://<slug>.localify.fyi` reaches
 `web.journal.localify` on the machine that serves it. It needs a Localify Cloud
-account. Accounts are invite-only for now. Serving takes Localify Cloud Pro, $7.99 a
-month or $79 a year after a 7-day free trial: `localify subscribe` starts it, and
-`localify billing` manages it.
+account, which you create by signing in with GitHub. Serving takes Localify Cloud
+Pro, after a 7-day free trial: `localify subscribe` starts it, and `localify billing`
+manages it. Prices are on [localify.dev/pricing](https://localify.dev/pricing).
 
 ```bash
 localify login                                   # shows a code to enter on github.com

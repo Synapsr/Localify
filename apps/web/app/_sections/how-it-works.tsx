@@ -1,85 +1,33 @@
-"use client";
+import { getTranslations } from "next-intl/server";
+import type { ComponentType, ReactNode, SVGProps } from "react";
 
-import * as motion from "motion/react-client";
-import { useTranslations } from "next-intl";
-import { useEffect, useRef, type ReactNode } from "react";
-
+import { InstallPromptButton } from "@/app/_components/install-prompt-button";
+import { AskDemo, ConnectDemo, PromptDemo } from "@/app/_components/step-demos";
+import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
+import { buttonVariants } from "@/components/ui/button-variants";
 import { FadeIn, SectionHeading, sectionClass } from "@/app/site-ui";
+import {
+  ArrowRightIcon,
+  CloudIcon,
+  DownloadSolidIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  LockIcon,
+  MobileIcon,
+  MonitorIcon,
+  ServersIcon,
+  SparklesIcon,
+} from "@/components/icons";
+import { Link } from "@/i18n/navigation";
 
-type VideoSrc = {
-  mp4?: string;
-  webm?: string;
-  poster?: string;
-};
+type Icon = ComponentType<SVGProps<SVGSVGElement>>;
 
-type MediaRowProps = {
-  title: ReactNode;
-  body: ReactNode;
-  reverse?: boolean;
-  video?: VideoSrc;
-};
+const demos = [<PromptDemo key="prompt" />, <ConnectDemo key="connect" />, <AskDemo key="ask" />];
 
-const ease = [0.22, 1, 0.36, 1] as const;
-
-const textContainer = {
-  hidden: {},
-  show: {
-    transition: {
-      staggerChildren: 0.08,
-      delayChildren: 0.05,
-    },
-  },
-};
-
-const textItem = {
-  hidden: { opacity: 0, y: 12 },
-  show: {
-    opacity: 1,
-    y: 0,
-    transition: { duration: 0.55, ease },
-  },
-};
-
-const mediaReveal = {
-  hidden: { opacity: 0, y: 16, scale: 0.985 },
-  show: {
-    opacity: 1,
-    y: 0,
-    scale: 1,
-    transition: { duration: 0.7, ease, delay: 0.12 },
-  },
-};
-
-const videos = [
-  { mp4: "/videos/flow-1-web.mp4" },
-  { mp4: "/videos/flow-2-web.mp4" },
-  { mp4: "/videos/flow-3-web.mp4" },
-  { mp4: "/videos/flow-4-web.mp4" },
-  { mp4: "/videos/flow-5-web.mp4" },
-] as const;
-
-export const HowItWorks = () => {
-  const t = useTranslations("HowItWorks");
-  const ta = useTranslations("Agents");
+export const HowItWorks = async () => {
+  const t = await getTranslations("HowItWorks");
+  const hero = await getTranslations("Hero");
   const steps = t.raw("steps") as Array<{ title: string; body: string }>;
-
-  const rows: Array<{ key: string; title: string; body: string; video?: VideoSrc }> = steps.map(
-    (step, index) => ({
-      key: step.title,
-      title: step.title,
-      body: step.body,
-      video: videos[index],
-    }),
-  );
-
-  // Agents are one of the ways into a project — drop them inline, right
-  // after the folder-import and CLI steps.
-  rows.splice(2, 0, {
-    key: "agents",
-    title: ta("title"),
-    body: ta("description"),
-    video: { mp4: "/videos/agent.mp4" },
-  });
 
   return (
     <section className={sectionClass} id="how-it-works">
@@ -93,95 +41,146 @@ export const HowItWorks = () => {
               {t("titleLine2")}
             </>
           }
-          description={t("description")}
         />
       </FadeIn>
 
-      <div className="mt-20 space-y-24 md:mt-28 md:space-y-36">
-        {rows.map((row, index) => (
-          <MediaRow
-            key={row.key}
-            reverse={index % 2 === 1}
-            video={row.video}
-            title={row.title}
-            body={row.body}
-          />
+      <div className="mt-14 grid grid-cols-[minmax(0,1fr)] gap-5 md:mt-20 lg:grid-cols-3">
+        {steps.map((step, index) => (
+          <FadeIn className="flex flex-col gap-5" delay={0.05 + index * 0.08} key={step.title}>
+            {demos[index]}
+            <div className="space-y-2.5 px-1">
+              <h3 className="flex items-center gap-2.5 text-[20px] leading-tight font-medium tracking-tight text-foreground">
+                <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-foreground text-[12px] font-medium text-background tabular-nums">
+                  {index + 1}
+                </span>
+                {step.title}
+              </h3>
+              <p className="text-[14.5px] leading-[1.55] text-pretty text-muted-foreground">{step.body}</p>
+            </div>
+          </FadeIn>
         ))}
       </div>
+
+      <FadeIn className="mt-12 flex flex-wrap items-center justify-center gap-3" delay={0.2}>
+        <InstallPromptButton source="how_it_works" />
+        <Link
+          className={buttonVariants({ variant: "outline", size: "lg" })}
+          data-umami-event="download_clicked"
+          data-umami-event-source="how_it_works"
+          href={MACOS_APP_DOWNLOAD_URL}
+        >
+          <DownloadSolidIcon className="h-4 w-4" />
+          {hero("download")}
+        </Link>
+      </FadeIn>
+
+      <Diagram
+        labels={{
+          title: t("diagram.title"),
+          you: [t("diagram.you"), t("diagram.youDetail")],
+          agents: [t("diagram.agents"), t("diagram.agentsDetail")],
+          machine: t("diagram.machine"),
+          dns: [t("diagram.dns"), t("diagram.dnsDetail")],
+          https: [t("diagram.https"), t("diagram.httpsDetail")],
+          router: [t("diagram.router"), t("diagram.routerDetail")],
+          servers: [t("diagram.servers"), t("diagram.serversDetail")],
+          cloud: [t("diagram.cloud"), t("diagram.cloudDetail")],
+          devices: [t("diagram.devices"), t("diagram.devicesDetail")],
+        }}
+      />
     </section>
   );
 };
 
-const MediaRow = ({ title, body, reverse, video }: MediaRowProps) => {
-  const hasVideo = !!video?.mp4 || !!video?.webm;
-  const videoRef = useRef<HTMLVideoElement>(null);
+type Pair = [string, string];
 
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.intersectionRatio < 1) return;
-        document.querySelectorAll("video").forEach((other) => {
-          if (other !== el) other.pause();
-        });
-        el.play().catch(() => {});
-      },
-      { threshold: 1 },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  return (
-    <div className="grid items-center gap-10 md:grid-cols-2 md:gap-16">
-      <motion.div
-        className={reverse ? "md:order-2" : ""}
-        initial="hidden"
-        variants={textContainer}
-        viewport={{ once: true, amount: 0.4 }}
-        whileInView="show"
-      >
-        <div className="space-y-5">
-          <motion.h3
-            className="text-[32px] leading-[1.05] font-medium tracking-[-0.03em] text-balance text-foreground md:text-[40px]"
-            variants={textItem}
-          >
-            {title}
-          </motion.h3>
-          <motion.p
-            className="max-w-lg text-[16.5px] leading-[1.55] text-pretty text-muted-foreground"
-            variants={textItem}
-          >
-            {body}
-          </motion.p>
-        </div>
-      </motion.div>
-
-      <motion.div
-        className={reverse ? "md:order-1" : ""}
-        initial="hidden"
-        variants={mediaReveal}
-        viewport={{ once: true, amount: 0.4 }}
-        whileInView="show"
-      >
-        <div className="relative aspect-4/3 overflow-hidden rounded-2xl border border-border bg-muted">
-          {hasVideo ? (
-            <video
-              ref={videoRef}
-              className="h-full w-full object-cover ring-1 ring-black/10 dark:ring-white/10"
-              loop
-              muted
-              playsInline
-              poster={video?.poster}
-              preload="metadata"
-            >
-              {video?.webm ? <source src={video.webm} type="video/webm" /> : null}
-              {video?.mp4 ? <source src={video.mp4} type="video/mp4" /> : null}
-            </video>
-          ) : null}
-        </div>
-      </motion.div>
+const Node = ({ icon: IconComponent, label, children }: { icon: Icon; label: Pair; children?: ReactNode }) => (
+  <div className="rounded-2xl bg-muted/60 p-4 ring-1 ring-border/60">
+    <div className="flex items-center gap-3">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-background text-foreground/80 ring-1 ring-border/60">
+        <IconComponent className="size-4" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-[14.5px] font-semibold tracking-tight text-foreground">{label[0]}</p>
+        <p className="text-[12.5px] text-muted-foreground">{label[1]}</p>
+      </div>
     </div>
-  );
-};
+    {children}
+  </div>
+);
+
+const Arrow = () => (
+  <div aria-hidden="true" className="flex items-center justify-center text-muted-foreground/70">
+    <ArrowRightIcon className="size-5 rotate-90 md:rotate-0" />
+  </div>
+);
+
+const Diagram = ({
+  labels,
+}: {
+  labels: {
+    title: string;
+    you: Pair;
+    agents: Pair;
+    machine: string;
+    dns: Pair;
+    https: Pair;
+    router: Pair;
+    servers: Pair;
+    cloud: Pair;
+    devices: Pair;
+  };
+}) => (
+  <FadeIn className="mt-24 md:mt-32">
+    <h3 className="text-center text-[22px] font-medium tracking-tight text-foreground">{labels.title}</h3>
+    <div className="mx-auto mt-10 grid max-w-5xl grid-cols-[minmax(0,1fr)] items-center gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1.15fr)_auto_minmax(0,1fr)] md:gap-4">
+      <div className="space-y-3">
+        <Node icon={MonitorIcon} label={labels.you} />
+        <Node icon={SparklesIcon} label={labels.agents} />
+      </div>
+      <Arrow />
+      <div className="rounded-3xl bg-foreground p-5 text-background shadow-[0_30px_60px_-30px_rgba(13,13,13,0.5)]">
+        <p className="text-[15px] font-semibold tracking-tight">{labels.machine}</p>
+        <div className="mt-4 space-y-2.5">
+          {(
+            [
+              [GlobeIcon, labels.dns],
+              [LockIcon, labels.https],
+              [GitBranchIcon, labels.router],
+            ] as const
+          ).map(([IconComponent, pair]) => (
+            <div className="flex items-center gap-3 rounded-xl bg-background/10 px-3 py-2.5" key={pair[0]}>
+              <IconComponent className="size-4 shrink-0 text-background/80" />
+              <div className="min-w-0">
+                <p className="text-[13.5px] font-medium">{pair[0]}</p>
+                <p className="text-[12px] text-background/60">{pair[1]}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <Arrow />
+      <div className="space-y-3">
+        <Node icon={ServersIcon} label={labels.servers}>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {["web.journal", "web--fix-auth.journal", "api.journal"].map((host) => (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-1 text-[11.5px] text-foreground/80" key={host}>
+                <span className="size-2 rounded-full bg-success" />
+                {host}.localify
+              </span>
+            ))}
+          </div>
+        </Node>
+        <Node icon={CloudIcon} label={labels.cloud}>
+          <div className="mt-3 flex items-center gap-2 rounded-xl bg-background px-3 py-2 ring-1 ring-border/60">
+            <MobileIcon className="size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0">
+              <p className="text-[12.5px] font-medium text-foreground">{labels.devices[0]}</p>
+              <p className="truncate text-[11.5px] text-muted-foreground">{labels.devices[1]}</p>
+            </div>
+          </div>
+        </Node>
+      </div>
+    </div>
+  </FadeIn>
+);

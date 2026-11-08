@@ -5,7 +5,8 @@ import Image from "next/image";
 import { Link } from "@/i18n/navigation";
 
 import { AppleGlyph } from "@/app/_components/apple-glyph";
-import { CLI_INSTALL_COMMAND, MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
+import { InstallPromptButton } from "@/app/_components/install-prompt-button";
+import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { sourceUrl } from "@/app/site-metadata";
 import { sectionClass } from "@/app/site-ui";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -76,8 +77,9 @@ export const FinalCta = async () => {
           className="flex flex-wrap items-center justify-center gap-3 pt-2"
           variants={item}
         >
+          <InstallPromptButton source="final_cta" />
           <Link
-            className={buttonVariants({ variant: "glow", size: "lg" })}
+            className={buttonVariants({ variant: "outline", size: "lg" })}
             data-umami-event="download_clicked"
             data-umami-event-source="final_cta"
             href={MACOS_APP_DOWNLOAD_URL}
@@ -85,25 +87,20 @@ export const FinalCta = async () => {
             <AppleGlyph className="h-4 w-4" />
             {t("download")}
           </Link>
-          <a
-            className={buttonVariants({ variant: "outline", size: "lg" })}
-            data-umami-event="source_clicked"
-            data-umami-event-source="final_cta"
-            href={sourceUrl}
-            rel="noopener noreferrer"
-            target="_blank"
-          >
-            <RiGithubFill className="h-4 w-4" />
-            {t("source")}
-          </a>
         </motion.div>
 
-        <motion.div className="w-full max-w-md space-y-2" variants={item}>
-          <p className="text-[13px] text-muted-foreground">{t("terminal")}</p>
-          <code className="block overflow-x-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2 font-mono text-[13px] whitespace-nowrap text-foreground select-all">
-            {CLI_INSTALL_COMMAND}
-          </code>
-        </motion.div>
+        <motion.a
+          className="inline-flex items-center gap-1.5 text-[13.5px] text-foreground underline decoration-border decoration-[1.5px] underline-offset-4 transition-colors hover:decoration-foreground"
+          data-umami-event="source_clicked"
+          data-umami-event-source="final_cta"
+          href={sourceUrl}
+          rel="noopener noreferrer"
+          target="_blank"
+          variants={item}
+        >
+          <RiGithubFill className="size-4" />
+          {t("source")}
+        </motion.a>
 
         <motion.p className="text-[13px] text-muted-foreground" variants={item}>
           {t("requirements")}

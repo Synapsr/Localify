@@ -4,10 +4,10 @@ import { localizedPath } from "@/app/page-metadata";
 import { siteUrl } from "@/app/site-metadata";
 import { routing } from "@/i18n/routing";
 
-const routes = ["", "/privacy", "/terms"] as const;
+const routes = ["", "/pricing", "/privacy", "/terms"] as const;
 
 const sitemap = (): MetadataRoute.Sitemap => {
-  const lastModified = new Date("2026-11-04");
+  const lastModified = new Date("2026-11-07");
 
   return routes.flatMap((route) => {
     const languages = Object.fromEntries(

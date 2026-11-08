@@ -8,20 +8,23 @@ For the full Rust and desktop picture (architecture, DNS, TLS, proxy behavior, c
 
 ## 1. Positioning
 
-- **One-liner**: stable local domains and trusted HTTPS for developers, free and open source.
+- **One-liner**: a clean HTTPS URL for every project, worktree, and machine. Your agents run it, you open the URL.
+- **Angle**: agent first, human in the loop. Coding agents set Localify up and drive it over MCP; the person watches and steers from the desktop app.
+- **Strongest point**: it scales with the way people code with agents now: several agents in parallel, one Git worktree each, on more than one computer. Every worktree gets its own URL, and one public URL per project reaches all of them from another device.
 - **Category**: local development proxy, HTTPS for localhost.
-- **Audience**: developers who run several projects at once and care about DX. AI coding tools (Claude Code, Codex, Cursor) make that workflow the default.
+- **Audience**: developers who let AI coding tools (Claude Code, Codex, Cursor) work in parallel, often on several machines.
 - **Tone**: pragmatic, technical, understated. Close to Linear, Raycast, or Arc in voice.
-- **Actions**: downloading the app is the primary action. Viewing the source at <https://github.com/Synapsr/Localify> is the secondary one.
+- **Actions**: copying the install prompt is the primary action: the visitor pastes it into their agent, which installs Localify (`INSTALL_PROMPT` in `app/_components/install-prompt-button.tsx`). Downloading the desktop app, the dashboard on top, is the second. Viewing the source at <https://github.com/Synapsr/Localify> is the third.
 
 ## 2. The problem we solve
 
-Working with AI agents means running several dev servers in parallel. Each one wants port 3000 by default, and each one points its env (`BASE_URL`, OAuth callbacks) at `http://localhost:3000`.
+Working with AI agents means running several dev servers in parallel, often one per Git worktree, and sometimes on a machine you're not sitting at. Each one wants port 3000 by default, and each one points its env (`BASE_URL`, OAuth callbacks) at `http://localhost:3000`.
 
 - **Port collisions**: opening a second project bumps it to `:3001`, which silently breaks anything its env hard-coded to `:3000`.
 - **No mental map**: four tabs all say "localhost".
 - **Demos feel unfinished**: `http://localhost:3000` doesn't look like a product.
 - **Side effects compound**: webhooks and OAuth callbacks can't tolerate moving ports.
+- **You lose sight of what agents run**: servers start in terminals you never see, on a machine you may not be at.
 
 ## 3. How the app works
 
@@ -62,7 +65,25 @@ DNS, TLS, CA install, Node trust, and CLI install happen during onboarding. Ther
 
 ### 4.7 Set up by your AI agent
 
-Localify includes an MCP server for Claude Code, Codex, and Cursor (`localify agent install`, or **Connect agents** in the desktop **Settings → AI agents**). Every action of the app and the CLI is a tool. The agent sets the project up, starts and stops services behind their `.localify` URLs, and when its work in a Git worktree is done, removes that environment and the worktree folder. The site shows this as an inline step in **How it works** (`public/videos/agent.mp4`).
+Localify includes an MCP server for Claude Code, Codex, and Cursor (`localify agent install`, or **Connect agents** in the desktop **Settings → AI agents**). Every action of the app and the CLI is a tool. The agent sets the project up, starts and stops services behind their `.localify` URLs, and when its work in a Git worktree is done, removes that environment and the worktree folder. The site leads with this (use case 01).
+
+### 4.8 One URL per worktree
+
+A service started inside a Git worktree attaches the worktree to the project as an environment, with its own ports and domains: `environment.project.localify` for a single-service project, `service--environment.project.localify` otherwise (ADR 0009). The main checkout keeps its URLs. `remove_environment` with `delete_worktree` stops its services, unregisters its domains, and deletes the folder.
+
+### 4.9 Public URLs across machines (Localify Cloud Pro)
+
+`localify public-url create <project>.localify --wildcard` gives a project one `https://<slug>.localify.fyi` URL, and every service and worktree under it opens at `https://<slug>--<label>.localify.fyi`. It is protected by a password by default, with a link that signs a browser in by itself. One machine serves each URL; `claim` moves it to another of the user's machines. Agents can create, protect, and remove URLs; signing in and opening a URL to everyone stay the person's ([docs/public-urls.md](../../docs/public-urls.md)).
+
+- **Plan**: Localify Cloud Pro, after a 7-day free trial: 2 serving machines, 10 public URLs. Prices come live from Polar (see "Prices" below).
+- **Access**: anyone with a GitHub account can sign in. The Pro action reads "Start your 7-day free trial" and points to the install; the card then shows `localify login` and `localify subscribe`.
+- **Add-ons**: +1 serving machine and +10 public URLs, billed monthly in any quantity, only with an active Pro plan. Buying them in the app (Settings → Localify Cloud) ships with the next app release, and no CLI command buys them, so the page says so and points to the billing portal to manage them. Update that line when the app ships.
+- **Team**: "Coming later", with a mailto. It is not built and not in the Cloud contract, so the page gives it no price or features.
+- **Remote machines**: seeing the services and output of your other machines in the app ([docs/remote-machines.md](../../docs/remote-machines.md)) isn't released. The machines use case mentions it only behind a "Coming soon" label; drop the label when the app ships it.
+
+#### Prices
+
+[`lib/pricing.ts`](lib/pricing.ts) is the one source of prices and plan amounts. The Worker fetches `GET https://api.localify.dev/v1/pricing?currency=eur|usd`, in euros when the visitor's `CF-IPCountry` is in the EU or EEA and in US dollars otherwise, keeps it for an hour, and falls back to the same numbers built in ($7.99 / $79, add-ons $3 and $2, or the same in euros) when the endpoint fails. Prices format with `Intl` in the page's locale. Reading the header renders the landing and pricing pages per request. Messages carry no price, except the Terms, which state both currencies as a contract does: change them with the Polar products.
 
 ## 5. Technical snapshot
 
@@ -91,7 +112,8 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 
 ### Facts copy can use
 
-- **License**: free and open source under AGPL-3.0-only. No account, and no limit on projects or domains.
+- **License**: everything that runs on the user's machines is free and open source under AGPL-3.0-only. No account, and no limit on projects, domains, or worktrees. Public URLs are the only paid part (4.9).
+- **Localify Cloud**: public URLs (`https://<slug>.localify.fyi`, served from the user's machine) are the one paid part. Pro costs $7.99 a month or $79 a year (€7.99 or €79 in the EU and EEA), after a 7-day free trial that asks for a card and charges nothing before it ends, one trial per GitHub account. It includes 2 machines serving at the same time and 10 public URLs, a password on every URL by default, and wildcard URLs. Add-ons: +1 serving machine for $3 a month, +10 URLs for $2 a month (4.9). Team is "coming later" with a mailto. Polar (polar.sh) is the merchant of record and the seller. Say "Start your 7-day free trial": install, then `localify login` and `localify subscribe`. The [pricing page](app/pricing/page.tsx), the Terms and the Privacy Policy carry the details.
 - **Platforms**: the desktop app runs on macOS on Apple Silicon for now. The CLI and daemon install on macOS on Apple Silicon and Linux x86_64 with `curl -fsSL https://localify.dev/install.sh | sh` (`public/install.sh`, which downloads the GitHub release and checks its SHA-256), and build from source elsewhere. Windows and a Linux desktop app are planned for later, with no date to promise.
 - **For agents**: `public/llms.txt` sums up install, first steps, MCP and public URLs. Keep it in step with this file and `docs/README.md`.
 - **Architecture**: Rust daemon plus Tauri desktop UI.
@@ -101,7 +123,9 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 ## 6. Differentiators
 
 - **vs. `/etc/hosts` + `mkcert`**: Localify sets up DNS, the local CA, and Node trust in one permission prompt, with no manual `mkcert -install`, `NODE_EXTRA_CA_CERTS` exports, or per-project scripts.
-- **vs. ngrok, Cloudflare Tunnel**: Localify is local, not a tunnel. URLs don't expire, and nothing traverses the internet.
+- **vs. ngrok, Cloudflare Tunnel, zrok, Pinggy**: a tunnel puts one port on the internet. Localify starts on the machine: a named HTTPS URL per project and worktree, set up by agents and visible in one app. When the person needs them elsewhere, one public URL covers a whole project, every worktree included.
+- **vs. LocalCan**: the closest product (local domains, HTTPS, public URLs). Localify is open source, free for everything local, and built around agents and worktrees rather than sharing previews.
+- **vs. Portless**: named `.localhost` URLs for agents, CLI only. Localify adds trusted HTTPS, the desktop app, and public URLs across machines.
 - **vs. Caddy, nginx**: a different problem. They optimize for running production-shaped configs on a dev box. Localify optimizes for DX: a simple UI, no config files, and a natural flow for juggling many projects.
 
 ## 7. Proof
@@ -114,26 +138,23 @@ Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
 
 | Section | File | Notes |
 |---|---|---|
-| Hero | `app/_sections/hero.tsx` | Download and source actions, interactive mockup of the Projects view with a download dialog |
-| What changes | `app/_sections/problem.tsx` | Three cards |
-| How it works | `app/_sections/how-it-works.tsx` | Steps plus the inline agent row (see 4.7) |
+| Hero | `app/_sections/hero.tsx` | Badge with the agents' logos, an H1 that names what Localify gives (clean URLs for agents, worktrees, and machines: keep those search words), the install prompt and download actions, URL chips tagged with their kind or machine, the interactive Projects mockup, then the agents as pills |
+| Use cases | `app/_sections/use-cases.tsx` | Four rows: agent setup (4.7), one URL per worktree (4.8), watching from the app, every machine (4.9). Visuals in `app/_components/use-case-visuals.tsx` |
+| Not just URLs | `app/_sections/features.tsx` | Three cards: HTTPS setup, launch profiles, any stack |
+| How it works | `app/_sections/how-it-works.tsx` | Three compact columns, each with a scaled demo on a plain background (`app/_components/step-demos.tsx`): the prompt in the agent, Settings → AI agents connecting, a worktree URL appearing. Then a diagram of the pieces |
+| Pricing | `app/_sections/pricing.tsx` | The plans block shared with the pricing page (`app/_components/plans.tsx`): Free, Pro with its trial action, Team, then the add-ons (4.9), and a link to the pricing page |
 | FAQ | `app/_sections/faq.tsx` | |
-| Final CTA | `app/_sections/final-cta.tsx` | Download and source actions, requirements |
+| Final CTA | `app/_sections/final-cta.tsx` | Install prompt, download and source actions, requirements |
 
-## 9. How it works videos
+The pricing page, [`app/pricing/page.tsx`](app/pricing/page.tsx), is a separate route: the same plans block, with Pro's monthly/yearly toggle (`app/_components/pro-plan-card.tsx`), then its own FAQ. Prices come from `lib/pricing.ts` (4.9, "Prices").
 
-`app/_sections/how-it-works.tsx` plays one muted, looping video per row, from `public/videos/`:
+Polar sends people back to two `noindex` pages, named in [`docs/public-urls.md`](../../docs/public-urls.md) ("Billing"): `app/cloud/subscribed/page.tsx` after checkout, which never says the plan is active (it starts when Localify Cloud sees the subscription), and `app/cloud/page.tsx` from the customer portal, with an overview and how to manage billing. Neither is in the navigation or the sitemap.
 
-| Row | File |
-|---|---|
-| Setup | `flow-1-web.mp4` |
-| Pick a folder | `flow-2-web.mp4` |
-| Agent | `agent.mp4` |
-| `localify init-project` | `flow-3-web.mp4` |
-| Projects by name | `flow-4-web.mp4` |
-| Launch and monitor | `flow-5-web.mp4` |
+## 9. Visuals
 
-Target a 4:3 aspect, 5 to 15 seconds, a clean loop, no audio, and under 2 MB: `ffmpeg -i in.mov -c:v libx264 -crf 30 -vf scale=1280:-2 -an out.mp4`.
+The use-case and step visuals are coded mockups, not videos, so they follow the product without re-recording. They reuse the sky backgrounds in `public/sky/`, except the machines diagram and the step demos, which sit on a plain background, and the example project `journal` from the docs. The machines diagram shows a MacBook and a remote Linux server, with the real output of `localify public-url create --wildcard`. Keep what they show true: tool names from `localify mcp`, domain shapes from ADR 0009 and 0022.
+
+The pieces of the app they show (project card and environments, domain chip, terminal panel, AI agents settings card) are copies of the desktop components with the same classes, in `app/_components/app-replicas.tsx`. The app is English only, so their strings stay English. Update them when those desktop components change. Domains use the sans font, as in the app; the mono font is for the terminal only.
 
 ## 10. Copy conventions
 

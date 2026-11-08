@@ -6,6 +6,13 @@ import { useState } from "react";
 
 import { FadeIn, sectionClass } from "@/app/site-ui";
 import { ChevronDownIcon } from "@/components/icons";
+import { Link } from "@/i18n/navigation";
+
+export type FaqEntry = {
+  question: string;
+  answer: string;
+  link?: { label: string; href: string };
+};
 
 const ease = [0.22, 1, 0.36, 1] as const;
 const blurEase = [0.22, 1, 0.36, 1] as const;
@@ -29,7 +36,7 @@ const headingItem = {
 
 export const Faq = () => {
   const t = useTranslations("Faq");
-  const items = t.raw("items") as { question: string; answer: string }[];
+  const items = t.raw("items") as FaqEntry[];
 
   return (
     <section className={sectionClass} id="faq">
@@ -61,7 +68,7 @@ export const Faq = () => {
       <FadeIn className="mx-auto mt-16 max-w-3xl md:mt-20">
         <div className="flex flex-col gap-2.5">
           {items.map((item) => (
-            <FaqItem answer={item.answer} key={item.question} question={item.question} />
+            <FaqItem key={item.question} {...item} />
           ))}
         </div>
 
@@ -79,7 +86,7 @@ export const Faq = () => {
   );
 };
 
-const FaqItem = ({ answer, question }: { answer: string; question: string }) => {
+export const FaqItem = ({ answer, question, link }: FaqEntry) => {
   const [open, setOpen] = useState(false);
   return (
     <div
@@ -115,6 +122,17 @@ const FaqItem = ({ answer, question }: { answer: string; question: string }) => 
           >
             <p className="max-w-2xl px-6 pb-6 text-[15px] leading-[1.65] text-pretty text-muted-foreground md:px-7">
               {answer}
+              {link ? (
+                <>
+                  {" "}
+                  <Link
+                    className="text-foreground underline decoration-border decoration-[1.5px] underline-offset-[5px] transition-colors hover:decoration-foreground"
+                    href={link.href}
+                  >
+                    {link.label}
+                  </Link>
+                </>
+              ) : null}
             </p>
           </motion.div>
         ) : null}

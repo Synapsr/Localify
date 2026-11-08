@@ -6,8 +6,7 @@ import {
   type Transition,
   type Variants,
 } from "motion/react";
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import type { BootstrapDto } from "@/types/localify";
@@ -16,14 +15,23 @@ import { DaemonPortConflicts } from "@/components/app/daemon-port-conflicts";
 import {
   CheckIcon,
   ChevronRightIcon,
+  CloudIcon,
+  CopyIcon,
   DangerTriangleIcon,
   LockIcon,
+  MonitorIcon,
   PowerIcon,
+  RefreshIcon,
+  ServersIcon,
+  SparklesIcon,
+  TerminalIcon,
   ZapIcon,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { captureDesktopEvent } from "@/lib/analytics";
-import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
+import { bootstrapQueries, configMutations, daemonMutations, systemMutations } from "@/lib/queries";
+import { tauriClient } from "@/lib/tauri-client";
 import { assertInstallCompleted } from "@/lib/util.install-result";
 import { cn } from "@/lib/utils";
 
@@ -36,28 +44,35 @@ interface OnboardingProps {
 
 type StepId = "welcome" | "why" | "how" | "activate";
 const STEPS: readonly StepId[] = ["welcome", "why", "how", "activate"] as const;
-const FLOW_VIDEOS = [
-  "/videos/flow-2-web.mp4",
-  "/videos/flow-3-web.mp4",
-  "/videos/flow-4-web.mp4",
-  "/videos/agent.mp4",
-] as const;
-const warmedFlowVideos = new Map<string, HTMLVideoElement>();
-
 export function Onboarding({ bootstrap, onActivated, startAtActivation }: OnboardingProps) {
   const [stepIndex, setStepIndex] = useState(startAtActivation ? STEPS.length - 1 : 0);
   const [direction, setDirection] = useState<0 | 1 | -1>(0);
   const reduceMotion = useReducedMotion();
 
   const currentStep = STEPS[stepIndex]!;
+  const queryClient = useQueryClient();
+  const updateConfig = useMutation(configMutations.update(queryClient));
+  const [connectAgents, setConnectAgents] = useState(bootstrap.config.agent.connectAgents);
+
+  // Activation reads this setting from the config, so it is saved as soon as it changes.
+  const changeConnectAgents = (next: boolean) => {
+    setConnectAgents(next);
+    updateConfig.mutate(
+      { agent: { ...bootstrap.config.agent, connectAgents: next } },
+      {
+        onError: (error) => {
+          setConnectAgents(!next);
+          toast.error("Could not change the agent setting", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        },
+      },
+    );
+  };
 
   useEffect(() => {
     captureDesktopEvent("desktop_onboarding_step_viewed", { step: currentStep });
   }, [currentStep]);
-
-  useEffect(() => {
-    warmFlowVideos();
-  }, []);
 
   const go = (next: number) => {
     if (next === stepIndex) return;
@@ -113,6 +128,8 @@ export function Onboarding({ bootstrap, onActivated, startAtActivation }: Onboar
               {currentStep === "how" && (
                 <HowItWorksStep
                   bootstrap={bootstrap}
+                  connectAgents={connectAgents}
+                  onConnectAgentsChange={changeConnectAgents}
                   onBack={() => go(1)}
                   onContinue={() => go(3)}
                 />
@@ -120,6 +137,7 @@ export function Onboarding({ bootstrap, onActivated, startAtActivation }: Onboar
               {currentStep === "activate" && (
                 <ActivateStep
                   bootstrap={bootstrap}
+                  connectAgents={connectAgents}
                   onActivated={onActivated}
                   onBack={() => go(2)}
                 />
@@ -132,22 +150,6 @@ export function Onboarding({ bootstrap, onActivated, startAtActivation }: Onboar
       <StepIndicator current={stepIndex} count={STEPS.length} onSelect={go} />
     </div>
   );
-}
-
-function warmFlowVideos() {
-  if (typeof document === "undefined") return;
-
-  for (const src of FLOW_VIDEOS) {
-    if (warmedFlowVideos.has(src)) continue;
-
-    const video = document.createElement("video");
-    video.src = src;
-    video.preload = "auto";
-    video.muted = true;
-    video.playsInline = true;
-    video.load();
-    warmedFlowVideos.set(src, video);
-  }
 }
 
 function BackgroundDecor() {
@@ -247,7 +249,7 @@ function WelcomeStep({
   const reduceMotion = useReducedMotion();
   const item = reduceMotion ? welcomeItemReduced : welcomeItem;
 
-  const subtitle = `A local development proxy with custom ${bootstrap.environment.fixedDomainSuffix} domains and automatic HTTPS.`;
+  const subtitle = `Clean ${bootstrap.environment.fixedDomainSuffix} URLs for your agents, worktrees, and machines.`;
 
   return (
     <motion.div
@@ -299,13 +301,6 @@ function WhyStep({
   onContinue: () => void;
 }) {
   const suffix = bootstrap.environment.fixedDomainSuffix;
-  const httpsPort = bootstrap.config.daemon.httpsPort;
-
-  const paragraphs = [
-    "AI makes it easy to juggle many projects at once. The problem: they all default to localhost:3000.",
-    "Open a second one and it bumps to :3001, then :3002. The moment an env var hardcodes a base URL, things quietly break.",
-    `Localify gives every project a fixed, memorable ${suffix} domain. No port drift, no collisions — and URLs that look good in a demo.`,
-  ];
 
   return (
     <div>
@@ -317,41 +312,23 @@ function WhyStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Why Localify</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          The end of <span className="font-mono">localhost:3000</span>,{" "}
-          <span className="font-mono">:3001</span>, <span className="font-mono">:3002</span>…
+          Five agents on five worktrees, across your computers. Every one keeps a stable URL, and
+          hot reload shows up wherever you look from.
         </p>
       </motion.div>
-
-      <div className="mx-auto max-w-xl space-y-4 text-[15px] leading-relaxed text-foreground/90">
-        {paragraphs.map((p, i) => (
-          <motion.p
-            key={i}
-            initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{
-              duration: 0.55,
-              delay: 0.1 + i * 0.12,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-          >
-            {p}
-          </motion.p>
-        ))}
-      </div>
 
       <motion.div
         initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
         animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-        transition={{ duration: 0.55, delay: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        className="mt-8"
+        transition={{ duration: 0.55, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
       >
-        <BrowserMock suffix={suffix} httpsPort={httpsPort} />
+        <MachinesMock suffix={suffix} />
       </motion.div>
 
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.7, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.4, ease: "easeOut" }}
         className="mt-8 flex items-center justify-between"
       >
         <Button variant="ghost" size="lg" onClick={onBack}>
@@ -366,221 +343,172 @@ function WhyStep({
   );
 }
 
-type BrowserProject = {
-  name: string;
-  localPort: string;
-};
+const MACHINES = [
+  {
+    name: "Mac Studio",
+    worktrees: ["web--fix-auth.journal", "web--onboarding.journal", "api--onboarding.journal"],
+  },
+  { name: "Linux server", worktrees: ["web--dark-mode.journal", "web--search.journal"] },
+] as const;
 
-const browserEase = [0.22, 1, 0.36, 1] as const;
+const WORKTREES = MACHINES.flatMap((machine) => machine.worktrees);
 
-const browserIconVariants: Variants = {
-  initial: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
-  animate: { opacity: 1, scale: 1, filter: "blur(0px)" },
-  exit: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
-};
-
-function BrowserMock({ suffix, httpsPort }: { suffix: string; httpsPort: number }) {
+/* Agents' worktrees on two machines; one at a time reloads, and the MacBook shows it. */
+function MachinesMock({ suffix }: { suffix: string }) {
   const reduceMotion = useReducedMotion();
-  const projects: BrowserProject[] = [
-    { name: "shop", localPort: "3000" },
-    { name: "admin", localPort: "3001" },
-    { name: "docs", localPort: "3002" },
-  ];
-
-  const cycleLength = projects.length + 1;
-  const [step, setStep] = useState(0);
+  const [active, setActive] = useState(0);
 
   useEffect(() => {
     if (reduceMotion) return;
-    const id = setInterval(() => {
-      setStep((s) => (s + 1) % cycleLength);
-    }, 1800);
+    const id = setInterval(() => setActive((i) => (i + 1) % WORKTREES.length), 1800);
     return () => clearInterval(id);
-  }, [reduceMotion, cycleLength]);
+  }, [reduceMotion]);
 
-  const tabModes: Array<"local" | "localify"> = projects.map((_, i) =>
-    i < step ? "localify" : "local",
-  );
-  const activeIndex = step === 0 ? 0 : step - 1;
-  const secure = tabModes[activeIndex] === "localify";
-  const active = projects[activeIndex]!;
-  const httpsPortSegment = httpsPort === 443 ? "" : `:${httpsPort}`;
-
-  const tabLabels = projects.map((p, i) =>
-    tabModes[i] === "local" ? `localhost:${p.localPort}` : `${p.name}${suffix}`,
-  );
-  const url = secure
-    ? `https://${active.name}${suffix}${httpsPortSegment}`
-    : `http://localhost:${active.localPort}`;
-  const label = secure ? "trusted" : "not secure";
+  const activeHost = WORKTREES[active]!;
+  const [label, project] = activeHost.split(".");
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-muted/30">
-      <div className="flex">
-        <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2">
-          <span className="size-2.5 rounded-full bg-[#FF5C5F]" />
-          <span className="size-2.5 rounded-full bg-[#FAC800]" />
-          <span className="size-2.5 rounded-full bg-[#34C759]" />
-        </div>
-
-        <div className="flex w-full items-end pt-1">
-          {tabLabels.map((lbl, i) => {
-            const isActive = i === activeIndex;
-            const tabSecure = tabModes[i] === "localify";
-            return (
-              <div
-                // biome-ignore lint/suspicious/noArrayIndexKey: tab position is stable
-                key={i}
-                className={cn(
-                  "relative flex min-w-0 flex-1 items-center gap-2 rounded-t-lg border-b border-border px-3 py-2.5 font-mono text-[11.5px]",
-                  isActive ? "border border-b-0 bg-card text-foreground" : "text-muted-foreground",
-                  i > 0 && !isActive
-                    ? "before:absolute before:top-1/2 before:left-0 before:h-4 before:w-px before:-translate-y-1/2 before:bg-border before:content-['']"
-                    : "",
-                )}
-              >
-                <span
-                  className={cn(
-                    "inline-block size-1.5 shrink-0 rounded-full transition-colors duration-300",
-                    tabSecure ? "bg-emerald-500" : "bg-muted-foreground/40",
-                  )}
-                />
-                <span className="relative min-w-0 flex-1 overflow-hidden">
-                  <MorphText className="truncate" delay={i * 0.04} value={lbl} />
-                </span>
-              </div>
-            );
-          })}
-        </div>
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        {MACHINES.map((machine) => (
+          <div key={machine.name} className="rounded-xl border border-border bg-card p-3">
+            <div className="mb-2.5 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <ServersIcon className="size-3.5" />
+              {machine.name}
+            </div>
+            <ul className="space-y-1.5">
+              {machine.worktrees.map((host) => {
+                const isActive = host === activeHost;
+                return (
+                  <li
+                    key={host}
+                    className={cn(
+                      "flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs transition-colors duration-300",
+                      isActive ? "border-foreground/25 bg-muted/60" : "border-border",
+                    )}
+                  >
+                    <span className="size-1.5 shrink-0 rounded-full bg-success" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {host}
+                      {suffix}
+                    </span>
+                    {isActive && (
+                      <RefreshIcon className="size-3 shrink-0 animate-spin text-muted-foreground [animation-duration:1.2s]" />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
       </div>
 
-      <div className="p-2">
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-          <span
-            aria-hidden
-            className={cn(
-              "relative grid size-4 shrink-0 place-items-center",
-              secure ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
-            )}
-          >
-            <AnimatePresence initial={false} mode="wait">
-              {secure ? (
-                <motion.span
-                  key="lock"
-                  variants={browserIconVariants}
-                  initial="initial"
-                  animate="animate"
-                  exit="exit"
-                  transition={{ type: "spring", duration: 0.3, bounce: 0 }}
-                  className="absolute inset-0 grid place-items-center"
-                >
-                  <LockIcon className="size-3.5" strokeWidth={2} />
-                </motion.span>
-              ) : (
-                <motion.span
-                  key="warn"
-                  variants={browserIconVariants}
-                  initial="initial"
-                  animate="animate"
-                  exit="exit"
-                  transition={{ type: "spring", duration: 0.3, bounce: 0 }}
-                  className="absolute inset-0 grid place-items-center"
-                >
-                  <DangerTriangleIcon className="size-3.5" strokeWidth={2} />
-                </motion.span>
-              )}
-            </AnimatePresence>
-          </span>
-
-          <span className="relative min-w-0 flex-1 overflow-hidden">
-            <MorphText
-              className="truncate font-mono text-[12px] text-muted-foreground"
-              delay={0.18}
-              value={url}
-            />
-          </span>
-
-          <span
-            className={cn(
-              "relative block min-w-[76px] overflow-hidden text-right font-mono text-[10.5px] tracking-wider uppercase transition-colors duration-300",
-              secure ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
-            )}
-          >
-            <MorphText delay={0.26} value={label} />
-          </span>
+      <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
+        <div className="flex shrink-0 items-center gap-2 text-xs font-medium text-muted-foreground">
+          <MonitorIcon className="size-3.5" />
+          MacBook
+        </div>
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-muted/60 px-3 py-1 text-xs">
+          <LockIcon className="size-3 shrink-0 text-muted-foreground" />
+          <AnimatePresence initial={false} mode="popLayout">
+            <motion.span
+              key={activeHost}
+              className="truncate"
+              initial={{ opacity: 0, filter: "blur(4px)", y: -3 }}
+              animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
+              exit={{ opacity: 0, filter: "blur(4px)", y: 3 }}
+              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {project}--{label}.localify.fyi
+            </motion.span>
+          </AnimatePresence>
         </div>
       </div>
     </div>
   );
 }
 
-function MorphText({
-  className,
-  delay = 0,
-  value,
-}: {
-  className?: string;
-  delay?: number;
-  value: string;
-}) {
+// ---------- Step 3: How it works ----------
+
+const DOCS_URL = "https://github.com/Synapsr/Localify/blob/main/docs/README.md";
+
+/* The prompt that sets Localify up the way a person works, pasted into their agent. */
+const SETUP_PROMPT = `Set up Localify for this project, using its MCP tools. First ask me how I work: which apps you should run, whether you work in Git worktrees, and whether I need to open them from another device. Then set the project up, start its services, and give me their URLs.`;
+
+const openDocs = (anchor: string) => {
+  const url = `${DOCS_URL}#${anchor}`;
+  tauriClient.openExternalUrl(url).catch(() => window.open(url, "_blank", "noopener"));
+};
+
+function LearnMore({ anchor }: { anchor: string }) {
   return (
-    <AnimatePresence initial={false} mode="popLayout">
-      <motion.span
-        key={value}
-        className={cn("block tabular-nums", className)}
-        initial={{ opacity: 0, filter: "blur(4px)", y: -3 }}
-        animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
-        exit={{ opacity: 0, filter: "blur(4px)", y: 3 }}
-        transition={{ duration: 0.3, ease: browserEase, delay }}
-      >
-        {value}
-      </motion.span>
-    </AnimatePresence>
+    <button
+      type="button"
+      onClick={() => openDocs(anchor)}
+      className="shrink-0 text-xs font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+    >
+      Learn more
+    </button>
   );
 }
 
-// ---------- Step 3: How it works ----------
-
 function HowItWorksStep({
   bootstrap,
+  connectAgents,
+  onConnectAgentsChange,
   onBack,
   onContinue,
 }: {
   bootstrap: BootstrapDto;
+  connectAgents: boolean;
+  onConnectAgentsChange: (next: boolean) => void;
   onBack: () => void;
   onContinue: () => void;
 }) {
   const suffix = bootstrap.environment.fixedDomainSuffix;
-  const [openVideo, setOpenVideo] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
-  const items: Array<{
-    title: string;
-    description: string;
-    video: string;
-  }> = [
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_PROMPT);
+      setCopied(true);
+    } catch {
+      toast.error("Could not copy the prompt");
+    }
+  };
+
+  const items: Array<{ icon: ReactNode; title: string; description: string; anchor: string }> = [
     {
-      title: "Pick a folder, get a project",
-      description: `Localify scans the folder, detects each app, and proposes ${suffix} hostnames. Works for a single project or a whole monorepo.`,
-      video: FLOW_VIDEOS[0],
+      icon: <ZapIcon className="size-4" />,
+      title: "One worktree, one URL",
+      description: `Each Git worktree gets its own ${suffix} URL, removed when the agent is done.`,
+      anchor: "cleaning-up-worktrees",
     },
     {
-      title: "Or run localify init-project from your editor",
-      description:
-        "Same result, interactive prompts. The project shows up in the app, ready to go.",
-      video: FLOW_VIDEOS[1],
+      icon: <TerminalIcon className="size-4" />,
+      title: "You watch from here",
+      description: "What your agents start runs in this app's terminal.",
+      anchor: "services-in-the-app-from-the-command-line",
     },
     {
-      title: "Projects by name, not by port",
-      description: `Every project gets a fixed ${suffix} hostname with trusted HTTPS. No port drift, demos that look like a product.`,
-      video: FLOW_VIDEOS[2],
-    },
-    {
-      title: "Or let your agent do it — /localify",
-      description:
-        "In any project, run /localify with Claude, Codex, or Cursor. It sets everything up, then you just talk to your agent to fix anything.",
-      video: FLOW_VIDEOS[3],
+      icon: <CloudIcon className="size-4" />,
+      title: "Reach it from anywhere",
+      description: "With Localify Cloud, one password-protected URL per project.",
+      anchor: "public-urls",
     },
   ];
+
+  const enter = (i: number) => ({
+    initial: { opacity: 0, y: 12, filter: "blur(8px)" },
+    animate: { opacity: 1, y: 0, filter: "blur(0px)" },
+    transition: { duration: 0.5, delay: 0.1 + i * 0.08, ease: [0.22, 1, 0.36, 1] as const },
+  });
 
   return (
     <div>
@@ -592,31 +520,67 @@ function HowItWorksStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">How it works</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          From a folder to a clean, trusted local URL.
+          Your agents do the work. You see all of it.
         </p>
       </motion.div>
 
-      <ul className="space-y-4">
-        {items.map((item, i) => (
-          <motion.li
-            key={item.title}
-            initial={{ opacity: 0, y: 12, filter: "blur(8px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{
-              duration: 0.55,
-              delay: 0.1 + i * 0.1,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-            className="flex items-center gap-5 rounded-2xl border border-border bg-card p-4"
+      <motion.div {...enter(0)} className="rounded-2xl border border-border bg-card p-4">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <SparklesIcon className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="text-sm font-medium text-foreground">Your agent sets it up</h3>
+              <LearnMore anchor="coding-agents" />
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Claude Code, Codex, and Cursor run your projects through Localify, over MCP.
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3 pl-10">
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-foreground">
+            <Switch checked={connectAgents} onCheckedChange={onConnectAgentsChange} />
+            Connect my agents automatically
+          </label>
+          <span className="text-xs text-muted-foreground">or</span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full"
+            onClick={() => void copyPrompt()}
           >
-            <FlowVideo src={item.video} onOpen={() => setOpenVideo(item.video)} />
+            {copied ? (
+              <CheckIcon data-icon="inline-start" />
+            ) : (
+              <CopyIcon data-icon="inline-start" />
+            )}
+            {copied ? "Copied" : "Copy a setup prompt"}
+          </Button>
+        </div>
+      </motion.div>
+
+      <ul className="mt-3 divide-y divide-border/60 rounded-2xl border border-border bg-card">
+        {items.map((item, i) => (
+          <motion.li key={item.title} {...enter(i + 1)} className="flex items-start gap-3 p-4">
+            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+              {item.icon}
+            </div>
             <div className="min-w-0 flex-1">
-              <h3 className="text-[15px] font-medium text-foreground">{item.title}</h3>
-              <p className="mt-1.5 text-sm text-muted-foreground">{item.description}</p>
+              <div className="flex items-baseline justify-between gap-3">
+                <h3 className="text-sm font-medium text-foreground">{item.title}</h3>
+                <LearnMore anchor={item.anchor} />
+              </div>
+              <p className="mt-1 text-sm text-muted-foreground">{item.description}</p>
             </div>
           </motion.li>
         ))}
       </ul>
+
+      <motion.p {...enter(4)} className="mt-4 text-center text-xs text-muted-foreground">
+        No agent? Add a project yourself from the app.
+      </motion.p>
 
       <motion.div
         initial={{ opacity: 0, y: 8 }}
@@ -632,114 +596,7 @@ function HowItWorksStep({
           <ChevronRightIcon data-icon="inline-end" />
         </Button>
       </motion.div>
-
-      <FlowVideoModal src={openVideo} onClose={() => setOpenVideo(null)} />
     </div>
-  );
-}
-
-function FlowVideo({ src, onOpen }: { src: string; onOpen: () => void }) {
-  return (
-    <motion.button
-      type="button"
-      onClick={onOpen}
-      layoutId={`flow-video-${src}`}
-      transition={flowVideoTransition}
-      className="group relative aspect-4/3 w-30 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-border bg-muted ring-1 ring-black/5 focus-visible:ring-2 focus-visible:ring-foreground focus-visible:outline-none dark:ring-white/10"
-    >
-      <video
-        className="h-full w-full object-cover"
-        src={src}
-        autoPlay
-        loop
-        muted
-        playsInline
-        preload="auto"
-      />
-      <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/0 opacity-0 transition duration-200 group-hover:bg-black/40 group-hover:opacity-100 group-focus-visible:bg-black/40 group-focus-visible:opacity-100">
-        <div className="flex items-center gap-1.5 rounded-full bg-background/90 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm backdrop-blur">
-          <MaximizeIcon className="size-3" />
-          Watch
-        </div>
-      </div>
-    </motion.button>
-  );
-}
-
-const flowVideoTransition: Transition = {
-  type: "spring",
-  stiffness: 320,
-  damping: 32,
-  mass: 0.9,
-};
-
-function FlowVideoModal({ src, onClose }: { src: string | null; onClose: () => void }) {
-  useEffect(() => {
-    if (!src) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [src, onClose]);
-
-  return createPortal(
-    <AnimatePresence>
-      {src && (
-        <motion.div
-          className="fixed inset-0 z-50 grid place-items-center p-8"
-          onClick={onClose}
-          role="dialog"
-          aria-modal="true"
-        >
-          <motion.div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-          />
-          <motion.div
-            layoutId={`flow-video-${src}`}
-            transition={flowVideoTransition}
-            onClick={(e) => e.stopPropagation()}
-            className="relative aspect-4/3 w-full max-w-3xl overflow-hidden rounded-2xl border border-border bg-muted shadow-2xl ring-1 ring-black/10 dark:ring-white/10"
-          >
-            <video
-              className="h-full w-full object-cover"
-              src={src}
-              autoPlay
-              loop
-              muted
-              playsInline
-              preload="auto"
-            />
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body,
-  );
-}
-
-function MaximizeIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <polyline points="15 3 21 3 21 9" />
-      <polyline points="9 21 3 21 3 15" />
-      <line x1="21" y1="3" x2="14" y2="10" />
-      <line x1="3" y1="21" x2="10" y2="14" />
-    </svg>
   );
 }
 
@@ -754,10 +611,12 @@ const waitForNextPaint = () =>
 
 function ActivateStep({
   bootstrap,
+  connectAgents,
   onActivated,
   onBack,
 }: {
   bootstrap: BootstrapDto;
+  connectAgents: boolean;
   onActivated: () => void;
   onBack: () => void;
 }) {
@@ -813,64 +672,56 @@ function ActivateStep({
     }
   }
 
-  const bullets = [
+  const suffix = bootstrap.environment.fixedDomainSuffix;
+  const checks = [
     {
-      icon: <CheckIcon className="size-4" />,
-      title: "Create a local certificate authority",
-      description:
-        "A private CA is generated on your machine. Node.js trusts it right away, and browsers trust it once you confirm in macOS.",
+      icon: <CheckIcon className="size-3.5" />,
+      label: "A local certificate authority, for trusted HTTPS",
     },
     {
-      icon: <ZapIcon className="size-4" />,
-      title: "Configure DNS for .localify domains",
-      description: `A resolver is added so your system sends ${bootstrap.environment.fixedDomainSuffix} lookups to Localify — without touching /etc/hosts.`,
+      icon: <ZapIcon className="size-3.5" />,
+      label: `DNS for ${suffix} domains, without /etc/hosts`,
     },
-    {
-      icon: <PowerIcon className="size-4" />,
-      title: `Run ${appName} as you, not as root`,
-      description:
-        "macOS opens ports 80 and 443 and hands them to Localify, which runs under your account from then on. Updates need no password.",
-    },
+    { icon: <PowerIcon className="size-3.5" />, label: `${appName} runs as you, not as root` },
+    ...(connectAgents
+      ? [
+          {
+            icon: <SparklesIcon className="size-3.5" />,
+            label: "Your coding agents, connected over MCP",
+          },
+        ]
+      : []),
   ];
 
   return (
-    <div>
+    <div className="mx-auto max-w-md text-center">
       <motion.div
         initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
         animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-        transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        className="mb-8 text-center"
+        transition={{ duration: 0.5, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+        className="mb-7"
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Activate {appName}</h2>
-        <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Localify needs an administrator's password once to set up its domains and background
-          service. After that, nothing of Localify's runs as root.
+        <p className="text-sm text-muted-foreground">
+          One administrator password, once. After that, nothing of {appName}'s runs as root.
         </p>
       </motion.div>
 
-      <ul className="mb-6 space-y-3">
-        {bullets.map((b, i) => (
-          <motion.li
-            key={b.title}
-            initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{
-              duration: 0.5,
-              delay: 0.1 + i * 0.08,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-            className="flex items-start gap-3 rounded-xl border border-border bg-card p-4"
-          >
-            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-              {b.icon}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-foreground">{b.title}</div>
-              <p className="mt-1 text-sm text-muted-foreground">{b.description}</p>
-            </div>
-          </motion.li>
+      <motion.ul
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
+        className="space-y-2.5 text-left"
+      >
+        {checks.map((check) => (
+          <li key={check.label} className="flex items-center gap-3 text-sm text-foreground/90">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              {check.icon}
+            </span>
+            {check.label}
+          </li>
         ))}
-      </ul>
+      </motion.ul>
 
       {showPortConflicts && (
         <div className="mt-4">

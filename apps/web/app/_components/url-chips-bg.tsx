@@ -8,8 +8,15 @@ import { LockIcon } from "@/components/icons";
 
 type Hue = "orange" | "blue" | "violet" | "rose" | "sky" | "amber" | "emerald" | "indigo";
 
+/* What a chip says next to its URL: its kind, or the machine that serves it. */
+export type ChipLabels = { local: string; public: string; worktree: string; linux: string };
+
+type Tag = keyof ChipLabels | "MacBook" | "Mac Studio";
+
 type Chip = {
   prefix: string;
+  suffix: ".localify" | ".localify.fyi";
+  tag: Tag;
   angle: number;
   rotate: number;
   scale?: number;
@@ -55,21 +62,23 @@ const COLORS: Record<Hue, { gradient: string; solid: string }> = {
 const ELLIPSE = { cx: 50, cy: 50, rx: 50, ry: 50 };
 
 const CHIPS: Chip[] = [
-  { prefix: "docs", angle: 250, rotate: -2, hue: "sky" },
-  { prefix: "webhooks", angle: 290, rotate: 4, hue: "orange" },
-  { prefix: "api", angle: 215, rotate: -3, hue: "blue" },
-  { prefix: "dashboard", angle: 325, rotate: 3, hue: "violet" },
+  { prefix: "docs", suffix: ".localify", tag: "local", angle: 250, rotate: -2, hue: "sky" },
+  { prefix: "journal", suffix: ".localify.fyi", tag: "public", angle: 290, rotate: 4, hue: "orange" },
+  { prefix: "api.journal", suffix: ".localify", tag: "MacBook", angle: 215, rotate: -3, hue: "blue" },
+  { prefix: "journal--admin", suffix: ".localify.fyi", tag: "Mac Studio", angle: 325, rotate: 3, hue: "violet" },
   {
-    prefix: "app",
+    prefix: "web--fix-auth",
+    suffix: ".localify",
+    tag: "worktree",
     angle: 180,
     rotate: 2,
     scale: 1.05,
     hue: "emerald",
     live: true,
   },
-  { prefix: "admin", angle: 0, rotate: -2, hue: "rose" },
-  { prefix: "staging", angle: 145, rotate: -2, scale: 0.95, hue: "amber" },
-  { prefix: "auth", angle: 35, rotate: 2, scale: 0.95, hue: "indigo" },
+  { prefix: "demo", suffix: ".localify.fyi", tag: "public", angle: 0, rotate: -2, hue: "rose" },
+  { prefix: "staging", suffix: ".localify", tag: "linux", angle: 145, rotate: -2, scale: 0.95, hue: "amber" },
+  { prefix: "web--dark-mode", suffix: ".localify", tag: "worktree", angle: 35, rotate: 2, scale: 0.95, hue: "indigo" },
 ];
 
 const POSITIONS = CHIPS.map((c) => {
@@ -90,7 +99,7 @@ const POP_WINDOW_MS = 500;
 const POP_DURATION_MS = 340;
 const CHIP_OPACITY = 0.85;
 
-export const UrlChipsBg = () => {
+export const UrlChipsBg = ({ labels }: { labels: ChipLabels }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chipRefs = useRef<Array<HTMLDivElement | null>>([]);
 
@@ -225,11 +234,17 @@ export const UrlChipsBg = () => {
                 //style={{ padding: "4px 10px 4px 7px" }}
               >
                 <LockIcon color={colors.solid} className="size-3" />
-                <div className="font-mono text-[12px] leading-none font-medium" style={textStyle}>
+                <div className="text-[12.5px] leading-none font-medium whitespace-nowrap" style={textStyle}>
                   {p.prefix}
                   <span className="opacity-55" style={textStyle}>
-                    .localify
+                    {p.suffix}
                   </span>
+                </div>
+                <div
+                  className="ml-1 rounded-full px-1.5 py-0.5 text-[10.5px] leading-none font-medium whitespace-nowrap"
+                  style={{ backgroundColor: `${colors.solid}14`, color: colors.solid }}
+                >
+                  {p.tag in labels ? labels[p.tag as keyof ChipLabels] : p.tag}
                 </div>
               </div>
             </div>

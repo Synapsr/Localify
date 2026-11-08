@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { RiGithubFill, RiTwitterXFill } from "@remixicon/react";
 import { useTranslations } from "next-intl";
 
 import { Link } from "@/i18n/navigation";
@@ -12,15 +13,28 @@ import { sourceUrl } from "./site-metadata";
 type FooterItem = { label: string; href: string };
 type FooterColumn = { head: string; items: readonly FooterItem[]; extra?: ReactNode };
 
-const socialLinks = [{ href: "https://x.com/Teo_Goulois", label: "X (Twitter)" }] as const;
+const socialLinks = [
+  { href: sourceUrl, label: "GitHub", Icon: RiGithubFill },
+  { href: "https://x.com/Teo_Goulois", label: "X (Twitter)", Icon: RiTwitterXFill },
+] as const;
 
 export const SiteFooter = () => {
   const t = useTranslations("Footer");
   const columns: readonly FooterColumn[] = [
     {
+      head: t("product"),
+      items: [
+        { label: t("useCases"), href: "/#use-cases" },
+        { label: t("howItWorks"), href: "/#how-it-works" },
+        { label: t("pricing"), href: "/#pricing" },
+        { label: t("faq"), href: "/#faq" },
+      ],
+    },
+    {
       head: t("resources"),
       items: [
         { label: t("download"), href: "/#download" },
+        { label: t("pricing"), href: "/pricing" },
         { label: t("source"), href: sourceUrl },
         { label: t("docs"), href: `${sourceUrl}/tree/main/docs` },
         { label: t("contact"), href: "mailto:support@localify.dev" },
@@ -39,7 +53,8 @@ export const SiteFooter = () => {
 
   return (
     <footer className="site-width relative z-10 mt-10 border-t border-border pt-12 pb-10">
-      <div className="grid gap-10 md:grid-cols-[minmax(0,1.4fr)_repeat(2,minmax(0,1fr))]">
+      <div className="grid gap-10 md:grid-cols-[minmax(0,1.4fr)_repeat(3,minmax(0,1fr))]">
+        <div className="space-y-4">
         <Link
           href="/"
           className="inline-flex h-fit w-fit items-center gap-1.5 pr-3 pl-2.5 text-[16px] font-semibold tracking-[-0.015em] transition-opacity duration-200 ease-[cubic-bezier(0.25,0.46,0.45,0.94)] hover:opacity-70"
@@ -94,6 +109,19 @@ export const SiteFooter = () => {
             </g>
           </svg>
         </Link>
+          <p className="max-w-xs pl-2.5 text-[13.5px] leading-normal text-pretty text-muted-foreground">{t("tagline")}</p>
+          <a
+            className="ml-2.5 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted"
+            data-umami-event="source_clicked"
+            data-umami-event-source="footer"
+            href={sourceUrl}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            <RiGithubFill className="size-4" />
+            {t("github")}
+          </a>
+        </div>
         {columns.map((col) => (
           <div key={col.head}>
             <p className="text-ink text-[13px] font-medium tracking-[-0.005em]">{col.head}</p>
@@ -124,9 +152,11 @@ export const SiteFooter = () => {
               href={s.href}
               target="_blank"
               rel="noopener noreferrer"
-              className="hover:text-ink py-1 transition-colors duration-150"
+              aria-label={s.label}
+              className="hover:text-ink inline-flex items-center gap-1.5 py-1 transition-colors duration-150"
             >
-              {s.label}
+              <s.Icon className="size-4" />
+              <span className="sr-only md:not-sr-only">{s.label}</span>
             </a>
           ))}
         </div>

@@ -1,9 +1,11 @@
-import { RiGithubFill } from "@remixicon/react";
+import { RiGithubFill, RiPlug2Fill } from "@remixicon/react";
 import * as motion from "motion/react-client";
 import { getTranslations } from "next-intl/server";
 
+import { AGENTS } from "@/app/_components/agent-logos";
 import { AppWindow } from "@/app/_components/app-window";
 import { DesktopFrame } from "@/app/_components/desktop-frame";
+import { InstallPromptButton } from "@/app/_components/install-prompt-button";
 import { UrlChipsBg } from "@/app/_components/url-chips-bg";
 import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { ProjectsMockup } from "@/app/projects-mockup";
@@ -40,16 +42,35 @@ export const HeroSection = async () => {
 
   return (
     <section className={`${sectionClass} pt-16 md:pt-24`} id="top">
-      <UrlChipsBg />
+      <UrlChipsBg
+        labels={{ local: t("chips.local"), public: t("chips.public"), worktree: t("chips.worktree"), linux: t("chips.linux") }}
+      />
 
       <motion.div
         animate="show"
-        className="relative mx-auto flex max-w-[870px] flex-col items-center space-y-7 text-center"
+        className="relative mx-auto flex max-w-[1040px] flex-col items-center space-y-7 text-center"
         initial="hidden"
         variants={textContainer}
       >
+        <motion.span
+          className="inline-flex items-center gap-2.5 rounded-full border border-border bg-background/80 py-1 pr-3.5 pl-1.5 text-[13px] font-medium text-foreground/80 shadow-[0_1px_2px_rgba(13,13,13,0.05)] backdrop-blur-sm"
+          variants={textItem}
+        >
+          <span className="flex -space-x-1">
+            {AGENTS.map(({ name, Logo, color }) => (
+              <span
+                className="inline-flex size-6 items-center justify-center rounded-full bg-background ring-1 ring-border"
+                key={name}
+              >
+                <Logo aria-hidden="true" className="size-3.5" style={{ color }} />
+              </span>
+            ))}
+          </span>
+          {t("eyebrow")}
+        </motion.span>
+
         <motion.h1
-          className="text-heading-gradient text-[52px] leading-[0.98] font-semibold tracking-[-0.035em] text-balance sm:text-[72px] md:text-[96px] lg:text-[104px]"
+          className="text-heading-gradient text-[44px] leading-[1] font-semibold tracking-[-0.035em] text-balance sm:text-[60px] md:text-[76px] lg:text-[86px]"
           variants={textItem}
         >
           {t("titleLine1")}
@@ -58,7 +79,7 @@ export const HeroSection = async () => {
         </motion.h1>
 
         <motion.p
-          className="text-[19px] text-muted-foreground md:text-[21px]"
+          className="max-w-2xl text-[18px] text-pretty text-muted-foreground md:text-[20px]"
           variants={textItem}
         >
           {t("description")}
@@ -68,11 +89,9 @@ export const HeroSection = async () => {
           className="flex flex-wrap items-center justify-center gap-3"
           variants={textItem}
         >
+          <InstallPromptButton source="hero" />
           <Link
-            className={buttonVariants({
-              variant: "glow",
-              size: "lg",
-            })}
+            className={buttonVariants({ variant: "outline", size: "lg" })}
             data-umami-event="download_clicked"
             data-umami-event-source="hero"
             href={MACOS_APP_DOWNLOAD_URL}
@@ -80,24 +99,25 @@ export const HeroSection = async () => {
             <DownloadSolidIcon className="h-4 w-4" />
             {t("download")}
           </Link>
-          <a
-            className={buttonVariants({ variant: "outline", size: "lg" })}
-            data-umami-event="source_clicked"
-            data-umami-event-source="hero"
-            href={sourceUrl}
-            rel="noopener noreferrer"
-            target="_blank"
-          >
-            <RiGithubFill className="h-4 w-4" />
-            {t("source")}
-          </a>
         </motion.div>
 
         <motion.p
           className="text-[13.5px] text-muted-foreground"
           variants={textItem}
         >
-          {t("availability")}
+          {t("promptHint")}{" "}
+          <span aria-hidden="true">·</span>{" "}
+          <a
+            className="inline-flex items-center gap-1 text-foreground underline decoration-border decoration-[1.5px] underline-offset-4 transition-colors hover:decoration-foreground"
+            data-umami-event="source_clicked"
+            data-umami-event-source="hero"
+            href={sourceUrl}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            <RiGithubFill className="size-3.5" />
+            {t("source")}
+          </a>
         </motion.p>
       </motion.div>
 
@@ -108,6 +128,30 @@ export const HeroSection = async () => {
           </AppWindow>
         </DesktopFrame>
       </FadeIn>
+
+      <AgentStrip />
     </section>
+  );
+};
+
+const AgentStrip = async () => {
+  const t = await getTranslations("AgentStrip");
+
+  return (
+    <FadeIn className="mt-14 flex flex-col items-center gap-5 text-center md:mt-20">
+      <p className="text-[13px] text-muted-foreground">{t("label")}</p>
+      <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-4 text-[20px] font-semibold tracking-tight text-foreground/75 md:text-[22px]">
+        {AGENTS.map(({ name, Logo, color }) => (
+          <span className="inline-flex items-center gap-2.5" key={name}>
+            <Logo aria-hidden="true" className="size-7" style={{ color }} />
+            {name}
+          </span>
+        ))}
+        <span className="inline-flex items-center gap-2.5">
+          <RiPlug2Fill aria-hidden="true" className="size-7" />
+          {t("more")}
+        </span>
+      </div>
+    </FadeIn>
   );
 };

@@ -189,6 +189,5 @@ only](LICENSE). It derives from Roxy, whose code remains under the
 [MIT license](LICENSE-MIT).
 
 The AGPL doesn't cover everything here. The Localify name and logo aren't
-licensed, and neither is the media in `apps/web/public/` and
-`desktop-ui/public/videos/`. `progresive-blur.tsx` is adapted from Skiper UI.
+licensed, and neither is the media in `apps/web/public/`. `progresive-blur.tsx` is adapted from Skiper UI.
 [NOTICE](NOTICE) has the details.
