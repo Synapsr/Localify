@@ -54,18 +54,23 @@ export function withoutDomainAttribute(setCookie: string): string {
 }
 
 /**
- * An app's response to a request without the notice cookie, which a browser
- * must not reuse for a navigation: another page of the same site could fetch
- * the app's HTML first, and the navigation would then skip the warning from
- * the browser's cache. It varies on the fetch metadata, and HTML is never
- * stored. A WebSocket upgrade (101) is never cached and passes as it is.
+ * The app's response, cached only where that cannot skip the warning. HTML is
+ * never stored, whatever the app sent: a shared cache could serve it to a
+ * visitor without the notice cookie, and a browser could reuse it after the
+ * cookie expires. Without the cookie, the response also varies on the fetch
+ * metadata, so a page that fetched it first cannot hand it to a navigation.
+ * Other responses keep the app's caching. A WebSocket upgrade (101) is never
+ * cached and passes as it is; the body still streams.
  */
-export function withoutNavigationReuse(response: Response): Response {
+export function withSafeCaching(response: Response, noticed: boolean): Response {
   if (response.status === 101 || response.webSocket) return response;
+  const html = (response.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  if (noticed && !html) return response;
   const headers = new Headers(response.headers);
-  headers.append("vary", "Sec-Fetch-Dest, Sec-Fetch-Mode");
-  if ((headers.get("content-type") ?? "").toLowerCase().includes("text/html")) {
+  if (!noticed) headers.append("vary", "Sec-Fetch-Dest, Sec-Fetch-Mode");
+  if (html) {
     headers.set("cache-control", "no-store");
+    headers.delete("expires");
   }
   return new Response(response.body, {
     status: response.status,

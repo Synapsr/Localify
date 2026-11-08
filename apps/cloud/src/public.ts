@@ -21,7 +21,7 @@ import { verifyPassword } from "./crypto";
 import {
   upstreamHeaders,
   withHostOnlyCookies,
-  withoutNavigationReuse,
+  withSafeCaching,
   type LocalifyHeaders,
 } from "./headers";
 import { readLimitedText } from "./http";
@@ -144,8 +144,8 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // 6. and 7. Forward, then keep the app's cookies on this host. Without the
-  // notice cookie, the browser must not reuse the answer for a navigation.
+  // 6. and 7. Forward, then keep the app's cookies on this host, and its HTML
+  // out of every cache, so no cache can skip the warning.
   const response = await forward(
     request,
     env,
@@ -160,7 +160,7 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     },
     url,
   );
-  return noticed ? response : withoutNavigationReuse(response);
+  return withSafeCaching(response, noticed);
 }
 
 /**

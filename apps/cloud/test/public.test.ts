@@ -741,31 +741,63 @@ describe("the warning page", () => {
     expect(machineCalls()).toHaveLength(requests.length);
     expect(machineCalls().at(-1)!.headers.has("localify-skip-warning")).toBe(false);
   });
+});
 
-  it("keeps the app's answers without the cookie from being reused for a navigation", async () => {
+describe("caching of the app's responses", () => {
+  const cacheable = { "cache-control": "public, max-age=600" };
+
+  /** The app answers HTML marked cacheable, with `Expires`; `.js` is a script, `/missing` a 404 page. */
+  function cacheableApp(): void {
+    context.routes.set(`GET https://m-${machineId}.localify.dev/`, (_body, url) => {
+      if (url.endsWith(".js")) {
+        return new Response("export {}", {
+          headers: { "content-type": "text/javascript", ...cacheable },
+        });
+      }
+      return new Response("<!doctype html><p>the app</p>", {
+        status: url.endsWith("/missing") ? 404 : 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          ...cacheable,
+          expires: "Thu, 01 Jan 2099 00:00:00 GMT",
+          vary: "Accept-Encoding",
+        },
+      });
+    });
+  }
+
+  it("never stores HTML fetched without the cookie, and varies on the fetch metadata", async () => {
     await makePublic();
-    context.routes.set(`GET https://m-${machineId}.localify.dev/`, (_body, url) =>
-      url.endsWith(".js")
-        ? new Response("export {}", {
-            headers: { "content-type": "text/javascript", "cache-control": "public, max-age=600" },
-          })
-        : new Response("<!doctype html><p>the app</p>", {
-            headers: {
-              "content-type": "text/html; charset=utf-8",
-              "cache-control": "public, max-age=600",
-              vary: "Accept-Encoding",
-            },
-          }),
-    );
+    cacheableApp();
     // Another page of the same site prefetches this host's HTML.
     const prefetch = await visit(context, `https://${host()}/`, {
       headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" },
     });
     expect(prefetch.status).toBe(200);
     expect(prefetch.headers.get("cache-control")).toBe("no-store");
+    expect(prefetch.headers.get("expires")).toBeNull();
     expect(prefetch.headers.get("vary")).toBe("Accept-Encoding, Sec-Fetch-Dest, Sec-Fetch-Mode");
     expect(await prefetch.text()).toContain("the app");
+  });
 
+  it("never stores HTML for an acknowledged visitor either, whatever its status", async () => {
+    await makePublic();
+    cacheableApp();
+    const cookie = await noticeCookie();
+    for (const path of ["/", "/missing"]) {
+      const response = await visit(context, `https://${host()}${path}`, {
+        headers: { ...navigation, cookie },
+      });
+      expect(response.headers.get("cache-control"), path).toBe("no-store");
+      expect(response.headers.get("expires"), path).toBeNull();
+      expect(response.headers.get("vary"), path).toBe("Accept-Encoding");
+      expect(await response.text()).toContain("the app");
+    }
+  });
+
+  it("keeps the app's caching on other responses", async () => {
+    await makePublic();
+    cacheableApp();
     const script = await visit(context, `https://${host()}/main.js`, {
       headers: { "sec-fetch-dest": "script" },
     });
@@ -773,11 +805,12 @@ describe("the warning page", () => {
     expect(script.headers.get("vary")).toBe("Sec-Fetch-Dest, Sec-Fetch-Mode");
 
     const cookie = await noticeCookie();
-    const acknowledged = await visit(context, `https://${host()}/`, {
-      headers: { ...navigation, cookie },
+    const acknowledged = await visit(context, `https://${host()}/main.js`, {
+      headers: { "sec-fetch-dest": "script", cookie },
     });
     expect(acknowledged.headers.get("cache-control")).toBe("public, max-age=600");
-    expect(acknowledged.headers.get("vary")).toBe("Accept-Encoding");
+    expect(acknowledged.headers.get("vary")).toBeNull();
+    expect(await acknowledged.text()).toBe("export {}");
   });
 });
 
