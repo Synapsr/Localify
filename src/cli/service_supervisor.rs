@@ -33,7 +33,14 @@ use crate::infrastructure::process::{
 use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT};
 use crate::infrastructure::runs::output::StreamSink;
 
+/// How often the service's exit is checked: a cheap wait on the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How often the service's descendants are looked up, scanning every
+/// process, while the run is healthy. A descendant that forks and leaves the
+/// session between two looks is not known to a later stop.
+const SCAN_WHILE_HEALTHY: Duration = Duration::from_secs(2);
+/// How often they are looked up during a stop or a session cleanup.
+const SCAN_WHILE_STOPPING: Duration = POLL_INTERVAL;
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the run's record says its executor is alive.
 pub const RUN_HEARTBEAT: Duration = Duration::from_secs(5);
@@ -508,6 +515,8 @@ fn supervise(
         session: started + LAUNCH_SESSION_HEARTBEAT,
     };
     let mut stopping = Stopping::new(launch, root);
+    let mut next_scan = started;
+    let mut scan = Vec::new();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -517,7 +526,20 @@ fn supervise(
             }
         }
         let now = Instant::now();
-        let scan = stopping.track();
+        let expiring = launch
+            .max_duration
+            .is_some_and(|duration| now.duration_since(started) >= duration);
+        // Every process is scanned only as often as the run's state needs.
+        let busy = stopping.stopping() || expiring || stops.any();
+        if busy || now >= next_scan {
+            scan = stopping.track();
+            next_scan = now
+                + if busy {
+                    SCAN_WHILE_STOPPING
+                } else {
+                    SCAN_WHILE_HEALTHY
+                };
+        }
         if let Some(duration) = launch.max_duration
             && stopping.expiring_since.is_none()
             && now.duration_since(started) >= duration
@@ -538,6 +560,7 @@ fn supervise(
     if launch.leads_session && !stopping.stopping() {
         stopping.cleaning_since = Some(Instant::now());
     }
+    // The rest is a stop or a cleanup: every SCAN_WHILE_STOPPING.
     let cleanup = loop {
         let scan = stopping.track();
         let left = stopping.targets();
@@ -557,7 +580,7 @@ fn supervise(
             ));
         }
         beats.beat(now, launch);
-        thread::sleep(POLL_INTERVAL);
+        thread::sleep(SCAN_WHILE_STOPPING);
     };
 
     let outcome = match (stopping.expiring_since, launch.max_duration) {
@@ -763,6 +786,52 @@ mod tests {
         let mut lines: Vec<String> = read.lines.into_iter().map(|line| line.text).collect();
         lines.sort();
         assert_eq!(lines, ["err-line-***", "out-line"]);
+    }
+
+    /// The kernel's table, counting full scans.
+    #[derive(Default)]
+    struct CountingScans(Cell<usize>);
+
+    impl crate::infrastructure::process::ProcessTable for CountingScans {
+        fn processes(&self) -> Vec<crate::infrastructure::process::ProcessInfo> {
+            self.0.set(self.0.get() + 1);
+            crate::infrastructure::process::all_processes()
+        }
+
+        fn process(&self, pid: u32) -> Option<crate::infrastructure::process::ProcessInfo> {
+            crate::infrastructure::process::process_info(pid)
+        }
+
+        fn signal(&self, pid: u32, signal: Signal) {
+            crate::infrastructure::process::send_signal(pid, signal);
+        }
+
+        fn boot_id(&self) -> Option<String> {
+            crate::infrastructure::process::boot_id()
+        }
+
+        fn now(&self) -> u64 {
+            crate::infrastructure::process::monotonic_now()
+        }
+    }
+
+    #[test]
+    fn a_healthy_run_scans_every_process_only_now_and_then() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = shell("sleep 1.5");
+        let environment = LaunchEnvironment::default();
+        let table = CountingScans::default();
+        let finisher = Finisher {
+            table: &table,
+            grace: Duration::from_secs(10),
+        };
+        let mut request = launch(&command, &environment, dir.path(), &|| {});
+        request.finisher = &finisher;
+
+        run(request).unwrap();
+
+        // One as it starts, one as it exits: not one every 200 ms poll.
+        assert!(table.0.get() <= 2, "{} full scans", table.0.get());
     }
 
     #[test]

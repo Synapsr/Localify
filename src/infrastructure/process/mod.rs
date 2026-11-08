@@ -435,6 +435,21 @@ mod tests {
         child.wait().unwrap();
     }
 
+    /// What one full scan costs on this machine. Not run by default:
+    /// `cargo test --bin localify -- --ignored full_scan_cost --nocapture`.
+    #[test]
+    #[ignore]
+    fn full_scan_cost() {
+        let rounds = 50;
+        let mut count = 0;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            count = all_processes().len();
+        }
+        let each = started.elapsed() / rounds;
+        println!("one full scan of {count} processes: {each:?}");
+    }
+
     #[test]
     fn process_groups_are_never_signalled() {
         assert!(!send_signal(0, Signal::Terminate));
