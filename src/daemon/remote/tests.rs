@@ -656,7 +656,8 @@ async fn a_key_other_than_the_pin_never_opens_a_session() {
     // The cloud's roster swaps B's key: A refuses before it dials.
     let other = encode_key(&StaticKeys::generate().unwrap().public);
     cloud.set_roster_key("mB", &other);
-    a.link.machines(false).await.unwrap();
+    // A probe reads the roster again, as `localify machines` does.
+    a.link.machines(true).await.unwrap();
     let failure = a.link.open(&b.id, false).await.unwrap_err();
     assert_eq!(failure.code, "key_mismatch");
     let machines = a.link.machines(false).await.unwrap();

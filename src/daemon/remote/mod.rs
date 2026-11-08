@@ -69,6 +69,10 @@ const TOO_MANY_LINKED: &str = "This account already links 10 machines for remote
 const NO_REMOTE: &str = "Localify Cloud does not offer remote access yet.";
 /// How long `localify machines` waits for probed machines to say hello.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A listing reads the roster from Localify Cloud again once it is older
+/// than this, so the app can poll the listing without calling the cloud.
+/// Presence of an unknown machine and revocations read it at once.
+const ROSTER_FRESH: Duration = Duration::from_secs(30);
 /// A signed-out machine looks again this often, in case a sign-in did not
 /// say so.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(5 * 60);
@@ -211,6 +215,8 @@ pub(super) struct View {
     retry_at: Option<String>,
     presence: HashMap<String, Presence>,
     roster: Vec<RosterMachine>,
+    /// When the roster was last read from Localify Cloud.
+    roster_read: Option<Instant>,
     /// This machine's sessions as a viewer, by peer.
     sessions: HashMap<String, SessionState>,
     settings: HashMap<String, TargetSettings>,
@@ -228,6 +234,7 @@ impl Default for View {
             retry_at: None,
             presence: HashMap::new(),
             roster: Vec::new(),
+            roster_read: None,
             sessions: HashMap::new(),
             settings: HashMap::new(),
             failures: HashMap::new(),
@@ -237,6 +244,17 @@ impl Default for View {
 }
 
 impl View {
+    fn set_roster(&mut self, roster: Vec<RosterMachine>) {
+        self.roster = roster;
+        self.roster_read = Some(Instant::now());
+    }
+
+    /// Whether the roster is older than [`ROSTER_FRESH`], or was never read.
+    fn roster_is_stale(&self) -> bool {
+        self.roster_read
+            .is_none_or(|read| read.elapsed() >= ROSTER_FRESH)
+    }
+
     fn name_of(&self, machine_id: &str) -> String {
         self.roster
             .iter()
@@ -440,10 +458,13 @@ impl RemoteLink {
 
     /// The roster with each machine's state. With `probe`, first opens a
     /// short session to each paired machine online, so the answer says
-    /// whether it shares and still answers.
+    /// whether it shares and still answers. The roster is read again when
+    /// probing, or once it is older than [`ROSTER_FRESH`].
     pub async fn machines(&self, probe: bool) -> Result<Vec<MachineView>> {
         let conn = self.shared.conn();
-        if let Some(conn) = &conn {
+        if let Some(conn) = &conn
+            && (probe || self.shared.view().roster_is_stale())
+        {
             self.refresh_roster(conn).await;
         }
         let mut views = self.list()?;
@@ -481,7 +502,7 @@ impl RemoteLink {
 
     async fn refresh_roster(&self, conn: &Conn) {
         match conn.cloud.machines().await {
-            Ok(roster) => self.shared.view().roster = roster,
+            Ok(roster) => self.shared.view().set_roster(roster),
             Err(error) => warn!(error = %error, "Could not read the account's machines"),
         }
     }
@@ -863,7 +884,7 @@ async fn connect_and_serve(
     shared.set_conn(Some(conn.clone()));
     // The names pins are saved with.
     if let Ok(roster) = ready.cloud.machines().await {
-        shared.view().roster = roster;
+        shared.view().set_roster(roster);
     }
     let context = actor::Context {
         self_id: ready.credentials.machine_id,

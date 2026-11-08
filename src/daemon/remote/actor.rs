@@ -596,7 +596,7 @@ impl Actor {
         let cloud = Arc::clone(&self.ctx.cloud);
         self.spawn(async move {
             if let Ok(roster) = cloud.machines().await {
-                shared.view().roster = roster;
+                shared.view().set_roster(roster);
             }
         });
     }
