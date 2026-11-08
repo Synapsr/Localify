@@ -17,7 +17,7 @@ export const PlanCard = ({ name, tagline, badge, featured = false, children }: P
 
   return (
     <article
-      className={`flex h-full flex-col gap-7 rounded-3xl p-7 ring-1 md:p-8 ${surface}`}
+      className={`flex h-full min-w-0 flex-col gap-7 rounded-3xl p-7 ring-1 md:p-8 ${surface}`}
     >
       <header className="space-y-2">
         <div className="flex items-center justify-between gap-3">

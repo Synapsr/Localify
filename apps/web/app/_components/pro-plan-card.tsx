@@ -93,7 +93,7 @@ export const ProPlanCard = ({
         <p className="text-[13.5px] leading-[1.55] text-pretty text-muted-foreground">{trial}</p>
         {/* The trial starts from the command line: install first, then sign in and subscribe. */}
         <Link
-          className={`${buttonVariants({ size: "lg" })} w-full`}
+          className={`${buttonVariants({ size: "lg" })} w-full whitespace-normal text-center`}
           data-umami-event="cloud_trial_clicked"
           data-umami-event-source={source}
           href="/#download"

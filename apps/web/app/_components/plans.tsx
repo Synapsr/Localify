@@ -37,7 +37,7 @@ export const Plans = async ({ source }: { source: "landing" | "pricing" }) => {
           <PlanFeatures items={t.raw("free.features") as string[]} />
           <div className="mt-auto">
             <Link
-              className={`${buttonVariants({ variant: "outline", size: "lg" })} w-full`}
+              className={`${buttonVariants({ variant: "outline", size: "lg" })} w-full whitespace-normal text-center`}
               data-umami-event="download_cta_clicked"
               data-umami-event-source={source}
               href="/#download"
@@ -79,7 +79,7 @@ export const Plans = async ({ source }: { source: "landing" | "pricing" }) => {
           <p className="text-[14.5px] leading-[1.55] text-pretty text-foreground">{t("team.body")}</p>
           <div className="mt-auto">
             <a
-              className={`${buttonVariants({ variant: "outline", size: "lg" })} w-full`}
+              className={`${buttonVariants({ variant: "outline", size: "lg" })} w-full whitespace-normal text-center`}
               data-umami-event="cloud_team_clicked"
               data-umami-event-source={source}
               href={TEAM_MAILTO}
