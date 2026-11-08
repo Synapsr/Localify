@@ -37,8 +37,8 @@ const HELPER_ENV: &str = "LOCALIFY_RUN_PTY_HELPER";
 /// Children that ignore SIGINT, SIGTERM and the hangup of their terminal, and
 /// never listen on their port.
 const STUBBORN: &str = r#"echo started
-sh -c 'trap "" INT TERM HUP; while :; do sleep 1; done' &
-sh -c 'trap "" INT TERM HUP; sleep 300' &
+sh -c 'trap "" INT TERM HUP; touch ../trapped-1; while :; do sleep 1; done' &
+sh -c 'trap "" INT TERM HUP; touch ../trapped-2; sleep 300' &
 echo ready
 wait"#;
 
@@ -151,6 +151,41 @@ impl Sandbox {
         self.localify(&["dev", "web", "--project", "app", "--", "sh", "-c", "exit 0"])
             .output()
             .unwrap()
+    }
+
+    /// Waits until the record's heartbeat is later than every member's start,
+    /// so a finisher can prove they belong to the run, and returns the record.
+    fn wait_for_proof(&self, executor: u32) -> RunningService {
+        wait_until(Duration::from_secs(30), || {
+            let record = self.record()?;
+            let alive = record.run.as_ref()?.last_alive_at;
+            let members: Vec<_> = process::all_processes()
+                .into_iter()
+                .filter(|process| process.sid == Some(executor))
+                .collect();
+            (record.pid == executor
+                && members.len() >= 4
+                && members.iter().all(|process| process.start <= alive))
+            .then_some(record)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no heartbeat after the members started: {:?}",
+                self.record()
+            )
+        })
+    }
+
+    /// Waits until both of `STUBBORN`'s children have set their traps.
+    fn wait_until_trapped(&self) {
+        let trapped = wait_until(Duration::from_secs(30), || {
+            (self.root.join("trapped-1").exists() && self.root.join("trapped-2").exists())
+                .then_some(())
+        });
+        assert!(
+            trapped.is_some(),
+            "the service's children never set their traps"
+        );
     }
 
     /// Every byte in every run's stream.
@@ -268,7 +303,14 @@ impl Tab {
         let found = wait_until(Duration::from_secs(30), || {
             self.shown().contains(text).then_some(())
         });
-        assert!(found.is_some(), "never showed {text:?}:\n{}", self.shown());
+        let executor = self.pty.executor_pid();
+        assert!(
+            found.is_some(),
+            "never showed {text:?} (executor {executor} alive: {}, ended: {}):\n{}",
+            process::process_exists(executor),
+            self.pty.has_ended(),
+            self.shown()
+        );
     }
 
     fn hold(&self, holding: bool) {
@@ -375,9 +417,8 @@ impl ShellTab {
             .unwrap();
         let printed = wait_until(Duration::from_secs(10), || {
             let shown = String::from_utf8_lossy(&self.shown.lock().unwrap()).into_owned();
-            // The command's output, not only its echo.
-            (shown.matches(prints).count() >= 2 || shown.contains(&format!("\n{prints}")))
-                .then_some(())
+            // The command's output, not only the terminal's echo of what was typed.
+            (shown.matches(prints).count() > command.matches(prints).count()).then_some(())
         });
         assert!(printed.is_some(), "the shell never printed {prints}");
     }
@@ -547,10 +588,7 @@ fn ctrl_c_typed_into_the_tab_ends_every_process_before_the_tab_shows_exited() {
     let sandbox = Sandbox::new(STUBBORN);
     let tab = sandbox.open_tab();
     tab.wait_for("ready");
-    wait_until(Duration::from_secs(10), || {
-        (tab.session_members().len() >= 4).then_some(())
-    })
-    .expect("the service's children never started");
+    sandbox.wait_until_trapped();
 
     tab.type_keys("\x03");
     let between = sandbox.launch_from_terminal();
@@ -583,17 +621,10 @@ fn a_killed_executor_s_run_is_ended_and_finalized_complete_by_the_app() {
     let sandbox = Sandbox::new(STUBBORN);
     let tab = sandbox.open_tab();
     tab.wait_for("ready");
+    sandbox.wait_until_trapped();
     let executor = tab.pty.executor_pid();
     // Its children start before a heartbeat, so they are proven the run's.
-    wait_until(Duration::from_secs(30), || {
-        let alive = sandbox.record()?.run?.last_alive_at;
-        let members: Vec<_> = process::all_processes()
-            .into_iter()
-            .filter(|process| process.sid == Some(executor))
-            .collect();
-        (members.len() >= 4 && members.iter().all(|process| process.start <= alive)).then_some(())
-    })
-    .expect("no heartbeat after the children started");
+    sandbox.wait_for_proof(executor);
 
     assert!(process::send_signal(executor, Signal::Kill));
     let between = sandbox.launch_from_terminal();
@@ -653,22 +684,21 @@ fn killing_the_app_finalizes_its_run_interrupted_at_what_was_written() {
         .store()
         .run_dir(&localify::infrastructure::runs::RunId::parse(run_id).unwrap());
     assert!(output::reader_alive(&dir).unwrap());
+    sandbox.wait_until_trapped();
+    let executor = sandbox.record().expect("the run never registered").pid;
+    // Its children start before a heartbeat, so the next finisher can prove
+    // they are the run's once the app and the executor are gone.
+    let record = sandbox.wait_for_proof(executor);
+    assert_eq!(record.run_id().map(|id| id.as_str()), Some(run_id));
 
     app.kill();
     let written = fs::metadata(dir.join("0.log")).unwrap().len();
     assert!(!output::reader_alive(&dir).unwrap());
-    let record = wait_until(Duration::from_secs(10), || {
-        sandbox
-            .record()
-            .filter(|record| record.run_id().map(|id| id.as_str()) == Some(run_id))
-    })
-    .unwrap();
     sandbox.store().stop(&record).unwrap();
 
     let end = output::read_end(&dir).unwrap().expect("not finalized");
     assert_eq!(end.reason, EndReason::Interrupted);
     assert_eq!(end.offset, written);
-    let executor = record.pid;
     let left: Vec<_> = process::all_processes()
         .into_iter()
         .filter(|process| process.sid == Some(executor))
@@ -920,10 +950,17 @@ fn a_service_finds_a_tool_that_only_its_shell_init_puts_on_path() {
     }
 }
 
+/// A deadline short enough for failing cases to keep the tests quick.
+const TEST_DEADLINE: Duration = Duration::from_secs(3);
+
 /// Runs the resolver in the app process with bash as the user's shell and
-/// `init` as its startup file. Returns what it said, how long it took, and
-/// the PID the init wrote, if it got that far.
-fn resolve_with_bash_init(init: &str, localify: Option<&Path>) -> (String, Duration, Option<u32>) {
+/// `init` as its startup file, within `deadline`. Returns what it said, how
+/// long it took, and the PID the init wrote, if it got that far.
+fn resolve_with_bash_init(
+    init: &str,
+    localify: Option<&Path>,
+    deadline: Duration,
+) -> (String, Duration, Option<u32>) {
     let bash = find_shell("bash").expect("bash is on every machine CI runs");
     let sandbox = Sandbox::new("exit 0");
     let pid_file = sandbox.home.join("init.pid");
@@ -934,7 +971,7 @@ fn resolve_with_bash_init(init: &str, localify: Option<&Path>) -> (String, Durat
     );
     let mut extra = vec![
         ("SHELL", bash.to_str().unwrap().to_string()),
-        ("HELPER_DEADLINE_MS", "3000".to_string()),
+        ("HELPER_DEADLINE_MS", deadline.as_millis().to_string()),
     ];
     if let Some(localify) = localify {
         extra.push(("HELPER_LOCALIFY", localify.display().to_string()));
@@ -960,7 +997,7 @@ fn resolve_with_bash_init(init: &str, localify: Option<&Path>) -> (String, Durat
 fn assert_failed_and_gone(case: &str, (outcome, elapsed, pid): (String, Duration, Option<u32>)) {
     assert!(outcome.starts_with("failed "), "{case}: {outcome}");
     assert!(
-        elapsed < Duration::from_millis(3500),
+        elapsed < TEST_DEADLINE + Duration::from_millis(500),
         "{case}: took {elapsed:?}"
     );
     if let Some(pid) = pid {
@@ -973,14 +1010,21 @@ fn assert_failed_and_gone(case: &str, (outcome, elapsed, pid): (String, Duration
 
 #[test]
 fn a_shell_init_that_hangs_waits_on_dev_tty_or_floods_fails_within_the_deadline() {
-    assert_failed_and_gone("hang", resolve_with_bash_init("sleep 60\n", None));
+    assert_failed_and_gone(
+        "hang",
+        resolve_with_bash_init("sleep 60\n", None, TEST_DEADLINE),
+    );
     assert_failed_and_gone(
         "/dev/tty",
-        resolve_with_bash_init("read answer < /dev/tty || sleep 60\n", None),
+        resolve_with_bash_init("read answer < /dev/tty || sleep 60\n", None, TEST_DEADLINE),
     );
     assert_failed_and_gone(
         "more than 1 MiB",
-        resolve_with_bash_init("head -c 2000000 /dev/zero | tr '\\0' x\n", None),
+        resolve_with_bash_init(
+            "head -c 2000000 /dev/zero | tr '\\0' x\n",
+            None,
+            TEST_DEADLINE,
+        ),
     );
 }
 
@@ -1001,10 +1045,10 @@ fn a_forged_frame_or_text_inside_it_fails() {
         let fake = scripts.path().join(format!("localify-{case}"));
         fs::write(&fake, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_failed_and_gone(case, resolve_with_bash_init("", Some(&fake)));
+        assert_failed_and_gone(case, resolve_with_bash_init("", Some(&fake), TEST_DEADLINE));
     }
-    // The real command, framed once, is accepted.
-    let (outcome, _, _) = resolve_with_bash_init("", None);
+    // The real command, framed once, is accepted, within the real deadline.
+    let (outcome, _, _) = resolve_with_bash_init("", None, shell_env::DEADLINE);
     assert!(outcome.starts_with("ok "), "{outcome}");
 }
 
