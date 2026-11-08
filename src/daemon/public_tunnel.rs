@@ -26,7 +26,7 @@ use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsSto
 use crate::infrastructure::cloud::http::{CloudError, CloudHttp};
 use crate::infrastructure::cloud::runtime::{ReadyRuntime, Runtime, fetch_runtime};
 use crate::infrastructure::cloud::types::{
-    PublicStatus, PublicUrlState, RuntimeBlock, RuntimeStatus, TunnelState,
+    PublicStatus, PublicUrl, PublicUrlState, RuntimeBlock, RuntimeStatus, TunnelState,
 };
 use crate::infrastructure::cloudflared;
 
@@ -86,6 +86,10 @@ struct Tunnel {
 struct Parts {
     signed_in: bool,
     served_urls: Vec<String>,
+    /// Every URL of the last `ready` runtime, served here or not, and this
+    /// machine's id: what the inventory says about each service's URL.
+    known_urls: Vec<PublicUrl>,
+    machine_id: Option<String>,
     /// Why the cloud side does not serve, for a person.
     cloud_error: Option<String>,
     /// Why public traffic cannot reach this daemon at all.
@@ -146,6 +150,13 @@ impl PublicTunnel {
             _ => None,
         };
         describe(parts, connections)
+    }
+
+    /// The URLs of the last `ready` runtime, and this machine's id, for the
+    /// inventory. Empty while signed out or before the first answer.
+    pub fn known_urls(&self) -> (Vec<PublicUrl>, Option<String>) {
+        let parts = self.parts();
+        (parts.known_urls.clone(), parts.machine_id.clone())
     }
 
     fn parts(&self) -> MutexGuard<'_, Parts> {
@@ -489,6 +500,8 @@ fn stand_down(
     let mut parts = tunnel.parts();
     parts.signed_in = signed_in;
     parts.served_urls.clear();
+    parts.known_urls.clear();
+    parts.machine_id = None;
     parts.cloud_error = error;
     parts.runtime = None;
     parts.blocked = None;
@@ -503,6 +516,7 @@ fn serve(
     credentials: &CloudCredentials,
     ready: ReadyRuntime,
 ) -> Next {
+    let known_urls = ready.public_urls.clone();
     // The API answers this machine's URLs only; keep to them all the same,
     // and to those it says may serve.
     let urls: Vec<_> = ready
@@ -520,7 +534,10 @@ fn serve(
     let ingress_down = tunnel.parts().ingress_error.is_some();
     if urls.is_empty() || ingress_down {
         stand_down(tunnel, access, desired, true, None);
-        tunnel.parts().runtime = Some(RuntimeStatus::Ready);
+        let mut parts = tunnel.parts();
+        parts.runtime = Some(RuntimeStatus::Ready);
+        parts.known_urls = known_urls;
+        parts.machine_id = Some(credentials.machine_id.clone());
         return Next::Regular;
     }
     let current = desired.borrow().clone();
@@ -549,6 +566,8 @@ fn serve(
     let mut parts = tunnel.parts();
     parts.signed_in = true;
     parts.served_urls = urls.into_iter().map(|url| url.id).collect();
+    parts.known_urls = known_urls;
+    parts.machine_id = Some(credentials.machine_id.clone());
     parts.cloud_error = None;
     parts.runtime = Some(RuntimeStatus::Ready);
     parts.blocked = None;
@@ -938,6 +957,11 @@ mod tests {
         assert_eq!(status.runtime, Some(RuntimeStatus::Ready));
         // u2 belongs to another machine and u3 is suspended: both are left out.
         assert_eq!(status.served_urls, vec!["u1".to_string()]);
+        // The inventory still says why they are not served here.
+        let (known, machine_id) = fixture.tunnel.known_urls();
+        let ids: Vec<_> = known.iter().map(|url| url.id.as_str()).collect();
+        assert_eq!(ids, ["u1", "u2", "u3"]);
+        assert_eq!(machine_id.as_deref(), Some("m1"));
         assert_eq!(
             api.requests(),
             ["GET /v2/machines/self/runtime?generation=0 HTTP/1.1"]
@@ -1100,6 +1124,7 @@ mod tests {
             })
         );
         assert!(status.served_urls.is_empty());
+        assert!(fixture.tunnel.known_urls().0.is_empty());
     }
 
     #[tokio::test]
@@ -1279,6 +1304,7 @@ mod tests {
             runtime: Some(RuntimeStatus::Ready),
             blocked: None,
             process,
+            ..Parts::default()
         };
         let status = describe(parts(Process::Running), Some(4));
         assert_eq!(

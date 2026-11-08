@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -9,7 +10,11 @@ use tracing::{error, info, warn};
 use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
 use super::router::SharedState;
+use crate::application::inventory::Have;
+use crate::infrastructure::cloud::types::TunnelState;
+use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
+use localify::desktop::ProjectRootStore;
 
 /// Management commands sent over the Unix socket.
 #[derive(Debug, Deserialize)]
@@ -38,6 +43,13 @@ enum MgmtCommand {
     /// Fetch this machine's public URLs again, in the background.
     #[serde(rename = "public_refresh")]
     PublicRefresh,
+    /// This machine's inventory (`docs/remote-machines.md`, "Inventory"), or
+    /// `unchanged` when `have` names its current revision.
+    #[serde(rename = "inventory")]
+    Inventory {
+        #[serde(default)]
+        have: Option<Have>,
+    },
 }
 
 /// Response sent back to the management client.
@@ -90,6 +102,7 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "restart" => Some(MgmtCommand::Restart),
         "public_status" => Some(MgmtCommand::PublicStatus),
         "public_refresh" => Some(MgmtCommand::PublicRefresh),
+        "inventory" => Some(MgmtCommand::Inventory { have: None }),
         _ => None,
     }
 }
@@ -115,6 +128,7 @@ pub async fn serve(
     shutdown: ShutdownHandle,
     ports: DaemonPorts,
     tunnel: PublicTunnel,
+    inventory: Arc<LocalInventory>,
 ) -> anyhow::Result<()> {
     let cancel = shutdown.token();
 
@@ -142,6 +156,7 @@ pub async fn serve(
         let reload_tx = reload_tx.clone();
         let shutdown = shutdown.clone();
         let tunnel = tunnel.clone();
+        let inventory = Arc::clone(&inventory);
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -232,6 +247,9 @@ pub async fn serve(
                     tunnel.refresh();
                     MgmtResponse::success(serde_json::json!({ "refreshing": true }))
                 }
+                Some(MgmtCommand::Inventory { have }) => {
+                    inventory_answer(&inventory, &tunnel, have).await
+                }
                 None => MgmtResponse::error(format!("Unknown command: {}", line.trim())),
             };
 
@@ -254,6 +272,49 @@ pub async fn serve(
     info!("Management socket closed");
 
     Ok(())
+}
+
+/// A fresh snapshot, built off the async threads: it reads the config and
+/// the run records, scans processes and connects to every service's port.
+async fn inventory_answer(
+    inventory: &Arc<LocalInventory>,
+    tunnel: &PublicTunnel,
+    have: Option<Have>,
+) -> MgmtResponse {
+    let (urls, machine_id) = tunnel.known_urls();
+    let public = PublicFacts {
+        urls,
+        machine_id,
+        tunnel_connected: tunnel.status().await.tunnel == TunnelState::Connected,
+    };
+    let inventory = Arc::clone(inventory);
+    let built = tokio::task::spawn_blocking(move || {
+        // The checkouts the app knows, as `localify dev` reads them.
+        let project_roots = ProjectRootStore::new_default()
+            .and_then(|store| store.load())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(project_id, root)| (project_id, PathBuf::from(root)))
+            .collect();
+        inventory.snapshot(&public, &project_roots)
+    })
+    .await;
+    let snapshot = match built {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(error)) => return MgmtResponse::error(format!("{error:#}")),
+        Err(error) => return MgmtResponse::error(error.to_string()),
+    };
+    if snapshot.is_held_by(have.as_ref()) {
+        return MgmtResponse::success(serde_json::json!({
+            "unchanged": true,
+            "epoch": snapshot.epoch,
+            "rev": snapshot.rev,
+        }));
+    }
+    match serde_json::to_value(&snapshot) {
+        Ok(snapshot) => MgmtResponse::success(snapshot),
+        Err(error) => MgmtResponse::error(error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -292,6 +353,13 @@ mod tests {
 
         let serve_shutdown = shutdown.clone();
         let sock_clone = sock.clone();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let inventory = Arc::new(
+            LocalInventory::new(config, dir.path().join("data"))
+                .unwrap()
+                .with_services_dir(dir.path().join("services")),
+        );
         let test_ports = DaemonPorts {
             http: 80,
             https: 443,
@@ -305,6 +373,7 @@ mod tests {
                 serve_shutdown,
                 test_ports,
                 PublicTunnel::new(1),
+                inventory,
             )
             .await;
         });
@@ -354,6 +423,28 @@ mod tests {
             shutdown.exit_code(),
             crate::infrastructure::macos_system::RESTART_EXIT_CODE
         );
+    }
+
+    #[tokio::test]
+    async fn inventory_answers_a_snapshot_then_unchanged_for_the_same_revision() {
+        let (sock, _shutdown, _reload_rx, dir) = start_server(vec![]).await;
+
+        let snapshot = send_command(&sock, "inventory").await;
+        assert_eq!(snapshot["ok"], true, "{snapshot}");
+        let data = &snapshot["data"];
+        assert_eq!(data["schema"], 1);
+        assert_eq!(data["rev"], 1);
+        assert_eq!(data["items"], serde_json::json!([]));
+        assert!(dir.path().join("data/launch-rev.key").exists());
+
+        let have = serde_json::json!({
+            "cmd": "inventory",
+            "have": {"epoch": data["epoch"], "rev": 1},
+        });
+        let again = send_command(&sock, &have.to_string()).await;
+        assert_eq!(again["data"]["unchanged"], true);
+        assert_eq!(again["data"]["rev"], 1);
+        assert!(again["data"].get("items").is_none());
     }
 
     // --- parse_command unit tests ---
