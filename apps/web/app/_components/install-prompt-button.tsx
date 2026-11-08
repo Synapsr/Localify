@@ -1,7 +1,8 @@
 "use client";
 
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useTranslations } from "next-intl";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { CheckIcon, CopyIcon } from "@/components/icons";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -54,8 +55,89 @@ export const InstallPromptButton = ({ source, variant = "glow", size = "lg", cla
       onClick={copy}
       type="button"
     >
-      {copied ? <CheckIcon className="h-4 w-4" /> : <CopyIcon className="h-4 w-4" />}
-      {copied ? t("copied") : t("cta")}
+      <MorphLabel icon={copied ? "check" : "copy"} text={copied ? t("copied") : t("cta")} />
     </button>
+  );
+};
+
+const spring = { type: "spring", stiffness: 380, damping: 32, mass: 0.6 } as const;
+
+/*
+ * The button's label: its width eases to the new text, and the text morphs letter by
+ * letter, so letters both labels share glide to their new place and the rest fade.
+ */
+const MorphLabel = ({ text, icon }: { text: string; icon: "copy" | "check" }) => {
+  const id = useId();
+  const reduce = useReducedMotion();
+  const inner = useRef<HTMLSpanElement>(null);
+  const [width, setWidth] = useState<number | "auto">("auto");
+
+  const letters = useMemo(() => {
+    const seen = new Map<string, number>();
+    return [...text].map((char) => {
+      const key = char.toLowerCase();
+      const count = (seen.get(key) ?? 0) + 1;
+      seen.set(key, count);
+      return { key: `${key}-${count}`, char };
+    });
+  }, [text]);
+
+  useLayoutEffect(() => {
+    if (inner.current) setWidth(inner.current.offsetWidth);
+  }, [text]);
+
+  const Icon = icon === "check" ? CheckIcon : CopyIcon;
+
+  if (reduce) {
+    return (
+      <span className="inline-flex items-center gap-2">
+        <Icon className="h-4 w-4" />
+        {text}
+      </span>
+    );
+  }
+
+  return (
+    <motion.span
+      animate={{ width }}
+      className="inline-flex justify-center overflow-hidden"
+      initial={false}
+      transition={spring}
+    >
+      <span className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap" ref={inner}>
+        <span className="relative inline-flex size-4 shrink-0">
+          <AnimatePresence initial={false} mode="popLayout">
+            <motion.span
+              animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+              className="absolute inset-0 inline-flex"
+              exit={{ opacity: 0, scale: 0.5, filter: "blur(4px)" }}
+              initial={{ opacity: 0, scale: 0.5, filter: "blur(4px)" }}
+              key={icon}
+              transition={{ duration: 0.2 }}
+            >
+              <Icon className="h-4 w-4" />
+            </motion.span>
+          </AnimatePresence>
+        </span>
+        <span aria-label={text} className="inline-flex">
+          <AnimatePresence initial={false} mode="popLayout">
+            {letters.map((letter) => (
+              <motion.span
+                animate={{ opacity: 1 }}
+                aria-hidden="true"
+                className="inline-block"
+                exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                key={letter.key}
+                layoutId={`${id}-${letter.key}`}
+                transition={spring}
+              >
+                {letter.char === " " ? " " : letter.char}
+              </motion.span>
+            ))}
+          </AnimatePresence>
+        </span>
+      </span>
+    </motion.span>
   );
 };
