@@ -23,12 +23,15 @@ use std::time::{Duration, Instant};
 use localify::branding::BRANDING;
 use localify::desktop::dto::ServiceRunDto;
 use localify::desktop::pty::{self, WindowSize, suspend_disabled};
-use localify::desktop::run_pty::{RunPty, RunPtyEnd, RunPtyLaunch, run_environment};
+use localify::desktop::run_pty::{
+    AppInstallation, RunPty, RunPtyEnd, RunPtyLaunch, run_environment,
+};
 use localify::desktop::shell_environment::ShellEnvironment;
 use localify::infrastructure::process::{self, Signal};
 use localify::infrastructure::running_services::{
     OutputAvailability, RunState, RunningService, RunningServiceStore,
 };
+use localify::infrastructure::runs::finish::Finish;
 use localify::infrastructure::runs::output::{self, EndReason};
 use localify::infrastructure::shell_env;
 
@@ -117,12 +120,21 @@ impl Sandbox {
         }
     }
 
+    /// The app's installation, as the sandbox's.
+    fn installation(&self) -> AppInstallation {
+        AppInstallation {
+            home: Some(self.home.clone().into()),
+            xdg_state_home: Some(self.root.join("state").into()),
+            profile: None,
+        }
+    }
+
     /// The test process's own environment, as a run gets it, in the sandbox.
     fn run_env(&self) -> Vec<(OsString, OsString)> {
-        let mut environment = run_environment(std::env::vars_os(), &self.app);
-        environment.retain(|(key, _)| key != "HOME" && key != "XDG_STATE_HOME");
-        environment.retain(|(key, _)| key != "LOCALIFY_PROFILE");
-        environment.extend(self.sandbox_env());
+        let mut environment = run_environment(std::env::vars_os(), &self.app, &self.installation());
+        // macOS keeps state under HOME, Linux under XDG_STATE_HOME: both the sandbox's.
+        environment.retain(|(key, _)| key != "XDG_STATE_HOME");
+        environment.push(("XDG_STATE_HOME".into(), self.root.join("state").into()));
         environment
     }
 
@@ -694,9 +706,14 @@ fn killing_the_app_finalizes_its_run_interrupted_at_what_was_written() {
     app.kill();
     let written = fs::metadata(dir.join("0.log")).unwrap().len();
     assert!(!output::reader_alive(&dir).unwrap());
-    sandbox.store().stop(&record).unwrap();
 
-    let end = output::read_end(&dir).unwrap().expect("not finalized");
+    // Nobody calls stop: `localify dev` sees its terminal go, ends the run
+    // and finalizes what the app wrote.
+    let end = wait_until(Duration::from_secs(45), || {
+        let gone = !process::process_exists(executor);
+        output::read_end(&dir).unwrap().filter(|_| gone)
+    })
+    .expect("the run was never ended after the app died");
     assert_eq!(end.reason, EndReason::Interrupted);
     assert_eq!(end.offset, written);
     let left: Vec<_> = process::all_processes()
@@ -704,12 +721,143 @@ fn killing_the_app_finalizes_its_run_interrupted_at_what_was_written() {
         .filter(|process| process.sid == Some(executor))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+    assert_eq!(record.run_id().map(|id| id.as_str()), Some(run_id));
     let after = sandbox.launch_from_terminal();
     assert!(
         after.status.success(),
         "{}",
         String::from_utf8_lossy(&after.stderr)
     );
+}
+
+#[test]
+fn the_daemon_finishes_a_run_pty_whose_app_and_executor_both_died() {
+    let sandbox = Sandbox::new(STUBBORN);
+    let mut app = sandbox.app_helper("hold", &[]);
+    let run_id = app.line("run ");
+    let dir = sandbox
+        .store()
+        .run_dir(&localify::infrastructure::runs::RunId::parse(run_id.trim()).unwrap());
+    sandbox.wait_until_trapped();
+    let executor = sandbox.record().expect("the run never registered").pid;
+    sandbox.wait_for_proof(executor);
+
+    // Both readers of the run gone at once: nothing of the app is left to
+    // finish it, and `localify dev` had no time to.
+    assert!(process::send_signal(executor, Signal::Kill));
+    app.kill();
+    assert!(!output::reader_alive(&dir).unwrap());
+    assert!(
+        !session_alive(executor).is_empty(),
+        "the children died with their terminal"
+    );
+
+    let finished = sandbox.store().finish_unread_runs().unwrap();
+
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0].1, Finish::Finalized(EndReason::Interrupted));
+    assert!(
+        session_alive(executor).is_empty(),
+        "{:?}",
+        session_alive(executor)
+    );
+    let after = sandbox.launch_from_terminal();
+    assert!(
+        after.status.success(),
+        "{}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+}
+
+#[test]
+fn a_run_pty_whose_app_still_reads_is_left_to_the_app() {
+    // Printed as two words, so only the service's output, not its echoed command, reads so.
+    let sandbox = Sandbox::new("printf 'service-%s\\n' up; sleep 300");
+    let tab = sandbox.open_tab();
+    tab.wait_for("service-up");
+
+    let finished = sandbox.store().finish_unread_runs().unwrap();
+
+    assert!(finished.is_empty(), "{finished:?}");
+    let record = sandbox.record().unwrap();
+    assert!(sandbox.store().stop(&record).unwrap());
+    tab.wait_end(Duration::from_secs(30));
+}
+
+#[test]
+fn a_reader_held_past_the_executor_s_end_finalizes_interrupted() {
+    // The reader holds after the service's own first line: what is left fits in the PTY.
+    let sandbox = Sandbox::new("printf 'first-%s\\n' line; sleep 0.5; printf 'second-%s\\n' line");
+    let tab = sandbox.open_tab();
+    tab.wait_for("first-line");
+    tab.hold(true);
+    let executor = tab.pty.executor_pid();
+    wait_until(Duration::from_secs(30), || {
+        (!process::process_exists(executor)).then_some(())
+    })
+    .expect("the service never ended");
+
+    let (end, finalized) = tab.wait_end(Duration::from_secs(30));
+    tab.hold(false);
+
+    assert_eq!(finalized, Some(EndReason::Interrupted));
+    assert_eq!(end.output, Some(EndReason::Interrupted));
+    assert!(
+        end.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("still open"),
+        "{end:?}"
+    );
+    // The reader wrote what it last read, then held: what it never read is the PTY's end.
+    assert!(contains(&tab.stream(), "first-line"));
+}
+
+#[test]
+fn concurrent_launches_from_the_app_and_a_terminal_leave_one_run() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        let _ = writeln!(std::io::stderr(), "skipped: python3 is not installed");
+        return;
+    }
+    // It listens, so a detached launch that wins returns at once.
+    let sandbox =
+        Sandbox::new(r#"echo ready; exec python3 -u -m http.server "$PORT" --bind 127.0.0.1"#);
+    // The app's button pressed twice, and a terminal's `dev --detach`, at once.
+    let tabs: Vec<Tab> = (0..2).map(|_| sandbox.open_tab()).collect();
+    let detached = sandbox
+        .localify(&["dev", "web", "--project", "app", "--detach"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+
+    let record = wait_until(Duration::from_secs(30), || {
+        sandbox.record().filter(|record| record.run_id().is_some())
+    })
+    .unwrap();
+    let admitted = tabs
+        .iter()
+        .position(|tab| Some(tab.pty.run_id()) == record.run_id());
+    for (index, tab) in tabs.iter().enumerate() {
+        if Some(index) != admitted {
+            let (end, _) = tab.wait_end(Duration::from_secs(30));
+            assert!(!end.registered, "a second tab ran the service");
+        }
+    }
+    match admitted {
+        Some(_) => assert!(!detached.success(), "the detached launch ran too"),
+        None => assert!(detached.success(), "no launch ran"),
+    }
+    assert!(sandbox.store().stop(&record).unwrap());
+}
+
+/// Every living process of the session `sid` leads.
+fn session_alive(sid: u32) -> Vec<u32> {
+    process::all_processes()
+        .into_iter()
+        .filter(|process| process.sid == Some(sid))
+        .map(|process| process.pid)
+        .collect()
 }
 
 // --- The shell environment -------------------------------------------------
@@ -846,7 +994,11 @@ fn app_helper() {
                         .map(OsString::from)
                         .to_vec(),
                     working_directory: app.clone(),
-                    environment: run_environment(environment, &app),
+                    environment: run_environment(
+                        environment,
+                        &app,
+                        &AppInstallation::of_this_process(),
+                    ),
                     size: WindowSize::new(100, 30).unwrap(),
                 },
                 move |bytes| output_shown.lock().unwrap().extend_from_slice(bytes),
@@ -1120,7 +1272,7 @@ fn a_service_started_from_a_shell_tab_before_the_update_is_a_legacy_run_left_alo
     let record = sandbox.record().unwrap();
     assert_eq!(store.state(&record), RunState::Running);
     assert_eq!(record.output_availability(), OutputAvailability::LegacyRun);
-    let shown = ServiceRunDto::new(&record, store.state(&record));
+    let shown = ServiceRunDto::new(&record, store.state(&record), None);
     assert!(shown.legacy);
     assert_eq!(shown.output_run_id, None);
 

@@ -93,6 +93,7 @@ import type {
   TerminalSessionRequest,
   TerminalRestartServiceRequest,
   ServiceRunRequest,
+  ServiceStopDto,
   ShellEnvironmentDto,
   TerminalWriteRequest,
   UpdateAutostartRequest,
@@ -300,8 +301,8 @@ export interface DesktopClient {
   ): Promise<TerminalLaunchServiceResultDto>;
   terminalStopService(request: TerminalSessionRequest): Promise<void>;
   terminalClose(request: TerminalSessionRequest): Promise<void>;
-  /** Stops a service's last run through its session; `false` when it was not running. */
-  stopServiceRun(request: ServiceRunRequest): Promise<boolean>;
+  /** Stops a service's last run through its session, and says whether a port stop may be offered. */
+  stopServiceRun(request: ServiceRunRequest): Promise<ServiceStopDto>;
   shellEnvironmentStatus(): Promise<ShellEnvironmentDto>;
   reloadShellEnvironment(): Promise<ShellEnvironmentDto>;
 }

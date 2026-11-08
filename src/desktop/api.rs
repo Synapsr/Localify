@@ -57,12 +57,13 @@ use crate::desktop::dto::{
     RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
     SaveEnvironmentFileRequest, ServiceRunCommand, ServiceRunDto, ServiceRunRequest,
-    SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto, SettingsExportRequest,
-    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewProjectDto,
-    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
-    SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSettingsDto,
-    SettingsTransferSnapshotDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
-    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    ServiceStopDto, ServiceStopOutcome, SetProjectServiceDomainRequest,
+    SetProjectServiceDomainResultDto, SettingsExportRequest, SettingsExportResultDto,
+    SettingsImportPreviewDto, SettingsImportPreviewProjectDto, SettingsImportPreviewRequest,
+    SettingsImportRequest, SettingsImportResultDto, SettingsTransferDomainDto,
+    SettingsTransferProjectDto, SettingsTransferSettingsDto, SettingsTransferSnapshotDto,
+    StartDaemonRequest, StepDto, StopLocalDevServerRequest, UninstallPreviewDto,
+    UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::dto::{
@@ -107,7 +108,7 @@ use crate::infrastructure::port_check::{
 use crate::infrastructure::project_marker::{
     project_marker_relative_path, read_project_marker, write_project_marker,
 };
-use crate::infrastructure::running_services::RunningServiceStore;
+use crate::infrastructure::running_services::{RunningService, RunningServiceStore};
 use crate::infrastructure::system_service;
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
@@ -149,6 +150,33 @@ fn dns_resolution_status(daemon_running: bool) -> DnsResolutionDto {
     }
 
     map_dns_resolution_check(check_system_resolution(Duration::from_millis(1500)))
+}
+
+/// The slug of a project's primary checkout.
+fn primary_environment<'a>(
+    environments: &'a [ProjectEnvironmentInfoDto],
+    project_id: &str,
+) -> Option<&'a str> {
+    environments
+        .iter()
+        .find(|environment| environment.project_id == project_id && environment.primary)
+        .map(|environment| environment.slug.as_str())
+}
+
+/// The record of the asked service in the asked environment. A record
+/// without an environment is the project's primary checkout, never every
+/// environment: stopping a worktree's service must not signal the primary's.
+fn find_service_run(
+    records: Vec<RunningService>,
+    request: &ServiceRunRequest,
+    primary: Option<&str>,
+) -> Option<RunningService> {
+    records.into_iter().find(|record| {
+        record.key.project_id == request.project_id
+            && record.key.service_id == request.service_id
+            && record.key.environment.as_deref().or(primary)
+                == Some(request.environment_slug.as_str())
+    })
 }
 
 fn map_dns_resolution_check(check: SystemResolutionCheck) -> DnsResolutionDto {
@@ -2942,33 +2970,33 @@ impl DesktopApi {
         let Ok(store) = RunningServiceStore::new_default() else {
             return Vec::new();
         };
+        let environments = self.list_project_environments().unwrap_or_default();
         store
             .list()
             .unwrap_or_default()
             .iter()
-            .map(|record| ServiceRunDto::new(record, store.state(record)))
+            .map(|record| {
+                let primary = primary_environment(&environments, &record.key.project_id);
+                ServiceRunDto::new(record, store.state(record), primary)
+            })
             .collect()
     }
 
     /// Stops a service's last run through its own session and process group,
-    /// as `localify stop` does, never by writing Ctrl-C into a tab. Returns
-    /// whether it was running. A legacy run is stopped only when its process
-    /// is verified; otherwise it is refused, never signalled.
-    pub fn stop_service_run(&self, request: ServiceRunRequest) -> Result<bool> {
+    /// as `localify stop` does, never by writing Ctrl-C into a tab. A legacy
+    /// run is stopped only when its process is verified; otherwise it is
+    /// refused, never signalled. Only when Localify has no record of the
+    /// service may the app offer to stop whatever listens on its port.
+    pub fn stop_service_run(&self, request: ServiceRunRequest) -> Result<ServiceStopDto> {
         let store = RunningServiceStore::new_default()?;
-        let record = store.list()?.into_iter().find(|record| {
-            record.key.project_id == request.project_id
-                && record.key.service_id == request.service_id
-                && record
-                    .key
-                    .environment
-                    .as_deref()
-                    .is_none_or(|slug| slug == request.environment_slug)
-        });
-        match record {
-            Some(record) => store.stop(&record),
-            None => Ok(false),
-        }
+        let environments = self.list_project_environments()?;
+        let primary = primary_environment(&environments, &request.project_id);
+        let outcome = match find_service_run(store.list()?, &request, primary) {
+            None => ServiceStopOutcome::NoRecord,
+            Some(record) if store.stop(&record)? => ServiceStopOutcome::Stopped,
+            Some(_) => ServiceStopOutcome::AlreadyStopped,
+        };
+        Ok(ServiceStopDto::from(outcome))
     }
 
     fn launcher_preferences(&self) -> Result<crate::desktop::LauncherPreferences> {
@@ -7671,6 +7699,72 @@ mod tests {
         });
 
         assert_eq!(step.status, "skipped");
+    }
+
+    fn service_record(
+        environment: Option<&str>,
+        pid: u32,
+    ) -> crate::infrastructure::running_services::RunningService {
+        use crate::infrastructure::running_services::{RunningService, ServiceKey, ServiceOrigin};
+        RunningService {
+            key: ServiceKey {
+                project_id: "acme".into(),
+                environment: environment.map(str::to_string),
+                service_id: "web".into(),
+            },
+            pid,
+            run: None,
+            process_started_at: None,
+            url: "https://web.localify".into(),
+            port: 3000,
+            origin: ServiceOrigin::App,
+            profile: None,
+            started_at: 0,
+            log_file: None,
+            exit: None,
+        }
+    }
+
+    fn service_request(environment: &str) -> crate::desktop::dto::ServiceRunRequest {
+        crate::desktop::dto::ServiceRunRequest {
+            project_id: "acme".into(),
+            environment_slug: environment.into(),
+            service_id: "web".into(),
+        }
+    }
+
+    #[test]
+    fn a_record_without_an_environment_is_the_primary_s_never_a_worktree_s() {
+        let records = || {
+            vec![
+                service_record(None, 1),
+                service_record(Some("fix-login"), 2),
+            ]
+        };
+
+        let worktree =
+            super::find_service_run(records(), &service_request("fix-login"), Some("main"));
+        let primary = super::find_service_run(records(), &service_request("main"), Some("main"));
+        let unknown = super::find_service_run(records(), &service_request("other"), Some("main"));
+
+        assert_eq!(worktree.map(|record| record.pid), Some(2));
+        assert_eq!(primary.map(|record| record.pid), Some(1));
+        assert!(unknown.is_none());
+        let no_primary = super::find_service_run(
+            vec![service_record(None, 1)],
+            &service_request("fix-login"),
+            None,
+        );
+        assert!(no_primary.is_none());
+    }
+
+    #[test]
+    fn only_a_service_without_any_record_offers_to_stop_its_port() {
+        use crate::desktop::dto::{ServiceStopDto, ServiceStopOutcome};
+
+        assert!(ServiceStopDto::from(ServiceStopOutcome::NoRecord).offer_port_stop);
+        assert!(!ServiceStopDto::from(ServiceStopOutcome::AlreadyStopped).offer_port_stop);
+        assert!(!ServiceStopDto::from(ServiceStopOutcome::Stopped).offer_port_stop);
     }
 
     #[test]

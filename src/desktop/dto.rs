@@ -525,10 +525,16 @@ pub struct ServiceRunDto {
 }
 
 impl ServiceRunDto {
-    pub fn new(record: &RunningService, state: RunState) -> Self {
+    /// `primary` is the slug of the project's primary checkout: a record
+    /// without an environment is that one's.
+    pub fn new(record: &RunningService, state: RunState, primary: Option<&str>) -> Self {
         Self {
             project_id: record.key.project_id.clone(),
-            environment: record.key.environment.clone(),
+            environment: record
+                .key
+                .environment
+                .clone()
+                .or_else(|| primary.map(str::to_string)),
             service_id: record.key.service_id.clone(),
             run_id: record.run_id().map(|id| id.to_string()),
             legacy: record.run.is_none(),
@@ -549,6 +555,36 @@ impl ServiceRunDto {
 pub struct ServiceRunCommand {
     pub executable: PathBuf,
     pub args: Vec<OsString>,
+}
+
+/// What stopping a service's last run did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceStopOutcome {
+    Stopped,
+    /// Its last run had already ended.
+    AlreadyStopped,
+    /// Localify has no record of it: what listens on its port, if anything,
+    /// is not a run it knows.
+    NoRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStopDto {
+    pub outcome: ServiceStopOutcome,
+    /// Whether the app may offer to stop whatever listens on the port: only
+    /// for a service with no record, never over a run Localify knows.
+    pub offer_port_stop: bool,
+}
+
+impl From<ServiceStopOutcome> for ServiceStopDto {
+    fn from(outcome: ServiceStopOutcome) -> Self {
+        Self {
+            outcome,
+            offer_port_stop: outcome == ServiceStopOutcome::NoRecord,
+        }
+    }
 }
 
 /// One service in one project environment.

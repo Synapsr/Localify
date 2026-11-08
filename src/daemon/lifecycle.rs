@@ -31,7 +31,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const FAILED_START_DELAY: Duration = Duration::from_secs(5);
 /// How often the daemon checks whether an update replaced its binary.
 const BINARY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-/// How often the daemon ends background runs whose `localify dev` died.
+/// How often the daemon ends runs whose `localify dev` and reader died.
 const RUN_FINISH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Stops the daemon from the inside, and remembers whether a restart was asked for.
@@ -200,7 +200,7 @@ async fn serve(
     if managed {
         tokio::spawn(restart_when_binary_is_replaced(shutdown.clone()));
     }
-    tokio::spawn(finish_background_runs(
+    tokio::spawn(finish_unread_runs(
         RunFinisher {
             every: RUN_FINISH_INTERVAL,
             as_root: is_root(),
@@ -261,7 +261,7 @@ async fn serve(
     result
 }
 
-/// How the daemon's pass over background runs is scheduled.
+/// How the daemon's pass over unread runs is scheduled.
 struct RunFinisher {
     every: Duration,
     /// Whether the daemon runs as root: then it never runs a pass.
@@ -269,11 +269,13 @@ struct RunFinisher {
     store: Arc<dyn Fn() -> Result<RunningServiceStore> + Send + Sync>,
 }
 
-/// The daemon is a finisher of background runs (docs/remote-machines.md, "The end
-/// of a run"): a run whose executor died has its remaining processes ended and
-/// its stream finalized, so the service is free again. A daemon running as root
-/// reads another home and never signals a user's processes.
-async fn finish_background_runs(finisher: RunFinisher, cancel: CancellationToken) {
+/// The daemon is a finisher of runs nobody reads any more
+/// (docs/remote-machines.md, "The end of a run"): a background run whose
+/// executor died, or a run PTY whose app and executor both died, has its
+/// remaining processes ended and its stream finalized, so the service is free
+/// again. A daemon running as root reads another home and never signals a
+/// user's processes.
+async fn finish_unread_runs(finisher: RunFinisher, cancel: CancellationToken) {
     if finisher.as_root {
         return;
     }
@@ -283,18 +285,18 @@ async fn finish_background_runs(finisher: RunFinisher, cancel: CancellationToken
             _ = tokio::time::sleep(finisher.every) => {}
         }
         let store = Arc::clone(&finisher.store);
-        let pass = tokio::task::spawn_blocking(move || store()?.finish_background_runs());
+        let pass = tokio::task::spawn_blocking(move || store()?.finish_unread_runs());
         match pass.await {
             Ok(Ok(finished)) => {
                 for (key, finish) in finished {
                     info!(
-                        "Ended the background run of {} ({}): {finish:?}",
+                        "Ended the unread run of {} ({}): {finish:?}",
                         key.service_id, key.project_id
                     );
                 }
             }
-            Ok(Err(error)) => warn!("Could not end background runs: {error:#}"),
-            Err(error) => warn!("Could not end background runs: {error}"),
+            Ok(Err(error)) => warn!("Could not end unread runs: {error:#}"),
+            Err(error) => warn!("Could not end unread runs: {error}"),
         }
     }
 }
@@ -420,7 +422,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run_dir = abandoned_run(dir.path());
         let cancel = CancellationToken::new();
-        let pass = tokio::spawn(finish_background_runs(
+        let pass = tokio::spawn(finish_unread_runs(
             scheduled(dir.path(), false),
             cancel.clone(),
         ));
@@ -447,7 +449,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            finish_background_runs(scheduled(dir.path(), true), cancel),
+            finish_unread_runs(scheduled(dir.path(), true), cancel),
         )
         .await
         .expect("the root guard did not return at once");

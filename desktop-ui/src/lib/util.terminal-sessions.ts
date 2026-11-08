@@ -4,6 +4,18 @@ import type {
   TerminalSessionDto,
 } from "@/types/localify";
 
+/**
+ * What the panel knows of a session, newest first: a session only moves forward. Once a tab
+ * has exited, a message about it that arrives late, such as the answer to the launch that
+ * started it, never shows it running again.
+ */
+export function laterSession(
+  known: TerminalSessionDto | undefined,
+  incoming: TerminalSessionDto,
+): TerminalSessionDto {
+  return known?.status === "exited" && incoming.status === "running" ? known : incoming;
+}
+
 /** `failed` is a service that stopped while its tab was in the background. */
 export type TerminalSessionState = "live" | "idle" | "failed";
 

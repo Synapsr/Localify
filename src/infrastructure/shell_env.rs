@@ -35,6 +35,8 @@ const CLEANUP: Duration = Duration::from_millis(500);
 /// still in the pipe to arrive.
 const LINGER: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(20);
+/// Chunks read from the shell and not taken yet.
+const QUEUED_CHUNKS: usize = 4;
 const NONCE_BYTES: usize = 16;
 
 /// Variables as the user's shell init leaves them, in the order it printed.
@@ -119,11 +121,15 @@ pub fn resolve_within(localify: &Path, shell: &Path, deadline: Duration) -> Resu
     };
     let until = started + deadline.saturating_sub(CLEANUP);
     let outcome = capture(&child, stdout, until).and_then(|captured| parse(&captured, &nonce));
-    match &outcome {
-        Ok(_) => reap(&mut child, started + deadline),
-        Err(_) => kill_group(&mut child),
+    match outcome {
+        // A shell that printed its environment but would not exit in time is
+        // a failure too: its process group is ended, and runs fall back.
+        Ok(environment) => reap(&mut child, started + deadline).map(|()| environment),
+        Err(error) => {
+            kill_group(&mut child);
+            Err(error)
+        }
     }
-    outcome
 }
 
 /// Reads what the shell prints until it closes its output, or until it has
@@ -132,7 +138,8 @@ pub fn resolve_within(localify: &Path, shell: &Path, deadline: Duration) -> Resu
 /// the first complete frame, is what shows a frame printed twice. Fails past
 /// `until` or [`MAX_CAPTURE`] bytes.
 fn capture(child: &Child, stdout: impl Read + Send + 'static, until: Instant) -> Result<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
+    // A few chunks in flight at most: the reader waits for the next one.
+    let (sender, receiver) = mpsc::sync_channel(QUEUED_CHUNKS);
     thread::spawn(move || read_chunks(stdout, &sender));
     let mut captured = Vec::new();
     let mut quiet_since: Option<Instant> = None;
@@ -154,10 +161,7 @@ fn capture(child: &Child, stdout: impl Read + Send + 'static, until: Instant) ->
             }
         }
         if captured.len() > MAX_CAPTURE {
-            bail!(
-                "Your shell printed more than {} MiB while starting.",
-                MAX_CAPTURE / (1024 * 1024)
-            );
+            return Err(oversized());
         }
         if Instant::now() >= until {
             bail!("Your shell's startup files did not finish in time.");
@@ -166,12 +170,21 @@ fn capture(child: &Child, stdout: impl Read + Send + 'static, until: Instant) ->
 }
 
 /// Sends what the shell prints, chunk by chunk, until it closes its output.
-fn read_chunks(mut stdout: impl Read, sender: &mpsc::Sender<Result<Vec<u8>>>) {
+/// It stops reading once more than [`MAX_CAPTURE`] bytes came, so a shell
+/// that floods its output never costs more than that.
+fn read_chunks(mut stdout: impl Read, sender: &mpsc::SyncSender<Result<Vec<u8>>>) {
     let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_usize;
     loop {
         let chunk = match stdout.read(&mut buffer) {
             Ok(0) => return,
-            Ok(count) => Ok(buffer[..count].to_vec()),
+            Ok(count) => {
+                total += count;
+                match total > MAX_CAPTURE {
+                    true => Err(oversized()),
+                    false => Ok(buffer[..count].to_vec()),
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => {
                 Err(anyhow::Error::new(error).context("Failed to read the shell's output"))
@@ -182,6 +195,13 @@ fn read_chunks(mut stdout: impl Read, sender: &mpsc::Sender<Result<Vec<u8>>>) {
             return;
         }
     }
+}
+
+fn oversized() -> anyhow::Error {
+    anyhow::anyhow!(
+        "Your shell printed more than {} MiB while starting.",
+        MAX_CAPTURE / (1024 * 1024)
+    )
 }
 
 /// Whether the process exited, without reaping it: its PID, and so the id of
@@ -347,15 +367,16 @@ fn kill_group(child: &mut Child) {
 
 /// Waits for the shell to exit after it printed its environment, and ends
 /// its session if it does not within what is left of the deadline.
-fn reap(child: &mut Child, until: Instant) {
+fn reap(child: &mut Child, until: Instant) -> Result<()> {
     while Instant::now() < until {
         if exited_unreaped(child.id()) {
             let _ = child.wait();
-            return;
+            return Ok(());
         }
         thread::sleep(POLL);
     }
     kill_group(child);
+    bail!("Your shell printed its environment but did not exit in time.")
 }
 
 /// `$SHELL`, else the account's login shell, else `/bin/sh`: an app started
@@ -487,6 +508,43 @@ mod tests {
         assert!(print_environment("../../etc").is_err());
         assert!(print_environment("00112233445566778899AABBCCDDEEFF").is_err());
         assert!(valid_nonce(&new_nonce().unwrap()));
+    }
+
+    #[test]
+    fn the_reader_stops_at_the_byte_budget_whatever_the_shell_keeps_printing() {
+        let endless = std::io::repeat(b'x');
+        let (sender, receiver) = mpsc::sync_channel(QUEUED_CHUNKS);
+        let reading = thread::spawn(move || read_chunks(endless, &sender));
+
+        let mut taken = 0;
+        let mut failed = false;
+        for chunk in receiver.iter() {
+            match chunk {
+                Ok(chunk) => taken += chunk.len(),
+                Err(_) => failed = true,
+            }
+        }
+
+        reading.join().unwrap();
+        assert!(failed);
+        assert!(taken <= MAX_CAPTURE, "{taken}");
+    }
+
+    #[test]
+    fn a_shell_that_does_not_exit_by_the_deadline_is_a_failure() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+
+        let reaped = reap(&mut child, Instant::now() + Duration::from_millis(200));
+
+        assert!(reaped.is_err());
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the shell was not ended"
+        );
     }
 
     #[test]

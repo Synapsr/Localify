@@ -321,7 +321,7 @@ fn the_end_of_a_run_whose_executor_was_killed() {
         stderr(&between)
     );
 
-    let finished = sandbox.store().finish_background_runs().unwrap();
+    let finished = sandbox.store().finish_unread_runs().unwrap();
 
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0].1, Finish::Finalized(EndReason::Interrupted));
@@ -402,7 +402,7 @@ fn a_finisher_killed_mid_way_lets_the_next_one_complete_and_never_two_at_once() 
     let services = sandbox.services_dir();
     let second = thread::spawn(move || {
         RunningServiceStore::new(services)
-            .finish_background_runs()
+            .finish_unread_runs()
             .unwrap()
     });
     thread::sleep(Duration::from_secs(1));

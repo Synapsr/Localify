@@ -28,6 +28,7 @@ import { setDeepLinkLaunchHandler } from "@/lib/deep-link";
 import { bootstrapQueries } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 import {
+  laterSession,
   reachableServiceSessionIds,
   sortTerminalSessions,
   type TerminalSessionState,
@@ -109,6 +110,13 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   );
   const sessionsRef = useRef(sessions);
   const lastSessionByEnvironmentRef = useRef(new Map<string, string>());
+  // The newest known state of every session, events and answers alike.
+  const latestSessionsRef = useRef(new Map<string, TerminalSessionDto>());
+  const reconcile = useCallback((incoming: TerminalSessionDto) => {
+    const next = laterSession(latestSessionsRef.current.get(incoming.id), incoming);
+    latestSessionsRef.current.set(incoming.id, next);
+    return next;
+  }, []);
   const [stoppedSessionIds, setStoppedSessionIds] = useState<ReadonlySet<string>>(new Set());
   const previousReachableIdsRef = useRef<ReadonlySet<string>>(new Set());
   const expectedStopIdsRef = useRef(new Set<string>());
@@ -130,7 +138,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       .then((nextSessions) => {
         if (cancelled) return;
         const initialSession = nextSessions[0] ?? null;
-        setSessions(nextSessions);
+        setSessions(nextSessions.map(reconcile));
         setActiveSessionIdState((current) => current ?? initialSession?.id ?? null);
         setSelectedTargetState(
           (current) =>
@@ -146,7 +154,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reconcile]);
 
   useEffect(() => {
     let unlistenOutput: (() => void) | null = null;
@@ -162,11 +170,13 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       })
       .catch(() => {});
 
-    // A service tab's run ended and its output was finalized.
+    // A service tab's run ended and its output was finalized. Kept even before the answer
+    // that opened the tab arrives, so that answer cannot show it running again.
     void listen<TerminalSessionDto>("terminal-session", (event) => {
       if (cancelled) return;
+      const ended = reconcile(event.payload);
       setSessions((current) =>
-        current.map((session) => (session.id === event.payload.id ? event.payload : session)),
+        current.map((session) => (session.id === ended.id ? ended : session)),
       );
       void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     }).then((unlisten) => {
@@ -191,7 +201,9 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       if (cancelled) return;
       setSessions((current) =>
         current.map((session) =>
-          session.id === event.payload.sessionId ? { ...session, status: "exited" } : session,
+          session.id === event.payload.sessionId
+            ? reconcile({ ...session, status: "exited" })
+            : session,
         ),
       );
       void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
@@ -206,7 +218,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       unlistenSession?.();
       unlistenShellEnvironment?.();
     };
-  }, [queryClient]);
+  }, [queryClient, reconcile]);
 
   // Bootstrap polling is what sees a service stop. A stop the user just asked for, or watches
   // in the active tab, needs no warning, and looking at the tab clears it.
@@ -263,21 +275,25 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     setIsOpen(true);
   }, []);
 
-  const upsertSession = useCallback((session: TerminalSessionDto) => {
-    setSessions((current) => {
-      const index = current.findIndex((candidate) => candidate.id === session.id);
-      if (index === -1) {
-        return [...current, session];
-      }
+  const upsertSession = useCallback(
+    (incoming: TerminalSessionDto) => {
+      const session = reconcile(incoming);
+      setSessions((current) => {
+        const index = current.findIndex((candidate) => candidate.id === session.id);
+        if (index === -1) {
+          return [...current, session];
+        }
 
-      const next = [...current];
-      next[index] = session;
-      return next;
-    });
-    setActiveSessionIdState(session.id);
-    setSelectedTargetState(toTerminalTargetRequest(session.target));
-    setIsOpen(true);
-  }, []);
+        const next = [...current];
+        next[index] = session;
+        return next;
+      });
+      setActiveSessionIdState(session.id);
+      setSelectedTargetState(toTerminalTargetRequest(session.target));
+      setIsOpen(true);
+    },
+    [reconcile],
+  );
 
   // A service target's running tab is its run; any other target's is a shell.
   const findSessionForTarget = useCallback((target: TerminalTargetRequest) => {
@@ -304,31 +320,35 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   }, []);
 
   // A new run that took over an ended tab, or a restart, keeps the tab's place.
-  const placeRun = useCallback((result: TerminalLaunchServiceResultDto) => {
-    const { replaced, session } = result;
-    setSessions((current) => {
-      const index = replaced ? current.findIndex((candidate) => candidate.id === replaced) : -1;
-      const others = current.filter(
-        (candidate) => candidate.id !== session.id && candidate.id !== replaced,
-      );
-      if (index === -1) {
-        return current.some((candidate) => candidate.id === session.id)
-          ? current.map((candidate) => (candidate.id === session.id ? session : candidate))
-          : [...others, session];
-      }
-      return [...others.slice(0, index), session, ...others.slice(index)];
-    });
-    if (replaced) {
-      setOutputBySessionId((current) => {
-        const next = { ...current };
-        delete next[replaced];
-        return next;
+  const placeRun = useCallback(
+    (result: TerminalLaunchServiceResultDto) => {
+      const { replaced } = result;
+      const session = reconcile(result.session);
+      setSessions((current) => {
+        const index = replaced ? current.findIndex((candidate) => candidate.id === replaced) : -1;
+        const others = current.filter(
+          (candidate) => candidate.id !== session.id && candidate.id !== replaced,
+        );
+        if (index === -1) {
+          return current.some((candidate) => candidate.id === session.id)
+            ? current.map((candidate) => (candidate.id === session.id ? session : candidate))
+            : [...others, session];
+        }
+        return [...others.slice(0, index), session, ...others.slice(index)];
       });
-    }
-    setActiveSessionIdState(session.id);
-    setSelectedTargetState(toTerminalTargetRequest(session.target));
-    setIsOpen(true);
-  }, []);
+      if (replaced) {
+        setOutputBySessionId((current) => {
+          const next = { ...current };
+          delete next[replaced];
+          return next;
+        });
+      }
+      setActiveSessionIdState(session.id);
+      setSelectedTargetState(toTerminalTargetRequest(session.target));
+      setIsOpen(true);
+    },
+    [reconcile],
+  );
 
   const openTerminal = useCallback(
     async (target: TerminalTargetRequest) => {

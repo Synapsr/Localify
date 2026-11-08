@@ -301,6 +301,8 @@ export interface TerminalRunDto {
 
 export interface TerminalRunEndDto {
   code: number | null;
+  /** Whether `localify dev` registered the run before it ended. */
+  registered: boolean;
   /** Ended by a signal (a stop, Ctrl-C) rather than on its own. */
   stopped: boolean;
   /** Unix seconds. */
@@ -321,6 +323,14 @@ export interface ShellEnvironmentDto {
   state: ShellEnvironmentState;
   shell: string;
   reason: string | null;
+}
+
+export type ServiceStopOutcome = "stopped" | "alreadyStopped" | "noRecord";
+
+export interface ServiceStopDto {
+  outcome: ServiceStopOutcome;
+  /** Only for a service Localify has no record of: never over a run it knows. */
+  offerPortStop: boolean;
 }
 
 export interface ServiceRunRequest {

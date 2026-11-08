@@ -624,18 +624,25 @@ impl RunningServiceStore {
         )
     }
 
-    /// The daemon's part in ending background runs: a run whose executor is
-    /// gone is ended (its proven processes signalled) and finalized
-    /// `interrupted`, since its reader died with it.
-    pub fn finish_background_runs(&self) -> Result<Vec<(ServiceKey, Finish)>> {
+    /// The daemon's part in ending runs nobody reads any more: a background
+    /// run whose executor is gone, its reader, or a run PTY whose executor and
+    /// reader, the app, are both gone. Its proven processes are signalled,
+    /// each checked by its native identity, and it is finalized
+    /// `interrupted`, since what its reader had not read is lost.
+    pub fn finish_unread_runs(&self) -> Result<Vec<(ServiceKey, Finish)>> {
         let mut finished = Vec::new();
         for service in self.list()? {
             let (Some(run), Some(session)) = (&service.run, service.session()) else {
                 continue;
             };
             let dir = self.run_dir(&run.run_id);
-            // A run PTY is the app's, or its next launcher's.
-            if service.output() != Some(RunOutput::Pipe)
+            // A run PTY whose app still reads it is the app's to finish.
+            let unread = match service.output() {
+                Some(RunOutput::Pipe) => true,
+                Some(RunOutput::Pty) => !output::reader_alive(&dir)?,
+                None => false,
+            };
+            if !unread
                 || output::read_end(&dir)?.is_some()
                 || session.executor_alive(&NativeProcesses)
             {

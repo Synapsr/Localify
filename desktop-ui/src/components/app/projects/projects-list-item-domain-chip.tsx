@@ -229,17 +229,13 @@ export const ProjectDomainChip = ({
         }
 
         // A run Localify recorded, in the background or a closed tab: through its session.
-        const stopped = await tauriClient.stopServiceRun({
+        const stop = await tauriClient.stopServiceRun({
           projectId: serviceTerminalTarget.projectId,
           environmentSlug: serviceTerminalTarget.environmentSlug,
           serviceId: serviceTerminalTarget.serviceId ?? "",
         });
-        if (stopped) {
-          await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
-          return;
-        }
-
-        if (!serviceTarget) {
+        await queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+        if (!stop.offerPortStop || !serviceTarget) {
           return;
         }
 

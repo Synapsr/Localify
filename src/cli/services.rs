@@ -424,12 +424,9 @@ impl RegisteredRun<'_> {
             );
         }
         let dir = self.store.run_dir(run_id);
-        // A run PTY's stream is the app's to finalize, once it has read it all.
-        let finalizing = match self.record.origin {
-            ServiceOrigin::App => None,
-            ServiceOrigin::Background | ServiceOrigin::Terminal => FinalizeLock::acquire(&dir)?,
-        };
-        if let Some(_finalizing) = finalizing {
+        if self.record.origin == ServiceOrigin::App {
+            self.leave_to_reader(&dir)?;
+        } else if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
             let offset = self.stream.as_ref().map_or(0, StreamSink::close);
             let capture = end.map_or(Capture::Complete, |end| end.capture.clone());
             let mut finished = match capture {
@@ -439,10 +436,10 @@ impl RegisteredRun<'_> {
                 }
             };
             if let Capture::Failed(error) = capture {
-                eprintln!(
-                    "Warning: writing the output of '{}' failed ({error}). The service ran on, and what it printed after that was dropped.",
+                service_supervisor::report(&format!(
+                    "Warning: writing the output of '{}' failed ({error}). The service ran on, and what it printed after that was dropped.\n",
                     self.record.key.service_id
-                );
+                ));
                 finished.error = Some(error);
             }
             if run_output::read_end(&dir)?.is_none() {
@@ -451,6 +448,26 @@ impl RegisteredRun<'_> {
         }
         let code = end.and_then(|end| end.outcome.code());
         self.store.mark_exited(&self.record.key, run_id, code)
+    }
+}
+
+impl RegisteredRun<'_> {
+    /// A run PTY's stream is the app's to finalize, once it has read it all.
+    /// When the app is gone, nobody reads the PTY any more: what it wrote is
+    /// finalized `interrupted` here, so the run ends without waiting for
+    /// another finisher.
+    fn leave_to_reader(&self, dir: &Path) -> Result<()> {
+        if run_output::reader_alive(dir)? {
+            return Ok(());
+        }
+        if let Some(_finalizing) = FinalizeLock::acquire(dir)?
+            && run_output::read_end(dir)?.is_none()
+            && !run_output::reader_alive(dir)?
+        {
+            let (_, written) = run_output::extent(dir)?;
+            run_output::publish_end(dir, &RunEnd::now(EndReason::Interrupted, written))?;
+        }
+        Ok(())
     }
 }
 
@@ -510,6 +527,7 @@ fn supervise(launch: Supervised<'_>) -> Result<LaunchEnd> {
             .run
             .as_ref()
             .is_some_and(|run| run.sid.is_some()),
+        app_terminal: launch.run.record.origin == ServiceOrigin::App,
     });
     if dangerous_name.is_some() {
         launch_profile::reset_title();
@@ -710,7 +728,7 @@ fn launch_outcome(
 ) -> Result<i32> {
     match outcome {
         LaunchOutcome::Exited(status) if !status.success() => {
-            eprintln!("Service '{}' exited with {status}", service.id);
+            service_supervisor::report(&format!("Service '{}' exited with {status}\n", service.id));
             Ok(outcome.exit_code())
         }
         LaunchOutcome::Expired(duration) => bail!(

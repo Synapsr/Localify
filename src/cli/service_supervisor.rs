@@ -8,7 +8,7 @@
 //! When `localify dev` leads the run's session, it also ends whatever the
 //! service left in it before returning.
 
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -46,6 +46,28 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the run's record says its executor is alive.
 pub const RUN_HEARTBEAT: Duration = Duration::from_secs(5);
 
+/// A write to the terminal failed as only a terminal nobody holds any more
+/// fails: in a run PTY, the app is gone.
+static TERMINAL_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Writes `text` to stderr, never panicking. In a run PTY whose app died,
+/// every write fails, and `eprintln!` would abort `localify dev` before it
+/// ended its service. A failure that says the terminal is gone is kept, so a
+/// run in the app's terminal stops.
+pub fn report(text: &str) {
+    let mut stderr = io::stderr().lock();
+    if let Err(error) = stderr
+        .write_all(text.as_bytes())
+        .and_then(|()| stderr.flush())
+        && matches!(
+            error.raw_os_error(),
+            Some(libc::EIO | libc::EPIPE | libc::ENXIO)
+        )
+    {
+        TERMINAL_LOST.store(true, Ordering::SeqCst);
+    }
+}
+
 pub struct SupervisedLaunch<'a> {
     pub command: &'a [String],
     pub workdir: &'a Path,
@@ -64,6 +86,10 @@ pub struct SupervisedLaunch<'a> {
     /// `localify dev` leads the run's session: what the service leaves in it
     /// is ended before the run returns, by `finisher`.
     pub leads_session: bool,
+    /// The terminal is the app's run PTY. Losing it, a SIGHUP or a write that
+    /// fails as on a closed terminal, means the app is gone: the run stops,
+    /// as for a SIGTERM. In any other terminal a SIGHUP is only forwarded.
+    pub app_terminal: bool,
     pub finisher: &'a Finisher<'a>,
 }
 
@@ -158,6 +184,14 @@ impl StopRequests {
     fn any(&self) -> bool {
         self.stopping() || self.hung_up.load(Ordering::SeqCst)
     }
+
+    /// The app's run PTY is gone: a stop, as `localify stop` asks for one,
+    /// once.
+    fn lose_terminal(&self, stopping: &Stopping<'_>) {
+        if !self.terminated.swap(true, Ordering::SeqCst) {
+            stopping.signal(&stopping.stop_targets(), Signal::Terminate);
+        }
+    }
 }
 
 /// Starts the service and waits for it, returning why it stopped.
@@ -184,7 +218,7 @@ fn run_with(
         });
     (launch.heartbeat)();
     if watch_signals {
-        watch_stop_signals(root, Arc::clone(&stops));
+        watch_stop_signals(root, Arc::clone(&stops), launch.app_terminal);
     }
     let output_done = copy_output(&mut child, &launch);
 
@@ -200,7 +234,9 @@ fn run_with(
     if let Some(session) = &launch.session
         && let Err(error) = session.stop(&outcome.reason())
     {
-        eprintln!("Warning: could not report the stop to the daemon: {error:#}");
+        report(&format!(
+            "Warning: could not report the stop to the daemon: {error:#}\n"
+        ));
     }
     Ok(LaunchEnd {
         outcome,
@@ -376,6 +412,11 @@ impl<'a> Stopping<'a> {
         targets
     }
 
+    /// What a stop is after: the service's tree and the session's members.
+    fn stop_targets(&self) -> Vec<Identity> {
+        self.targets_on_interrupt()
+    }
+
     fn signal(&self, targets: &[Identity], signal: Signal) {
         for target in targets {
             let unchanged = self
@@ -536,13 +577,16 @@ fn supervise(
             && stopping.expiring_since.is_none()
             && now.duration_since(started) >= duration
         {
-            eprintln!(
-                "\n{}: the launch profile reached its max_duration of {}. Stopping the service.",
+            report(&format!(
+                "\n{}: the launch profile reached its max_duration of {}. Stopping the service.\n",
                 BRANDING.app_name,
                 humantime::format_duration(duration)
-            );
+            ));
             stopping.expiring_since = Some(now);
             stopping.signal(&stopping.targets(), Signal::Terminate);
+        }
+        if launch.app_terminal && TERMINAL_LOST.load(Ordering::SeqCst) {
+            stops.lose_terminal(&stopping);
         }
         // Before the exit: a service a Ctrl+C just ended leaves its stop to run.
         respond_to_stop_requests(&mut stopping, stops, now, &scan);
@@ -611,8 +655,10 @@ fn respond_to_stop_requests(
 }
 
 /// Counts each Ctrl+C, keeping Localify alive to stop the service in bounds,
-/// and forwards SIGTERM and SIGHUP sent to Localify alone to the service's tree.
-fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
+/// and forwards SIGTERM and SIGHUP sent to Localify alone to the service's
+/// tree. In the app's run PTY a SIGHUP means the app closed the terminal: it
+/// stops the run as a SIGTERM does.
+fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>, app_terminal: bool) {
     let (ready_sender, ready_receiver) = mpsc::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -649,8 +695,13 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
                         forward(Signal::Terminate);
                     }
                     _ = hangup.recv() => {
-                        stops.hung_up.store(true, Ordering::SeqCst);
-                        forward(Signal::Hangup);
+                        if app_terminal {
+                            stops.terminated.store(true, Ordering::SeqCst);
+                            forward(Signal::Terminate);
+                        } else {
+                            stops.hung_up.store(true, Ordering::SeqCst);
+                            forward(Signal::Hangup);
+                        }
                     }
                 }
             }
@@ -731,6 +782,7 @@ mod tests {
             heartbeat,
             heartbeat_every: RUN_HEARTBEAT,
             leads_session: false,
+            app_terminal: false,
             finisher: Box::leak(Box::new(Finisher::native())),
         }
     }

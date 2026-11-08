@@ -11,6 +11,7 @@ mod project_roots;
 pub mod pty;
 pub mod run_pty;
 pub mod shell_environment;
+pub mod terminal;
 
 pub use crate::infrastructure::editor::EditorPreference;
 pub use crate::infrastructure::local_dev::TerminalPreference;
