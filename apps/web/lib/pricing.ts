@@ -110,9 +110,10 @@ const parsePricing = (body: unknown, currency: Currency): Pricing | null => {
 };
 
 // Per Worker isolate: OpenNext keeps no data cache by default, so this keeps the
-// endpoint from being asked on every page view. An entry holds the promise, so
-// concurrent misses share one request per currency.
-const cache = new Map<Currency, { pricing: Promise<Pricing>; expiresAt: number }>();
+// endpoint from being asked on every page view. It holds plain, validated data
+// only: a Worker must not await another request's promise or touch its Response,
+// so concurrent misses each fetch.
+const cache = new Map<Currency, { pricing: Pricing; expiresAt: number }>();
 
 const fetchPricing = async (currency: Currency): Promise<Pricing | null> => {
   try {
@@ -128,18 +129,14 @@ const fetchPricing = async (currency: Currency): Promise<Pricing | null> => {
   }
 };
 
-const getPricingFor = (currency: Currency): Promise<Pricing> => {
+const getPricingFor = async (currency: Currency): Promise<Pricing> => {
   const cached = cache.get(currency);
   if (cached && cached.expiresAt > Date.now()) return cached.pricing;
 
-  // In flight, the entry never expires; once settled, it lasts by outcome.
-  // fetchPricing never rejects, so neither does this promise.
-  const pricing = fetchPricing(currency).then((live) => {
-    const ttl = live ? REVALIDATE_SECONDS : RETRY_SECONDS;
-    cache.set(currency, { pricing, expiresAt: Date.now() + ttl * 1000 });
-    return live ?? fallback(currency);
-  });
-  cache.set(currency, { pricing, expiresAt: Infinity });
+  const live = await fetchPricing(currency);
+  const pricing = live ?? fallback(currency);
+  const ttl = live ? REVALIDATE_SECONDS : RETRY_SECONDS;
+  cache.set(currency, { pricing, expiresAt: Date.now() + ttl * 1000 });
   return pricing;
 };
 
