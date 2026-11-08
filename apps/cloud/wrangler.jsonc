@@ -62,6 +62,11 @@
     // comma-separated. Ids, not logins, because a login can be renamed and
     // taken by someone else.
     "ALLOWED_GITHUB_IDS": "77238381,61839831,23056644,88707023,261605370",
+    // The team, in the same format: each id gets the `team` override (5
+    // serving machines, 10 URLs, no expiry) when it signs in without one. It
+    // stays after the allowlist goes. Removing an id leaves its override:
+    // `pnpm cloud:admin override --remove` ends it.
+    "TEAM_GITHUB_IDS": "77238381,61839831,23056644,88707023,261605370",
     "PUBLIC_BASE_DOMAIN": "localify.fyi",
     "MACHINE_DOMAIN": "localify.dev",
     "CLOUDFLARE_ACCOUNT_ID": "3346bba113d622c4b100e546032bc5dc",

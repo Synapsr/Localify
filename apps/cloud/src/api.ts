@@ -4,7 +4,7 @@
 // 404.
 
 import { CloudflareError } from "./cloudflare";
-import { ConfigError, isAllowedGithubId, setting, signup } from "./config";
+import { ConfigError, isAllowedGithubId, isTeamGithubId, setting, signup } from "./config";
 import { hashPassword, sha256Hex } from "./crypto";
 import { isUniqueViolation, urlOfUser, urlsOfUser, type PublicUrl } from "./db";
 import {
@@ -303,6 +303,7 @@ async function deviceToken(request: Request, env: Env): Promise<Response> {
     .bind(newId(), github.id, github.login, Date.now())
     .first<{ id: string; login: string }>();
   if (!user) throw new Error("User upsert returned no row");
+  if (isTeamGithubId(env, github.id)) await grantTeamOverride(env, user.id);
 
   const { machineId, token } = await signInMachine(env, user.id, machineName, ingressPort);
   return json({
@@ -310,6 +311,22 @@ async function deviceToken(request: Request, env: Env): Promise<Response> {
     user: { login: user.login },
     machine: { id: machineId, name: machineName },
   });
+}
+
+/**
+ * Gives a team member the override migration 0003 gave the first team: 5
+ * serving machines, 10 URLs, no expiry. It only inserts: an override an
+ * operator changed is kept, and leaving the team list removes nothing. It
+ * skips a banned account, even one banned since the check above.
+ */
+async function grantTeamOverride(env: Env, userId: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, expires_at, created_at)
+     SELECT id, 5, 10, 'team', NULL, ?2 FROM users WHERE id = ?1 AND banned_at IS NULL
+     ON CONFLICT (user_id) DO NOTHING`,
+  )
+    .bind(userId, Date.now())
+    .run();
 }
 
 async function me(_request: Request, env: Env, caller: Caller): Promise<Response> {

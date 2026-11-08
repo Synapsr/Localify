@@ -43,10 +43,23 @@ export function signup(env: Env): "allowlist" | "open" {
 }
 
 /**
- * `ALLOWED_GITHUB_IDS` holds comma-separated numeric GitHub user ids. Ids,
- * not logins: a login can be renamed and then taken by someone else.
+ * Whether `list`, comma-separated numeric GitHub user ids, holds `githubId`.
+ * Ids, not logins: a login can be renamed and then taken by someone else.
  */
-export function isAllowedGithubId(env: Env, githubId: number): boolean {
+function listsGithubId(list: string | undefined, githubId: number): boolean {
   const wanted = String(githubId);
-  return (env.ALLOWED_GITHUB_IDS ?? "").split(",").some((entry) => entry.trim() === wanted);
+  return (list ?? "").split(",").some((entry) => entry.trim() === wanted);
+}
+
+/** `ALLOWED_GITHUB_IDS`: under `SIGNUP=allowlist`, who may sign in. */
+export function isAllowedGithubId(env: Env, githubId: number): boolean {
+  return listsGithubId(env.ALLOWED_GITHUB_IDS, githubId);
+}
+
+/**
+ * `TEAM_GITHUB_IDS`: who gets the team override when they sign in. It
+ * outlives the allowlist, which goes away once `SIGNUP` opens.
+ */
+export function isTeamGithubId(env: Env, githubId: number): boolean {
+  return listsGithubId(env.TEAM_GITHUB_IDS, githubId);
 }
