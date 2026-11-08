@@ -125,12 +125,19 @@ impl Supervision {
     }
 
     /// The profile resolved: stop signals now wait for the service, and
-    /// reach it once it runs.
+    /// reach it once it runs. When a stop already began ending the
+    /// resolution, nothing may start: this waits for that stop to exit.
     pub fn resolved(&self) {
-        self.forwarding
+        let resolved = self
+            .forwarding
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .resolving = false;
+            .finish_resolution();
+        if !resolved {
+            loop {
+                thread::park();
+            }
+        }
     }
 }
 
@@ -720,6 +727,8 @@ struct Forwarding {
     pending: Vec<Signal>,
     /// The profile still resolves: a stop ends its helpers and exits.
     resolving: bool,
+    /// A stop ends the resolution: the service must never start.
+    ending: bool,
 }
 
 impl Forwarding {
@@ -728,6 +737,23 @@ impl Forwarding {
             Some(root) => signal_identities(&track_tree(&[root], &all_processes()), signal),
             None => self.pending.push(signal),
         }
+    }
+
+    /// A stop arrived: whether it ends the resolution. Decided under the
+    /// lock `finish_resolution` takes, so exactly one of them wins.
+    fn begin_stop(&mut self) -> bool {
+        self.ending |= self.resolving;
+        self.ending
+    }
+
+    /// The profile resolved: whether the service may start, which it may not
+    /// once a stop began ending the resolution.
+    fn finish_resolution(&mut self) -> bool {
+        if self.ending {
+            return false;
+        }
+        self.resolving = false;
+        true
     }
 
     fn publish(&mut self, root: Identity) {
@@ -780,7 +806,7 @@ fn watch_stop_signals(
                 forwarding
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .resolving
+                    .begin_stop()
             };
             loop {
                 tokio::select! {
@@ -893,6 +919,29 @@ mod tests {
             supervision: None,
             finisher: Box::leak(Box::new(Finisher::native())),
         }
+    }
+
+    #[test]
+    fn a_stop_during_resolution_and_the_end_of_resolution_never_both_win() {
+        let mut stopped_first = Forwarding {
+            resolving: true,
+            ..Forwarding::default()
+        };
+        assert!(stopped_first.begin_stop());
+        assert!(
+            !stopped_first.finish_resolution(),
+            "the service would start"
+        );
+
+        let mut resolved_first = Forwarding {
+            resolving: true,
+            ..Forwarding::default()
+        };
+        assert!(resolved_first.finish_resolution());
+        assert!(
+            !resolved_first.begin_stop(),
+            "the stop would exit over a service"
+        );
     }
 
     fn shell(script: &str) -> Vec<String> {
