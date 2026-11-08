@@ -12,6 +12,7 @@ type PublicUrlRow = {
   password_version: number;
   created_at: number;
   taken_down_at: number | null;
+  suspended_at: number | null;
   /** The URL's rank among its owner's live URLs, oldest first; null when taken down. */
   live_rank: number | null;
 };
@@ -25,7 +26,10 @@ export type PublicUrl = {
   machine: { id: string; name: string } | null;
   /** `version` changes with every protection change: a password saved before is stale. */
   protection: { mode: "password" | "public"; version: number };
-  /** `serving` while the owner's `publicUrls` covers it (docs/public-urls.md, "Downgrades"). */
+  /**
+   * `serving` while the owner's `publicUrls` covers it and no reconcile left it
+   * marked suspended (docs/public-urls.md, "Downgrades").
+   */
   state: "serving" | "suspended" | "taken_down";
   createdAt: string;
 };
@@ -39,10 +43,10 @@ const SELECT_URLS = `
     SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS live_rank
     FROM public_urls WHERE user_id = ?1 AND deleted_at IS NULL AND taken_down_at IS NULL)
   SELECT p.id, p.slug, p.local_domain, p.wildcard, p.machine_id, m.name AS machine_name, p.protected,
-         p.password_version, p.created_at, p.taken_down_at, r.live_rank
+         p.password_version, p.created_at, p.taken_down_at, p.suspended_at, r.live_rank
   FROM public_urls p LEFT JOIN machines m ON m.id = p.machine_id LEFT JOIN ranked r ON r.id = p.id`;
 
-/** The user's public URLs, oldest first. `servingLimit` is the owner's `publicUrls`. */
+/** The user's public URLs, oldest first. `servingLimit` is `servingUrlLimit` of the owner's entitlement. */
 export async function urlsOfUser(
   db: D1Database,
   baseDomain: string,
@@ -109,7 +113,7 @@ function toPublicUrl(row: PublicUrlRow, baseDomain: string, servingLimit: number
     state:
       row.taken_down_at !== null
         ? "taken_down"
-        : row.live_rank !== null && row.live_rank <= servingLimit
+        : row.live_rank !== null && row.live_rank <= servingLimit && row.suspended_at === null
           ? "serving"
           : "suspended",
     createdAt: new Date(row.created_at).toISOString(),

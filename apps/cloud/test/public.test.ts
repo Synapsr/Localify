@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ACCESS_COOKIE, NOTICE_COOKIE } from "../src/cookie";
 import { hmacHex } from "../src/crypto";
+import { forgetSite } from "../src/sites";
 import { api, createContext, rateLimit, serve, signIn, visit, type TestContext } from "./support";
 
 let context: TestContext;
@@ -100,9 +101,9 @@ describe("finding the URL", () => {
     expect(await response.text()).toContain("offline");
   });
 
-  it("answers 404 once the owner's GitHub id leaves the allowlist", async () => {
+  it("keeps serving once the owner's GitHub id leaves the allowlist: it only gates sign-in", async () => {
     context.env.ALLOWED_GITHUB_IDS = "2";
-    expect((await visit(context, `https://${host()}/`)).status).toBe(404);
+    expect((await visit(context, `https://${host()}/`)).status).toBe(401);
   });
 
   it("answers 404 for a deleted URL", async () => {
@@ -965,5 +966,107 @@ describe("the owner's traffic limit", () => {
     } as unknown as RateLimit;
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect((await visit(context, `https://${host()}/`)).status).toBe(200);
+  });
+});
+
+describe("moderation and plans before the warning page", () => {
+  it("answer 402 and 410 to a navigation without cookies, and to the warning's form", async () => {
+    // A form token while the URL served, posted once it no longer does.
+    const notice = await formToken(`https://${host()}/`);
+    const { user_id: owner } = context.sqlite
+      .prepare("SELECT user_id FROM public_urls WHERE id = ?")
+      .get(urlId) as { user_id: string };
+
+    context.sqlite.prepare("DELETE FROM plan_overrides WHERE user_id = ?").run(owner);
+    forgetSite(slug);
+    expect((await visit(context, `https://${host()}/`, { headers: navigation })).status).toBe(402);
+    expect((await acknowledge(host(), "/", { notice })).status).toBe(402);
+
+    context.sqlite.prepare("UPDATE public_urls SET taken_down_at = 1 WHERE id = ?").run(urlId);
+    forgetSite(slug);
+    expect((await visit(context, `https://${host()}/`, { headers: navigation })).status).toBe(410);
+    expect((await acknowledge(host(), "/", { notice })).status).toBe(410);
+  });
+});
+
+describe("a routing decision held past the cache lifetime", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is made again before forwarding, so a URL suspended meanwhile answers 402", async () => {
+    await makePublic();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.parse("2026-11-08T12:00:00Z");
+    vi.setSystemTime(t0);
+    // The owner's traffic limit answers 20 seconds later.
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    context.env.OWNER_LIMITER = {
+      limit: async () => {
+        entered = true;
+        await gate;
+        return { success: true };
+      },
+    } as RateLimit;
+
+    const pending = visit(context, `https://${host()}/`);
+    await vi.waitFor(() => expect(entered).toBe(true));
+    const { user_id: owner } = context.sqlite
+      .prepare("SELECT user_id FROM public_urls WHERE id = ?")
+      .get(urlId) as { user_id: string };
+    context.sqlite.prepare("DELETE FROM plan_overrides WHERE user_id = ?").run(owner);
+    vi.setSystemTime(t0 + 20_000);
+    release();
+
+    expect((await pending).status).toBe(402);
+    expect(machineCalls()).toEqual([]);
+  });
+
+  it("answers 503 when the re-read itself took too long, and never forwards", async () => {
+    await makePublic();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.parse("2026-11-08T13:00:00Z");
+    vi.setSystemTime(t0);
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    context.env.OWNER_LIMITER = {
+      limit: async () => {
+        entered = true;
+        await gate;
+        return { success: true };
+      },
+    } as RateLimit;
+    // The re-read of the URL, started at 20 s, returns at 31 s.
+    const db = context.env.DB;
+    let slow = false;
+    const slowed = (statement: D1PreparedStatement): D1PreparedStatement =>
+      ({
+        bind: (...values: unknown[]) => slowed(statement.bind(...values)),
+        first: async () => {
+          vi.setSystemTime(t0 + 31_000);
+          return statement.first();
+        },
+      }) as unknown as D1PreparedStatement;
+    context.env.DB = {
+      prepare: (sql: string) => {
+        const statement = db.prepare(sql);
+        return slow && sql.includes("live_rank") ? slowed(statement) : statement;
+      },
+      batch: (statements: D1PreparedStatement[]) => db.batch(statements),
+    } as unknown as D1Database;
+
+    const pending = visit(context, `https://${host()}/`);
+    await vi.waitFor(() => expect(entered).toBe(true));
+    slow = true;
+    vi.setSystemTime(t0 + 20_000);
+    release();
+
+    const response = await pending;
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("10");
+    expect(machineCalls()).toEqual([]);
   });
 });

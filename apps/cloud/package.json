@@ -9,7 +9,8 @@
     "test": "vitest run",
     "deploy": "node scripts/deploy.mjs",
     "migrate": "node scripts/infisical.mjs d1 migrations apply localify-cloud --remote",
-    "migrate:local": "wrangler d1 migrations apply localify-cloud --local"
+    "migrate:local": "wrangler d1 migrations apply localify-cloud --local",
+    "admin": "node scripts/admin.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

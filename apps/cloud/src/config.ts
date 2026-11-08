@@ -32,6 +32,17 @@ export function maxTunnels(env: Env): number {
 }
 
 /**
+ * `SIGNUP`: who may finish a new sign-in. `allowlist` lets in only the ids
+ * in `ALLOWED_GITHUB_IDS`, `open` anyone. It gates the device flow only:
+ * entitlements decide what an account may use, in both modes.
+ */
+export function signup(env: Env): "allowlist" | "open" {
+  const value = typeof env.SIGNUP === "string" ? env.SIGNUP.trim() : "";
+  if (value !== "allowlist" && value !== "open") throw new ConfigError("SIGNUP");
+  return value;
+}
+
+/**
  * `ALLOWED_GITHUB_IDS` holds comma-separated numeric GitHub user ids. Ids,
  * not logins: a login can be renamed and then taken by someone else.
  */

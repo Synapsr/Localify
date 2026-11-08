@@ -4,10 +4,16 @@
 // 404.
 
 import { CloudflareError } from "./cloudflare";
-import { ConfigError, isAllowedGithubId, setting } from "./config";
+import { ConfigError, isAllowedGithubId, setting, signup } from "./config";
 import { hashPassword, sha256Hex } from "./crypto";
 import { isUniqueViolation, urlOfUser, urlsOfUser, type PublicUrl } from "./db";
-import { entitlementOf } from "./entitlement";
+import {
+  entitlementOf,
+  isEntitled,
+  loadAccount,
+  servingUrlLimit,
+  type Entitlement,
+} from "./entitlement";
 import { fetchGitHubUser, pollDeviceFlow, startDeviceFlow } from "./github";
 import { ApiError, errorResponse, json, noContent, readJson } from "./http";
 import { newId, signInMachine, signOutMachine } from "./machines";
@@ -20,9 +26,8 @@ import {
 } from "./names";
 import { generatePassword } from "./passwords";
 import { forgetSite } from "./sites";
-import { background, machineRuntime, releaseIfUnwanted } from "./tunnels";
+import { background, machineRuntime, reconcileOwner, releaseIfUnwanted } from "./tunnels";
 
-export const MAX_URLS_PER_USER = 10;
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 256;
 const MAX_MACHINE_NAME_LENGTH = 64;
@@ -33,8 +38,8 @@ const SLOW_DOWN_SECONDS = 5;
 /** Who calls, from the bearer token. */
 type Caller = {
   userId: string;
-  githubId: number;
   login: string;
+  banned: boolean;
   machineId: string;
   machineName: string;
 };
@@ -54,7 +59,8 @@ const ROUTES: Route[] = [
   { method: "POST", pattern: /^\/v1\/auth\/device$/, handle: deviceStart },
   { method: "POST", pattern: /^\/v1\/auth\/device\/token$/, handle: deviceToken },
   { method: "GET", pattern: /^\/v1\/me$/, handle: authed(me) },
-  { method: "POST", pattern: /^\/v1\/auth\/logout$/, handle: authed(logout) },
+  // Signing out is the one route a banned account keeps.
+  { method: "POST", pattern: /^\/v1\/auth\/logout$/, handle: authed(logout, { banned: true }) },
   { method: "GET", pattern: /^\/v1\/slugs$/, handle: authed(suggestSlug) },
   { method: "GET", pattern: /^\/v1\/slugs\/([^/]+)$/, handle: authed(checkSlug) },
   { method: "GET", pattern: /^\/v1\/public-urls$/, handle: authed(listUrls) },
@@ -121,6 +127,7 @@ function toApiError(error: unknown): ApiError {
   );
 }
 
+/** A route behind the bearer token. A banned account gets `403 banned` unless `banned` lets it in. */
 function authed(
   handler: (
     request: Request,
@@ -129,9 +136,13 @@ function authed(
     params: string[],
     ctx: ExecutionContext,
   ) => Promise<Response>,
+  { banned = false }: { banned?: boolean } = {},
 ): Route["handle"] {
-  return async (request, env, ctx, params) =>
-    handler(request, env, await authenticate(request, env), params, ctx);
+  return async (request, env, ctx, params) => {
+    const caller = await authenticate(request, env);
+    if (caller.banned && !banned) throw bannedError();
+    return handler(request, env, caller, params, ctx);
+  };
 }
 
 async function authenticate(request: Request, env: Env): Promise<Caller> {
@@ -144,7 +155,7 @@ async function authenticate(request: Request, env: Env): Promise<Caller> {
   );
   if (!match?.[1]) throw signedOut;
   const row = await env.DB.prepare(
-    `SELECT u.id AS user_id, u.github_id, u.login, m.id AS machine_id, m.name AS machine_name
+    `SELECT u.id AS user_id, u.login, u.banned_at, m.id AS machine_id, m.name AS machine_name
      FROM tokens t
      JOIN users u ON u.id = t.user_id
      JOIN machines m ON m.id = t.machine_id AND m.user_id = t.user_id
@@ -153,20 +164,28 @@ async function authenticate(request: Request, env: Env): Promise<Caller> {
     .bind(await sha256Hex(match[1]))
     .first<{
       user_id: string;
-      github_id: number;
       login: string;
+      banned_at: number | null;
       machine_id: string;
       machine_name: string;
     }>();
+  // The allowlist only gates sign-in: a signed-in account keeps its token.
   if (!row) throw signedOut;
-  if (!isAllowedGithubId(env, row.github_id)) throw notAllowed(row.login);
   return {
     userId: row.user_id,
-    githubId: row.github_id,
     login: row.login,
+    banned: row.banned_at !== null,
     machineId: row.machine_id,
     machineName: row.machine_name,
   };
+}
+
+function bannedError(): ApiError {
+  return new ApiError(
+    403,
+    "banned",
+    "This Localify Cloud account was suspended for breaking the terms. Write to abuse@localify.dev if you think this is a mistake.",
+  );
 }
 
 function notAllowed(login: string): ApiError {
@@ -267,7 +286,14 @@ async function deviceToken(request: Request, env: Env): Promise<Response> {
 
   // The GitHub token is used for this one read, then dropped.
   const github = await fetchGitHubUser(poll.accessToken);
-  if (!isAllowedGithubId(env, github.id)) throw notAllowed(github.login);
+  const known = await env.DB.prepare(`SELECT banned_at FROM users WHERE github_id = ?1`)
+    .bind(github.id)
+    .first<{ banned_at: number | null }>();
+  if (known && known.banned_at !== null) throw bannedError();
+  // SIGNUP decides who may finish a sign-in, nothing else.
+  if (signup(env) === "allowlist" && !isAllowedGithubId(env, github.id)) {
+    throw notAllowed(github.login);
+  }
 
   const user = await env.DB.prepare(
     `INSERT INTO users (id, github_id, login, created_at) VALUES (?1, ?2, ?3, ?4)
@@ -286,10 +312,26 @@ async function deviceToken(request: Request, env: Env): Promise<Response> {
   });
 }
 
-async function me(_request: Request, _env: Env, caller: Caller): Promise<Response> {
+async function me(_request: Request, env: Env, caller: Caller): Promise<Response> {
+  const account = await loadAccount(env.DB, caller.userId);
+  if (!account) throw new Error(`User ${caller.userId} has no row`);
+  // A slot is held by any machine with a tunnel, a revoked one still releasing included.
+  const usage = await env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM machines WHERE user_id = ?1 AND tunnel_state != 'none') AS machines,
+            (SELECT COUNT(*) FROM public_urls
+             WHERE user_id = ?1 AND deleted_at IS NULL AND taken_down_at IS NULL) AS urls`,
+  )
+    .bind(caller.userId)
+    .first<{ machines: number; urls: number }>();
+  const { addons, ...plan } = account.plan;
   return json({
     user: { login: caller.login },
     machine: { id: caller.machineId, name: caller.machineName },
+    plan: {
+      ...plan,
+      usage: { servingMachines: usage?.machines ?? 0, publicUrls: usage?.urls ?? 0 },
+      addons,
+    },
   });
 }
 
@@ -343,14 +385,16 @@ async function freeSlug(env: Env, caller: Caller, localDomain: string): Promise<
 }
 
 /**
- * Slugs held by a live URL, or by someone else's deleted one for 30 days.
- * The caller's own deleted slugs are free: a create takes them back.
+ * Slugs held by a live URL, by someone else's deleted one for 30 days, or
+ * by a taken-down one forever. The caller's own deleted slugs are free: a
+ * create takes them back.
  */
 async function takenSlugs(env: Env, caller: Caller, slugs: string[]): Promise<Set<string>> {
   const placeholders = slugs.map((_, index) => `?${index + 2}`).join(", ");
   const { results } = await env.DB.prepare(
     `SELECT slug FROM public_urls
-     WHERE slug IN (${placeholders}) AND (deleted_at IS NULL OR user_id <> ?1)`,
+     WHERE slug IN (${placeholders})
+       AND (deleted_at IS NULL OR user_id <> ?1 OR taken_down_at IS NOT NULL)`,
   )
     .bind(caller.userId, ...slugs)
     .all<{ slug: string }>();
@@ -365,12 +409,18 @@ async function listUrls(_request: Request, env: Env, caller: Caller): Promise<Re
       env.DB,
       baseDomain(env),
       caller.userId,
-      await servingLimit(env, caller),
+      servingUrlLimit(await entitlementOf(env, caller.userId)),
     ),
   });
 }
 
-async function createUrl(request: Request, env: Env, caller: Caller): Promise<Response> {
+async function createUrl(
+  request: Request,
+  env: Env,
+  caller: Caller,
+  _params: string[],
+  ctx: ExecutionContext,
+): Promise<Response> {
   const body = await readJson(request);
   const localDomain = readLocalDomain(body.localDomain);
   if (body.wildcard !== undefined && typeof body.wildcard !== "boolean") {
@@ -385,8 +435,12 @@ async function createUrl(request: Request, env: Env, caller: Caller): Promise<Re
     }
   }
   const protection = readProtection(body.protection ?? { mode: "password" });
+  const entitlement = await requireEntitlement(env, caller);
   const secret = protection.mode === "password" ? await hashPassword(protection.password) : null;
 
+  // A live URL is neither deleted nor taken down; suspended ones count.
+  const live = `(SELECT COUNT(*) FROM public_urls
+                 WHERE user_id = ?2 AND deleted_at IS NULL AND taken_down_at IS NULL)`;
   const id = newId();
   for (let attempt = 1; ; attempt++) {
     const slug =
@@ -395,18 +449,19 @@ async function createUrl(request: Request, env: Env, caller: Caller): Promise<Re
     try {
       // The quota check is part of each statement, so concurrent creates
       // cannot both pass it. The owner may take back one of their own
-      // deleted slugs; for everyone else it stays reserved for 30 days.
+      // deleted slugs; for everyone else it stays reserved for 30 days, and
+      // a taken-down one stays held forever.
       const [, insert] = await env.DB.batch([
         env.DB.prepare(
           `DELETE FROM public_urls
-           WHERE slug = ?1 AND user_id = ?2 AND deleted_at IS NOT NULL
-             AND (SELECT COUNT(*) FROM public_urls WHERE user_id = ?2 AND deleted_at IS NULL) < ?3`,
-        ).bind(slug, caller.userId, MAX_URLS_PER_USER),
+           WHERE slug = ?1 AND user_id = ?2 AND deleted_at IS NOT NULL AND taken_down_at IS NULL
+             AND ${live} < ?3`,
+        ).bind(slug, caller.userId, entitlement.publicUrls),
         env.DB.prepare(
           `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
                                     password_hash, password_salt, password_version, created_at)
            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10
-           WHERE (SELECT COUNT(*) FROM public_urls WHERE user_id = ?2 AND deleted_at IS NULL) < ?11`,
+           WHERE ${live} < ?11`,
         ).bind(
           id,
           caller.userId,
@@ -418,17 +473,19 @@ async function createUrl(request: Request, env: Env, caller: Caller): Promise<Re
           secret?.hash ?? null,
           secret?.salt ?? null,
           Date.now(),
-          MAX_URLS_PER_USER,
+          entitlement.publicUrls,
         ),
       ]);
       if (!insert || insert.meta.changes === 0) {
         throw new ApiError(
           403,
           "quota_exceeded",
-          `You already have ${MAX_URLS_PER_USER} public URLs, the most an account can have. Remove one with \`localify public-url remove\`, then try again.`,
+          `You already have ${entitlement.publicUrls} public URLs, the most your plan allows. Remove one with \`localify public-url remove\`, then try again.`,
         );
       }
       forgetSite(slug);
+      // The new URL serves: it can only end a suspension recorded earlier.
+      background(ctx, reconcileOwner(env, caller.userId));
       break;
     } catch (error) {
       if (isUniqueViolation(error, "public_urls.slug")) {
@@ -477,6 +534,8 @@ async function deleteUrl(
   if (!deleted) throw urlNotFound();
   forgetSite(deleted.slug);
   if (deleted.machine_id) background(ctx, releaseIfUnwanted(env, deleted.machine_id));
+  // The next URL in line may serve again.
+  background(ctx, reconcileOwner(env, caller.userId));
   return noContent();
 }
 
@@ -516,18 +575,46 @@ async function claimUrl(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const before = await env.DB.prepare(
-    `SELECT machine_id FROM public_urls WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL`,
+    `SELECT machine_id, taken_down_at FROM public_urls
+     WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL`,
   )
     .bind(id, caller.userId)
-    .first<{ machine_id: string | null }>();
+    .first<{ machine_id: string | null; taken_down_at: number | null }>();
+  if (!before) throw urlNotFound();
+  if (before.taken_down_at !== null) throw takenDown();
+  const entitlement = await requireEntitlement(env, caller);
+  // Only a URL that serves moves: live, among the owner's `publicUrls`
+  // oldest, and not marked suspended. A URL whose mark a reconcile has yet
+  // to clear waits for it, within 5 minutes. A takedown or a deletion
+  // between the read and this update leaves it where it was.
   const claimed = await env.DB.prepare(
-    `UPDATE public_urls SET machine_id = ?3 WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL RETURNING slug`,
+    `UPDATE public_urls SET machine_id = ?3
+     WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL AND taken_down_at IS NULL
+       AND suspended_at IS NULL
+       AND (SELECT COUNT(*) FROM public_urls q
+            WHERE q.user_id = ?2 AND q.deleted_at IS NULL AND q.taken_down_at IS NULL
+              AND (q.created_at < public_urls.created_at
+                   OR (q.created_at = public_urls.created_at AND q.id <= public_urls.id))) <= ?4
+     RETURNING slug`,
   )
-    .bind(id, caller.userId, caller.machineId)
+    .bind(id, caller.userId, caller.machineId, entitlement.publicUrls)
     .first<{ slug: string }>();
-  if (!claimed) throw urlNotFound();
+  if (!claimed) {
+    const current = await env.DB.prepare(
+      `SELECT taken_down_at FROM public_urls WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL`,
+    )
+      .bind(id, caller.userId)
+      .first<{ taken_down_at: number | null }>();
+    if (!current) throw urlNotFound();
+    if (current.taken_down_at !== null) throw takenDown();
+    throw new ApiError(
+      403,
+      "quota_exceeded",
+      `This public URL is not serving: your plan serves your ${entitlement.publicUrls} oldest public URLs, and this one comes after them, or it is waiting to serve again, which takes up to 5 minutes. Remove an older one with \`localify public-url remove\`, or try again in a few minutes.`,
+    );
+  }
   forgetSite(claimed.slug);
-  const previous = before?.machine_id;
+  const previous = before.machine_id;
   if (previous && previous !== caller.machineId) {
     background(ctx, releaseIfUnwanted(env, previous));
   }
@@ -603,9 +690,25 @@ function baseDomain(env: Env): string {
   return setting(env, "PUBLIC_BASE_DOMAIN");
 }
 
-/** How many of the caller's live URLs serve, oldest first. */
-async function servingLimit(env: Env, caller: Caller): Promise<number> {
-  return (await entitlementOf(env, { id: caller.userId, githubId: caller.githubId })).publicUrls;
+/** The caller's entitlement, or `402 subscription_required` when it is zero. */
+async function requireEntitlement(env: Env, caller: Caller): Promise<Entitlement> {
+  const entitlement = await entitlementOf(env, caller.userId);
+  if (!isEntitled(entitlement)) {
+    throw new ApiError(
+      402,
+      "subscription_required",
+      "Public URLs need Localify Cloud Pro. Start a 7-day trial with `localify subscribe`.",
+    );
+  }
+  return entitlement;
+}
+
+function takenDown(): ApiError {
+  return new ApiError(
+    403,
+    "taken_down",
+    "This public URL was removed for breaking the terms. Write to abuse@localify.dev if you think this is a mistake.",
+  );
 }
 
 function urlNotFound(): ApiError {
@@ -618,7 +721,13 @@ function urlNotFound(): ApiError {
 
 async function requireUrl(env: Env, caller: Caller, id: string | undefined): Promise<PublicUrl> {
   const url = id
-    ? await urlOfUser(env.DB, baseDomain(env), caller.userId, id, await servingLimit(env, caller))
+    ? await urlOfUser(
+        env.DB,
+        baseDomain(env),
+        caller.userId,
+        id,
+        servingUrlLimit(await entitlementOf(env, caller.userId)),
+      )
     : null;
   if (!url) throw urlNotFound();
   return url;

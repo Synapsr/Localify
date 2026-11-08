@@ -65,7 +65,8 @@ A refund changes nothing by itself. When Polar revokes the subscription as well,
 
 Whenever a user's entitlement changes, the Worker applies it:
 
-- **URLs:** the live URLs that serve are the `publicUrls` oldest by `created_at`, then by `id`. The rest are suspended. Removing a URL lets the next one serve, so the owner chooses by removing.
+- **URLs:** the live URLs that serve are the `publicUrls` oldest by `created_at`, then by `id`, among those without `suspended_at` (below). The rest are suspended. Removing a URL lets the next one serve, so the owner chooses by removing.
+- **Serving state:** `public_urls.suspended_at` records what the last reconcile found: null while the URL served, the time it stopped otherwise. A reconcile works out the serving URLs from the entitlement as above. For each owner, in one batch, it first sets `rotate_requested_at` on every machine of the owner that holds a slot and has no rotation pending, when one of the URLs that served and no longer does (suspended or taken down) still has `suspended_at` null. It then sets their `suspended_at`, and clears it on each URL that serves again. Every machine of the owner rotates, not only the URL's own: the set is resolved by that statement at write time, so a claim that moved the URL after the read cannot escape it, and once `suspended_at` records the stop, a retry or a late second reconcile marks nothing. An owner holds few serving machines, and stops are rare, so a short reconnect of the others is the price. The reconcile reads the entitlements and URLs first, so a change made in between can only cost an extra rotation or a wrong clear, which the next reconcile corrects. A URL serves only when it ranks within the limit and its `suspended_at` is null, everywhere the Worker decides it: the runtime, the public path (402 while the mark is set), the sweep, the API's `state`, and the claim. Suspending is immediate: a URL ranked beyond the limit stops serving before any reconcile has marked it. Resuming waits for a reconcile, which alone clears the mark, for a URL that now ranks within the limit: right away after a removal, or within 5 minutes if that reconcile fails. A URL with `suspended_at` set has therefore not served since its mark, which was written in the same batch as its owner's rotation, so nothing needs rotating for it again. The 5-minute sweep reconciles every owner with a URL before it builds its revocation queue, so a change no request announces still closes the streams of the URLs that stop serving within one sweep. That covers an override that expires, the end of a canceled period, and the end of the `past_due` grace. Creating and removing a URL reconcile its owner right away, and so does every `cloud:admin` command (see "Moderation").
 - **Serving slots:** when an account holds more slots than `servingMachines`, the Worker releases the slots provisioned most recently (`tunnel_ready_at`, then machine `id`) until it fits.
 - **Kept working:** listing, removing, protection changes, sign-out, `/v1/me` and billing, at zero entitlement too. Create, claim and serving answer `402 subscription_required` at zero, and `403 quota_exceeded` when above a non-zero limit.
 
@@ -107,7 +108,7 @@ In Polar, the organization turns on "Prevent trial abuse", and once add-ons ship
 
 ```sql
 users       (id TEXT PRIMARY KEY, github_id INTEGER UNIQUE NOT NULL, login TEXT NOT NULL, created_at INTEGER NOT NULL,
-             trial_used_at INTEGER, banned_at INTEGER, banned_reason TEXT)
+             trial_used_at INTEGER, banned_at INTEGER, banned_reason TEXT, serving_stopped_at INTEGER)
 machines    (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
              status TEXT NOT NULL CHECK (status IN ('provisioning', 'active', 'revoked')),
              tunnel_state TEXT NOT NULL DEFAULT 'none'
@@ -123,6 +124,7 @@ public_urls (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), sl
              local_domain TEXT NOT NULL, wildcard INTEGER NOT NULL, machine_id TEXT REFERENCES machines(id),
              protected INTEGER NOT NULL, password_hash TEXT, password_salt TEXT, password_version INTEGER NOT NULL,
              created_at INTEGER NOT NULL, deleted_at INTEGER, taken_down_at INTEGER, taken_down_reason TEXT,
+             suspended_at INTEGER,
              CHECK (protected = 0 OR (password_hash IS NOT NULL AND password_salt IS NOT NULL)))
 plan_overrides (user_id TEXT PRIMARY KEY REFERENCES users(id), serving_machines INTEGER NOT NULL,
              public_urls INTEGER NOT NULL, reason TEXT NOT NULL, expires_at INTEGER, created_at INTEGER NOT NULL)
@@ -182,7 +184,7 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `POST /v1/public-urls` | `{localDomain, wildcard, slug?, protection: {mode: "password", password?} \| {mode: "public"}}` | `201 {publicUrl, password?}`. The calling machine serves it. `password` is present only when the server generated it. `409 slug_taken`, `409 local_domain_taken`, `422 invalid_slug`, `422 invalid_local_domain`, `402 subscription_required`, `403 quota_exceeded`. |
 | `DELETE /v1/public-urls/{id}` | — | `204` |
 | `PUT /v1/public-urls/{id}/protection` | `{protection}`, the same object as in `POST` | `{publicUrl, password?}`. Changing or removing the password signs every browser out. |
-| `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine, in one update. `402 subscription_required`; `403 taken_down`. |
+| `POST /v1/public-urls/{id}/claim` | — | `{publicUrl}`, now served by the calling machine, in one update. `402 subscription_required`; `403 taken_down`; `403 quota_exceeded` when the URL does not serve: beyond the owner's `publicUrls` oldest, or marked suspended until the next reconcile, checked in the same update. |
 | `GET /v2/machines/self/runtime?generation=<n>` | — | `MachineRuntime`, see "Tunnels". `n` is the tunnel generation the daemon runs, or `0` when it runs none: generations start at 1, and 0 never names a tunnel. |
 | `GET /v1/machines/self/runtime` | — | For clients before this contract. Runs the same reservation and provisioning as v2. When the state is `ready`, it returns `{tunnelToken, ingressSecret, publicUrls: [PublicUrl]}` with the current generation's token every time, and only the URLs whose state is `serving`, since those clients serve every URL they get. Otherwise it returns `409 runtime_not_ready` with `{state}`. Removed once no such client remains (see "Rollout order"). |
 
@@ -273,7 +275,7 @@ Each write is conditioned on the row still holding this `tunnel_op` and this `tu
 3. Deletes the tunnel.
 4. Sets `none` and clears `tunnel_id`, conditioned on the operation.
 
-It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A machine is released when:
+The batch that takes the row also stamps the owner's quiet period (see "Quiet period"). A release keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A machine is released when:
 
 - it no longer wants a tunnel: its last URL was deleted, claimed elsewhere or suspended, or a runtime fetch found nothing to serve;
 - its owner lost the entitlement or was banned (ADR 0027);
@@ -281,7 +283,9 @@ It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A
 - the sweep reaps it;
 - it signs out, which also deletes the CNAME.
 
-**Rotating.** One of a machine's URLs can stop serving, through a takedown or a suspension, while the machine keeps serving others. Releasing would not be enough for that URL: its open WebSockets and SSE streams ride the same tunnel as the others. Whoever removes the URL's right (a refresh, a downgrade, `cloud:admin takedown`) sets `rotate_requested_at` on the machine. The Worker, right away or at the next sweep, then releases the machine's current generation as above. The machine still wants a tunnel, so its next runtime fetch provisions generation `n + 1`. The daemon's next fetch comes when `cloudflared` exits twice, which deleting the tunnel causes. The URLs that keep their right to serve are offline for those seconds. ADR 0027 covers this case.
+**Rotating.** One of a machine's URLs can stop serving, through a takedown or a suspension, while the machine keeps serving others. Releasing would not be enough for that URL: its open WebSockets and SSE streams ride the same tunnel as the others. Whoever removes the URL's right (a refresh, `cloud:admin`, or the sweep's reconcile, see "Downgrades") sets `rotate_requested_at` on the machine. The Worker, right away or at the next sweep, then releases the machine's current generation as above. The machine still wants a tunnel, so its next runtime fetch provisions generation `n + 1`. The daemon's next fetch comes when `cloudflared` exits twice, which deleting the tunnel causes. The URLs that keep their right to serve are offline for those seconds. ADR 0027 covers this case.
+
+**Quiet period.** The rule: no new tunnel generation of an owner's machines is reserved until 15 seconds after that owner's latest serving stop or tunnel release, measured on D1's clock, and that time never moves backwards. The public path caches each lookup for 10 seconds (see "Public traffic"), so without the rule a request routed before a URL stopped could reach the generation that replaces the old one, provisioned for the URLs that keep serving, and a stream it opens there would outlive the rotation. `users.serving_stopped_at` holds that time. It is written by D1 itself, as `MAX(COALESCE(serving_stopped_at, 0), <D1's now in milliseconds>)`, measured from the statement that stamps it, which commits within the same batch of indexed writes and comes as late in that batch as its guard allows. An older operation cannot shorten a newer period. A stamping batch that takes longer than 2 seconds is logged as an error, by the Worker and by `cloud:admin`. It is written in the batch that records a stop (see "Downgrades"), with a ban, and in the batch that claims any tunnel release, whatever its reason: a rotation, a lost entitlement, a machine with nothing left to serve, a reap. Revoked and replaced machines need nothing: their successor has a new id and hostname. The runtime and the reservation statement compare it with D1's clock in the same SQL. During the period the runtime answers `provisioning`, with `retryAfter` set to the seconds left. A routing decision on the public path, in turn, lives at most 10 seconds from the start of its D1 read, cached or not: before forwarding, a decision older than that is read again once, bypassing the cache, and made again. When that read fails, or itself ends more than 10 seconds after it started, the request gets 503 with `Retry-After: 10` and is not forwarded. Any decision that still says a stopped URL serves was therefore read before the stop committed, and has ended before a new generation can exist. The 15 seconds are the cache lifetime plus 5 seconds, from one constant shared with the cache. The margin covers the stamping batch's duration and the skew between a Worker's clock and D1's.
 
 **Edge rule.** A machine hostname is public, and whoever holds its tunnel token could run their own origin behind it and serve arbitrary pages on `localify.dev`. The `localify.dev` zone therefore has two rules:
 
@@ -290,7 +294,7 @@ It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A
 
 The Worker sends that header on every forwarded request (see "Public traffic"). A tenant who learns the key gains nothing, since a victim's browser never sends it, and the tunnel never sees it.
 
-**The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes:
+**The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes, and of 900 D1 queries, below the 1,000 a Worker invocation may send. D1 counts a batch as one query. The run reads every owner's entitlement and URLs in a fixed number of queries, whatever their number, and writes the reconcile in batches of about 150 statements, each owner's in one batch. D1 gives a batch 30 seconds and rolls it back whole on a failure, so a failed batch is logged, the others still run, and the next run retries it. The batches stop while fewer than 185 queries would be left: the slot reads, 60 revocations at 2 queries each, 60 for maintenance, and the end of the run. 60 revocations take at most 240 of the 300 calls, which leaves maintenance its 40:
 
 1. Lists the account's tunnels, page by page.
 2. For each `ready` machine, reads the status of its tunnel in that listing; a tunnel missing from a complete listing reads as down:
@@ -298,14 +302,14 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
    - down or inactive, with `down_seen_at` empty: sets `down_seen_at`;
    - down or inactive again, with `down_seen_at` and `tunnel_ready_at` both more than 15 minutes old: releases it;
    - a failed read: changes nothing.
-3. Releases abandoned operations, machines that no longer want a tunnel, and `ready` machines whose `rotate_requested_at` is set, clearing it with the release.
+3. Releases abandoned operations, machines that no longer want a tunnel, and `ready` machines whose `rotate_requested_at` is set, clearing it with the release. A machine is found to want no tunnel from the URLs the run read at its start, so its release also requires, as it takes the row, that no live URL is on the machine: a URL created during the run keeps its new tunnel.
 4. Compares each `ready` machine's CNAME content with its `tunnel_id` and corrects it, since a generation check cannot stop a DNS call already on its way.
 5. Deletes `localify-*` tunnels no machine row holds, once they are more than an hour old.
 6. Logs an error when the database holds more than 800 slots.
 
-Before all of this, the run takes over any active machine that has a `tunnel_id` but `tunnel_state` `none`. A Worker from before this contract can sign such a machine in while a deploy rolls out. It becomes `ready` at generation 1 when it has a live URL, and `releasing` otherwise, so it holds a slot and its tunnel is released like any other.
+Before all of this, the run reconciles the serving state of every owner with a URL (see "Downgrades"), so the rotations it marks are revoked in the same run. It also takes over any active machine that has a `tunnel_id` but `tunnel_state` `none`. A Worker from before this contract can sign such a machine in while a deploy rolls out. It becomes `ready` at generation 1 when it has a live URL, and `releasing` otherwise, so it holds a slot and its tunnel is released like any other.
 
-Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They may use all of the budget but 60 calls, which the rest of the work keeps; whatever that work leaves goes back to the revocations. They never back off longer than one run. A revocation costs at most 4 calls (a lookup by name, the new secret, the connections, the delete), so at least 60 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 60. A revocation keeps `rotate_requested_at` set until Cloudflare confirms the delete. The queue takes the revocations not yet tried first, then the others by their last attempt, so one that keeps failing goes to the back of the queue without losing its urgency, and cannot starve the others. The budget counts every request actually sent, fallbacks included. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
+Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. Each run attempts the first 60 whatever else waits, then more while maintenance keeps its share of 40 calls and 60 queries: the revoked-machine cleanup, the reaps, the CNAME corrections and the orphan tunnels. What maintenance leaves goes back to the revocations still queued. Revocations that keep failing therefore cannot hold maintenance back, nor maintenance the first 60. They never back off longer than one run. A revocation costs at most 4 calls (a lookup by name, the new secret, the connections, the delete), so at least 60 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 60. A revocation keeps `rotate_requested_at` set until Cloudflare confirms the delete. The queue takes the revocations not yet tried first, then the others by their last attempt, so one that keeps failing goes to the back of the queue without losing its urgency, and cannot starve the others. The budget counts every request actually sent, fallbacks included. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
 
 **Runtime.** `GET /v2/machines/self/runtime?generation=<n>` answers:
 
@@ -324,7 +328,7 @@ type MachineRuntime = {
 ```
 
 - `idle`: the machine wants no tunnel. Its owner may still be entitled.
-- `provisioning`: a slot is reserved and the tunnel is on its way, including while the previous generation is being released for a rotation; `retryAfter` is 3.
+- `provisioning`: a slot is reserved and the tunnel is on its way, including while the previous generation is being released for a rotation; `retryAfter` is 3. During an owner's quiet period (see "Quiet period"), no slot is reserved yet and `retryAfter` is the seconds the period has left.
 - `ready`: serve with this generation's tunnel.
 - `blocked`: the machine has something to serve but may not. The reason is the plan, its owner's slots, or the account cap. `retryAfter` is 60 for `capacity` and `null` otherwise, since only a plan or a URL change unblocks it, and the CLI and the app send `public_refresh` after either.
 
@@ -402,12 +406,15 @@ Losing to a newer revision is not a failure: the newer refresh read Polar later.
 
 ### Moderation
 
-`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 60 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
+`pnpm cloud:admin <command>` runs the operator's actions against the production D1, through wrangler with `CLOUDFLARE_DEPLOY_TOKEN` from Infisical, or the operator's own wrangler login when that key is missing; `pnpm cloud:admin --local <command>` runs them against the local D1 of `pnpm cloud:dev`. Each command writes D1 only, binds every value as a quoted literal (wrangler takes no parameters), and prints what it changed. New requests feel it within the public path's 10-second cache. A command that touches an account or a URL sends its change and the reconcile of that owner (see "Downgrades") in one `wrangler d1 execute` call, which D1 runs as one batch, so a failure applies none of it. A takedown also stops its URL itself, deleted or not, with the same owner-wide rotation, guarded by the URL's `suspended_at` at write time: a takedown written without its rotation is repaired by running it again, and a complete one changes nothing. The reconcile runs even when the change was already made: retrying a command repairs a rotation an earlier attempt missed, and the sweep's own reconcile repairs it within 5 minutes anyway. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 60 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
 
+- `show <github-login>`: the ban, the override, the billing snapshot, the entitlement and each URL's state;
 - `ban <github-login> <reason>` and `unban <github-login>`;
-- `takedown <slug> <reason>`;
+- `takedown <slug> <reason>` and `restore <slug>`, which undoes a takedown;
 - `override <github-login> <serving-machines> <urls> <reason> [--expires <date>]` and `override --remove <github-login>`;
-- `refresh <github-login>`, which refreshes billing now.
+- `refresh <github-login>`, which sets `check_due_at` so the next 5-minute run refreshes billing.
+
+A login is the one GitHub gave at the last sign-in, so two accounts can share one; `id:<github-id>` names either of them.
 
 Reports arrive at `abuse@localify.dev`, linked from every page the Worker serves.
 
@@ -415,7 +422,7 @@ Reports arrive at `abuse@localify.dev`, linked from every page the Worker serves
 
 For a request to `*.localify.fyi`, the Worker:
 
-1. Parses the host into slug and label. It loads the public URL with its machine and tunnel state, and its owner's GitHub login, ban and entitlement, including the URL's rank among the owner's live URLs. Lookups are cached in the isolate for 10 seconds, so a deleted URL, a new password, a claim, a plan change, a ban or a takedown reaches every location within that time. New requests feel it then. Streams already open close when the tunnel is released (ADR 0027).
+1. Parses the host into slug and label. It loads the public URL with its machine and tunnel state, and its owner's GitHub login, ban and entitlement, including the URL's rank among the owner's live URLs. Lookups are cached in the isolate for 10 seconds, so a deleted URL, a new password, a claim, a plan change, a ban or a takedown reaches every location within that time. New requests feel it then. Streams already open close when the tunnel is released (ADR 0027). A decision held longer than 10 seconds from its read, behind the traffic limit or a slow check, is made again before forwarding, and no machine starts a new tunnel generation while a decision made before its owner's latest stop could still be in use (see "Quiet period").
 
    | Case | Page |
    |---|---|

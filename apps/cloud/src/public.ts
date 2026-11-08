@@ -33,13 +33,15 @@ import {
   notFoundPage,
   offlinePage,
   passwordPage,
+  pausedPage,
+  removedPage,
   RETRY_AFTER_SECONDS,
   tooManyRequestsPage,
   unavailablePage,
   unreachablePage,
   warningPage,
 } from "./pages";
-import { findSite, type Site } from "./sites";
+import { findSite, reloadSite, SITE_CACHE_TTL_MS, type Site } from "./sites";
 
 const MAX_FORM_BYTES = 8 * 1024;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -72,6 +74,8 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   if (!site || (target.label !== null && !site.wildcard)) return notFoundPage(method);
   const localHost = localHostFor(site.localDomain, target.label);
   if (!localHost) return notFoundPage(method);
+  if (site.state === "removed") return removedPage(method);
+  if (site.state === "suspended") return pausedPage(method);
   if (site.machineId === null || site.ingressSecret === null) return offlinePage(method);
 
   // 2. The owner's traffic limit, across all their URLs.
@@ -144,15 +148,50 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  // A routing decision lives at most SITE_CACHE_TTL_MS from the start of its
+  // read. One held longer, behind the traffic limit or a slow check, could
+  // outlast an owner's quiet period and reach a new tunnel generation
+  // (docs/public-urls.md, "Quiet period"), so it is made again first.
+  let machineId = site.machineId;
+  let ingressSecret = site.ingressSecret;
+  let readAt = site.readAt;
+  if (Date.now() - readAt > SITE_CACHE_TTL_MS) {
+    let fresh: Site | null;
+    try {
+      fresh = await reloadSite(env, target.slug);
+    } catch (error) {
+      console.error("Re-reading a public URL before forwarding failed", error);
+      return retryLater(unavailablePage(method));
+    }
+    if (!fresh || (target.label !== null && !fresh.wildcard)) return notFoundPage(method);
+    if (fresh.state === "removed") return removedPage(method);
+    if (fresh.state === "suspended") return pausedPage(method);
+    if (fresh.machineId === null || fresh.ingressSecret === null) return offlinePage(method);
+    // Another URL under this slug, or another password: the checks above
+    // were for the old one, so the client asks again.
+    if (
+      fresh.id !== site.id ||
+      fresh.protected !== site.protected ||
+      fresh.passwordVersion !== site.passwordVersion
+    ) {
+      return retryLater(unavailablePage(method));
+    }
+    machineId = fresh.machineId;
+    ingressSecret = fresh.ingressSecret;
+    readAt = fresh.readAt;
+  }
+  // A re-read that itself took too long is not forwarded on, nor read again.
+  if (Date.now() - readAt > SITE_CACHE_TTL_MS) return retryLater(unavailablePage(method));
+
   // 6. and 7. Forward, then keep the app's cookies on this host, and its HTML
   // out of every cache, so no cache can skip the warning.
   const response = await forward(
     request,
     env,
-    site.machineId,
+    machineId,
     {
       edgeKey: setting(env, "EDGE_KEY"),
-      ingressSecret: site.ingressSecret,
+      ingressSecret,
       publicHost: host,
       localHost,
       urlId: site.id,
@@ -415,6 +454,12 @@ async function forward(
   // 530 is Cloudflare's answer when the tunnel has no connector (error 1033).
   if (response.status === 530) return offlinePage(request.method);
   return withHostOnlyCookies(response);
+}
+
+/** A response the client may retry shortly: the next try gets a fresh decision. */
+function retryLater(response: Response): Response {
+  response.headers.set("retry-after", "10");
+  return response;
 }
 
 function redirect(location: string): Response {

@@ -20,7 +20,25 @@ import {
 } from "./cloudflare";
 import { maxTunnels, setting } from "./config";
 import { urlsOfMachine, type PublicUrl } from "./db";
-import { entitlementOf, type Entitlement } from "./entitlement";
+import {
+  accountOf,
+  ACCOUNTS_SQL,
+  ALL_ACCOUNTS_SQL,
+  ALL_OWNED_URLS_SQL,
+  entitlementOf,
+  isEntitled,
+  OWNED_URLS_SQL,
+  reconcileStatements,
+  servingUrlIds,
+  servingUrlLimit,
+  D1_NOW_MS,
+  SLOW_STAMP_MS,
+  STAMP_STOP,
+  type AccountRow,
+  type Entitlement,
+  type OwnedUrl,
+  type Statement,
+} from "./entitlement";
 import {
   cleanUpRevokedMachines,
   ingressSecret,
@@ -29,7 +47,33 @@ import {
   nextAttemptAt,
   tunnelName,
 } from "./machines";
+import { meteredDb } from "./queries";
+import { SITE_CACHE_TTL_MS } from "./sites";
 
+/**
+ * No new tunnel generation of an owner starts until this long after their
+ * latest serving stop or tunnel release, on D1's clock. A routing decision
+ * lives at most `SITE_CACHE_TTL_MS` from the start of its read, so one
+ * made before the stop has ended by then. The 5 seconds cover the skew
+ * between a Worker's clock and D1's.
+ */
+export const QUIET_AFTER_STOP_MS = SITE_CACHE_TTL_MS + 5_000;
+/** Runs a batch that stamps a quiet period, logging it as an error when it is slow. */
+async function stampingBatch<T>(
+  env: Env,
+  name: string,
+  statements: D1PreparedStatement[],
+): Promise<D1Result<T>[]> {
+  const started = Date.now();
+  const results = await env.DB.batch<T>(statements);
+  const took = Date.now() - started;
+  if (took > SLOW_STAMP_MS) {
+    console.error(
+      `The ${name} batch took ${took} ms; the quiet period's margin assumes milliseconds`,
+    );
+  }
+  return results;
+}
 /** An operation older than this is abandoned. */
 const OP_STALE_MS = 2 * 60 * 1000;
 /** Two down readings this far apart, on a tunnel ready this long, reap it. */
@@ -38,12 +82,50 @@ const ORPHAN_AGE_MS = 60 * 60 * 1000;
 const LATE_REVOCATION_MS = 10 * 60 * 1000;
 const SWEEP_CALL_BUDGET = 300;
 /**
- * Calls kept for the rest of the sweep while revocations run first.
- * Revocations get them too, once the rest of the work is done.
+ * D1 queries a sweep may make, below the 1,000 a Worker invocation may send
+ * on the paid plan, leaving room for the cron's other work. A batch counts
+ * as one.
  */
-const MAINTENANCE_RESERVE = 60;
+const SWEEP_QUERY_BUDGET = 900;
 /** A release looks the tunnel up by name at most once, then removes it. */
 const RELEASE_CALLS = 1 + REMOVE_TUNNEL_CALLS;
+/** A release takes the row, then sets `none`. */
+const RELEASE_QUERIES = 2;
+/** A release that failed outside the revocations records its backoff. */
+const BACKOFF_QUERIES = 1;
+/** Reading the slots, and the owners of slots reserved since the owners were read. */
+const SLOT_QUERIES = 3;
+/** The orphan listing and the slot count, at the end of a run. */
+const FINAL_QUERIES = 2;
+/** The two writes of the status readings: healthy again, and first seen down. */
+const STATUS_QUERIES = 2;
+/**
+ * The revocations every run attempts first, whatever came before them: the
+ * reconcile stops while their queries are left, and they take at most
+ * 60 × 4 = 240 of the 300 calls.
+ */
+const REVOCATIONS_PER_RUN = 60;
+/**
+ * What maintenance keeps after those 60 (reaps, CNAME repairs, the
+ * revoked-machine cleanup, orphan tunnels), however many revocations are
+ * queued: 240 + 40 fits in 300. Revocations get what it leaves.
+ */
+const MAINTENANCE_CALLS = 40;
+/** The queries 40 calls of maintenance can need: at most 4 per call, and a few reads. */
+const MAINTENANCE_QUERIES = 60;
+/** What the reconcile leaves: the slot reads, 60 revocations, maintenance, the end of the run. */
+const QUERIES_AFTER_RECONCILE =
+  SLOT_QUERIES + REVOCATIONS_PER_RUN * RELEASE_QUERIES + MAINTENANCE_QUERIES + FINAL_QUERIES;
+/**
+ * Statements per reconcile batch. D1 limits a batch to 30 seconds and
+ * rolls all of it back on a failure, so one owner's failure, or a slow
+ * batch, costs at most its chunk.
+ */
+const RECONCILE_BATCH = 150;
+/** A revoked machine's cleanup records its lookups, the tunnel, the record and its attempts. */
+const CLEANUP_QUERIES_PER_MACHINE = 4;
+/** Correcting a CNAME takes the row, records the record, and lets the row go. */
+const CNAME_QUERIES = 3;
 /** Moving a CNAME may find it gone, fail to create it, then look it up and move it. */
 const CNAME_CALLS = 4;
 const SLOT_ALERT = 800;
@@ -66,7 +148,6 @@ export type MachineRuntime = {
 
 type RuntimeCaller = {
   userId: string;
-  githubId: number;
   machineId: string;
 };
 
@@ -91,13 +172,13 @@ export async function machineRuntime(
   daemonGeneration: number | null,
   now = Date.now(),
 ): Promise<MachineRuntime> {
-  const entitlement = await entitlementOf(env, { id: caller.userId, githubId: caller.githubId });
+  const entitlement = await entitlementOf(env, caller.userId, now);
   const publicUrls = await urlsOfMachine(
     env.DB,
     setting(env, "PUBLIC_BASE_DOMAIN"),
     caller.userId,
     caller.machineId,
-    entitlement.publicUrls,
+    servingUrlLimit(entitlement),
   );
   await adoptUntrackedTunnels(env, now, caller.machineId);
   let row = await tunnelRow(env, caller.machineId);
@@ -127,13 +208,20 @@ export async function machineRuntime(
   }
 
   if (row.tunnel_state === "none") {
+    const quiet = await quietLeft(env, caller.userId);
+    if (quiet > 0) return { ...provisioning, retryAfter: Math.ceil(quiet / 1000) };
     const reserved = await reserveSlot(env, caller, entitlement.servingMachines, now);
     if (reserved) {
       background(ctx, provisionTunnel(env, reserved));
       return provisioning;
     }
     row = await tunnelRow(env, caller.machineId);
-    if (row.tunnel_state === "none") return blockedRuntime(env, caller, entitlement, base);
+    if (row.tunnel_state === "none") {
+      // A stop that landed since the check above.
+      const late = await quietLeft(env, caller.userId);
+      if (late > 0) return { ...provisioning, retryAfter: Math.ceil(late / 1000) };
+      return blockedRuntime(env, caller, entitlement, base);
+    }
   }
 
   if (row.tunnel_state === "ready" && row.tunnel_id !== null && row.rotate_requested_at === null) {
@@ -173,11 +261,7 @@ export async function machineRuntime(
 
 /** A machine wants a tunnel when its owner may serve and one of its URLs serves. */
 function wantsTunnel(entitlement: Entitlement, publicUrls: PublicUrl[]): boolean {
-  return entitlement.servingMachines > 0 && publicUrls.some((url) => url.state === "serving");
-}
-
-function isEntitled(entitlement: Entitlement): boolean {
-  return entitlement.servingMachines > 0 && entitlement.publicUrls > 0;
+  return isEntitled(entitlement) && publicUrls.some((url) => url.state === "serving");
 }
 
 function isStale(opAt: number | null, now: number): boolean {
@@ -242,10 +326,20 @@ type Reservation = {
   dnsRecordId: string | null;
 };
 
+/** How long the owner's quiet period still lasts, in milliseconds of D1's clock. */
+async function quietLeft(env: Env, userId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT serving_stopped_at + ?2 - ${D1_NOW_MS} AS left FROM users WHERE id = ?1`,
+  )
+    .bind(userId, QUIET_AFTER_STOP_MS)
+    .first<{ left: number | null }>();
+  return Math.max(0, row?.left ?? 0);
+}
+
 /**
  * Reserves a serving slot in one statement, so concurrent requests can pass
- * neither the owner's limit nor the account's cap. Null when the row is no
- * longer `none` or a limit stops it.
+ * neither the owner's limit, nor the account's cap, nor the owner's quiet
+ * period. Null when the row is no longer `none` or one of them stops it.
  */
 async function reserveSlot(
   env: Env,
@@ -261,9 +355,19 @@ async function reserveSlot(
      WHERE id = ?1 AND status = 'active' AND tunnel_state = 'none'
        AND (SELECT COUNT(*) FROM machines WHERE user_id = ?4 AND tunnel_state != 'none') < ?5
        AND (SELECT COUNT(*) FROM machines WHERE tunnel_state != 'none') < ?6
+       AND NOT EXISTS (SELECT 1 FROM users
+                       WHERE id = ?4 AND serving_stopped_at > ${D1_NOW_MS} - ?7)
      RETURNING tunnel_generation, ingress_port, dns_record_id`,
   )
-    .bind(caller.machineId, op, now, caller.userId, servingMachines, maxTunnels(env))
+    .bind(
+      caller.machineId,
+      op,
+      now,
+      caller.userId,
+      servingMachines,
+      maxTunnels(env),
+      QUIET_AFTER_STOP_MS,
+    )
     .first<{ tunnel_generation: number; ingress_port: number; dns_record_id: string | null }>();
   return row
     ? {
@@ -394,6 +498,12 @@ type ReleaseOptions = {
   urgent?: boolean;
   /** The sweep's budget; API requests have none. */
   budget?: CallBudget | null;
+  /**
+   * Releases only while no live URL is on the machine, checked as the
+   * release takes the row: one created since the caller read the URLs
+   * keeps its new tunnel.
+   */
+  ifIdle?: boolean;
 };
 
 /**
@@ -407,20 +517,29 @@ async function releaseTunnel(
   env: Env,
   machineId: string,
   generation: number,
-  { now = Date.now(), urgent = false, budget = null }: ReleaseOptions = {},
+  { now = Date.now(), urgent = false, budget = null, ifIdle = false }: ReleaseOptions = {},
 ): Promise<ReleaseResult> {
   const op = newOp();
-  const taken = await env.DB.prepare(
-    `UPDATE machines SET tunnel_state = 'releasing', tunnel_op = ?3, tunnel_op_at = ?4,
+  // Claiming the release stamps the owner's quiet period in the same batch:
+  // a request routed before it cannot reach the generation that follows.
+  const [claim] = await stampingBatch<{ tunnel_id: string | null }>(env, "release", [
+    env.DB.prepare(
+      `UPDATE machines SET tunnel_state = 'releasing', tunnel_op = ?3, tunnel_op_at = ?4,
             rotate_requested_at = CASE WHEN ?6 THEN COALESCE(rotate_requested_at, ?4)
                                        ELSE rotate_requested_at END
      WHERE id = ?1 AND status = 'active' AND tunnel_generation = ?2
        AND (tunnel_state = 'ready'
             OR (tunnel_state IN ('provisioning', 'releasing') AND tunnel_op_at <= ?5))
+       AND (?7 = 0 OR NOT EXISTS (SELECT 1 FROM public_urls p WHERE p.machine_id = machines.id
+                                  AND p.deleted_at IS NULL AND p.taken_down_at IS NULL))
      RETURNING tunnel_id`,
-  )
-    .bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0)
-    .first<{ tunnel_id: string | null }>();
+    ).bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0, ifIdle ? 1 : 0),
+    env.DB.prepare(
+      `UPDATE users SET ${STAMP_STOP}
+       WHERE id = (SELECT user_id FROM machines WHERE id = ?1 AND tunnel_op = ?2)`,
+    ).bind(machineId, op),
+  ]);
+  const taken = claim?.results[0];
   if (!taken) return "skipped";
   try {
     const cloudflare = new CloudflareApi(env, budget);
@@ -451,28 +570,19 @@ async function releaseTunnel(
 export async function releaseIfUnwanted(env: Env, machineId: string): Promise<void> {
   try {
     const machine = await env.DB.prepare(
-      `SELECT m.user_id, u.github_id, m.tunnel_state, m.tunnel_generation
-       FROM machines m JOIN users u ON u.id = m.user_id
-       WHERE m.id = ?1 AND m.status = 'active'`,
+      `SELECT user_id, tunnel_state, tunnel_generation FROM machines
+       WHERE id = ?1 AND status = 'active'`,
     )
       .bind(machineId)
-      .first<{
-        user_id: string;
-        github_id: number;
-        tunnel_state: string;
-        tunnel_generation: number;
-      }>();
+      .first<{ user_id: string; tunnel_state: string; tunnel_generation: number }>();
     if (!machine || machine.tunnel_state === "none") return;
-    const entitlement = await entitlementOf(env, {
-      id: machine.user_id,
-      githubId: machine.github_id,
-    });
+    const entitlement = await entitlementOf(env, machine.user_id);
     const publicUrls = await urlsOfMachine(
       env.DB,
       setting(env, "PUBLIC_BASE_DOMAIN"),
       machine.user_id,
       machineId,
-      entitlement.publicUrls,
+      servingUrlLimit(entitlement),
     );
     if (!wantsTunnel(entitlement, publicUrls)) {
       await releaseTunnel(env, machineId, machine.tunnel_generation);
@@ -480,6 +590,83 @@ export async function releaseIfUnwanted(env: Env, machineId: string): Promise<vo
   } catch (error) {
     console.error("Releasing an unwanted tunnel failed; the sweep retries it", machineId, error);
   }
+}
+
+/** What decides which URLs of some owners serve: their entitlements and their URLs. */
+export type Owners = { entitlements: Map<string, Entitlement>; urls: Map<string, OwnedUrl[]> };
+
+/**
+ * The owners' accounts and URLs, in two queries whatever their number.
+ * `userIds` null means every owner of a URL that is not deleted or of a
+ * serving slot.
+ */
+export async function loadOwners(
+  env: Env,
+  userIds: string[] | null,
+  now = Date.now(),
+): Promise<Owners> {
+  const list = JSON.stringify(userIds ?? []);
+  const [accounts, urls] = await Promise.all([
+    userIds === null
+      ? env.DB.prepare(ALL_ACCOUNTS_SQL).all<AccountRow>()
+      : env.DB.prepare(ACCOUNTS_SQL).bind(list).all<AccountRow>(),
+    userIds === null
+      ? env.DB.prepare(ALL_OWNED_URLS_SQL).all<OwnedUrl>()
+      : env.DB.prepare(OWNED_URLS_SQL).bind(list).all<OwnedUrl>(),
+  ]);
+  const owners: Owners = { entitlements: new Map(), urls: new Map() };
+  for (const row of accounts.results) {
+    owners.entitlements.set(row.user_id, accountOf(row, now).entitlement);
+  }
+  for (const url of urls.results) {
+    owners.urls.set(url.user_id, [...(owners.urls.get(url.user_id) ?? []), url]);
+  }
+  return owners;
+}
+
+/**
+ * Brings the serving state of the owners' URLs in line with their
+ * entitlements. A URL that stopped serving since the last reconcile,
+ * through a downgrade, an expiry, a ban or a takedown, gets `suspended_at`,
+ * and every serving machine of its owner a rotation, so its open streams
+ * close at the next release (ADR 0027). The statements go in batches of
+ * about `RECONCILE_BATCH`, each owner's in one batch, and each batch counts
+ * as one query. A batch that fails is logged and the others still run; the
+ * next reconcile retries it. With a budget, the batches stop while
+ * `reserve` queries are left.
+ */
+export async function reconcileServing(
+  env: Env,
+  owners: Owners,
+  now = Date.now(),
+  queries: { budget: CallBudget; reserve: number } | null = null,
+): Promise<void> {
+  const batches: Statement[][] = [];
+  for (const [userId, entitlement] of owners.entitlements) {
+    const statements = reconcileStatements(userId, entitlement, owners.urls.get(userId) ?? [], now);
+    if (statements.length === 0) continue;
+    const last = batches.at(-1);
+    // An owner's rotation and the record of its stop always share a batch.
+    if (last && last.length + statements.length <= RECONCILE_BATCH) last.push(...statements);
+    else batches.push(statements);
+  }
+  for (const batch of batches) {
+    if (queries && !queries.budget.has(1 + queries.reserve)) return;
+    try {
+      await stampingBatch(
+        env,
+        "reconcile",
+        batch.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)),
+      );
+    } catch (error) {
+      console.error("A reconcile batch failed; the next sweep retries it", error);
+    }
+  }
+}
+
+/** Reconciles one owner, after a change of their URLs. */
+export async function reconcileOwner(env: Env, userId: string, now = Date.now()): Promise<void> {
+  await reconcileServing(env, await loadOwners(env, [userId], now), now);
 }
 
 /** Runs work after the response, logging what fails. */
@@ -494,7 +681,6 @@ export function background(ctx: ExecutionContext, work: Promise<unknown>): void 
 type SlotRow = {
   id: string;
   user_id: string;
-  github_id: number;
   tunnel_state: "provisioning" | "ready" | "releasing";
   tunnel_generation: number;
   tunnel_op_at: number | null;
@@ -508,32 +694,47 @@ type SlotRow = {
 };
 
 /**
- * The 5-minute sweep, within a budget of Cloudflare calls. Revocations come
- * first, with all but a reserve of the budget: rotations, and the slots of
- * owners who lost their entitlement or hold more than it allows. Then the
- * revoked machines' cleanup, the status readings and reaps, abandoned
- * operations, machines with nothing to serve, CNAME drift and orphan
- * tunnels. What they leave goes to the revocations still queued.
+ * The 5-minute sweep, within a budget of Cloudflare calls and one of D1
+ * queries. It first marks for a rotation the machines of URLs that stopped
+ * serving. Revocations come next: rotations, and the slots of owners who
+ * lost their entitlement or hold more than it allows. The first 60 are
+ * attempted whatever else waits, then more while maintenance keeps its
+ * share: the revoked machines' cleanup, the status readings and reaps,
+ * abandoned operations, machines with nothing to serve, CNAME drift and
+ * orphan tunnels. What maintenance leaves goes to the revocations still
+ * queued.
  */
-export async function runSweep(env: Env, now = Date.now()): Promise<void> {
+export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
+  const queries = new CallBudget(SWEEP_QUERY_BUDGET);
+  const env: Env = { ...sweptEnv, DB: meteredDb(sweptEnv.DB, queries) };
   await adoptUntrackedTunnels(env, now, null);
-  const { results: slots } = await env.DB.prepare(
-    `SELECT m.id, m.user_id, u.github_id, m.tunnel_state, m.tunnel_generation, m.tunnel_op_at,
-            m.tunnel_id, m.tunnel_ready_at, m.down_seen_at, m.rotate_requested_at, m.dns_record_id,
-            m.cleanup_attempts, m.next_cleanup_at
-     FROM machines m JOIN users u ON u.id = m.user_id
-     WHERE m.status = 'active' AND m.tunnel_state != 'none'`,
-  ).all<SlotRow>();
-  const entitlements = new Map<string, Entitlement>();
-  for (const slot of slots) {
-    if (!entitlements.has(slot.user_id)) {
-      entitlements.set(
-        slot.user_id,
-        await entitlementOf(env, { id: slot.user_id, githubId: slot.github_id }),
-      );
-    }
+  // Every owner's entitlement and URLs in two queries, for the reconcile and
+  // the rest of the run. The reconcile goes before the slots are read, so
+  // the rotations it marks are revoked in this run.
+  const owners = await loadOwners(env, null, now);
+  try {
+    await reconcileServing(env, owners, now, { budget: queries, reserve: QUERIES_AFTER_RECONCILE });
+  } catch (error) {
+    console.error("Reconciling the serving URLs failed; the next sweep retries it", error);
   }
+  const { results: slots } = await env.DB.prepare(
+    `SELECT id, user_id, tunnel_state, tunnel_generation, tunnel_op_at, tunnel_id,
+            tunnel_ready_at, down_seen_at, rotate_requested_at, dns_record_id, cleanup_attempts,
+            next_cleanup_at
+     FROM machines WHERE status = 'active' AND tunnel_state != 'none'`,
+  ).all<SlotRow>();
+  // A slot reserved since the owners were read.
+  const unread = [...new Set(slots.map((slot) => slot.user_id))].filter(
+    (userId) => !owners.entitlements.has(userId),
+  );
+  if (unread.length > 0) {
+    const late = await loadOwners(env, unread, now);
+    for (const [userId, entitlement] of late.entitlements)
+      owners.entitlements.set(userId, entitlement);
+    for (const [userId, urls] of late.urls) owners.urls.set(userId, urls);
+  }
+  const entitlements = owners.entitlements;
   const done = new Set<string>();
 
   // 1. Revocations, never backed off: one that fails keeps its mark, and
@@ -545,16 +746,30 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
     }
     done.add(slot.id);
   }
-  const revoke = async (reserve: number) => {
-    while (queue.length > 0 && budget.has(RELEASE_CALLS + reserve)) {
+  const revoke = async (most: number, callReserve: number, queryReserve: number) => {
+    for (
+      let tried = 0;
+      tried < most &&
+      queue.length > 0 &&
+      budget.has(RELEASE_CALLS + callReserve) &&
+      queries.has(RELEASE_QUERIES + queryReserve + FINAL_QUERIES);
+      tried++
+    ) {
       const slot = queue.shift()!;
       await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
     }
   };
-  await revoke(MAINTENANCE_RESERVE);
+  // The 60 every run attempts, then all but maintenance's share. What
+  // maintenance leaves comes back to them at the end of the run.
+  await revoke(REVOCATIONS_PER_RUN, 0, MAINTENANCE_QUERIES);
+  await revoke(Number.POSITIVE_INFINITY, MAINTENANCE_CALLS, MAINTENANCE_QUERIES);
 
-  // 2. Revoked machines.
-  await cleanUpRevokedMachines(env, now, budget);
+  // 2. Revoked machines, as many as the queries left allow after their own
+  // read, the status readings and the end of the run.
+  const cleanups = Math.floor(
+    (queries.left - 1 - STATUS_QUERIES - FINAL_QUERIES) / CLEANUP_QUERIES_PER_MACHINE,
+  );
+  if (cleanups > 0) await cleanUpRevokedMachines(env, now, budget, cleanups);
 
   // 3. and 4. Status readings, from the account's tunnel listing.
   const tunnels = await listAll(budget, (cloudflare, page) => cloudflare.listTunnels(page), env);
@@ -596,18 +811,31 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   // 5. Reaps, seen down the longest first, abandoned operations, and
   // machines with nothing left to serve. A release that keeps failing backs off.
   reaps.sort((a, b) => (a.down_seen_at ?? 0) - (b.down_seen_at ?? 0));
-  const serving = await machinesWithServingUrls(env, entitlements);
+  const serving = machinesWithServingUrls(owners);
+  // The run read the URLs at its start: an idle machine is released only
+  // while it still has no live URL, so a URL created since keeps its tunnel.
+  const idle = slots.filter((slot) => slot.tunnel_state === "ready" && !serving.has(slot.id));
   const regular = [
     ...reaps,
     ...slots.filter((slot) => slot.tunnel_state !== "ready" && isStale(slot.tunnel_op_at, now)),
-    ...slots.filter((slot) => slot.tunnel_state === "ready" && !serving.has(slot.id)),
+    ...idle,
   ];
   for (const slot of regular) {
     if (done.has(slot.id)) continue;
     done.add(slot.id);
     if (slot.next_cleanup_at !== null && slot.next_cleanup_at > now) continue;
-    if (!budget.has(RELEASE_CALLS)) continue;
-    if ((await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, budget })) === "failed") {
+    if (
+      !budget.has(RELEASE_CALLS) ||
+      !queries.has(RELEASE_QUERIES + BACKOFF_QUERIES + FINAL_QUERIES)
+    )
+      continue;
+    const ifIdle = !reaps.includes(slot) && idle.includes(slot);
+    const released = await releaseTunnel(env, slot.id, slot.tunnel_generation, {
+      now,
+      budget,
+      ifIdle,
+    });
+    if (released === "failed") {
       const attempts = slot.cleanup_attempts + 1;
       await env.DB.prepare(
         `UPDATE machines SET cleanup_attempts = ?2, next_cleanup_at = ?3 WHERE id = ?1`,
@@ -627,7 +855,7 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
         if (slot.tunnel_id === null) continue;
         const record = byName.get(machineHostname(env, slot.id));
         if (record?.content === `${slot.tunnel_id}.cfargotunnel.com`) continue;
-        if (!budget.has(CNAME_CALLS)) break;
+        if (!budget.has(CNAME_CALLS) || !queries.has(CNAME_QUERIES + FINAL_QUERIES)) break;
         await correctCname(env, slot, record ?? null, now, budget);
       }
     }
@@ -665,8 +893,8 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
     }
   }
 
-  // The revocations the reserve kept waiting.
-  await revoke(0);
+  // The revocations still queued get what maintenance left.
+  await revoke(Number.POSITIVE_INFINITY, 0, 0);
 
   // 8. The account's slots.
   const total = await env.DB.prepare(
@@ -699,7 +927,8 @@ function revocations(slots: SlotRow[], entitlements: Map<string, Entitlement>): 
     byOwner.set(slot.user_id, [...(byOwner.get(slot.user_id) ?? []), slot]);
   }
   for (const [owner, held] of byOwner) {
-    const allowed = entitlements.get(owner)?.servingMachines ?? 0;
+    const entitlement = entitlements.get(owner);
+    const allowed = entitlement && isEntitled(entitlement) ? entitlement.servingMachines : 0;
     if (allowed === 0) {
       beyond.push(...held);
       continue;
@@ -752,29 +981,13 @@ async function adoptUntrackedTunnels(
 }
 
 /** Machines with at least one URL their owner's entitlement serves. */
-async function machinesWithServingUrls(
-  env: Env,
-  entitlements: Map<string, Entitlement>,
-): Promise<Set<string>> {
-  const { results } = await env.DB.prepare(
-    `SELECT machine_id, user_id,
-            ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at, id) AS live_rank
-     FROM public_urls
-     WHERE deleted_at IS NULL AND taken_down_at IS NULL
-       AND user_id IN (SELECT value FROM json_each(?1))`,
-  )
-    .bind(JSON.stringify([...entitlements.keys()]))
-    .all<{ machine_id: string | null; user_id: string; live_rank: number }>();
+function machinesWithServingUrls(owners: Owners): Set<string> {
   const serving = new Set<string>();
-  for (const url of results) {
-    const entitlement = entitlements.get(url.user_id);
-    if (
-      url.machine_id !== null &&
-      entitlement &&
-      entitlement.servingMachines > 0 &&
-      url.live_rank <= entitlement.publicUrls
-    ) {
-      serving.add(url.machine_id);
+  for (const [userId, entitlement] of owners.entitlements) {
+    const urls = owners.urls.get(userId) ?? [];
+    const ids = servingUrlIds(entitlement, urls);
+    for (const url of urls) {
+      if (ids.has(url.id) && url.machine_id !== null) serving.add(url.machine_id);
     }
   }
   return serving;

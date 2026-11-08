@@ -253,13 +253,14 @@ export async function cleanUpRevokedMachines(
   env: Env,
   now: number,
   budget: CallBudget,
+  maxMachines = Number.POSITIVE_INFINITY,
 ): Promise<void> {
   const pending = await env.DB.prepare(
     `${SELECT_REVOKED} AND ${HOLDS_RESOURCES}
        AND (next_cleanup_at IS NULL OR next_cleanup_at <= ?1)
      ORDER BY next_cleanup_at IS NOT NULL, next_cleanup_at, revoked_at LIMIT ?2`,
   )
-    .bind(now, Math.floor(budget.left / CALLS_PER_REVOKED_MACHINE))
+    .bind(now, Math.min(maxMachines, Math.floor(budget.left / CALLS_PER_REVOKED_MACHINE)))
     .all<RevokedMachine>();
   for (const machine of pending.results) {
     if (!budget.has(CALLS_PER_REVOKED_MACHINE)) break;
@@ -289,9 +290,15 @@ export async function revokeStuckSignIns(env: Env, now: number): Promise<void> {
     .run();
 }
 
-/** Removes URL rows deleted more than 30 days ago, freeing their slugs. */
+/**
+ * Removes URL rows deleted more than 30 days ago, freeing their slugs. A
+ * taken-down URL keeps its row, so its slug is never given out again.
+ */
 export async function purgeDeletedUrls(env: Env, now = Date.now()): Promise<void> {
-  await env.DB.prepare(`DELETE FROM public_urls WHERE deleted_at IS NOT NULL AND deleted_at < ?1`)
+  await env.DB.prepare(
+    `DELETE FROM public_urls
+     WHERE deleted_at IS NOT NULL AND deleted_at < ?1 AND taken_down_at IS NULL`,
+  )
     .bind(now - DELETED_URL_RETENTION_MS)
     .run();
 }
