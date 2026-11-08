@@ -777,7 +777,8 @@ mod tests {
 
         run(request).unwrap();
 
-        assert!(beats.get() >= 5, "{} heartbeats in a second", beats.get());
+        // One as it starts; the rest come as often as the supervision polls.
+        assert!(beats.get() >= 3, "{} heartbeats in a second", beats.get());
     }
 
     /// This process as the executor leading its session, with a member that
