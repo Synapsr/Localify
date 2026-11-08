@@ -34,6 +34,7 @@ export {
   Command as CommandIcon,
   Power as PowerIcon,
   Servers as ServersIcon,
+  Monitor as MonitorIcon,
   Activity as ActivityIcon,
   Zap as ZapIcon,
   Code as CodeIcon,
