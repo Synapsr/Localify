@@ -39,7 +39,7 @@ use crate::infrastructure::running_services::{
 };
 use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
-    find_existing_vite_config_path,
+    find_existing_vite_config_path, next_dev_host,
 };
 
 const DEFAULT_URL_ENV_KEYS: &[&str] = &[
@@ -278,7 +278,8 @@ pub fn run(
 
     let workdir = service_workdir(&service)?;
     let command = if !has_override_command {
-        prepare_local_dev_command(command, &workdir, port)?
+        let project_root = service_project_root(&service, &workdir);
+        prepare_local_dev_command(command, &workdir, &project_root, port)?
     } else {
         command
     };
@@ -1541,6 +1542,7 @@ enum PackageScriptRunner {
 fn prepare_local_dev_command(
     command: Vec<String>,
     workdir: &Path,
+    project_root: &Path,
     port: u16,
 ) -> Result<Vec<String>> {
     let Some((runner, script_name)) = package_script_invocation(&command) else {
@@ -1549,7 +1551,12 @@ fn prepare_local_dev_command(
     let Some(script) = read_package_script(workdir, script_name)? else {
         return Ok(command);
     };
-    let args = localify_dev_args_for_script(&script, port);
+    let next_host = if script.contains("next dev") {
+        next_dev_host(workdir, project_root)
+    } else {
+        "127.0.0.1"
+    };
+    let args = localify_dev_args_for_script(&script, port, next_host);
     if args.is_empty() {
         return Ok(command);
     }
@@ -1588,14 +1595,14 @@ fn read_package_script(workdir: &Path, script_name: &str) -> Result<Option<Strin
         .map(str::to_string))
 }
 
-fn localify_dev_args_for_script(script: &str, port: u16) -> Vec<String> {
+fn localify_dev_args_for_script(script: &str, port: u16, next_host: &str) -> Vec<String> {
     let trimmed = script.trim();
     if trimmed.contains("next dev") {
         return host_and_port_args(
             trimmed,
             "--hostname",
             &["--hostname", "-H"],
-            "127.0.0.1",
+            next_host,
             port,
         );
     }
@@ -2485,6 +2492,7 @@ mod tests {
         let command = prepare_local_dev_command(
             vec!["pnpm".into(), "run".into(), "dev:bare".into()],
             temp_dir.path(),
+            temp_dir.path(),
             58522,
         )
         .unwrap();
@@ -2514,6 +2522,7 @@ mod tests {
 
         let command = prepare_local_dev_command(
             vec!["npm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
             temp_dir.path(),
             4010,
         )
@@ -2546,6 +2555,7 @@ mod tests {
         let command = prepare_local_dev_command(
             vec!["pnpm".into(), "run".into(), "dev".into()],
             temp_dir.path(),
+            temp_dir.path(),
             4010,
         )
         .unwrap();
@@ -2564,6 +2574,179 @@ mod tests {
 
         let command = prepare_local_dev_command(
             vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_opens_next_intl_apps_to_every_interface() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"scripts":{"dev":"next dev --hostname 127.0.0.1"},"dependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--hostname",
+                "0.0.0.0",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_finds_next_intl_in_the_monorepo_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app_dir = temp_dir.path().join("apps/web");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"private":true,"dependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            &app_dir,
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--hostname",
+                "0.0.0.0",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_ignores_next_intl_above_the_project_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_root = temp_dir.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"dependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            &project_root,
+            &project_root,
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_keeps_vite_on_loopback_next_to_next_intl() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"scripts":{"dev":"vite"},"devDependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_ignores_a_broken_parent_manifest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app_dir = temp_dir.path().join("apps/web");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(temp_dir.path().join("package.json"), "{ not json").unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            &app_dir,
             temp_dir.path(),
             4010,
         )
@@ -2594,6 +2777,7 @@ mod tests {
 
         let command = prepare_local_dev_command(
             vec!["pnpm".into(), "run".into(), "dev".into()],
+            temp_dir.path(),
             temp_dir.path(),
             52168,
         )
