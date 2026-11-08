@@ -972,7 +972,11 @@ async fn a_refused_renewal_ends_the_sessions() {
     wait_until("the session ends", || a.session("mB").is_none()).await;
     // Whichever side asks for a lease first is refused.
     let code = a.link.open("mB", true).await.unwrap_err().code;
-    assert!(code == "unauthorized" || code == "refused", "{code}");
+    // A's own lease says the plan lapsed; B's refusal reaches A as a close.
+    assert!(
+        code == "subscription_required" || code == "refused",
+        "{code}"
+    );
     cloud.set_lease(200, 60);
     a.link.open("mB", true).await.unwrap();
 }
@@ -1310,16 +1314,55 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_leases() {
         .wake
         .store(true, std::sync::atomic::Ordering::SeqCst);
     wait_until("the session ends", || a.session("mB").is_none()).await;
-    assert_eq!(
-        a.link.open("mB", true).await.unwrap_err().code,
-        "unauthorized"
+    // Not "remote access lapsed", nor a sign-in problem: unreachable.
+    let failure = a.link.open("mB", true).await.unwrap_err();
+    assert_eq!(failure.code, "unreachable");
+    assert!(
+        failure.message.contains("Can't reach Localify Cloud"),
+        "{}",
+        failure.message
     );
     kept(&a);
-    // The polling after a lapse.
+    // The polling after a lapse says unreachable too, not a lapse, and asks
+    // again sooner than the 15-minute (here 500 ms) recheck.
     let requests = cloud.lease_requests();
     cloud.close("mA", 4402, "remote access lapsed");
     wait_until("it asked for a lease", || cloud.lease_requests() > requests).await;
+    wait_until("it says unreachable", || {
+        a.link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "unreachable")
+    })
+    .await;
     wait_until("it asked again", || cloud.lease_requests() > requests + 1).await;
+    kept(&a);
+    // A 402 is the plan's: the status says so.
+    cloud.set_unauthorized("lease", None);
+    cloud.set_lease(402, 60);
+    wait_until("it says the plan lapsed", || {
+        a.link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "subscription_required")
+    })
+    .await;
+    // A 5xx is no lapse either.
+    cloud.set_lease(503, 60);
+    wait_until("it says unreachable again", || {
+        a.link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "unreachable")
+    })
+    .await;
+    kept(&a);
+    // Granted again: connected, everything kept.
+    cloud.set_lease(200, 60);
+    wait_until("connected again", || {
+        a.link.status().relay == RelayState::Connected
+    })
+    .await;
     kept(&a);
 }
 
@@ -1344,7 +1387,7 @@ async fn a_revoked_lease_signs_out_from_open_and_from_the_lapse_polling() {
     .await;
     assert_eq!(
         a.link.open("mB", true).await.unwrap_err().code,
-        "unauthorized"
+        "signed_out"
     );
     wait_until("A is signed out", || {
         a.link
@@ -1414,6 +1457,42 @@ async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
     })
     .await;
     kept(&daemon);
+}
+
+/// A daemon updated from before `owner.json`, restarted on its old folder:
+/// it keeps its key, so the cloud's set-once key check still passes, and
+/// its pins and settings with it.
+#[tokio::test]
+async fn an_update_from_before_owner_json_keeps_the_key_pins_and_settings() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    pair(&a, &b).await;
+    share_on(&a);
+    let key = a
+        .store()
+        .load_identity()
+        .unwrap()
+        .unwrap()
+        .public_key
+        .clone();
+    a.cancel.cancel();
+    wait_until("A's socket closes", || !cloud.connected("mA")).await;
+    std::fs::remove_file(a.dir.path().join("remote/owner.json")).unwrap();
+
+    let link = RemoteLink::with_timings(a.dir.path(), fast());
+    link.trust_api_base(&cloud.base);
+    let cancel = CancellationToken::new();
+    spawn(link.clone(), cancel.clone());
+    wait_until("the updated daemon connects", || {
+        link.status().relay == RelayState::Connected
+    })
+    .await;
+    cancel.cancel();
+
+    assert_eq!(a.store().load_identity().unwrap().unwrap().public_key, key);
+    assert!(a.pinned("mB"));
+    assert!(a.store().settings().unwrap().share);
+    assert!(a.dir.path().join("remote/owner.json").exists());
 }
 
 /// The pairing limit lives in the link: a new connection keeps the count.

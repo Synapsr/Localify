@@ -117,12 +117,17 @@ impl CredentialsStore {
 
     /// Signs out only while `cloud.json` still holds `token`, compared and
     /// deleted under the sign-in lock: a revocation of an old token never
-    /// takes a newer sign-in with it. `true` when it signed out.
-    pub fn delete_if_token(&self, token: &str) -> Result<bool> {
+    /// takes a newer sign-in with it. `then` runs once it signed out, still
+    /// under the lock, for what goes with the sign-in (the saved passwords),
+    /// so a new login cannot slip in between. Locks are always taken in this
+    /// order: the sign-in lock, then the password store's. `true` when it
+    /// signed out.
+    pub fn delete_if_token(&self, token: &str, then: impl FnOnce()) -> Result<bool> {
         let _lock = sign_in_lock(&self.data_dir())?;
         match self.load()? {
             Some(credentials) if credentials.token == token => {
                 self.delete_locked()?;
+                then();
                 Ok(true)
             }
             _ => Ok(false),
@@ -211,7 +216,7 @@ mod tests {
         let login = sign_in_lock(dir.path()).unwrap();
         let revocation = {
             let store = store.clone();
-            std::thread::spawn(move || store.delete_if_token("lfy_secret").unwrap())
+            std::thread::spawn(move || store.delete_if_token("lfy_secret", || {}).unwrap())
         };
         // The new login, inside the lock the revocation waits for.
         let newer = CloudCredentials {
@@ -229,8 +234,80 @@ mod tests {
         assert_eq!(store.load().unwrap(), Some(newer));
         // Without a race, the same revocation does sign out.
         store.save(&credentials()).unwrap();
-        assert!(store.delete_if_token("lfy_secret").unwrap());
+        assert!(store.delete_if_token("lfy_secret", || {}).unwrap());
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    /// A revocation clears the saved passwords; a new login that saves one
+    /// right after the revoked sign-in is deleted keeps it: its login waits
+    /// for the lock until the clearing is done.
+    #[test]
+    fn a_revocation_never_clears_a_newer_sign_ins_passwords() {
+        use crate::infrastructure::cloud::passwords::{PasswordStore, StoredPassword};
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::in_data_dir(dir.path());
+        let passwords = PasswordStore::in_data_dir(dir.path());
+        store.save(&credentials()).unwrap();
+        let saved = |id: &str| {
+            passwords
+                .update(|all| {
+                    all.insert(
+                        id.into(),
+                        StoredPassword {
+                            version: 1,
+                            password: "p".into(),
+                        },
+                    );
+                })
+                .unwrap();
+        };
+        saved("old-url");
+
+        let (deleted, on_delete) = mpsc::channel();
+        let (login_started, on_login) = mpsc::channel();
+        let login = {
+            let (store, passwords) = (store.clone(), passwords.clone());
+            std::thread::spawn(move || {
+                on_delete.recv().unwrap();
+                login_started.send(()).unwrap();
+                // Waits for the revocation's lock, then signs in and saves.
+                store
+                    .save(&CloudCredentials {
+                        token: "lfy_newer".into(),
+                        machine_id: "m2".into(),
+                        ..credentials()
+                    })
+                    .unwrap();
+                passwords
+                    .update(|all| {
+                        all.insert(
+                            "new-url".into(),
+                            StoredPassword {
+                                version: 1,
+                                password: "p".into(),
+                            },
+                        );
+                    })
+                    .unwrap();
+            })
+        };
+        let signed_out = store
+            .delete_if_token("lfy_secret", || {
+                // Between the deletion and the clearing, the new login runs.
+                deleted.send(()).unwrap();
+                on_login.recv().unwrap();
+                passwords.update(|all| all.clear()).unwrap();
+            })
+            .unwrap();
+        login.join().unwrap();
+
+        assert!(signed_out);
+        let left = passwords.load().unwrap();
+        assert!(left.contains_key("new-url"), "{left:?}");
+        assert!(!left.contains_key("old-url"));
+        assert_eq!(store.load().unwrap().unwrap().token, "lfy_newer");
     }
 
     #[test]

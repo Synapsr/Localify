@@ -35,7 +35,7 @@ use tracing::{info, warn};
 
 use self::actor::{Command, Failure};
 pub use self::actor::{Event, PairEvent};
-use self::backoff::{Backoff, Ending, Next, Stop, up_to};
+use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
 use crate::daemon::public_tunnel::Clocks;
@@ -486,11 +486,7 @@ impl RemoteLink {
             .connected()
             .map_err(|error| Failure::new("unavailable", error.to_string()))?;
         if let Err(error) = conn.lease.ensure().await {
-            revoked_lease(&conn, &error);
-            return Err(Failure::new(
-                "unauthorized",
-                "Remote access is not available right now.",
-            ));
+            return Err(lease_refused(&conn, &error));
         }
         let (reply, answer) = oneshot::channel();
         let command = Command::Open {
@@ -522,8 +518,7 @@ impl RemoteLink {
             bail!("{name} is offline. Open Localify on it, then try again.");
         }
         if let Err(error) = conn.lease.ensure().await {
-            revoked_lease(&conn, &error);
-            bail!("Remote access is not available right now. Try again in a moment.");
+            bail!("{}", lease_refused(&conn, &error).message);
         }
         let (events, receiver) = mpsc::channel(16);
         conn.commands
@@ -580,11 +575,18 @@ impl RemoteLink {
     }
 }
 
-/// A lease the cloud refused because the token is revoked: the connection
-/// ends, and the machine signs out, as for a renewal.
-fn revoked_lease(conn: &Conn, error: &LeaseError) {
-    if error.is_revoked() {
-        let _ = conn.commands.send(Command::Revoked);
+/// Why a viewer got no lease, as its caller says it. A revoked token also
+/// ends the connection, and the machine signs out, as for a renewal; a lapse
+/// is the plan's; anything else, the cloud could not be reached.
+fn lease_refused(conn: &Conn, error: &LeaseError) -> Failure {
+    match error {
+        LeaseError::Refused { status: 401, .. } => {
+            let _ = conn.commands.send(Command::Revoked);
+            Failure::new("signed_out", SIGNED_OUT)
+        }
+        LeaseError::Refused { status: 403, .. } => Failure::new("banned", BANNED),
+        LeaseError::Refused { .. } => Failure::new("subscription_required", NEEDS_PRO),
+        LeaseError::Unreachable(_) => Failure::new("unreachable", UNREACHABLE),
     }
 }
 
@@ -765,15 +767,14 @@ fn lapsed(shared: &Shared, first: Duration) -> Wait {
 fn signed_out_by_cloud(shared: &Shared, token: &str) -> Wait {
     // Compared and deleted under the sign-in lock `login` takes: a newer
     // sign-in is never taken with the revoked one.
-    match shared.credentials.delete_if_token(token) {
-        Ok(true) => {
-            info!("Localify Cloud revoked this machine's token; signed out here");
-            let data_dir = shared.credentials.data_dir();
-            if let Err(error) = PasswordStore::in_data_dir(&data_dir).update(|saved| saved.clear())
-            {
-                warn!(error = %format!("{error:#}"), "Could not delete the saved passwords");
-            }
+    let passwords = PasswordStore::in_data_dir(&shared.credentials.data_dir());
+    let forget_passwords = || {
+        if let Err(error) = passwords.update(|saved| saved.clear()) {
+            warn!(error = %format!("{error:#}"), "Could not delete the saved passwords");
         }
+    };
+    match shared.credentials.delete_if_token(token, forget_passwords) {
+        Ok(true) => info!("Localify Cloud revoked this machine's token; signed out here"),
         // A new sign-in, or none: nothing of this one is left.
         Ok(false) => return Wait::Retry(Duration::ZERO),
         Err(error) => {
@@ -937,6 +938,7 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
         }
         Wait::Lapsed(first) => {
             let mut delay = first;
+            let mut failures = 0_u32;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return false,
@@ -945,7 +947,28 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
                 }
                 match lease_granted(shared).await {
                     Granted::Yes => return true,
-                    Granted::No => delay = shared.timings.lapsed_recheck,
+                    Granted::No => {
+                        // Still the plan's, after an answer from the cloud.
+                        failures = 0;
+                        let _ = lapsed(shared, Duration::ZERO);
+                        delay = shared.timings.lapsed_recheck;
+                    }
+                    // No answer of the cloud's own: not a lapse. Asked
+                    // again sooner, with backoff, up to the usual interval.
+                    Granted::Unreachable => {
+                        failures = failures.saturating_add(1);
+                        let blocked = Blocked {
+                            code: "unreachable".into(),
+                            message: UNREACHABLE.into(),
+                        };
+                        shared.set_relay(RelayState::Reconnecting, Some(blocked), None);
+                        delay = lease::retry_delay(
+                            failures,
+                            shared.timings.lease_retry,
+                            random_fraction(),
+                        )
+                        .min(shared.timings.lapsed_recheck);
+                    }
                     // Revoked meanwhile: signed out, until a new sign-in.
                     Granted::Revoked(token) => {
                         let wait = signed_out_by_cloud(shared, &token);
@@ -959,7 +982,10 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
 
 enum Granted {
     Yes,
+    /// Refused by the plan: `402`, or `403`.
     No,
+    /// No answer, a 5xx, or a `401` that is not the cloud's revocation.
+    Unreachable,
     /// The token is revoked; the token it was.
     Revoked(String),
 }
@@ -980,9 +1006,15 @@ async fn lease_granted(shared: &Shared) -> Granted {
     match CloudClient::new(http).remote_lease().await {
         Ok(_) => Granted::Yes,
         Err(error) if revocation.revokes(&error) => Granted::Revoked(credentials.token.clone()),
-        Err(error) => {
-            info!(error = %error, "Remote access is still lapsed");
+        Err(CloudError::Api {
+            status: 402 | 403, ..
+        }) => {
+            info!("Remote access is still lapsed");
             Granted::No
+        }
+        Err(error) => {
+            info!(error = %error, "Localify Cloud did not answer a lease request");
+            Granted::Unreachable
         }
     }
 }

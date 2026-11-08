@@ -260,17 +260,34 @@ impl RemoteStore {
             );
         }
         create_private_dir(&self.dir)?;
-        let owner: Option<Owner> = self.read(OWNER_FILE)?;
-        if owner.as_ref().map(|owner| owner.machine_id.as_str()) != Some(machine_id) {
-            self.clear(&[IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE])?;
-            self.write(
-                OWNER_FILE,
-                &Owner {
-                    machine_id: machine_id.to_string(),
-                },
-            )?;
+        let named: Option<Owner> = self.read(OWNER_FILE)?;
+        if named.is_some_and(|owner| owner.machine_id == machine_id) {
+            return Ok(lock);
         }
+        // A folder from before `owner.json` whose key names this sign-in
+        // is this sign-in's: adopted, key, pins and settings kept. Only a
+        // folder whose owner cannot be told is reset.
+        if self.owner()?.as_deref() != Some(machine_id) {
+            self.clear(&[IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE])?;
+        }
+        self.write(
+            OWNER_FILE,
+            &Owner {
+                machine_id: machine_id.to_string(),
+            },
+        )?;
         Ok(lock)
+    }
+
+    /// The sign-in the folder belongs to: `owner.json`, or for a folder
+    /// from before it, the machine id its key was made for.
+    fn owner(&self) -> Result<Option<String>> {
+        if let Some(owner) = self.read::<Owner>(OWNER_FILE)? {
+            return Ok(Some(owner.machine_id));
+        }
+        Ok(self
+            .load_identity()?
+            .map(|identity| identity.machine_id.clone()))
     }
 
     /// The machine id `cloud.json` holds now; `None` when signed out.
@@ -281,9 +298,8 @@ impl RemoteStore {
     }
 
     fn owned_by_current(&self) -> Result<bool> {
-        let owner: Option<Owner> = self.read(OWNER_FILE)?;
-        Ok(match (owner, self.current_machine()?) {
-            (Some(owner), Some(current)) => owner.machine_id == current,
+        Ok(match (self.owner()?, self.current_machine()?) {
+            (Some(owner), Some(current)) => owner == current,
             _ => false,
         })
     }
@@ -516,6 +532,60 @@ mod tests {
         assert_eq!(mode(&dir.path().join("cloud.lock")), 0o600);
         first.keys().unwrap();
         assert!(!format!("{first:?}").contains(&first.private_key));
+    }
+
+    /// A folder written before `owner.json` existed: its key names the
+    /// current sign-in, so it is adopted, with its pins and settings, and
+    /// the key is the same one (the cloud refuses a second key).
+    #[test]
+    fn a_folder_from_before_owner_json_is_adopted_when_its_key_matches() {
+        let (dir, store) = signed_in();
+        let identity = store.identity_for("m1").unwrap();
+        store.update_settings("m1", share_on()).unwrap();
+        store
+            .update_pins("m1", |pins| {
+                pins.insert("peer".into(), pin("k"));
+            })
+            .unwrap();
+        let key = identity.public_key.clone();
+        drop(identity);
+        fs::remove_file(dir.path().join("remote/owner.json")).unwrap();
+
+        // Read before any write: already this sign-in's.
+        assert!(store.settings().unwrap().share);
+        assert!(store.pins().unwrap().contains_key("peer"));
+        // A write adopts it.
+        assert_eq!(store.identity_for("m1").unwrap().public_key, key);
+        assert!(store.settings().unwrap().share);
+        assert!(store.pins().unwrap().contains_key("peer"));
+        let owner = fs::read_to_string(dir.path().join("remote/owner.json")).unwrap();
+        assert!(owner.contains("m1"), "{owner}");
+    }
+
+    /// From before `owner.json`, with a key of another sign-in, or no key:
+    /// nobody can tell whose the pins and settings are, so they go.
+    #[test]
+    fn a_folder_from_before_owner_json_of_unknown_owner_is_reset() {
+        for key_of in [Some("m0"), None] {
+            let (dir, store) = signed_in();
+            if let Some(other) = key_of {
+                sign_in(dir.path(), other);
+                store.identity_for(other).unwrap();
+                sign_in(dir.path(), "m1");
+            }
+            fs::create_dir_all(dir.path().join("remote")).unwrap();
+            fs::write(
+                dir.path().join("remote/settings.json"),
+                r#"{"share": true}"#,
+            )
+            .unwrap();
+            let _ = fs::remove_file(dir.path().join("remote/owner.json"));
+
+            assert_eq!(store.settings().unwrap(), DEFAULT_SETTINGS);
+            store.identity_for("m1").unwrap();
+            assert_eq!(store.settings().unwrap(), DEFAULT_SETTINGS);
+            assert!(!dir.path().join("remote/settings.json").exists());
+        }
     }
 
     /// Switches turned on before the first relay connection belong to the
