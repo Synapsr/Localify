@@ -1,4 +1,5 @@
 mod commands;
+mod remote;
 mod terminal;
 
 use std::collections::HashMap;
@@ -1105,6 +1106,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::with_api(api))
+        .manage(remote::RemoteStreams::default())
         .manage(TrayState::default());
 
     #[cfg(target_os = "macos")]
@@ -1192,6 +1194,14 @@ pub fn run() {
             commands::get_cloud_plan,
             commands::start_cloud_checkout,
             commands::open_cloud_billing_portal,
+            remote::get_remote_status,
+            remote::get_remote_machines,
+            remote::change_remote_settings,
+            remote::answer_remote_pairing,
+            remote::unpair_remote_machine,
+            remote::remove_remote_machine,
+            remote::open_remote_stream,
+            remote::close_remote_stream,
             commands::refresh_public_tunnel,
             commands::list_public_urls,
             commands::create_public_url,

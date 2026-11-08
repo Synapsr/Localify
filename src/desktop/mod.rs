@@ -9,6 +9,7 @@ mod node_trust;
 mod port_conflicts;
 mod project_roots;
 pub mod pty;
+mod remote;
 pub mod run_pty;
 pub mod shell_environment;
 pub mod terminal;

@@ -19,6 +19,7 @@ import { useScroll } from "@/hooks/use-scroll";
 import { cn } from "@/lib/utils";
 import { useAppHotkeys } from "@/providers/hotkeys-provider";
 
+import { MachineSwitcher } from "../remote/machine-switcher";
 import { ProjectsCreateDialog } from "./projects-create-dialog";
 import {
   consumeQueuedProjectsSearchFocus,
@@ -28,9 +29,11 @@ import {
 interface ProjectsHeaderProps {
   query: string;
   onQueryChange: (value: string) => void;
+  /** Another machine is on screen: nothing can be created there. */
+  remote?: boolean;
 }
 
-export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) => {
+export const ProjectsHeader = ({ query, onQueryChange, remote = false }: ProjectsHeaderProps) => {
   const { hotkeys } = useAppHotkeys();
   const { scrolled } = useScroll(4);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -61,34 +64,37 @@ export const ProjectsHeader = ({ query, onQueryChange }: ProjectsHeaderProps) =>
       <div className="relative z-10 flex items-end justify-between gap-4 ">
         <div className="relative z-10 flex items-center gap-4">
           <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
+          <MachineSwitcher />
         </div>
 
         <div className="flex  items-center gap-2">
-          <ProjectsCreateDialog>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <DialogTrigger
-                    render={
-                      <Button
-                        aria-label="Create project"
-                        className={cn("border-dashed")}
-                        variant="outline"
-                        size="icon"
-                        title="Create project"
-                      >
-                        <PlusIcon className="size-4 text-muted-foreground" />
-                      </Button>
-                    }
-                  />
-                }
-              />
-              <TooltipContent className="flex items-center gap-2">
-                <span>Create new project</span>
-                <Kbd>{formatForDisplay(hotkeys.createProject)}</Kbd>
-              </TooltipContent>
-            </Tooltip>
-          </ProjectsCreateDialog>
+          {remote ? null : (
+            <ProjectsCreateDialog>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <DialogTrigger
+                      render={
+                        <Button
+                          aria-label="Create project"
+                          className={cn("border-dashed")}
+                          variant="outline"
+                          size="icon"
+                          title="Create project"
+                        >
+                          <PlusIcon className="size-4 text-muted-foreground" />
+                        </Button>
+                      }
+                    />
+                  }
+                />
+                <TooltipContent className="flex items-center gap-2">
+                  <span>Create new project</span>
+                  <Kbd>{formatForDisplay(hotkeys.createProject)}</Kbd>
+                </TooltipContent>
+              </Tooltip>
+            </ProjectsCreateDialog>
+          )}
           <InputGroup className="max-w-xs border-dashed pr-5">
             <InputGroupInput
               ref={inputRef}

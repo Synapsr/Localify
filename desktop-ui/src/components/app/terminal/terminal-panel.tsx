@@ -57,6 +57,7 @@ import {
   ShellEnvironmentWarning,
   TerminalPanelMenu,
   TerminalRunEndBar,
+  TerminalSharedInputNote,
 } from "./terminal-run-status";
 
 export const TerminalPanel = () => {
@@ -202,6 +203,7 @@ export const TerminalPanel = () => {
             )}
             {currentSession ? <TerminalRunEndBar session={currentSession} /> : null}
           </div>
+          {currentSession ? <TerminalSharedInputNote session={currentSession} /> : null}
         </div>
       </div>
     </section>

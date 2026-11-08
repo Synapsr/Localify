@@ -1616,3 +1616,56 @@ pub struct SetPublicUrlProtectionRequest {
     #[serde(default)]
     pub password: Option<String>,
 }
+
+// --- Remote machines (docs/remote-machines.md, "Desktop app") -------------
+//
+// The daemon's answers reach the window as it sent them; their shapes are in
+// desktop-ui/src/types/localify.ts.
+
+/// This machine's switches for paired machines; each one is optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSettingsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_starts: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMachineRequest {
+    pub machine_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePairAnswerRequest {
+    pub pairing_id: String,
+    pub accept: bool,
+}
+
+/// A streaming management command the window listens to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RemoteStreamRequest {
+    /// Pairing requests, presence and revocations, while the app runs.
+    Events,
+    /// A pairing this machine starts.
+    Pair { machine_id: String },
+    /// Another machine's inventory, while it is on screen.
+    Watch { machine_id: String },
+    /// A run's output on another machine, from `offset`, or from its tail.
+    Follow {
+        machine_id: String,
+        run_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+    },
+}

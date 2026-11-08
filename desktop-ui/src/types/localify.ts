@@ -1080,3 +1080,176 @@ export interface SetPublicUrlProtectionRequest {
   mode: PublicUrlProtectionModeDto;
   password?: string;
 }
+
+// --- Remote machines (docs/remote-machines.md) -----------------------------
+// The daemon's answers, passed through `DesktopApi` as it sent them.
+
+export type RemoteRelayState = "off" | "connecting" | "connected" | "reconnecting" | "blocked";
+
+/** This machine's switches for paired machines. All start off. */
+export interface RemoteSettingsDto {
+  share: boolean;
+  control: boolean;
+  backgroundStarts: boolean;
+}
+
+export interface RemoteStatusDto {
+  relay: RemoteRelayState;
+  blocked: { code: string; message: string } | null;
+  /** RFC 3339: the next attempt, while reconnecting. */
+  retryAt: string | null;
+  settings: RemoteSettingsDto;
+  /** This machine's key, as four groups of four hex digits. */
+  fingerprint: string | null;
+}
+
+export type RemoteMachineState =
+  | "offline"
+  | "connecting"
+  | "reconnecting"
+  | "connected"
+  | "not_responding"
+  | "incompatible"
+  | "not_paired"
+  | "key_mismatch"
+  | "not_sharing"
+  | "signed_out"
+  | "unavailable";
+
+export interface RemoteMachineDto {
+  id: string;
+  name: string;
+  self: boolean;
+  paired: boolean;
+  state: RemoteMachineState;
+  version: string | null;
+  /** From its last `hello`; null until a session said. */
+  sharing: boolean | null;
+  fingerprint: string | null;
+  /** RFC 3339: when the relay saw it come or go. */
+  since: string | null;
+}
+
+export interface RemoteSettingsRequest {
+  share?: boolean;
+  control?: boolean;
+  backgroundStarts?: boolean;
+}
+
+export interface RemoteMachineRequest {
+  machineId: string;
+}
+
+export interface RemotePairAnswerRequest {
+  pairingId: string;
+  accept: boolean;
+}
+
+export type RemoteStreamRequest =
+  | { kind: "events" }
+  | { kind: "pair"; machineId: string }
+  | { kind: "watch"; machineId: string }
+  | { kind: "follow"; machineId: string; runId: string; offset: number | null };
+
+/** One line of a stream, or its end. */
+export interface RemoteStreamPayload {
+  streamId: number;
+  data: unknown;
+  done: boolean;
+  error: string | null;
+}
+
+/** What `remote_events` says while the app runs. */
+export type RemoteEventDto =
+  | { event: "subscribed" }
+  | { event: "pair_request"; pairingId: string; machineId: string; name: string; code: string }
+  | { event: "paired"; pairingId: string; machineId: string; name: string }
+  | { event: "pair_cancelled"; pairingId: string; machineId: string; reason: string }
+  | { event: "presence"; machineId: string; state: "online" | "offline" }
+  | { event: "revoked"; machineId: string }
+  | { event: "unpaired"; machineId: string };
+
+/** What `remote_pair` says to the machine that asked. */
+export type RemotePairEventDto =
+  | { event: "code"; pairingId: string; machineId: string; name: string; code: string }
+  | { event: "paired"; machineId: string; name: string }
+  | { event: "cancelled"; reason: string; message: string };
+
+export interface RemoteMachineSummaryDto {
+  machineId: string;
+  name: string;
+  version: string;
+  os: "macos" | "linux";
+  settings: RemoteSettingsDto;
+  app: "running" | "absent";
+}
+
+export type RemoteOwner = "app" | "background" | "terminal" | "unknown";
+
+export type RemoteOutputReason = "terminal" | "unknown_owner" | "no_run" | "legacy_run";
+
+export type RemoteControlAction = "start" | "stop" | "restart";
+
+export interface RemoteInventoryItemDto {
+  project: { id: string; name: string };
+  environment: { slug: string | null; name: string; primary: boolean; branch: string | null };
+  service: { id: string; name: string; configRev: string };
+  /** Resolves on the target only. */
+  localUrl: string;
+  /** Null: nothing runs and the port is free. */
+  owner: RemoteOwner | null;
+  run: {
+    runId: string | null;
+    legacy: boolean;
+    startedAt: string;
+    profile: string | null;
+    profileDanger: boolean;
+    exit: { at: string; code: number | null } | null;
+  } | null;
+  process: "running" | "stopped";
+  /** `reachable` null: not probed in time. */
+  port: { number: number; reachable: boolean | null };
+  output: { available: boolean; runId?: string; reason?: RemoteOutputReason };
+  publicUrl: {
+    url: string;
+    serving: boolean;
+    reason: "suspended" | "taken_down" | "served_elsewhere" | "tunnel_down" | null;
+  } | null;
+  controls: Record<RemoteControlAction, { allowed: boolean; code?: string }>;
+}
+
+/** Every page of one revision of a target's inventory. */
+export interface RemoteInventoryDto {
+  machine: RemoteMachineSummaryDto;
+  epoch: string;
+  rev: number;
+  truncated: boolean;
+  items: RemoteInventoryItemDto[];
+}
+
+/** What `remote_watch` streams. */
+export type RemoteWatchEventDto =
+  | { event: "connecting" }
+  | ({ event: "snapshot" } & RemoteInventoryDto)
+  | { event: "lost"; code: string; message: string; retryIn: number };
+
+export interface RemoteOutputLineDto {
+  text: string;
+  /** The line goes on in the next item. */
+  cut?: boolean;
+}
+
+export interface RemoteOutputDataDto {
+  runId: string;
+  offset: number;
+  next: number;
+  lines: RemoteOutputLineDto[];
+  rotated?: { firstOffset: number };
+  ended: boolean;
+  interrupted?: boolean;
+}
+
+/** What `remote_output_follow` streams. */
+export type RemoteFollowEventDto =
+  | ({ event: "data" } & RemoteOutputDataDto)
+  | { event: "ended"; code: string; message: string };

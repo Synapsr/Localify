@@ -2908,7 +2908,7 @@ impl DesktopApi {
         }
     }
 
-    fn load_config_and_paths(&self) -> Result<(Config, LocalifyPaths)> {
+    pub(super) fn load_config_and_paths(&self) -> Result<(Config, LocalifyPaths)> {
         let config = self.config_store().load()?;
         let paths = config.paths.clone();
         Ok((config, paths))

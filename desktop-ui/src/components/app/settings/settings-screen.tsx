@@ -13,6 +13,7 @@ import { SettingsDeveloper } from "./settings-developer";
 import { SettingsHeader } from "./settings-header";
 import { SettingsHotkeys } from "./settings-hotkeys";
 import { SettingsLaunchers } from "./settings-launchers";
+import { SettingsRemoteAccess } from "./settings-remote-access";
 import { SettingsStartup } from "./settings-startup";
 import { SettingsStatus } from "./settings-status";
 import { SettingsTransfer } from "./settings-transfer";
@@ -64,6 +65,7 @@ export const SettingsScreen = () => {
         <SettingsLaunchers />
         <SettingsAgents config={data.config} />
         <SettingsCloud />
+        <SettingsRemoteAccess />
         <SettingsAnalytics />
         <SettingsTransfer />
         <SettingsHotkeys />

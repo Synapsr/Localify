@@ -228,6 +228,13 @@ impl MgmtStream {
     pub fn next_answer(&mut self) -> Result<Option<serde_json::Value>, DaemonConnectionError> {
         Ok(read_answer(&mut self.reader)?.map(|mut answer| answer["data"].take()))
     }
+
+    /// A handle that closes the stream from another thread: shutting it
+    /// down ends what the stream watched, and `next_answer` returns.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn closer(&self) -> std::io::Result<UnixStream> {
+        self.reader.get_ref().try_clone()
+    }
 }
 
 /// One answer line, or `None` at the end of the stream. An answer with

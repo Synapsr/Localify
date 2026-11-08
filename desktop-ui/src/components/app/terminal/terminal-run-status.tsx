@@ -1,5 +1,6 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -13,6 +14,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { remoteQueries } from "@/lib/queries";
 import { toTerminalTargetRequest, useTerminal } from "@/providers/terminal-provider";
 
 /** Shown under a service tab once its run ended and its output was finalized. */
@@ -76,6 +78,20 @@ export function TerminalRunEndBar({ session }: { session: TerminalSessionDto }) 
         <TerminalIcon />
         Open a terminal here
       </Button>
+    </div>
+  );
+}
+
+/**
+ * Under a running service tab while this Mac shares its output: keystrokes are echoed into
+ * the run's output, which paired machines read (docs/remote-machines.md, "Output").
+ */
+export function TerminalSharedInputNote({ session }: { session: TerminalSessionDto }) {
+  const status = useQuery({ ...remoteQueries.status(), refetchInterval: false, staleTime: 30_000 });
+  if (!session.run || session.run.ended || !status.data?.settings.share) return null;
+  return (
+    <div className="shrink-0 border-t border-white/10 bg-[#171717] px-3 py-1.5 text-[11px] text-neutral-400">
+      What you type here appears in this service's output.
     </div>
   );
 }
