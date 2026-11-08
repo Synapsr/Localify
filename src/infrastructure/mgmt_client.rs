@@ -37,6 +37,27 @@ impl MgmtSocketClient {
 
     /// Send a command to the management socket and return the parsed JSON response.
     fn send_command(&self, cmd: &str) -> Result<serde_json::Value, DaemonConnectionError> {
+        self.send_command_within(cmd, Duration::from_secs(2))
+    }
+
+    /// Like `send_command`, for an answer that takes longer than 2 s.
+    fn send_command_within(
+        &self,
+        cmd: &str,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let mut reader = self.open(cmd, Some(timeout))?;
+        read_answer(&mut reader)?.ok_or_else(|| {
+            DaemonConnectionError::ProtocolError("the daemon closed the connection".into())
+        })
+    }
+
+    /// Connects and sends one command; `None` waits for the answer forever.
+    fn open(
+        &self,
+        cmd: &str,
+        timeout: Option<Duration>,
+    ) -> Result<BufReader<UnixStream>, DaemonConnectionError> {
         let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::PermissionDenied {
                 DaemonConnectionError::ConnectionFailed(error.into())
@@ -46,7 +67,7 @@ impl MgmtSocketClient {
         })?;
 
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(timeout)
             .map_err(|e| DaemonConnectionError::ConnectionFailed(e.into()))?;
         stream
             .set_write_timeout(Some(Duration::from_secs(2)))
@@ -56,24 +77,66 @@ impl MgmtSocketClient {
             .write_all(format!("{cmd}\n").as_bytes())
             .map_err(|e| DaemonConnectionError::ConnectionFailed(e.into()))?;
 
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| DaemonConnectionError::ConnectionFailed(e.into()))?;
+        Ok(BufReader::new(stream))
+    }
 
-        let resp: serde_json::Value = serde_json::from_str(&line)
-            .map_err(|e| DaemonConnectionError::ProtocolError(e.to_string()))?;
+    /// The relay link, the settings and this machine's fingerprint
+    /// (`docs/remote-machines.md`, "Daemon").
+    pub fn remote_status(&self) -> Result<serde_json::Value, DaemonConnectionError> {
+        let mut response = self.send_command(r#"{"cmd":"remote_status"}"#)?;
+        Ok(response["data"].take())
+    }
 
-        if !resp["ok"].as_bool().unwrap_or(false) {
-            let msg = resp["error"]
-                .as_str()
-                .unwrap_or("unknown error")
-                .to_string();
-            return Err(DaemonConnectionError::ProtocolError(msg));
-        }
+    /// The roster with each machine's state. A probe opens a session to
+    /// each paired machine online, which takes a few seconds.
+    pub fn remote_machines(&self, probe: bool) -> Result<serde_json::Value, DaemonConnectionError> {
+        let command = serde_json::json!({ "cmd": "remote_machines", "probe": probe });
+        let mut response =
+            self.send_command_within(&command.to_string(), Duration::from_secs(40))?;
+        Ok(response["data"].take())
+    }
 
-        Ok(resp)
+    /// Changes the target settings and returns them as saved. `change`
+    /// holds `share`, `control` and `backgroundStarts`, each optional.
+    pub fn remote_settings(
+        &self,
+        change: serde_json::Value,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let mut command = change;
+        command["cmd"] = serde_json::json!("remote_settings");
+        let mut response = self.send_command(&command.to_string())?;
+        Ok(response["data"].take())
+    }
+
+    /// Deletes a pin; `true` when there was one.
+    pub fn remote_unpair(&self, machine_id: &str) -> Result<bool, DaemonConnectionError> {
+        let command = serde_json::json!({ "cmd": "remote_unpair", "machineId": machine_id });
+        let response = self.send_command(&command.to_string())?;
+        Ok(response["data"]["removed"].as_bool().unwrap_or(false))
+    }
+
+    /// A person's answer to a pairing code.
+    pub fn remote_pair_answer(
+        &self,
+        pairing_id: &str,
+        accept: bool,
+    ) -> Result<(), DaemonConnectionError> {
+        let command = serde_json::json!({
+            "cmd": "remote_pair_answer", "pairingId": pairing_id, "accept": accept,
+        });
+        self.send_command_within(&command.to_string(), Duration::from_secs(10))
+            .map(|_| ())
+    }
+
+    /// A streaming command (`remote_pair`, `remote_events`): one answer per
+    /// line until the daemon or the caller closes it.
+    pub fn remote_stream(
+        &self,
+        command: &serde_json::Value,
+    ) -> Result<MgmtStream, DaemonConnectionError> {
+        Ok(MgmtStream {
+            reader: self.open(&command.to_string(), None)?,
+        })
     }
 
     /// Reports the start, heartbeat or stop of a service launched with a
@@ -141,6 +204,46 @@ impl MgmtSocketClient {
     pub fn public_refresh(&self) -> Result<(), DaemonConnectionError> {
         self.send_command(r#"{"cmd":"public_refresh"}"#).map(|_| ())
     }
+}
+
+/// The answers of a streaming command. Dropping it closes the connection,
+/// which ends what it watched.
+pub struct MgmtStream {
+    reader: BufReader<UnixStream>,
+}
+
+impl MgmtStream {
+    /// The next answer's `data`; `None` once the daemon closed the stream.
+    pub fn next_answer(&mut self) -> Result<Option<serde_json::Value>, DaemonConnectionError> {
+        Ok(read_answer(&mut self.reader)?.map(|mut answer| answer["data"].take()))
+    }
+}
+
+/// One answer line, or `None` at the end of the stream. An answer with
+/// `ok: false` is an error carrying its message.
+fn read_answer(
+    reader: &mut BufReader<UnixStream>,
+) -> Result<Option<serde_json::Value>, DaemonConnectionError> {
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .map_err(|e| DaemonConnectionError::ConnectionFailed(e.into()))?;
+    if read == 0 {
+        return Ok(None);
+    }
+
+    let resp: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|e| DaemonConnectionError::ProtocolError(e.to_string()))?;
+
+    if !resp["ok"].as_bool().unwrap_or(false) {
+        let msg = resp["error"]
+            .as_str()
+            .unwrap_or("unknown error")
+            .to_string();
+        return Err(DaemonConnectionError::ProtocolError(msg));
+    }
+
+    Ok(Some(resp))
 }
 
 impl DaemonConnection for MgmtSocketClient {

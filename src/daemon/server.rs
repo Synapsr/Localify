@@ -20,9 +20,11 @@ use super::dns_server::DnsServer;
 use super::launch_sessions::LaunchSessions;
 use super::lifecycle::ShutdownHandle;
 use super::listeners::DaemonListeners;
+use super::mgmt_socket::MachineServices;
 use super::proxy::{ClientAddr, Scheme};
 use super::public_ingress::{self, IngressAccess};
 use super::public_tunnel::{self, PublicTunnel, TunnelFiles};
+use super::remote::{self, RemoteLink};
 use super::router::{DomainAccessLog, RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
 use crate::application::ports::RegistrationProvider;
@@ -157,6 +159,8 @@ impl Server {
             cancel.clone(),
         )
         .await;
+        let remote = RemoteLink::new(&self.data_dir);
+        remote::spawn(remote.clone(), cancel.clone());
         public_tunnel::spawn(
             tunnel.clone(),
             access,
@@ -177,8 +181,11 @@ impl Server {
             self.socket_path,
             ports,
             shutdown,
-            tunnel,
-            inventory,
+            MachineServices {
+                tunnel,
+                inventory,
+                remote,
+            },
         );
 
         let http_server =
@@ -343,19 +350,11 @@ fn spawn_mgmt_socket(
     socket_path: PathBuf,
     ports: super::mgmt_socket::DaemonPorts,
     shutdown: ShutdownHandle,
-    tunnel: PublicTunnel,
-    inventory: Arc<LocalInventory>,
+    services: MachineServices,
 ) {
     tokio::spawn(async move {
-        let served = super::mgmt_socket::serve(
-            socket_path,
-            state,
-            reload_tx,
-            shutdown,
-            ports,
-            tunnel,
-            inventory,
-        );
+        let served =
+            super::mgmt_socket::serve(socket_path, state, reload_tx, shutdown, ports, services);
         if let Err(e) = served.await {
             error!(error = %e, "Management socket error");
         }

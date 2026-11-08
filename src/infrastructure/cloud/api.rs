@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::http::{CloudError, CloudHttp};
-use super::types::{CloudMachine, CloudUser, PublicUrl};
+use super::types::{CloudMachine, CloudUser, LeaseGrant, PublicUrl, RosterMachine};
 
 /// GitHub's device flow, started by Localify Cloud.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -300,6 +300,87 @@ impl CloudClient {
     }
 }
 
+/// What the relay link needs from `GET /v1/me`: the account's id, which
+/// goes into every prologue, and whether the plan gives remote access
+/// (`docs/remote-machines.md`, "Entitlement").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAccount {
+    pub user_id: String,
+    pub remote_access: bool,
+}
+
+#[derive(Deserialize)]
+struct RemoteMe {
+    user: RemoteMeUser,
+    #[serde(default)]
+    plan: Option<RemoteMePlan>,
+}
+
+#[derive(Deserialize)]
+struct RemoteMeUser {
+    /// Left out by a cloud older than remote access.
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RemoteMePlan {
+    limits: RemoteMeLimits,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteMeLimits {
+    #[serde(default)]
+    remote_access: bool,
+}
+
+#[derive(Deserialize)]
+struct Roster {
+    machines: Vec<RosterMachine>,
+}
+
+/// The routes of remote access (`docs/remote-machines.md`, "API").
+impl CloudClient {
+    /// `None` when the cloud does not say who the account is, as a cloud
+    /// from before remote access does not.
+    pub async fn remote_account(&self) -> Result<Option<RemoteAccount>, CloudError> {
+        let me: RemoteMe = self.http.send(Method::GET, "/v1/me", None).await?;
+        Ok(me.user.id.map(|user_id| RemoteAccount {
+            user_id,
+            remote_access: me.plan.is_some_and(|plan| plan.limits.remote_access),
+        }))
+    }
+
+    /// The account's active machines, this one included.
+    pub async fn machines(&self) -> Result<Vec<RosterMachine>, CloudError> {
+        let roster: Roster = self.http.send(Method::GET, "/v1/machines", None).await?;
+        Ok(roster.machines)
+    }
+
+    /// Set once per machine id: the same key again is fine, another one is
+    /// `409 remote_key_set`.
+    pub async fn put_remote_key(&self, public_key: &str) -> Result<(), CloudError> {
+        self.http
+            .send_no_content(
+                Method::PUT,
+                "/v1/machines/self/remote-key",
+                Some(json!({ "publicKey": public_key })),
+            )
+            .await
+    }
+
+    /// Signs that machine out of the account.
+    pub async fn remove_machine(&self, id: &str) -> Result<(), CloudError> {
+        let path = format!("/v1/machines/{}", encode_component(id));
+        self.http.send_no_content(Method::DELETE, &path, None).await
+    }
+
+    pub async fn remote_lease(&self) -> Result<LeaseGrant, CloudError> {
+        self.http.send(Method::GET, "/v1/remote/lease", None).await
+    }
+}
+
 /// `/v1/public-urls/<id><suffix>`, with the id encoded as one path segment.
 fn url_path(id: &str, suffix: &str) -> String {
     format!("/v1/public-urls/{}{suffix}", encode_component(id))
@@ -395,6 +476,55 @@ mod tests {
         assert_eq!(body, r#"{"protection":{"mode":"password","password":"p"}}"#);
         assert_eq!(changed.public_url.protection.mode, ProtectionMode::Password);
         assert_eq!(changed.password, None);
+    }
+
+    #[test]
+    fn the_remote_account_reads_the_user_id_and_remote_access() {
+        let (address, server) = serve_once(
+            "200 OK",
+            r#"{"user":{"id":"u1","login":"teo"},"machine":{"id":"m1","name":"mac"},
+               "plan":{"status":"active","entitled":true,
+                       "limits":{"servingMachines":1,"publicUrls":3,"remoteAccess":true},
+                       "usage":{"servingMachines":0,"publicUrls":0}}}"#,
+        );
+        let account = block_on(client(&address).remote_account())
+            .unwrap()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            account,
+            Some(RemoteAccount {
+                user_id: "u1".into(),
+                remote_access: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_remote_key_is_put_as_the_contract_says() {
+        let (address, server) = serve_once("204 No Content", "");
+        block_on(client(&address).put_remote_key("k"))
+            .unwrap()
+            .unwrap();
+        let (head, body) = server.join().unwrap();
+        assert!(
+            head.starts_with("PUT /v1/machines/self/remote-key HTTP/1.1"),
+            "{head}"
+        );
+        assert_eq!(body, r#"{"publicKey":"k"}"#);
+    }
+
+    #[test]
+    fn removing_a_machine_encodes_its_id() {
+        let (address, server) = serve_once("204 No Content", "");
+        block_on(client(&address).remove_machine("m/1"))
+            .unwrap()
+            .unwrap();
+        let (head, _) = server.join().unwrap();
+        assert!(
+            head.starts_with("DELETE /v1/machines/m%2F1 HTTP/1.1"),
+            "{head}"
+        );
     }
 
     #[test]

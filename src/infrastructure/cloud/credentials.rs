@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::file_security::write_private_file;
+use crate::infrastructure::remote::store::RemoteStore;
 
 const FILE_NAME: &str = "cloud.json";
 
@@ -77,14 +78,22 @@ impl CredentialsStore {
             .with_context(|| format!("Could not write {}", self.path.display()))
     }
 
-    /// Deleting credentials that are already gone is not an error.
+    /// Signs this machine out here: the credentials go, and with them the
+    /// remote key, the pins and the remote settings, so a new sign-in starts
+    /// over (`docs/remote-machines.md`, "Keys"). Deleting credentials that
+    /// are already gone is not an error.
     pub fn delete(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                Err(error).with_context(|| format!("Could not delete {}", self.path.display()))
+                return Err(error)
+                    .with_context(|| format!("Could not delete {}", self.path.display()));
             }
+        }
+        match self.path.parent() {
+            Some(data_dir) => RemoteStore::in_data_dir(data_dir).delete_all(),
+            None => Ok(()),
         }
     }
 }
@@ -133,6 +142,18 @@ mod tests {
         store.delete().unwrap();
         store.delete().unwrap();
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn signing_out_deletes_the_remote_key_pins_and_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::in_data_dir(dir.path());
+        store.save(&credentials()).unwrap();
+        RemoteStore::in_data_dir(dir.path())
+            .identity_for("m1")
+            .unwrap();
+        store.delete().unwrap();
+        assert!(!dir.path().join("remote").exists());
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod pid;
 pub mod port_check;
 pub mod process;
 pub mod project_marker;
+pub mod remote;
 pub mod running_services;
 pub mod runs;
 pub mod service_sockets;

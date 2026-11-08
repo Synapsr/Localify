@@ -11,6 +11,7 @@ pub mod launch_profile;
 pub mod list;
 pub mod list_projects;
 pub mod logs;
+pub mod machines;
 pub mod mcp;
 pub mod output;
 pub mod profile_init;
