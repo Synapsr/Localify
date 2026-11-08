@@ -17,7 +17,8 @@ export const LegalPage = ({ title, updatedAt, intro, children }: LegalPageProps)
   const nav = useTranslations("Navigation");
   const legal = useTranslations("Legal");
   const navItems = [
-    { href: "/#how-it-works", label: nav("howItWorks") },
+    { href: "/#use-cases", label: nav("useCases") },
+    { href: "/#pricing", label: nav("pricing") },
     { href: "/#faq", label: nav("faq") },
     { href: sourceUrl, label: nav("source") },
   ];

@@ -1,20 +1,24 @@
 {
   "Metadata": {
-    "title": "Localify - 開発者のためのローカルドメインと信頼できる HTTPS",
-    "description": "Localify は無料のオープンソースアプリです。ローカルプロジェクトに安定した .localify ドメイン、信頼できる HTTPS、DNS ルーティング、ネイティブ macOS アプリを提供します。mkcert も /etc/hosts の編集もトンネルの設定も不要です。"
+    "title": "Localify - すべてのエージェント、ワークツリー、マシンにクリーンな URL を",
+    "description": "Localify は、すべてのプロジェクト、Git ワークツリー、マシンに安定した HTTPS URL を与えます。設定はコーディングエージェントが MCP 経由で行い、エージェントが動かすものはすべてデスクトップアプリで確認できます。無料のオープンソースです。"
   },
   "Navigation": {
+    "useCases": "ユースケース",
     "howItWorks": "使い方",
+    "pricing": "料金",
     "faq": "FAQ",
     "source": "ソースコード",
     "cta": "ダウンロード"
   },
   "Hero": {
-    "titleLine1": ":3000 では",
-    "titleLine2": "物足りない",
-    "description": "ポートをやりくりする代わりに、プロジェクトに名前を。.localify URL、ローカル DNS、信頼される HTTPS。",
+    "eyebrow": "エージェントファースト、舵取りはあなた",
+    "titleLine1": "動かすのはエージェント。",
+    "titleLine2": "あなたは URL を開くだけ。",
+    "description": "すべてのプロジェクト、ワークツリー、マシンにクリーンな HTTPS URL を。設定はコーディングエージェントが MCP 経由ですべて行います。あなたは一つのアプリから見守り、指示を出すだけです。",
     "download": "macOS 版をダウンロード",
     "source": "ソースコードを見る",
+    "terminal": "またはコマンドライン版をインストール",
     "availability": "AGPL の無料オープンソース。デスクトップアプリは macOS 向けです。"
   },
   "DemoDialog": {
@@ -23,54 +27,141 @@
     "later": "あとで",
     "download": "今すぐダウンロード"
   },
-  "Agents": {
-    "title": "エージェントにすべて任せよう。",
-    "description": "Claude Code、Codex、Cursor を Localify につなぐだけ。エージェントがプロジェクトを設定してサービスを起動し、作業が終わればワークツリーも片付けます。あなたは話しかけるだけです。"
+  "AgentStrip": {
+    "label": "MCP であなたのエージェントと連携",
+    "more": "ほか、あらゆる MCP クライアント"
   },
-  "Problem": {
-    "titleLine1": "本当に変わるのは",
-    "titleLine2": "ここ。",
+  "UseCases": {
+    "titleLine1": "作業するのはエージェント。",
+    "titleLine2": "すべてを見渡すのはあなた。",
+    "description": "エージェントと一緒にコードを書く、今の開発スタイルのために。複数のエージェントを同時に、複数のコンピューターで。",
+    "items": {
+      "agent": {
+        "title": "設定はエージェントが。",
+        "body": "Claude Code、Codex、Cursor を一度つなぐだけ。アプリのすべての操作が MCP ツールになっているので、エージェントがプロジェクトを作成し、空いているポートを選び、Next.js や Vite の設定をパッチして、各サービスをそれぞれの URL で起動します。あなたは頼むだけです。"
+      },
+      "worktrees": {
+        "title": "ワークツリーごとに、URL を一つ。",
+        "body": "Git ワークツリーはそれぞれ、独自のドメインとポートを持つ環境になり、メインのチェックアウトと並んで動きます。5 つのブランチで 5 つのエージェントが動いても、URL は 5 つ。衝突することはありません。作業が終われば、エージェントがワークツリーとそのドメインを削除します。"
+      },
+      "app": {
+        "title": "アプリから見守る。",
+        "body": "エージェントが起動したものは Localify アプリのターミナルで動くので、すべてが見えます。プロジェクト、ワークツリー、ログ、リクエストを一つのウィンドウに。URL を開き、出力を読み、サービスを再起動・停止できます。"
+      },
+      "machines": {
+        "title": "手持ちのすべてのマシンで。",
+        "body": "デスクトップや空いている Mac でエージェントに作業させ、自分はノートパソコンやスマートフォンからテスト。プロジェクトごとの公開 URL 一つで、その下のすべてのサービスとワークツリーにアクセスできます。デフォルトでパスワード保護付きです。"
+      }
+    },
+    "agentDemo": {
+      "prompt": "fix-auth ワークツリーで web アプリを起動して、リンクを送って。",
+      "reply": "完了しました。起動先："
+    },
+    "worktreeDemo": {
+      "title": "環境",
+      "primary": "main",
+      "running": "実行中",
+      "stopped": "停止中",
+      "removed": "マージ時に削除"
+    },
+    "appDemo": {
+      "terminal": "ターミナル",
+      "checkouts": "チェックアウト"
+    },
+    "machinesDemo": {
+      "studio": "Mac Studio",
+      "studioRole": "ここでエージェントが作業",
+      "laptop": "MacBook",
+      "laptopRole": "ここでレビュー",
+      "phone": "iPhone",
+      "phoneRole": "ここでテスト",
+      "password": "パスワード保護"
+    }
+  },
+  "Features": {
+    "titleLine1": "URL だけでなく、",
+    "titleLine2": "その先まで。",
     "cards": {
-      "urls": {
-        "title": "意味のある URL を。",
-        "body": "studio.localify、admin.localify、docs.localify。:3000、:3001、:5173 の間でやりくりする時代は終わり。"
+      "https": {
+        "title": "信頼できる HTTPS、設定不要。",
+        "body": "インストール時にパスワードを一度入力するだけで、ローカル DNS、認証局、Node.js の信頼設定が整います。/etc/hosts の編集も、mkcert も、NODE_EXTRA_CA_CERTS も不要です。"
       },
-      "ui": {
-        "title": "CLI じゃなくて、アプリ。",
-        "body": "プロジェクト、URL、ログ — すべてが一か所に。設定ファイルを編集する必要はありません。"
+      "profiles": {
+        "title": "シークレットは元の場所に。",
+        "body": "サービスの変数をどこから読み込むかは localify.toml に書きます。.env ファイル、Infisical、Proton Pass のいずれかです。Infisical と Proton Pass の値は、エージェントが読む出力ではマスクされたままです。"
       },
-      "agents": {
-        "title": "複数のエージェント、ゼロ競合。",
-        "body": "Cursor、Claude Code、そしてあなた自身の dev server が並行して動く。各プロジェクトが安定した URL を保持します。"
+      "stack": {
+        "title": "どんなスタックでも。Docker も。",
+        "body": "Localify はホスト名でルーティングするので、ポートで listen するものなら何でも動きます。Next.js と Vite は設定を自動でパッチし、Docker と Compose のサービスは自動で検出します。"
       }
     }
   },
   "HowItWorks": {
-    "titleLine1": "実際の動きは、",
-    "titleLine2": "こうです。",
-    "description": "インストール時に権限を一つ。フォルダか localify init-project を一つ。アプリごとに HTTPS のドメイン一つ。それだけ。",
+    "titleLine1": "3 ステップ。",
+    "titleLine2": "あとは頼むだけ。",
     "steps": [
       {
-        "title": "パスワード一つ、設定ゼロ。",
-        "body": "初回起動時に、Localify が管理者パスワードを一度だけ尋ねます。その後、認証局、DNS、デーモンを自動でセットアップします。ブラウザで初めて HTTPS が必要になったときに、macOS が証明書の確認を一度だけ求めます。"
+        "title": "アプリをダウンロード。",
+        "body": "初回起動時に管理者パスワードを一度だけ尋ね、HTTPS、DNS、バックグラウンドサービスをセットアップします。それ以降、Localify が root 権限で動かすものはありません。"
       },
       {
-        "title": "フォルダを選ぶ。Localify が autocomplete。",
-        "body": "Localify がフォルダをスキャンしてアプリを検出し、それぞれにホスト名を提案します。内容を確認して確定するだけです。"
+        "title": "エージェントをつなぐ。",
+        "body": "Settings → AI agents か localify agent install で、MCP サーバーを Claude Code、Codex、Cursor に登録します。"
       },
       {
-        "title": "localify init-project、エディタから直接。",
-        "body": "もうエディタを開いている？ターミナルから localify init-project を実行するだけです。同じ autocomplete フロー、同じ確認ステップ。プロジェクトはアプリに表示されます。"
-      },
-      {
-        "title": "ポートではなく、名前でプロジェクトを。",
-        "body": "各プロジェクトに信頼できる HTTPS 付きの .localify ホスト名が付きます。意味の伝わるタブ、本物のプロダクトらしいデモ、ポートが変わっても壊れない環境。"
-      },
-      {
-        "title": "起動も監視も、エディタなしで。",
-        "body": "Localify はローカルのダッシュボードにもなります — ワンクリックで任意のプロジェクトを起動、ひと目で稼働状況を確認。IDE を一度も開かずに vibecoding したいときに最適です。"
+        "title": "URL を頼む。",
+        "body": "「このワークツリーでアプリを起動して」。エージェントがアプリ内で起動し、URL を渡してくれます。"
       }
-    ]
+    ],
+    "diagram": {
+      "you": "あなた",
+      "youDetail": "デスクトップアプリ",
+      "agents": "エージェント",
+      "agentsDetail": "MCP サーバー",
+      "machine": "各 Mac の Localify",
+      "machineDetail": "DNS · HTTPS · ルーター",
+      "servers": "開発サーバー",
+      "serversDetail": "ワークツリーごとに URL",
+      "devices": "ほかのデバイス",
+      "devicesDetail": "ノートパソコン、スマートフォン",
+      "cloud": "Localify Cloud",
+      "cloudDetail": "パスワード · トンネル"
+    }
+  },
+  "Pricing": {
+    "titleLine1": "自分のマシンでは無料。",
+    "titleLine2": "マシンをまたぐなら Pro。",
+    "description": "あなたのコンピューターで動くものはすべて、無料のオープンソースです。Localify Cloud Pro は、どこからでもアクセスできる公開 URL を追加します。",
+    "free": {
+      "name": "Localify",
+      "price": "$0",
+      "period": "ずっと無料",
+      "tagline": "あなたのマシン上のすべて。",
+      "features": [
+        "プロジェクト、ドメイン、ワークツリーは無制限",
+        "信頼できるローカル HTTPS",
+        "デスクトップアプリ、CLI、MCP サーバー",
+        "サービスのターミナルとリクエストログ",
+        "AGPL のオープンソース"
+      ],
+      "cta": "macOS 版をダウンロード"
+    },
+    "pro": {
+      "name": "Localify Cloud Pro",
+      "price": "$7.99",
+      "period": "/ 月",
+      "yearly": "または年額 $79",
+      "tagline": "どこからでも、自分のマシンへ。",
+      "features": [
+        "localify.fyi の公開 URL を 10 個",
+        "1 つの URL で、プロジェクトのすべてのサービスとワークツリーにアクセス",
+        "最大 2 台のマシンから配信",
+        "デフォルトでパスワード保護、自動でサインインできるリンク付き",
+        "7 日間の無料トライアル"
+      ],
+      "cta": "招待をリクエスト",
+      "note": "現在は招待制です。GitHub でサインインします。"
+    }
   },
   "Faq": {
     "titleLine1": "よくある質問に、",
@@ -80,27 +171,31 @@
     "items": [
       {
         "question": "Localify とは何ですか？",
-        "answer": "Localify は各ローカルプロジェクトに信頼できる HTTPS 付きの安定した .localify URL を与えます。localhost:3000、localhost:5173、localhost:8080 を使い分ける代わりに、app.localify や admin.localify をブラウザで直接開けます。"
+        "answer": "Localify は、すべてのローカルプロジェクト、Git ワークツリー、マシンに、信頼できる HTTPS 付きの安定した URL を与えます。localhost:3000 の代わりに https://web.journal.localify のように。コーディングエージェントが MCP 経由で操作し、エージェントが動かすものはデスクトップアプリで確認できます。"
       },
       {
         "question": "無料ですか？",
-        "answer": "はい。Localify は AGPL の無料オープンソースで、アカウントは不要、プロジェクト数やドメイン数の上限もありません。公開 URL も無料ですが、招待されたアカウントが必要で、現在は 1 人あたり 10 個までです。ソースコードは GitHub にあります。"
+        "answer": "あなたのマシンで動くものはすべて AGPL の無料オープンソースです。アカウントは不要で、プロジェクト、ドメイン、ワークツリーの数にも上限はありません。別のデバイスから自分のマシンにアクセスするための公開 URL には Localify Cloud Pro が必要です。7 日間の無料トライアルのあと、月額 $7.99 または年額 $79 です。Localify Cloud は現在招待制です。"
       },
       {
-        "question": "誰向けのツールですか？",
-        "answer": "複数のアプリをローカルで動かす開発者、スタックを切り替える開発者、AI エージェントを並行して動かしたい開発者向けです — ポート衝突を管理する必要なしに。"
+        "question": "どのエージェントに対応していますか？",
+        "answer": "Claude Code、Codex、Cursor に、Localify に組み込まれた MCP サーバー経由で対応しています。Settings → AI agents か localify agent install で接続します。ただし、次の 2 つはあなた自身が行います。Localify Cloud へのサインインと、公開 URL を誰でも開けるようにすることです。"
+      },
+      {
+        "question": "ワークツリーごとに URL が付くのはどういう仕組みですか？",
+        "answer": "エージェントが Git ワークツリー内でサービスを起動すると、Localify はそのワークツリーを環境としてプロジェクトに追加し、専用のポートと web--fix-auth.journal.localify のようなドメインを割り当てます。メインのチェックアウトの URL はそのままです。作業が終われば、エージェントが環境、そのドメイン、ワークツリーのフォルダを削除します。"
+      },
+      {
+        "question": "別のコンピューターで動いているものを開けますか？",
+        "answer": "はい、公開 URL を使えば開けます。プロジェクトに公開 URL を作成すると、その下のすべてのサービスとワークツリーを、ノートパソコンやスマートフォンから https://<slug>--<label>.localify.fyi でパスワード付きで開けます。URL を自分の別のマシンに移すには localify public-url claim を使います。"
       },
       {
         "question": "作業内容がインターネットに公開されますか？",
-        "answer": "自分で有効にした場合だけです。ローカルサービスはあなたのマシン上に残り、アプリの通信やリクエストログが Localify に送られることはありません。例外は公開 URL です。これは招待制のオプションで、ドメインごとに個別にオンにします。その URL へのリクエストは Cloudflare を経由してあなたのマシンに届き、デフォルトでパスワードで保護されます。"
+        "answer": "頼んだ場合だけです。ローカルサービスはあなたのマシン上に残り、アプリの通信やリクエストログが Localify に送られることはありません。例外は、自分でオンにする公開 URL です。その URL へのリクエストは Cloudflare を経由してあなたのマシンに届き、デフォルトでパスワードで保護されます。"
       },
       {
-        "question": "Localify は analytics を収集しますか？",
-        "answer": "公式デスクトップアプリは収集します。対象はプロダクトのフロー（オンボーディング、ナビゲーション、プロジェクト作成）、利用状況のカウント、エラーレポートです。これらのイベントにリクエストログ、プロジェクト名、ドメイン、ローカルパス、通信内容は含まれません。エラーレポートは送信前にフィルターを通し、URL、ファイルパス、.localify ドメイン、引用符で囲まれた名前を取り除きますが、すべてを検出できるとは限りません。CLI とデーモンは分析データを送信しません。"
-      },
-      {
-        "question": "どのプラットフォームで動きますか？",
-        "answer": "デスクトップアプリは現在、Apple Silicon の macOS で動きます。CLI とデーモンは Linux x86_64 にも curl -fsSL https://localify.dev/install.sh | sh でインストールでき、その他の環境ではソースからビルドできます。Windows と Linux 向けデスクトップアプリは今後対応する予定です。"
+        "question": "ngrok や Cloudflare Tunnel との違いは？",
+        "answer": "トンネルは、一つのポートをインターネットに公開するものです。Localify はあなたのマシンから始まります。すべてのプロジェクトとワークツリーに名前付きの HTTPS URL があり、それをエージェントが設定し、一つのアプリで確認できます。外からアクセスしたいときは、一つの公開 URL でプロジェクト全体を、すべてのワークツリーも含めてカバーします。"
       },
       {
         "question": "/etc/hosts の編集や mkcert のインストールは必要ですか？",
@@ -111,17 +206,17 @@
         "answer": "はい。Localify は hostname でルーティングするため、ローカルポートで listen するものならすべて動作します。Docker、Next.js、Vite、Rails、自作のサーバー — どんなスタックでも。"
       },
       {
-        "question": "ngrok や Cloudflare Tunnel との違いは？",
-        "answer": "ngrok と Cloudflare Tunnel は、サービスをインターネットに公開するために作られています。Localify はローカル開発のために作られています。クラウドを使わずに、あなたのマシン上でクリーンな URL と信頼できる HTTPS を提供します。スマートフォンや別のコンピューターから dev server を開く必要があるときは、公開 URL を使えば、デフォルトでパスワードで保護された状態で開けます。公開 URL は現在、招待制です。"
+        "question": "どのプラットフォームで動きますか？",
+        "answer": "デスクトップアプリは現在、Apple Silicon の macOS で動きます。CLI とデーモンは Linux x86_64 にも curl -fsSL https://localify.dev/install.sh | sh でインストールでき、その他の環境ではソースからビルドできます。Windows と Linux 向けデスクトップアプリは今後対応する予定です。"
       },
       {
-        "question": "Cursor、Claude Code、または複数の AI エージェントの並行動作で使えますか？",
-        "answer": "はい — むしろ中心的なユースケースです。どのプロジェクトでも /localify を実行すれば、エージェントがすべてを設定します。アプリごとのドメイン、信頼された HTTPS、dev スクリプトまで。複数のエージェントが別々のアプリで並行して作業しても、ポートの競合は一切ありません。"
+        "question": "Localify は analytics を収集しますか？",
+        "answer": "公式デスクトップアプリは収集します。対象はプロダクトのフロー（オンボーディング、ナビゲーション、プロジェクト作成）、利用状況のカウント、エラーレポートです。これらのイベントにリクエストログ、プロジェクト名、ドメイン、ローカルパス、通信内容は含まれません。エラーレポートは送信前にフィルターを通し、URL、ファイルパス、.localify ドメイン、引用符で囲まれた名前を取り除きますが、すべてを検出できるとは限りません。CLI とデーモンは分析データを送信しません。"
       }
     ]
   },
   "FinalCta": {
-    "description": "localhost との戦いをやめましょう。Localify は AGPL の無料オープンソースです。",
+    "description": "dev server はエージェントに任せて。どれも名前で開けます。",
     "download": "macOS 版をダウンロード",
     "source": "ソースコードを見る",
     "terminal": "またはターミナルから（macOS と Linux）：",
