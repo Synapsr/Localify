@@ -44,8 +44,28 @@
       "name": "OWNER_LIMITER",
       "namespace_id": "1003",
       "simple": { "limit": 2000, "period": 60 }
+    },
+    // Relay upgrades (docs/remote-machines.md, "Connecting"), checked before
+    // any D1 work: keyed by client IP, then by the token's SHA-256. Both shed
+    // load per location; neither caps how often a token is checked worldwide.
+    {
+      "name": "REMOTE_IP_LIMITER",
+      "namespace_id": "1004",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "REMOTE_CONNECT_LIMITER",
+      "namespace_id": "1005",
+      "simple": { "limit": 6, "period": 60 }
     }
   ],
+  // The relay between an account's machines, one object per account, named
+  // `user:<user id>` (docs/remote-machines.md, "Relay"). It never touches its
+  // storage: SQLite is only the backend every new class gets.
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY", "class_name": "RemoteRelay" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RemoteRelay"] }],
   // Every 5 minutes: billing refreshes, the tunnel sweep and the cleanup of
   // revoked machines. Every day at 03:00 UTC: the billing reconciliation, and
   // purging URLs deleted more than 30 days ago.

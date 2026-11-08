@@ -36,14 +36,16 @@ export const USAGE = `Usage: pnpm cloud:admin [--local] <command>
   unban <github-login>
   takedown <slug> <reason>                shows a removal page; the slug is never given out again
   restore <slug>                          undoes a takedown
-  override <github-login> <serving-machines> <urls> <reason> [--expires <date>]
+  override <github-login> <serving-machines> <urls> <reason> [--expires <date>] [--no-remote-access]
   override --remove <github-login>
   refresh <github-login>                  queues a billing refresh for the next 5-minute run
   duplicates                              duplicate Pro subscriptions and their orders, live
                                           from Polar, to refund in its dashboard; reads only
 
 <github-login> may also be id:<numeric GitHub id>, for a login two accounts held.
-<date> is an ISO 8601 date or time, such as 2027-01-31.`;
+<date> is an ISO 8601 date or time, such as 2027-01-31. An override gives remote access
+unless --no-remote-access says otherwise. Remote access lost through a command here
+reaches open relay connections within a minute.`;
 
 type Param = Statement["params"][number];
 type Row = Record<string, unknown>;
@@ -195,7 +197,8 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
   const [[override], [billing], urls] = await query(
     db,
     statement(
-      `SELECT serving_machines, public_urls, reason, expires_at FROM plan_overrides WHERE user_id = ?1`,
+      `SELECT serving_machines, public_urls, remote_access, reason, expires_at
+       FROM plan_overrides WHERE user_id = ?1`,
       user.id,
     ),
     statement(
@@ -222,7 +225,7 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
   );
   lines.push(
     override
-      ? `Override: ${limits(override.serving_machines, override.public_urls)}, reason "${override.reason}", ${
+      ? `Override: ${limits(override.serving_machines, override.public_urls, override.remote_access)}, reason "${override.reason}", ${
           override.expires_at === null
             ? "no expiry"
             : `expires ${date(Number(override.expires_at))}`
@@ -365,8 +368,12 @@ async function restore(db: AdminDb, slug: string, now: number): Promise<string[]
 }
 
 async function setOverride(db: AdminDb, args: string[], now: number): Promise<string[]> {
-  const usage = "override <github-login> <serving-machines> <urls> <reason> [--expires <date>]";
+  const usage =
+    "override <github-login> <serving-machines> <urls> <reason> [--expires <date>] [--no-remote-access]";
   const words = [...args];
+  const noRemoteAccess = words.indexOf("--no-remote-access");
+  if (noRemoteAccess !== -1) words.splice(noRemoteAccess, 1);
+  const remoteAccess = noRemoteAccess === -1 ? 1 : 0;
   let expiresAt: number | null = null;
   const flag = words.indexOf("--expires");
   if (flag !== -1) {
@@ -386,27 +393,31 @@ async function setOverride(db: AdminDb, args: string[], now: number): Promise<st
   const [[previous]] = await query(
     db,
     statement(
-      `SELECT serving_machines, public_urls, reason, expires_at FROM plan_overrides WHERE user_id = ?1`,
+      `SELECT serving_machines, public_urls, remote_access, reason, expires_at
+       FROM plan_overrides WHERE user_id = ?1`,
       user.id,
     ),
   );
   return applyChange(db, user, now, {
     lines: [
       describeUser(user),
-      `Override: ${previous ? `${limits(previous.serving_machines, previous.public_urls)} ("${previous.reason}")` : "none"} -> ${limits(servingMachines, publicUrls)} ("${reason}"), ${
+      `Override: ${previous ? `${limits(previous.serving_machines, previous.public_urls, previous.remote_access)} ("${previous.reason}")` : "none"} -> ${limits(servingMachines, publicUrls, remoteAccess)} ("${reason}"), ${
         expiresAt === null ? "no expiry" : `expires ${date(expiresAt)}`
       }.`,
     ],
     change: [
       statement(
-        `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, expires_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, remote_access, reason,
+                                     expires_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT (user_id) DO UPDATE SET serving_machines = excluded.serving_machines,
-           public_urls = excluded.public_urls, reason = excluded.reason,
-           expires_at = excluded.expires_at, created_at = excluded.created_at`,
+           public_urls = excluded.public_urls, remote_access = excluded.remote_access,
+           reason = excluded.reason, expires_at = excluded.expires_at,
+           created_at = excluded.created_at`,
         user.id,
         servingMachines,
         publicUrls,
+        remoteAccess,
         reason,
         expiresAt,
         now,
@@ -418,6 +429,7 @@ async function setOverride(db: AdminDb, args: string[], now: number): Promise<st
         override_machines: servingMachines,
         override_urls: publicUrls,
         override_expires_at: expiresAt,
+        override_remote_access: remoteAccess,
       },
       urls,
     }),
@@ -429,7 +441,7 @@ async function removeOverride(db: AdminDb, who: string, now: number): Promise<st
   const [[previous]] = await query(
     db,
     statement(
-      `SELECT serving_machines, public_urls, reason FROM plan_overrides WHERE user_id = ?1`,
+      `SELECT serving_machines, public_urls, remote_access, reason FROM plan_overrides WHERE user_id = ?1`,
       user.id,
     ),
   );
@@ -439,11 +451,17 @@ async function removeOverride(db: AdminDb, who: string, now: number): Promise<st
   return applyChange(db, user, now, {
     lines: [
       describeUser(user),
-      `Override removed: ${limits(previous.serving_machines, previous.public_urls)} ("${previous.reason}"). The plan applies again.`,
+      `Override removed: ${limits(previous.serving_machines, previous.public_urls, previous.remote_access)} ("${previous.reason}"). The plan applies again.`,
     ],
     change: [statement(`DELETE FROM plan_overrides WHERE user_id = ?1`, user.id)],
     predict: ({ row, urls }) => ({
-      row: { ...row, override_machines: null, override_urls: null, override_expires_at: null },
+      row: {
+        ...row,
+        override_machines: null,
+        override_urls: null,
+        override_expires_at: null,
+        override_remote_access: null,
+      },
       urls,
     }),
   });
@@ -740,15 +758,19 @@ function describeUser(user: User): string {
 }
 
 function describeEntitlement(entitlement: Entitlement): string {
-  return entitlement.servingMachines === 0 && entitlement.publicUrls === 0
+  return entitlement.servingMachines === 0 &&
+    entitlement.publicUrls === 0 &&
+    !entitlement.remoteAccess
     ? "none"
-    : limits(entitlement.servingMachines, entitlement.publicUrls);
+    : limits(entitlement.servingMachines, entitlement.publicUrls, entitlement.remoteAccess);
 }
 
-function limits(servingMachines: unknown, publicUrls: unknown): string {
+/** `remoteAccess` is a boolean, or the 0 or 1 of its D1 column. */
+function limits(servingMachines: unknown, publicUrls: unknown, remoteAccess: unknown): string {
   const machines = Number(servingMachines);
   const urls = Number(publicUrls);
-  return `${machines} serving ${machines === 1 ? "machine" : "machines"}, ${urls} ${urls === 1 ? "URL" : "URLs"}`;
+  const remote = remoteAccess === true || Number(remoteAccess) === 1;
+  return `${machines} serving ${machines === 1 ? "machine" : "machines"}, ${urls} ${urls === 1 ? "URL" : "URLs"}, ${remote ? "remote access" : "no remote access"}`;
 }
 
 function date(ms: number): string {

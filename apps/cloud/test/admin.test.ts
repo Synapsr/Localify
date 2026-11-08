@@ -129,7 +129,7 @@ describe("ban and unban", () => {
 
     const lines = await admin("ban", "Teo-Goulois", "phishing", "pages");
     expect(lines).toContain("Banned: phishing pages.");
-    expect(lines).toContain("Entitlement: 5 serving machines, 10 URLs -> none.");
+    expect(lines).toContain("Entitlement: 5 serving machines, 10 URLs, remote access -> none.");
     expect(lines.some((line) => line.startsWith("Rotating laptop"))).toBe(true);
     expect(machine(machineId).rotate_requested_at).not.toBeNull();
     expect((await api(context, "GET", "/v1/me", { token })).status).toBe(403);
@@ -143,7 +143,7 @@ describe("ban and unban", () => {
       "Nothing changed.",
     ]);
     const unbanned = await admin("unban", "teo-goulois");
-    expect(unbanned).toContain("Entitlement: none -> 5 serving machines, 10 URLs.");
+    expect(unbanned).toContain("Entitlement: none -> 5 serving machines, 10 URLs, remote access.");
     expect(get("SELECT banned_at, banned_reason FROM users")).toEqual({
       banned_at: null,
       banned_reason: null,
@@ -247,7 +247,7 @@ describe("overrides", () => {
       "2099-01-31",
     );
     expect(lines).toContain(
-      'Override: 5 serving machines, 10 URLs ("team") -> 2 serving machines, 1 URL ("early user"), expires 2099-01-31T00:00:00.000Z.',
+      'Override: 5 serving machines, 10 URLs, remote access ("team") -> 2 serving machines, 1 URL, remote access ("early user"), expires 2099-01-31T00:00:00.000Z.',
     );
     // Only the runner's URL stops, but every serving machine of the owner rotates.
     expect(lines.some((line) => line.includes(`laptop (${laptop.machineId})`))).toBe(true);
@@ -264,7 +264,7 @@ describe("overrides", () => {
     });
 
     const removed = await admin("override", "--remove", "teo-goulois");
-    expect(removed).toContain("Entitlement: 2 serving machines, 1 URL -> none.");
+    expect(removed).toContain("Entitlement: 2 serving machines, 1 URL, remote access -> none.");
     expect(removed.some((line) => line.startsWith("Rotating laptop"))).toBe(true);
     expect(get("SELECT COUNT(*) AS n FROM plan_overrides")).toEqual({ n: 0 });
     expect(await admin("override", "--remove", "teo-goulois")).toEqual([
@@ -285,6 +285,29 @@ describe("overrides", () => {
       admin("override", "teo-goulois", "2", "10", "x", "--expires", "2020-01-01"),
     ).rejects.toThrow(/already past/);
     expect(get("SELECT serving_machines FROM plan_overrides")).toEqual({ serving_machines: 5 });
+  });
+
+  it("give remote access unless told otherwise, and show it", async () => {
+    const { userId } = await signIn(context);
+    const lines = await admin("override", "teo-goulois", "5", "10", "team", "--no-remote-access");
+    expect(lines).toContain(
+      'Override: 5 serving machines, 10 URLs, remote access ("team") -> 5 serving machines, 10 URLs, no remote access ("team"), no expiry.',
+    );
+    expect(lines).toContain(
+      "Entitlement: 5 serving machines, 10 URLs, remote access -> 5 serving machines, 10 URLs, no remote access.",
+    );
+    const remoteAccess = () =>
+      get("SELECT remote_access FROM plan_overrides WHERE user_id = ?", userId);
+    expect(remoteAccess()).toEqual({ remote_access: 0 });
+    expect(await admin("show", "teo-goulois")).toContain(
+      'Override: 5 serving machines, 10 URLs, no remote access, reason "team", no expiry.',
+    );
+
+    await admin("override", "teo-goulois", "0", "0", "remote", "only");
+    expect(remoteAccess()).toEqual({ remote_access: 1 });
+    expect(await admin("show", "teo-goulois")).toContain(
+      "Plan: override. Entitlement: 0 serving machines, 0 URLs, remote access.",
+    );
   });
 });
 
@@ -418,7 +441,9 @@ describe("the other commands", () => {
       .prepare("UPDATE plan_overrides SET public_urls = 1 WHERE user_id = ?")
       .run(userId);
     const lines = await admin("show", "teo-goulois");
-    expect(lines).toContain("Plan: override. Entitlement: 5 serving machines, 1 URL.");
+    expect(lines).toContain(
+      "Plan: override. Entitlement: 5 serving machines, 1 URL, remote access.",
+    );
     expect(lines).toContain(`  ${a.slug}: serving on laptop`);
     expect(lines).toContain(`  ${b.slug}: suspended on laptop`);
   });

@@ -8,6 +8,7 @@ One Worker, routed by host:
   - Sign-in runs GitHub's device flow with the OAuth App's client ID alone, refuses banned accounts (and, under `SIGNUP=allowlist`, ids outside the allowlist), and registers the machine without any Cloudflare call.
   - A machine gets a named Cloudflare Tunnel `localify-<machine-id>-<generation>` only when it has a public URL to serve and its owner is entitled. Its ingress goes to the daemon on `127.0.0.1:<ingressPort>`, behind the proxied CNAME `m-<machine-id>.localify.dev`, which outlives the tunnels.
   - The API manages the user's public URLs, their password, which machine serves them, and the plan: a Polar checkout, the customer portal, and a snapshot of the subscriptions that webhooks refresh.
+  - Remote machines ([docs/remote-machines.md](../../docs/remote-machines.md), ADRs 0028 and 0032): the roster, each machine's remote key, removing a machine, authorization leases, and `/v1/remote/connect`, which hands each daemon's WebSocket to its account's `RemoteRelay` Durable Object. The relay routes end-to-end encrypted frames between the account's machines, stores nothing, and hibernates while idle, so an account nobody watches costs nothing.
 - **`*.localify.fyi`**: public traffic. The Worker:
   - finds the URL by slug, and checks its owner's ban and entitlement;
   - applies the owner's traffic limit;
@@ -34,7 +35,8 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/tunnels.ts` | Serving slots, provisioning and releasing tunnels, the machine runtime, the serving reconcile, and the 5-minute sweep |
 | `src/queries.ts` | The D1 query budget of a scheduled run |
 | `src/billing.ts` | The checkout, the portal, Polar's webhooks, the refresh of the `billing` snapshot, duplicate subscriptions, and the daily reconciliation |
-| `src/entitlement.ts` | What an account may use: its ban, its override, or its Pro plan from the `billing` snapshot; and which URLs lose their right after a change |
+| `src/entitlement.ts` | What an account may use: its ban, its override, or its Pro plan from the `billing` snapshot, remote access included; and which URLs lose their right after a change |
+| `src/relay.ts` | The `RemoteRelay` Durable Object, one per account, and the Worker's revocation pushes to it |
 | `src/public.ts`, `src/sites.ts` | The public traffic path |
 | `src/github.ts`, `src/cloudflare.ts`, `src/polar.ts` | The GitHub, Cloudflare and Polar API calls |
 | `src/names.ts` | Slugs, labels, public hosts, and the origin rule |
@@ -81,7 +83,7 @@ pnpm cloud:typecheck   # wrangler types, then tsc
 pnpm cloud:test        # vitest
 ```
 
-The route tests run the Worker in Node against a D1 stand-in on `node:sqlite` with the real migrations, and a fake `fetch` for GitHub, Cloudflare and Polar. `@cloudflare/vitest-pool-workers` pins its own wrangler and an alpha miniflare, so it is not used.
+The route tests run the Worker in Node against a D1 stand-in on `node:sqlite` with the real migrations, and a fake `fetch` for GitHub, Cloudflare and Polar. The relay runs over fake hibernatable WebSockets the tests hold, with `cloudflare:workers` aliased to a stub of its base class ([`test/cloudflare-workers.ts`](test/cloudflare-workers.ts)); a test drops the object's instance to simulate hibernation. `@cloudflare/vitest-pool-workers` pins its own wrangler and an alpha miniflare, so it is not used.
 
 ## Setup, once
 

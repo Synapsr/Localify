@@ -8,6 +8,7 @@ import { CallBudget, CloudflareApi, REMOVE_TUNNEL_CALLS } from "./cloudflare";
 import { setting } from "./config";
 import { hmacHex, randomHex, sha256Hex } from "./crypto";
 import { ApiError } from "./http";
+import { pushToRelay } from "./relay";
 
 const MAX_SIGNED_IN_MACHINES = 10;
 const STUCK_AFTER_MS = 10 * 60 * 1000;
@@ -93,7 +94,7 @@ export async function signInMachine(
   // The quota and the insert are one statement, so concurrent sign-ins cannot
   // both pass it. A same-name active machine does not count: this one replaces
   // it. Every other statement runs only when the insert did.
-  const [insert] = await env.DB.batch([
+  const [insert, , , revoked] = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at)
        SELECT ?1, ?2, ?3, 'active', ?4, ?5
@@ -108,13 +109,9 @@ export async function signInMachine(
       name,
       id,
     ),
-    env.DB.prepare(`${revoke("?4", "?5")} WHERE id IN (${replaced}) AND ${exists("?3")}`).bind(
-      userId,
-      name,
-      id,
-      now,
-      newOp(),
-    ),
+    env.DB.prepare(
+      `${revoke("?4", "?5")} WHERE id IN (${replaced}) AND ${exists("?3")} RETURNING id`,
+    ).bind(userId, name, id, now, newOp()),
     env.DB.prepare(
       `INSERT INTO tokens (hash, user_id, machine_id, created_at)
        SELECT ?1, ?2, ?3, ?4 WHERE ${exists("?3")}`,
@@ -126,6 +123,10 @@ export async function signInMachine(
       "quota_exceeded",
       `Your account already has ${MAX_SIGNED_IN_MACHINES} machines signed in, the most it can have. Run \`localify logout\` on one of them, or sign in with the name of a machine you no longer use to replace it.`,
     );
+  }
+  // The replaced machine's relay socket closes, and its peers drop its pin.
+  for (const { id: replacedId } of (revoked?.results ?? []) as { id: string }[]) {
+    await pushToRelay(env, userId, (relay) => relay.revokeMachine(replacedId));
   }
   // Only what this batch replaced, within a small budget: older cleanups,
   // and anything left over, are the sweep's.
@@ -148,10 +149,13 @@ function exists(param: string): string {
 }
 
 /**
- * Signs a machine out in one batch: deletes its token, marks it `revoked`
- * and detaches its URLs. Then removes its tunnel and its CNAME.
+ * Signs a machine of `userId` out in one batch: deletes its token, marks it
+ * `revoked` and detaches its URLs. Then pushes `revoked` to the account's
+ * relay, which closes the machine's socket and tells its peers, and
+ * removes its tunnel and its CNAME. Signing out a machine already revoked
+ * pushes again, for a push that failed before.
  */
-export async function signOutMachine(env: Env, machineId: string): Promise<void> {
+export async function signOutMachine(env: Env, userId: string, machineId: string): Promise<void> {
   const now = Date.now();
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM tokens WHERE machine_id = ?1`).bind(machineId),
@@ -164,6 +168,7 @@ export async function signOutMachine(env: Env, machineId: string): Promise<void>
       machineId,
     ),
   ]);
+  await pushToRelay(env, userId, (relay) => relay.revokeMachine(machineId));
   const machine = await env.DB.prepare(`${SELECT_REVOKED} AND id = ?1`)
     .bind(machineId)
     .first<RevokedMachine>();
