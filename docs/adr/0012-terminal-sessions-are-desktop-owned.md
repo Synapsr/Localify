@@ -1,3 +1,5 @@
+> **Amended.** [ADR 0031](0031-remote-controls-respect-service-ownership.md) lets another paired machine start, stop and restart a service through a local bridge to the app. The app still owns every PTY, and no terminal is attached remotely ([ADR 0030](0030-remote-access-shows-service-output-not-terminals.md)).
+
 # Terminal Sessions Are Desktop-Owned
 
 Terminal sessions are real interactive shells owned by the Localify desktop app, rendered in an in-app bottom panel, and scoped to a project environment or one service inside a project environment rather than a generic home-directory shell. Projects group terminal targets but are not terminal targets themselves; project-level actions resolve to the primary environment. The CLI may ask the desktop app to open or focus a terminal session for a project environment, service, or path, but it does not render, multiplex, or persist those sessions itself. This keeps the Codex-style terminal experience in one UI surface while preserving non-interactive CLI access for agent and scripted workflows.

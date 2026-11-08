@@ -167,6 +167,7 @@ pnpm web:build
 Design notes for features that are not built yet:
 
 - [Public URLs](docs/public-urls.md)
+- [Remote machines](docs/remote-machines.md)
 
 ## Contributing
 
