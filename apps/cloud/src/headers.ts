@@ -1,8 +1,8 @@
 // The headers a public request carries to the machine.
 
-import { ACCESS_COOKIE, withoutCookie } from "./cookie";
+import { ACCESS_COOKIE, NOTICE_COOKIE, withoutCookies } from "./cookie";
 
-const STRIPPED = new Set(["host", "forwarded", "x-real-ip"]);
+const STRIPPED = new Set(["host", "forwarded", "x-real-ip", "localify-skip-warning"]);
 const STRIPPED_PREFIXES = ["x-forwarded-", "x-localify-", "cf-"];
 
 export type LocalifyHeaders = {
@@ -17,7 +17,8 @@ export type LocalifyHeaders = {
 
 /**
  * Copies the request's headers without `Host`, `Forwarded`, `X-Real-IP`,
- * `X-Forwarded-*`, `X-Localify-*`, `CF-*` and the access cookie, then adds
+ * `X-Forwarded-*`, `X-Localify-*`, `CF-*`, `Localify-Skip-Warning`, and the
+ * access and notice cookies, then adds
  * `X-Localify-Edge` for the machine zone, and the `X-Localify-*` headers the
  * daemon's public ingress reads.
  */
@@ -29,7 +30,7 @@ export function upstreamHeaders(incoming: Headers, localify: LocalifyHeaders): H
     if (STRIPPED_PREFIXES.some((prefix) => lower.startsWith(prefix))) continue;
     headers.append(name, value);
   }
-  const cookies = withoutCookie(incoming.get("cookie"), ACCESS_COOKIE);
+  const cookies = withoutCookies(incoming.get("cookie"), [ACCESS_COOKIE, NOTICE_COOKIE]);
   if (cookies) headers.set("cookie", cookies);
   headers.set("x-localify-edge", localify.edgeKey);
   headers.set("x-localify-ingress", localify.ingressSecret);
@@ -50,6 +51,32 @@ export function withoutDomainAttribute(setCookie: string): string {
     (attribute) => attribute.split("=")[0]!.trim().toLowerCase() !== "domain",
   );
   return [pair, ...kept].join(";");
+}
+
+/**
+ * The app's response, cached only where that cannot skip the warning. HTML is
+ * never stored, whatever the app sent: a shared cache could serve it to a
+ * visitor without the notice cookie, and a browser could reuse it after the
+ * cookie expires. Without the cookie, the response also varies on the fetch
+ * metadata, so a page that fetched it first cannot hand it to a navigation.
+ * Other responses keep the app's caching. A WebSocket upgrade (101) is never
+ * cached and passes as it is; the body still streams.
+ */
+export function withSafeCaching(response: Response, noticed: boolean): Response {
+  if (response.status === 101 || response.webSocket) return response;
+  const html = (response.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  if (noticed && !html) return response;
+  const headers = new Headers(response.headers);
+  if (!noticed) headers.append("vary", "Sec-Fetch-Dest, Sec-Fetch-Mode");
+  if (html) {
+    headers.set("cache-control", "no-store");
+    headers.delete("expires");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 /** The upstream response, with `Domain` removed from every `Set-Cookie`. The body still streams. */

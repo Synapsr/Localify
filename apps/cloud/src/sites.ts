@@ -19,6 +19,9 @@ export type Site = {
   passwordHash: string | null;
   passwordSalt: string | null;
   passwordVersion: number;
+  /** The owner, whose traffic limit the URL shares, and their GitHub login. */
+  userId: string;
+  ownerLogin: string;
 };
 
 type SiteRow = {
@@ -33,6 +36,7 @@ type SiteRow = {
   password_version: number;
   user_id: string;
   github_id: number;
+  login: string;
   tunnel_state: string | null;
 };
 
@@ -58,7 +62,7 @@ export function forgetSite(slug: string): void {
 async function loadSite(env: Env, slug: string): Promise<Site | null> {
   const row = await env.DB.prepare(
     `SELECT p.id, p.slug, p.local_domain, p.wildcard, p.machine_id, p.protected,
-            p.password_hash, p.password_salt, p.password_version, p.user_id, u.github_id,
+            p.password_hash, p.password_salt, p.password_version, p.user_id, u.github_id, u.login,
             m.tunnel_state
      FROM public_urls p JOIN users u ON u.id = p.user_id
        LEFT JOIN machines m ON m.id = p.machine_id AND m.status = 'active'
@@ -81,5 +85,7 @@ async function loadSite(env: Env, slug: string): Promise<Site | null> {
     passwordHash: row.password_hash,
     passwordSalt: row.password_salt,
     passwordVersion: row.password_version,
+    userId: row.user_id,
+    ownerLogin: row.login,
   };
 }

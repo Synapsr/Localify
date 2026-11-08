@@ -6,9 +6,38 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import ts from "typescript";
 import { vi } from "vitest";
 
 const MIGRATIONS = join(import.meta.dirname, "..", "migrations");
+const WRANGLER = join(import.meta.dirname, "..", "wrangler.jsonc");
+
+/** A rate-limit binding as wrangler.jsonc declares it. */
+export function rateLimit(name: string): { limit: number; period: number } {
+  const { config, error } = ts.parseConfigFileTextToJson(WRANGLER, readFileSync(WRANGLER, "utf8"));
+  if (error) throw new Error(`wrangler.jsonc does not parse: ${String(error.messageText)}`);
+  const binding = (
+    config.ratelimits as { name: string; simple: { limit: number; period: number } }[]
+  ).find((entry) => entry.name === name);
+  if (!binding) throw new Error(`wrangler.jsonc has no rate limit ${name}`);
+  return binding.simple;
+}
+
+/**
+ * A rate-limit binding that counts per key within one period, with the limit
+ * of wrangler.jsonc. Clearing `counts` starts the next period.
+ */
+export type CountingLimiter = { limit: number; counts: Map<string, number> };
+
+function countingLimiter(limiter: CountingLimiter): RateLimit {
+  return {
+    limit: async ({ key }: { key: string }) => {
+      const count = (limiter.counts.get(key) ?? 0) + 1;
+      limiter.counts.set(key, count);
+      return { success: count <= limiter.limit };
+    },
+  } as RateLimit;
+}
 
 class TestStatement {
   constructor(
@@ -105,16 +134,19 @@ export type TestContext = {
   routes: Map<string, (body: string | null, url: string) => Response | Promise<Response>>;
   limiter: { allowed: boolean };
   deviceLimiter: { allowed: boolean };
+  ownerLimiter: CountingLimiter;
 };
 
 export function createContext(overrides: Partial<Env> = {}): TestContext {
   const { db, sqlite } = createTestDb();
   const limiter = { allowed: true };
   const deviceLimiter = { allowed: true };
+  const ownerLimiter = { limit: rateLimit("OWNER_LIMITER").limit, counts: new Map() };
   const env = {
     DB: db,
     PASSWORD_LIMITER: { limit: async () => ({ success: limiter.allowed }) },
     DEVICE_LIMITER: { limit: async () => ({ success: deviceLimiter.allowed }) },
+    OWNER_LIMITER: countingLimiter(ownerLimiter),
     GITHUB_CLIENT_ID: "client-123",
     ALLOWED_GITHUB_IDS: "1, 2",
     PUBLIC_BASE_DOMAIN: "localify.fyi",
@@ -142,6 +174,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     routes: new Map(),
     limiter,
     deviceLimiter,
+    ownerLimiter,
   };
   vi.stubGlobal("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input instanceof Request ? input.url : input);

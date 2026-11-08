@@ -3,10 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   ACCESS_COOKIE,
   accessCookieHeader,
+  NOTICE_COOKIE,
+  noticeCookieHeader,
   readCookie,
   signAccess,
+  signNotice,
+  signNoticeForm,
   verifyAccess,
-  withoutCookie,
+  verifyNotice,
+  verifyNoticeForm,
+  withoutCookies,
 } from "../src/cookie";
 import { hashPassword, hmacHex, verifyPassword } from "../src/crypto";
 import { upstreamHeaders, withHostOnlyCookies, withoutDomainAttribute } from "../src/headers";
@@ -231,9 +237,66 @@ describe("access cookie", () => {
   it("is read from and removed from a Cookie header", () => {
     const header = `a=1; ${ACCESS_COOKIE}=x; b=2; ${ACCESS_COOKIE}=y`;
     expect(readCookie(header, ACCESS_COOKIE)).toEqual(["x", "y"]);
-    expect(withoutCookie(header, ACCESS_COOKIE)).toBe("a=1; b=2");
-    expect(withoutCookie(`${ACCESS_COOKIE}=x`, ACCESS_COOKIE)).toBeNull();
-    expect(withoutCookie(null, ACCESS_COOKIE)).toBeNull();
+    expect(withoutCookies(header, [ACCESS_COOKIE])).toBe("a=1; b=2");
+    expect(withoutCookies(`${ACCESS_COOKIE}=x`, [ACCESS_COOKIE])).toBeNull();
+    expect(withoutCookies(null, [ACCESS_COOKIE])).toBeNull();
+    expect(
+      withoutCookies(`a=1; ${NOTICE_COOKIE}=n; ${ACCESS_COOKIE}=x`, [ACCESS_COOKIE, NOTICE_COOKIE]),
+    ).toBe("a=1");
+  });
+});
+
+describe("notice cookie", () => {
+  const scope = { host: "journal-a8f3.localify.fyi", urlId: "url-1" };
+  const now = Date.UTC(2026, 10, 5);
+  const week = 7 * 24 * 3600 * 1000;
+
+  it("verifies for the same host and URL within 7 days", async () => {
+    const value = await signNotice("key", scope, now);
+    expect(value).toMatch(/^\d+\.[0-9a-f]{64}$/);
+    const [expiry, signature] = value.split(".");
+    expect(Number(expiry)).toBe(now / 1000 + 7 * 24 * 3600);
+    expect(signature).toBe(
+      await hmacHex("key", `notice|journal-a8f3.localify.fyi|url-1|${expiry}`),
+    );
+    expect(await verifyNotice("key", value, scope, now + week - 1000)).toBe(true);
+    expect(await verifyNotice("key", value, scope, now + week)).toBe(false);
+  });
+
+  it("refuses another host, URL or key, a tampered expiry, and an access cookie", async () => {
+    const value = await signNotice("key", scope, now);
+    expect(
+      await verifyNotice("key", value, { ...scope, host: "journal-a8f3--web.localify.fyi" }, now),
+    ).toBe(false);
+    expect(await verifyNotice("key", value, { ...scope, urlId: "url-2" }, now)).toBe(false);
+    expect(await verifyNotice("other", value, scope, now)).toBe(false);
+    const [expiry, signature] = value.split(".");
+    expect(await verifyNotice("key", `${Number(expiry) + 100}.${signature}`, scope, now)).toBe(
+      false,
+    );
+    const access = await signAccess("key", { ...scope, version: 1 }, now);
+    expect(await verifyNotice("key", access, scope, now)).toBe(false);
+  });
+
+  it("is acknowledged with a form token for the same host, valid a day", async () => {
+    const value = await signNoticeForm("key", scope.host, now);
+    expect(value).toMatch(/^\d+\.[0-9a-f]{64}$/);
+    expect(await verifyNoticeForm("key", value, scope.host, now + 24 * 3600 * 1000 - 1000)).toBe(
+      true,
+    );
+    expect(await verifyNoticeForm("key", value, scope.host, now + 24 * 3600 * 1000)).toBe(false);
+    expect(await verifyNoticeForm("key", value, "journal-a8f3--web.localify.fyi", now)).toBe(false);
+    expect(await verifyNoticeForm("other", value, scope.host, now)).toBe(false);
+    // A notice cookie's value is not a form token.
+    expect(
+      await verifyNoticeForm("key", await signNotice("key", scope, now), scope.host, now),
+    ).toBe(false);
+  });
+
+  it("is set host-only, secure, HTTP-only and Lax", () => {
+    expect(noticeCookieHeader("v")).toBe(
+      `${NOTICE_COOKIE}=v; Max-Age=604800; Path=/; Secure; HttpOnly; SameSite=Lax`,
+    );
   });
 });
 
@@ -261,7 +324,7 @@ describe("passwords", () => {
 });
 
 describe("upstream headers", () => {
-  it("strips proxy, Cloudflare and Localify headers and the access cookie, then adds Localify's", () => {
+  it("strips proxy, Cloudflare and Localify headers and Localify's cookies, then adds Localify's", () => {
     const incoming = new Headers({
       host: "journal-a8f3.localify.fyi",
       forwarded: "for=1.2.3.4",
@@ -273,7 +336,8 @@ describe("upstream headers", () => {
       "x-localify-local-host": "other.localify",
       "cf-connecting-ip": "5.6.7.8",
       "cf-ray": "abc",
-      cookie: `session=1; ${ACCESS_COOKIE}=secret`,
+      cookie: `session=1; ${ACCESS_COOKIE}=secret; ${NOTICE_COOKIE}=seen`,
+      "localify-skip-warning": "1",
       accept: "text/html",
       upgrade: "websocket",
     });
@@ -348,9 +412,13 @@ describe("upstream Set-Cookie", () => {
 describe("the next path after the password", () => {
   const host = "journal-a8f3.localify.fyi";
 
-  it("keeps a path and query on the same host", () => {
+  it("keeps a path and query on the same host, as resolved", () => {
     expect(safeNext("/docs?page=2", host)).toBe("/docs?page=2");
     expect(safeNext("/", host)).toBe("/");
+    expect(safeNext("/a/../docs?x=1", host)).toBe("/docs?x=1");
+    // Encoded slashes stay in one path segment.
+    expect(safeNext("/%2F%2Fevil.example/x", host)).toBe("/%2F%2Fevil.example/x");
+    expect(safeNext("/%5Cevil.example", host)).toBe("/%5Cevil.example");
   });
 
   it("falls back to / for anything that could leave the host", () => {
@@ -360,8 +428,15 @@ describe("the next path after the password", () => {
       "https://evil.example/",
       "//evil.example/",
       "/\\evil.example",
+      "/\\/evil.example",
+      "/a/..//evil.example/phish",
+      "/a/%2e%2e//evil.example/phish",
+      "/a/.%2E/\\evil.example",
+      "/\t/evil.example",
       "docs",
       "/__localify/access",
+      "/__localify/notice?x=1",
+      "/a/../__localify/notice",
     ]) {
       expect(safeNext(next, host), String(next)).toBe("/");
     }
