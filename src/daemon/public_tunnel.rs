@@ -86,10 +86,11 @@ struct Tunnel {
 struct Parts {
     signed_in: bool,
     served_urls: Vec<String>,
-    /// Every URL of the last `ready` runtime, served here or not, and this
-    /// machine's id: what the inventory says about each service's URL.
+    /// Every URL of the last `ready` runtime, served here or not, and the
+    /// account and machine they were fetched for: what the inventory says
+    /// about each service's URL.
     known_urls: Vec<PublicUrl>,
-    machine_id: Option<String>,
+    account: Option<Account>,
     /// Why the cloud side does not serve, for a person.
     cloud_error: Option<String>,
     /// Why public traffic cannot reach this daemon at all.
@@ -98,6 +99,25 @@ struct Parts {
     runtime: Option<RuntimeStatus>,
     blocked: Option<RuntimeBlock>,
     process: Process,
+}
+
+/// Who signed this machine in, without the token: a sign-in as someone else
+/// or on another cloud makes the known URLs someone else's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Account {
+    api_base: String,
+    login: String,
+    machine_id: String,
+}
+
+impl Account {
+    fn of(credentials: &CloudCredentials) -> Self {
+        Self {
+            api_base: credentials.api_base.clone(),
+            login: credentials.login.clone(),
+            machine_id: credentials.machine_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -153,11 +173,30 @@ impl PublicTunnel {
     }
 
     /// The URLs of the last `ready` runtime, and this machine's id, for the
-    /// inventory and `public_urls`. Empty while signed out or before the
-    /// first answer.
+    /// inventory. Empty while signed out or before the first answer.
     pub fn known_urls(&self) -> (Vec<PublicUrl>, Option<String>) {
         let parts = self.parts();
-        (parts.known_urls.clone(), parts.machine_id.clone())
+        let machine_id = parts
+            .account
+            .as_ref()
+            .map(|account| account.machine_id.clone());
+        (parts.known_urls.clone(), machine_id)
+    }
+
+    /// `known_urls` while `current`, the credentials on disk now, are those
+    /// they were fetched for. A sign-out or a sign-in as someone else reaches
+    /// the daemon at its next fetch; until then, nothing.
+    pub fn known_urls_for(
+        &self,
+        current: Option<&CloudCredentials>,
+    ) -> (Vec<PublicUrl>, Option<String>) {
+        let parts = self.parts();
+        match (&parts.account, current) {
+            (Some(account), Some(current)) if *account == Account::of(current) => {
+                (parts.known_urls.clone(), Some(account.machine_id.clone()))
+            }
+            _ => (Vec::new(), None),
+        }
     }
 
     fn parts(&self) -> MutexGuard<'_, Parts> {
@@ -502,7 +541,7 @@ fn stand_down(
     parts.signed_in = signed_in;
     parts.served_urls.clear();
     parts.known_urls.clear();
-    parts.machine_id = None;
+    parts.account = None;
     parts.cloud_error = error;
     parts.runtime = None;
     parts.blocked = None;
@@ -538,7 +577,7 @@ fn serve(
         let mut parts = tunnel.parts();
         parts.runtime = Some(RuntimeStatus::Ready);
         parts.known_urls = known_urls;
-        parts.machine_id = Some(credentials.machine_id.clone());
+        parts.account = Some(Account::of(credentials));
         return Next::Regular;
     }
     let current = desired.borrow().clone();
@@ -568,7 +607,7 @@ fn serve(
     parts.signed_in = true;
     parts.served_urls = urls.into_iter().map(|url| url.id).collect();
     parts.known_urls = known_urls;
-    parts.machine_id = Some(credentials.machine_id.clone());
+    parts.account = Some(Account::of(credentials));
     parts.cloud_error = None;
     parts.runtime = Some(RuntimeStatus::Ready);
     parts.blocked = None;
@@ -966,6 +1005,29 @@ mod tests {
         assert_eq!(
             api.requests(),
             ["GET /v2/machines/self/runtime?generation=0 HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn known_urls_are_given_only_to_the_account_they_were_fetched_for() {
+        let fixture = Fixture::new();
+        let api = FakeApi::v2("200 OK", ready(1, Some("tok-1"))).await;
+        let store = sign_in(fixture.dir.path(), &api.base);
+        fixture.check_store(&store).await;
+        let current = store.load().unwrap();
+
+        let (urls, machine_id) = fixture.tunnel.known_urls_for(current.as_ref());
+        assert_eq!(urls.len(), 3);
+        assert_eq!(machine_id.as_deref(), Some("m1"));
+
+        // Signed out, before the next fetch.
+        assert_eq!(fixture.tunnel.known_urls_for(None), (Vec::new(), None));
+        // Signed in again as someone else.
+        let mut other = current.unwrap();
+        other.login = "ana".into();
+        assert_eq!(
+            fixture.tunnel.known_urls_for(Some(&other)),
+            (Vec::new(), None)
         );
     }
 

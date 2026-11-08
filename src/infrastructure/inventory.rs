@@ -119,6 +119,11 @@ impl LocalInventory {
         })
     }
 
+    /// Where the daemon keeps its data, `cloud.json` among it.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Reads run records from `dir` instead of the user's `services/`.
     #[cfg(test)]
     pub fn with_services_dir(mut self, dir: PathBuf) -> Self {
@@ -429,9 +434,9 @@ fn public_url_facts(domain: &str, public: &PublicFacts) -> Option<PublicUrlFacts
 
 /// The origins at which this machine's public URLs reach `domain`: those on
 /// that domain first, then a wildcard URL on its parent at `<slug>--<label>`.
-/// Only URLs this machine serves and that are not taken down, since another
-/// machine's URL reaches another checkout, and only addresses that start
-/// with their slug, as the ingress matches them.
+/// Only the URLs the ingress serves: this machine's, since another machine's
+/// URL reaches another checkout, serving (or from a cloud older than the
+/// states), and with an address that starts with their slug.
 pub fn public_origins(domain: &str, urls: &[PublicUrl], machine_id: &str) -> Vec<String> {
     let domain = domain.trim();
     let domain = domain
@@ -444,7 +449,7 @@ pub fn public_origins(domain: &str, urls: &[PublicUrl], machine_id: &str) -> Vec
             url.machine
                 .as_ref()
                 .is_some_and(|machine| machine.id == machine_id)
-                && url.state != Some(PublicUrlState::TakenDown)
+                && matches!(url.state, None | Some(PublicUrlState::Serving))
         })
         .collect();
     let exact = served
@@ -989,9 +994,10 @@ domain = "web.feature.localify"
     }
 
     #[test]
-    fn public_origins_leave_out_other_machines_and_foreign_addresses() {
+    fn public_origins_leave_out_what_the_ingress_does_not_serve() {
         let elsewhere = r#","machine":{"id":"m2","name":"desktop"},"state":"serving""#;
         let taken_down = r#","machine":{"id":"m1","name":"laptop"},"state":"taken_down""#;
+        let suspended = r#","machine":{"id":"m1","name":"laptop"},"state":"suspended""#;
         let foreign: PublicUrl = serde_json::from_str(
             r#"{"id":"evil","slug":"app-a8f3","url":"https://evil.example",
                 "localDomain":"app.localify","wildcard":true,
@@ -1002,6 +1008,7 @@ domain = "web.feature.localify"
         let urls = [
             public_url("other", "app.localify", true, elsewhere),
             public_url("down", "app.localify", true, taken_down),
+            public_url("suspended", "app.localify", true, suspended),
             public_url("unserved", "app.localify", true, r#","machine":null"#),
             foreign,
         ];

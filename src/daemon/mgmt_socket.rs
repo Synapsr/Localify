@@ -11,6 +11,7 @@ use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
 use super::router::SharedState;
 use crate::application::inventory::Have;
+use crate::infrastructure::cloud::credentials::CredentialsStore;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
@@ -253,7 +254,11 @@ pub async fn serve(
                     MgmtResponse::success(serde_json::json!({ "refreshing": true }))
                 }
                 Some(MgmtCommand::PublicUrls) => {
-                    let (urls, machine_id) = tunnel.known_urls();
+                    let current = CredentialsStore::in_data_dir(inventory.data_dir())
+                        .load()
+                        .ok()
+                        .flatten();
+                    let (urls, machine_id) = tunnel.known_urls_for(current.as_ref());
                     MgmtResponse::success(
                         serde_json::json!({ "urls": urls, "machineId": machine_id }),
                     )

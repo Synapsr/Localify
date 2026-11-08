@@ -697,16 +697,24 @@ Writes such as a `POST` keep the browser's public `Origin`; only Next.js's own d
 and hot reload get the local origin. An app that checks `Origin` against its own URL
 therefore refuses them, as Better Auth does with `Invalid origin`.
 
-For Better Auth, `localify dev` does it for you. When public URLs of yours served by this
-machine reach the service, it sets `BETTER_AUTH_TRUSTED_ORIGINS` to their exact origins:
-`https://journal.localify.fyi` for the URL on `journal.localify`, and
+For Better Auth, `localify dev` does it for you. When public URLs of yours that this
+machine serves reach the service, it sets `BETTER_AUTH_TRUSTED_ORIGINS` to their exact
+origins: `https://journal.localify.fyi` for the URL on `journal.localify`, and
 `https://journal--api.localify.fyi` for `api.journal.localify` under a wildcard URL. Better
 Auth adds this variable to its `trustedOrigins` option, so `trustedOrigins: [env.AUTH_URL]`
-keeps working. A value you set yourself, in your shell, a launch profile or an env file, is
-kept, and the public origins are appended to it. `LOCALIFY_PUBLIC_URL` gets the first of
-these origins, unless you set it. Localify reads the URLs the daemon last learned from
-Localify Cloud, so a launch never waits on the network, and signed out it adds nothing. A
-URL you create while the service runs takes effect at its next restart.
+keeps working.
+
+- Set in your shell or a launch profile, your value is kept and the public origins are
+  appended to it.
+- Set only in an env file of the service or the checkout root (`.env`, `.env.local`…),
+  Localify leaves it alone, since your framework decides which file wins. It prints what to
+  add instead: `BETTER_AUTH_TRUSTED_ORIGINS is set in <file>: add <origins> to it so Better
+  Auth accepts your public URL.`
+
+`LOCALIFY_PUBLIC_URL` gets the first of these origins, unless you set it. Localify reads
+the URLs the daemon last learned from Localify Cloud, so a launch never waits on the
+network; signed out, or with no URL served here, it adds nothing. A URL you create while
+the service runs takes effect at its next restart.
 
 Other libraries need the public origins in their own allowlist. In development, trust your
 own public URL and the hosts of its services and worktrees, so a new worktree needs no
