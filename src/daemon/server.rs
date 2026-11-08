@@ -29,6 +29,7 @@ use crate::application::ports::RegistrationProvider;
 use crate::branding::BRANDING;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::config::ConfigStore;
+use crate::infrastructure::inventory::LocalInventory;
 use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::LocalifyPaths;
 use localify::desktop::ProjectRootStore;
@@ -134,6 +135,10 @@ impl Server {
         let dns_handle = spawn_dns_server(self.dns_port, self.listeners.lan_access);
         let domain_accesses = self.state.load().domain_access_log();
         let launch_sessions = self.state.load().launch_sessions();
+        let inventory = Arc::new(LocalInventory::new(
+            self.config_path.clone(),
+            self.data_dir.clone(),
+        )?);
         spawn_reload_listener(
             self.state.clone(),
             self.reload_rx,
@@ -173,6 +178,7 @@ impl Server {
             ports,
             shutdown,
             tunnel,
+            inventory,
         );
 
         let http_server =
@@ -338,11 +344,19 @@ fn spawn_mgmt_socket(
     ports: super::mgmt_socket::DaemonPorts,
     shutdown: ShutdownHandle,
     tunnel: PublicTunnel,
+    inventory: Arc<LocalInventory>,
 ) {
     tokio::spawn(async move {
-        if let Err(e) =
-            super::mgmt_socket::serve(socket_path, state, reload_tx, shutdown, ports, tunnel).await
-        {
+        let served = super::mgmt_socket::serve(
+            socket_path,
+            state,
+            reload_tx,
+            shutdown,
+            ports,
+            tunnel,
+            inventory,
+        );
+        if let Err(e) = served.await {
             error!(error = %e, "Management socket error");
         }
     });

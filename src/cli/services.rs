@@ -20,7 +20,6 @@ use super::project_env::{current_worktree_environment, ensure_implicit_worktree_
 use super::service_supervisor::{self, Capture, LaunchEnd, LaunchOutcome, SupervisedLaunch};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
-use crate::domain::DomainRegistration;
 use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
 use crate::domain::value_objects::{ProxyTarget, RouteTarget};
 use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
@@ -2033,35 +2032,27 @@ fn environment_matches(environment: &ConfiguredProjectEnvironment, value: &str) 
 }
 
 fn service_for_environment(
-    mut service: ConfiguredService,
+    service: ConfiguredService,
     environment: &ConfiguredProjectEnvironment,
     ctx: &AppContext,
 ) -> Result<ConfiguredService> {
-    let mapping = environment
-        .services
-        .iter()
-        .find(|mapping| mapping.service_id == service.id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Service '{}' is unavailable in environment '{}'. Re-run '{} project env ensure --project {} --name {}'.",
-                service.id,
-                environment.slug,
-                BRANDING.cli_command(),
-                service.project_id,
-                environment.slug
-            )
-        })?;
-
     let inferred_service_path = service
         .path
         .clone()
         .or_else(|| inferred_path_from_configured_route_launch(&service));
-    service.primary_domain = mapping.domain.clone();
-    service.domains = vec![mapping.domain.clone()];
-    service.project_root_path = environment
-        .root_path
-        .clone()
-        .or_else(|| service.project_root_path.clone());
+    let (service_id, project_id) = (service.id.clone(), service.project_id.clone());
+    let mut service = ctx
+        .config_store
+        .load()?
+        .environment_service(service, environment)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Service '{service_id}' is unavailable in environment '{}'. Re-run '{} project env ensure --project {project_id} --name {}'.",
+                environment.slug,
+                BRANDING.cli_command(),
+                environment.slug
+            )
+        })?;
     if service
         .path
         .as_deref()
@@ -2069,26 +2060,7 @@ fn service_for_environment(
     {
         service.path = inferred_service_path;
     }
-    service.primary_target = domain_root_target(&mapping.domain, ctx)?;
     Ok(service)
-}
-
-fn domain_root_target(domain: &str, ctx: &AppContext) -> Result<Option<RouteTarget>> {
-    let target = ctx
-        .config_store
-        .list_configured_domains()?
-        .into_iter()
-        .find(|configured| configured.registration.display_pattern() == domain)
-        .and_then(|configured| root_route_target(configured.registration));
-    Ok(target)
-}
-
-fn root_route_target(registration: DomainRegistration) -> Option<RouteTarget> {
-    registration
-        .routes()
-        .iter()
-        .find(|route| route.path().to_string() == "/")
-        .map(|route| route.target().clone())
 }
 
 fn project_id_for_cwd(services: &[ConfiguredService], cwd: &Path) -> Option<String> {

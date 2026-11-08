@@ -3,6 +3,7 @@ pub mod cloud_billing;
 pub mod cloud_errors;
 pub mod daemon_status;
 pub mod install;
+pub mod inventory;
 pub mod list_all_domains;
 pub mod manage_routes;
 pub mod ports;

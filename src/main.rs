@@ -325,6 +325,14 @@ enum Commands {
     /// Show daemon and domain status
     Status,
 
+    /// This machine's inventory, as JSON, from the daemon (docs/remote-machines.md)
+    #[command(hide = true)]
+    Inventory {
+        /// The revision already held, `<epoch>:<rev>`: an unchanged snapshot is not sent again
+        #[arg(long, value_name = "EPOCH:REV")]
+        have: Option<String>,
+    },
+
     /// Print a service's output as the app's terminal shows it, or the daemon logs when no service is given
     Logs {
         #[command(flatten)]
@@ -1276,6 +1284,7 @@ fn main() -> Result<()> {
             None => cli::restart::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon),
         },
         Commands::Status => cli::status::execute(&ctx, &config.daemon),
+        Commands::Inventory { have } => cli::inventory::show(have.as_deref(), &ctx),
         Commands::Logs {
             service,
             lines,

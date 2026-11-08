@@ -112,7 +112,6 @@ impl LaunchProfiles {
         }))
     }
 
-    #[allow(dead_code)] // Used by the desktop through the library crate.
     pub fn profiles(&self) -> impl Iterator<Item = &LaunchProfile> {
         self.profiles.values()
     }
