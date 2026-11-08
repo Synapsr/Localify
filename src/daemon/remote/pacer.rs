@@ -80,6 +80,13 @@ impl Outbox {
         frames < BULK_FRAMES && self.queued.load(Ordering::SeqCst) < BULK_BYTES
     }
 
+    /// Whether a viewer's request may go in now: half the queue stays for
+    /// heartbeats and handshakes, however many requests its clients make.
+    pub fn has_room_for_requests(&self) -> bool {
+        let frames = QUEUE_FRAMES - self.sender.capacity();
+        frames < QUEUE_FRAMES / 2 && self.queued.load(Ordering::SeqCst) < QUEUE_BYTES / 2
+    }
+
     /// Notified each time the writer takes a frame.
     pub fn drained(&self) -> Arc<Notify> {
         Arc::clone(&self.drained)

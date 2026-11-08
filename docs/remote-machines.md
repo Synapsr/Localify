@@ -59,7 +59,7 @@ Three switches on each machine, set only on that machine, in the app's Settings 
 | `control` | No start, stop or restart from another machine. | Paired machines may start, stop and restart services this machine owns (see "Controls"). Needs `share`. |
 | `backgroundStarts` | A remote start needs the desktop app running here, and a background run cannot be restarted remotely. | A remote start runs detached in the background when the app is closed, and a background run can be restarted in the background. Needs `control`. |
 
-Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already dispatched finish, but no new one starts.
+Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already dispatched finish, but no new one starts. The daemon confirms the change only once it has done so, with every waiting answer dropped, so nothing a service prints afterwards reaches a paired machine.
 
 ## Trust
 
@@ -435,6 +435,7 @@ type InventoryItem = {
 - **Pages:** items sorted by project name, environment and service; split so each page fits 32 KiB; at most 32 pages. A viewer replaces its copy only once it holds every page of one revision; pages of an older revision are dropped.
 - **When it is sent:** on `inventory.get`; while a watch is open, whenever the content changes, checked every 2 seconds (in PR 3, each check builds the whole snapshot, ports probed included: the inventory has no cheaper partial build, and the probe is bounded to 1 second); right after every control's result; and on a 30-second reconcile while watched. Unchanged snapshots are never sent.
 - **Watches:** at most one per session. A watch ends with `inventory.unwatch`, with the session, or 120 seconds after the last `keep` that names it. The viewer names it in its `keep` while the machine is on screen, and stops when the window is hidden. With no watch open, the target computes nothing and sends nothing.
+- **Pending answers:** a target admits at most 4 `inventory.get` and 8 `output.read` in flight per session (16 and 32 in all), from their arrival until their last answer is in the send queue, and keeps at most 1 MiB and 64 KiB of answers waiting per session, 4 MiB in all, a whole snapshot fitting in one session's. Past a count it answers `too_many`, past the bytes `busy` with `retryAfter`, without reading or paging anything. A viewer whose refusals no longer fit loses its session.
 - **Deltas,** if they come later, carry the epoch and the revision they apply to. A gap or another epoch makes the viewer ask for a snapshot.
 
 ## Output

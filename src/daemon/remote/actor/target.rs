@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::{Actor, Command, Key};
+use super::{Actor, Command, End, Failure, Key};
 use crate::application::inventory::{Snapshot, pages};
 use crate::daemon::remote::local::RunLookup;
 use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
@@ -28,11 +28,20 @@ use crate::infrastructure::runs::output;
 /// At most this many follows per session, and per target.
 const FOLLOWS_PER_SESSION: usize = 2;
 const FOLLOWS_PER_TARGET: usize = 4;
-/// `inventory.get`s one session may have waiting for a build.
+/// `inventory.get`s and `output.read`s in flight, from their admission until
+/// their last answer is in the send queue: per session, and per target.
 const GETS_PER_SESSION: usize = 4;
+const GETS_PER_TARGET: usize = 16;
+const READS_PER_SESSION: usize = 8;
+const READS_PER_TARGET: usize = 32;
+/// Answers waiting for room in the send queue, in bytes: per session, and
+/// per target. A whole snapshot (32 pages of 32 KiB) fits in one session's.
+const PENDING_PER_SESSION: usize = 1024 * 1024 + 64 * 1024;
+const PENDING_PER_TARGET: usize = 4 * 1024 * 1024;
 
 const NOT_SHARED: &str =
     "This machine doesn't share its projects and output. Turn on sharing in Localify on it.";
+const FULL: &str = "This machine has too many answers waiting to be sent. Try again in a moment.";
 
 /// What one viewer asked this machine for.
 #[derive(Default)]
@@ -42,7 +51,27 @@ pub(super) struct Served {
     /// `inventory.get`s waiting for the snapshot being built.
     gets: Vec<(String, Option<Have>)>,
     /// Pages and reads waiting for room in the send queue.
-    bulk: VecDeque<SessionMessage>,
+    bulk: VecDeque<Pending>,
+    /// What `bulk` holds, in bytes.
+    pending_bytes: usize,
+    /// Gets and reads admitted and not fully queued for sending yet.
+    in_flight: Vec<(String, Kind)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Get,
+    Read,
+}
+
+/// An answer waiting for room in the send queue.
+struct Pending {
+    message: SessionMessage,
+    bytes: usize,
+    re: String,
+    /// The request's last answer: it is no longer in flight once this is
+    /// queued.
+    last: bool,
 }
 
 struct Watch {
@@ -83,6 +112,7 @@ impl Served {
             && self.follows.is_empty()
             && self.gets.is_empty()
             && self.bulk.is_empty()
+            && self.in_flight.is_empty()
     }
 
     /// A watch or a follow nothing renewed in `after` ends.
@@ -109,35 +139,165 @@ impl Served {
         }
     }
 
-    /// Ends everything, and returns the ids that were open.
+    /// Ends everything, waiting answers included, and returns the ids that
+    /// were open.
     fn clear(&mut self) -> Vec<String> {
-        let mut ids: Vec<String> = self.gets.drain(..).map(|(id, _)| id).collect();
+        let mut ids: Vec<String> = self.in_flight.drain(..).map(|(id, _)| id).collect();
         ids.extend(self.watch.take().map(|watch| watch.id));
         ids.extend(self.follows.drain(..).map(|follow| follow.id));
+        self.gets.clear();
         self.bulk.clear();
+        self.pending_bytes = 0;
         ids
+    }
+
+    fn count(&self, kind: Kind) -> usize {
+        self.in_flight.iter().filter(|(_, k)| *k == kind).count()
+    }
+
+    fn done(&mut self, re: &str) {
+        self.in_flight.retain(|(id, _)| id != re);
+    }
+
+    /// Drops the answers still waiting for `re`.
+    fn drop_pending(&mut self, re: &str) {
+        let mut freed = 0;
+        self.bulk.retain(|pending| {
+            let kept = pending.re != re;
+            if !kept {
+                freed += pending.bytes;
+            }
+            kept
+        });
+        self.pending_bytes -= freed;
+    }
+
+    fn push(&mut self, re: &str, message: SessionMessage, last: bool) {
+        let bytes = encoded_size(&message);
+        self.pending_bytes += bytes;
+        self.bulk.push_back(Pending {
+            message,
+            bytes,
+            re: re.to_string(),
+            last,
+        });
+    }
+
+    fn pop(&mut self) -> Option<SessionMessage> {
+        let pending = self.bulk.pop_front()?;
+        self.pending_bytes -= pending.bytes;
+        if pending.last {
+            self.done(&pending.re);
+        }
+        Some(pending.message)
     }
 }
 
 /// The target's state across sessions.
-#[derive(Default)]
 pub(super) struct Shelf {
+    /// `share`, as this task last learned it: from a settings change, which
+    /// waits for this task to act on it before it answers, and from the file
+    /// each second, for a change made some other way.
+    sharing: bool,
     /// A snapshot is being built: one at a time.
     building: bool,
     /// While watched, the next look for changes.
     next_look: Option<Instant>,
     /// Whose turn it is among the follows.
     turn: usize,
+    /// When to read the switches from the file again.
+    next_recheck: Option<Instant>,
+}
+
+impl Shelf {
+    pub(super) fn new(sharing: bool) -> Self {
+        Self {
+            sharing,
+            building: false,
+            next_look: None,
+            turn: 0,
+            next_recheck: None,
+        }
+    }
 }
 
 impl Actor {
     fn sharing(&self) -> bool {
-        self.shared
-            .store
-            .settings()
-            .map(|settings| settings.share)
-            .unwrap_or(false)
+        self.shelf.sharing
     }
+
+    /// `share` changed here: turned off, every watch, follow and waiting
+    /// answer ends now, before the change is confirmed, so nothing read
+    /// after it is sent.
+    pub(super) fn on_share(&mut self, share: bool) {
+        self.shelf.sharing = share;
+        if !share {
+            self.end_served("not_shared", NOT_SHARED);
+        }
+    }
+
+    /// The answers waiting in every target session, in bytes, and the
+    /// requests of `kind` in flight.
+    fn totals(&self, kind: Kind) -> (usize, usize) {
+        self.sessions
+            .values()
+            .fold((0, 0), |(bytes, count), session| {
+                (
+                    bytes + session.served.pending_bytes,
+                    count + session.served.count(kind),
+                )
+            })
+    }
+
+    /// Whether `bytes` more answers fit, in the session and in all of them.
+    fn fits(&self, key: &Key, bytes: usize) -> bool {
+        let session = self
+            .sessions
+            .get(key)
+            .map_or(0, |session| session.served.pending_bytes);
+        let (total, _) = self.totals(Kind::Get);
+        session + bytes <= PENDING_PER_SESSION && total + bytes <= PENDING_PER_TARGET
+    }
+
+    /// Admits a get or a read before any work is done for it, or refuses
+    /// it: `too_many` past the count, `busy` past the bytes.
+    fn admit(&mut self, key: &Key, id: &str, kind: Kind, bytes: usize) -> bool {
+        let (per_session, per_target) = match kind {
+            Kind::Get => (GETS_PER_SESSION, GETS_PER_TARGET),
+            Kind::Read => (READS_PER_SESSION, READS_PER_TARGET),
+        };
+        let mine = self
+            .sessions
+            .get(key)
+            .map_or(0, |session| session.served.count(kind));
+        let (_, all) = self.totals(kind);
+        if mine >= per_session || all >= per_target {
+            self.refuse(key, id, "too_many", "Too many requests at once.");
+            return false;
+        }
+        if !self.fits(key, bytes) {
+            self.answer(key, id, busy(id));
+            return false;
+        }
+        match self.served(key) {
+            Some(served) => {
+                served.in_flight.push((id.to_string(), kind));
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[cfg(test)]
+    fn note_pending(&self) {
+        let (total, _) = self.totals(Kind::Get);
+        self.shared
+            .pending_peak
+            .fetch_max(total, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(not(test))]
+    fn note_pending(&self) {}
 
     fn served_sessions(&self) -> Vec<Key> {
         self.sessions
@@ -158,7 +318,23 @@ impl Actor {
     }
 
     fn refuse(&mut self, key: &Key, re: &str, code: &str, message: impl Into<String>) {
-        self.send_message(key, &SessionMessage::refusal(re, code, message));
+        self.answer(key, re, SessionMessage::refusal(re, code, message));
+    }
+
+    /// A short answer (`unchanged`, an error) queued behind the others, so
+    /// a viewer flooding requests waits its turn rather than filling the
+    /// send queue. Past the session's bytes, the session ends.
+    fn answer(&mut self, key: &Key, re: &str, message: SessionMessage) {
+        if !self.fits(key, encoded_size(&message)) {
+            return self.end(
+                key,
+                End::Close,
+                &Failure::new("too_many", "The viewer sent more requests than it reads."),
+            );
+        }
+        if let Some(served) = self.served(key) {
+            served.push(re, message, false);
+        }
     }
 
     /// A viewer's request: inventory or output.
@@ -226,13 +402,13 @@ impl Actor {
     // --- Inventory -----------------------------------------------------------
 
     fn get_inventory(&mut self, key: &Key, id: String, have: Option<Have>) {
-        let Some(served) = self.served(key) else {
+        // Its pages are counted once the snapshot is built.
+        if !self.admit(key, &id, Kind::Get, 0) {
             return;
-        };
-        if served.gets.len() >= GETS_PER_SESSION {
-            return self.refuse(key, &id, "too_many", "Too many inventory requests at once.");
         }
-        served.gets.push((id, have));
+        if let Some(served) = self.served(key) {
+            served.gets.push((id, have));
+        }
         self.build_snapshot();
     }
 
@@ -288,6 +464,9 @@ impl Actor {
                         .map(|served| served.gets.drain(..).map(|(id, _)| id).collect())
                         .unwrap_or_default();
                     for id in gets {
+                        if let Some(served) = self.served(&key) {
+                            served.done(&id);
+                        }
                         self.refuse(&key, &id, "unavailable", message.clone());
                     }
                 }
@@ -296,53 +475,87 @@ impl Actor {
     }
 
     fn answer_snapshot(&mut self, key: &Key, snapshot: &Snapshot, summary: &MachineSummary) {
-        let Some(served) = self.served(key) else {
-            return;
-        };
         let current = Have {
             epoch: snapshot.epoch.clone(),
             rev: snapshot.rev,
         };
-        let unchanged = |re: &str| SessionMessage::InventoryUnchanged {
-            re: re.to_string(),
-            epoch: current.epoch.clone(),
-            rev: current.rev,
+        let Some(served) = self.served(key) else {
+            return;
         };
-        let mut now = Vec::new();
-        let mut paged = Vec::new();
-        for (id, have) in served.gets.drain(..) {
+        let gets = std::mem::take(&mut served.gets);
+        for (id, have) in gets {
             if snapshot.is_held_by(have.as_ref()) {
-                now.push(unchanged(&id));
+                if let Some(served) = self.served(key) {
+                    served.done(&id);
+                }
+                self.answer(key, &id, unchanged(&id, &current));
             } else {
-                paged.push(id);
+                self.queue_pages(key, &id, snapshot, summary, true);
             }
         }
-        if let Some(watch) = served.watch.as_mut() {
-            if snapshot.is_held_by(watch.have.as_ref()) {
-                if !watch.answered {
-                    now.push(unchanged(&watch.id));
-                }
-            } else {
-                paged.push(watch.id.clone());
+        let Some(watch) = self.served(key).and_then(|served| served.watch.as_mut()) else {
+            return;
+        };
+        let id = watch.id.clone();
+        if snapshot.is_held_by(watch.have.as_ref()) {
+            let first = !watch.answered;
+            watch.answered = true;
+            if first {
+                self.answer(key, &id, unchanged(&id, &current));
             }
-            watch.have = Some(current.clone());
+        } else if self.queue_pages(key, &id, snapshot, summary, false)
+            && let Some(watch) = self.served(key).and_then(|served| served.watch.as_mut())
+        {
+            watch.have = Some(current);
             watch.answered = true;
         }
-        for re in paged {
-            match pages_of(&re, snapshot, summary) {
-                Ok(pages) => {
-                    // Pages of an older revision still waiting are dropped.
-                    served.bulk.retain(|message| {
-                        !matches!(message, SessionMessage::InventoryPage { re: old, .. } if *old == re)
-                    });
-                    served.bulk.extend(pages);
+    }
+
+    /// Queues the snapshot's pages answering `re`, in place of older ones
+    /// still waiting, when they fit. A get that does not fit is refused
+    /// `busy` and is over; a watch tries again at its next look. Returns
+    /// whether they were queued.
+    fn queue_pages(
+        &mut self,
+        key: &Key,
+        re: &str,
+        snapshot: &Snapshot,
+        summary: &MachineSummary,
+        get: bool,
+    ) -> bool {
+        // Pages of an older revision still waiting are dropped.
+        if let Some(served) = self.served(key) {
+            served.drop_pending(re);
+        }
+        let pages = match pages_of(re, snapshot, summary) {
+            Ok(pages) => pages,
+            Err(error) => {
+                if let Some(served) = self.served(key) {
+                    served.done(re);
                 }
-                Err(error) => now.push(SessionMessage::refusal(&re, "unavailable", error)),
+                self.refuse(key, re, "unavailable", error);
+                return false;
             }
+        };
+        let bytes = pages.iter().map(encoded_size).sum();
+        if !self.fits(key, bytes) {
+            if get {
+                if let Some(served) = self.served(key) {
+                    served.done(re);
+                }
+                self.answer(key, re, busy(re));
+            }
+            return false;
         }
-        for message in now {
-            self.send_message(key, &message);
+        let Some(served) = self.served(key) else {
+            return false;
+        };
+        let count = pages.len();
+        for (index, page) in pages.into_iter().enumerate() {
+            served.push(re, page, get && index + 1 == count);
         }
+        self.note_pending();
+        true
     }
 
     fn summary(&self) -> MachineSummary {
@@ -380,17 +593,27 @@ impl Actor {
         }
     }
 
+    /// Admitted with room for the largest answer before anything is read;
+    /// in flight until its answer is in the send queue.
     fn read_output(&mut self, key: &Key, id: &str, run_id: &str, offset: u64, max_bytes: u32) {
+        if !self.admit(key, id, Kind::Read, MAX_MESSAGE_BYTES) {
+            return;
+        }
         let read = self
             .locate(run_id)
             .and_then(|dir| read_fitting(&dir, id, run_id, offset, max_bytes as usize));
+        let Some(served) = self.served(key) else {
+            return;
+        };
         match read {
             Ok(data) => {
-                if let Some(served) = self.served(key) {
-                    served.bulk.push_back(SessionMessage::OutputData(data));
-                }
+                served.push(id, SessionMessage::OutputData(data), true);
+                self.note_pending();
             }
-            Err((code, message)) => self.refuse(key, id, code, message),
+            Err((code, message)) => {
+                served.done(id);
+                self.refuse(key, id, code, message);
+            }
         }
     }
 
@@ -455,12 +678,18 @@ impl Actor {
 
     /// Fills the send queue with what waits, while it has room.
     pub(super) fn pump(&mut self) {
+        self.pump_taps();
         while self.failed.is_none() && self.out.has_room_for_bulk() {
             if let Some((key, message)) = self.next_bulk() {
-                self.send_message(&key, &message);
+                // Nothing that `share` covers goes out once it is off;
+                // refusals do.
+                let shared = !matches!(message, SessionMessage::Error { .. });
+                if self.sharing() || !shared {
+                    self.send_message(&key, &message);
+                }
                 continue;
             }
-            if !self.send_output() {
+            if !self.sharing() || !self.send_output() {
                 break;
             }
         }
@@ -472,7 +701,7 @@ impl Actor {
             .iter()
             .find(|(_, session)| !session.served.bulk.is_empty())
             .map(|(key, _)| key.clone())?;
-        let message = self.served(&key)?.bulk.pop_front()?;
+        let message = self.served(&key)?.pop()?;
         Some((key, message))
     }
 
@@ -504,6 +733,11 @@ impl Actor {
     }
 
     fn send_follow(&mut self, key: &Key, id: &str) {
+        // Checked again right before reading: nothing is read once `share`
+        // is off.
+        if !self.sharing() {
+            return;
+        }
         let Some(served) = self.served(key) else {
             return;
         };
@@ -535,7 +769,9 @@ impl Actor {
         if data.ended {
             served.follows.remove(index);
         }
-        self.send_message(key, &SessionMessage::OutputData(data));
+        if self.sharing() {
+            self.send_message(key, &SessionMessage::OutputData(data));
+        }
     }
 
     // --- Lifetimes -----------------------------------------------------------
@@ -550,12 +786,21 @@ impl Actor {
     /// Each second: a look for changes while watched, and the end of what
     /// `share` no longer allows.
     pub(super) fn serve_tick(&mut self, now: Instant) {
-        let served = self.served_sessions();
-        if served.is_empty() {
-            return;
+        // A change made without the management socket.
+        if self.shelf.next_recheck.is_none_or(|at| now >= at) {
+            self.shelf.next_recheck = Some(now + self.shared.timings.settings_recheck);
+            let share = self
+                .shared
+                .store
+                .settings()
+                .is_ok_and(|settings| settings.share);
+            if share != self.shelf.sharing {
+                self.on_share(share);
+            }
         }
-        if !self.sharing() {
-            return self.end_served("not_shared", NOT_SHARED);
+        let served = self.served_sessions();
+        if served.is_empty() || !self.sharing() {
+            return;
         }
         let watched = served.iter().any(|key| {
             self.sessions
@@ -577,6 +822,28 @@ impl Actor {
             }
         }
     }
+}
+
+fn unchanged(re: &str, current: &Have) -> SessionMessage {
+    SessionMessage::InventoryUnchanged {
+        re: re.to_string(),
+        epoch: current.epoch.clone(),
+        rev: current.rev,
+    }
+}
+
+fn busy(re: &str) -> SessionMessage {
+    SessionMessage::Error {
+        re: Some(re.to_string()),
+        code: "busy".into(),
+        message: FULL.into(),
+        retry_after: Some(1),
+    }
+}
+
+/// What a message takes in memory, near enough: its JSON.
+fn encoded_size(message: &SessionMessage) -> usize {
+    serde_json::to_vec(message).map_or(MAX_MESSAGE_BYTES, |json| json.len())
 }
 
 fn gone() -> (&'static str, String) {

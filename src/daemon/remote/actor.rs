@@ -180,6 +180,12 @@ pub enum Command {
         id: String,
         offset: u64,
     },
+    /// `share` was just saved: answered once the actor acted on it, so a
+    /// switch turned off stops every follow before the change is confirmed.
+    Share {
+        share: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// A snapshot of this machine's inventory, built for a viewer.
     Snapshot {
         result: Result<Arc<crate::application::inventory::Snapshot>, String>,
@@ -349,6 +355,7 @@ pub async fn run(
     let mut writer = tokio::spawn(pacer::run(sink, queue, bucket));
     let mut writer_done = false;
     let refresh = Arc::clone(&shared);
+    let sharing = shared.store.settings().is_ok_and(|settings| settings.share);
     let mut actor = Actor {
         shared,
         ctx,
@@ -362,7 +369,7 @@ pub async fn run(
         next_clock_check: Instant::now() + timings.clock_check,
         failed: None,
         tasks: Vec::new(),
-        shelf: target::Shelf::default(),
+        shelf: target::Shelf::new(sharing),
         taps_made: 0,
     };
     let mut tick = tokio::time::interval(timings.tick);
@@ -1505,6 +1512,10 @@ impl Actor {
             Command::Untap { peer, id } => self.untap(&peer, &id),
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
             Command::Snapshot { result } => self.on_snapshot(result),
+            Command::Share { share, reply } => {
+                self.on_share(share);
+                let _ = reply.send(());
+            }
             Command::Pair { peer, events } => {
                 let holder = Holder::Pair(events);
                 if let Some(failure) = self.cannot_open(&peer, Purpose::Pair) {

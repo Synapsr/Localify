@@ -22,12 +22,12 @@ use crate::infrastructure::runs::output::{
 
 const RUN: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 
-fn sharing(daemon: &Daemon, share: bool) {
+async fn sharing(daemon: &Daemon, share: bool) {
     let change = SettingsChange {
         share: Some(share),
         ..Default::default()
     };
-    daemon.link.change_settings(change).unwrap();
+    daemon.link.change_settings(change).await.unwrap();
 }
 
 fn item(name: &str) -> InventoryItem {
@@ -69,7 +69,7 @@ fn item(name: &str) -> InventoryItem {
 async fn paired_and_shared(cloud: &FakeCloud) -> (Daemon, Daemon) {
     let (a, b) = two(cloud).await;
     pair(&a, &b).await;
-    sharing(&b, true);
+    sharing(&b, true).await;
     (a, b)
 }
 
@@ -248,16 +248,179 @@ async fn a_restarted_run_is_gone_and_a_terminal_run_unavailable() {
     assert_eq!(refused.code, "output_unavailable");
 }
 
+/// Turning sharing off ends the follow before the change is confirmed:
+/// output written once it returns never reaches the viewer, even while the
+/// follow was busy sending.
 #[tokio::test]
-async fn turning_sharing_off_ends_a_follow_at_once() {
+async fn nothing_written_after_sharing_is_turned_off_reaches_the_viewer() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = paired_and_shared(&cloud).await;
+    let mut writer = run_on(&b, "one\n");
+    let mut follow = a.link.follow("mB", RUN, Some(0), 0).await.unwrap();
+    assert_eq!(lines_until(&mut follow, 1).await, ["one"]);
+    // Output keeps coming as the switch turns off.
+    for index in 0..200 {
+        writer
+            .append(format!("before {index} {}\n", "x".repeat(200)).as_bytes())
+            .unwrap();
+    }
+
+    sharing(&b, false).await;
+    writer.append(b"secret after\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let code = loop {
+        match next_follow(&mut follow).await {
+            FollowEvent::Data(data) => {
+                assert!(
+                    data.lines.iter().all(|line| !line.text.contains("after")),
+                    "output written after sharing was turned off reached the viewer"
+                );
+                follow.shown(data.next);
+            }
+            FollowEvent::Ended { code, .. } => break code,
+        }
+    };
+    assert_eq!(code, "not_shared");
+    assert!(follow.next().await.is_none());
+}
+
+/// A viewer asking for many snapshots and reads at once: the target admits
+/// a bounded number, answers the rest `too_many` or `busy` without doing
+/// the work, keeps what waits to be sent bounded, and serves again after.
+#[tokio::test]
+async fn a_viewer_flooding_gets_and_reads_keeps_the_target_bounded() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = paired_and_shared(&cloud).await;
+    let items: Vec<_> = (0..240)
+        .map(|index| item(&format!("{index:03}-{}", "x".repeat(400))))
+        .collect();
+    b.source.set_items(items);
+    let text: String = (0..4000)
+        .map(|index| format!("{index:05} {}\n", "y".repeat(90)))
+        .collect();
+    run_on(&b, &text);
+
+    let reads = (0..60).map(|index| a.link.read_output("mB", RUN, index * 1000, 16 * 1024));
+    let gets = (0..12).map(|_| a.link.inventory("mB"));
+    let (reads, gets) = tokio::join!(
+        futures_util::future::join_all(reads),
+        futures_util::future::join_all(gets)
+    );
+
+    let refused = |code: &str| code == "too_many" || code == "busy";
+    let read_refusals = reads
+        .iter()
+        .filter(|read| read.as_ref().is_err_and(|failure| refused(&failure.code)))
+        .count();
+    let codes: Vec<_> = reads
+        .iter()
+        .map(|read| {
+            read.as_ref()
+                .map_or_else(|failure| failure.code.clone(), |_| "ok".into())
+        })
+        .collect();
+    assert!(read_refusals > 0, "some reads were refused: {codes:?}");
+    assert!(reads.iter().any(Result::is_ok), "some reads were answered");
+    for get in &gets {
+        if let Err(failure) = get {
+            assert!(refused(&failure.code), "{failure:?}");
+        }
+    }
+    // One session's bound: 1 MiB and 64 KiB.
+    let peak = b
+        .link
+        .shared
+        .pending_peak
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(peak <= 1024 * 1024 + 64 * 1024, "{peak}");
+    assert!(peak > 0);
+
+    // Everything admitted drained: the target answers again.
+    assert!(a.link.read_output("mB", RUN, 0, 1024).await.is_ok());
+    assert_eq!(a.link.inventory("mB").await.unwrap().items.len(), 240);
+}
+
+/// The gate through the management socket, as the app follows output:
+/// `remote_output_follow` streams lines, and removing the target ends the
+/// stream within 2 seconds.
+#[tokio::test]
+async fn removing_the_target_ends_a_follow_on_the_management_socket() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     let cloud = FakeCloud::start().await;
     let (a, b) = paired_and_shared(&cloud).await;
     run_on(&b, "one\n");
-    let mut follow = a.link.follow("mB", RUN, Some(0), 0).await.unwrap();
-    assert_eq!(lines_until(&mut follow, 1).await, ["one"]);
+    let socket = serve_management(&a).await;
 
-    sharing(&b, false);
-    assert_eq!(ended_code(&next_follow(&mut follow).await), "not_shared");
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let command = serde_json::json!({
+        "cmd": "remote_output_follow", "machineId": "mB", "runId": RUN, "offset": 0,
+    });
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    let mut next_line = async || {
+        tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("an answer within 2 s")
+            .unwrap()
+    };
+    let first: serde_json::Value = serde_json::from_str(&next_line().await.unwrap()).unwrap();
+    assert_eq!(first["data"]["event"], "data");
+    assert_eq!(first["data"]["lines"][0]["text"], "one");
+
+    let started = Instant::now();
+    cloud.revoke("mB");
+    let last: serde_json::Value = serde_json::from_str(&next_line().await.unwrap()).unwrap();
+    assert_eq!(last["data"]["event"], "ended", "{last}");
+    assert!(next_line().await.is_none(), "the stream closed");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+/// The daemon's management socket, answering with `daemon`'s link.
+async fn serve_management(daemon: &Daemon) -> PathBuf {
+    use crate::daemon::lifecycle::ShutdownHandle;
+    use crate::daemon::mgmt_socket::{DaemonPorts, MachineServices, serve};
+    use crate::daemon::public_tunnel::PublicTunnel;
+    use crate::daemon::router::RuntimeState;
+    use crate::infrastructure::inventory::LocalInventory;
+
+    let dir = daemon.dir.path();
+    let socket = dir.join("mgmt.sock");
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "").unwrap();
+    let inventory = LocalInventory::new(config, dir.to_path_buf()).unwrap();
+    let state = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(RuntimeState::new(
+        Vec::new(),
+    )));
+    let (reload, _) = tokio::sync::mpsc::channel(1);
+    let services = MachineServices {
+        tunnel: PublicTunnel::new(1),
+        inventory: std::sync::Arc::new(inventory),
+        remote: daemon.link.clone(),
+    };
+    let ports = DaemonPorts {
+        http: 80,
+        https: 443,
+        dns: 1053,
+    };
+    let path = socket.clone();
+    tokio::spawn(async move {
+        let _ = serve(
+            path,
+            state,
+            reload,
+            ShutdownHandle::default(),
+            ports,
+            services,
+        )
+        .await;
+    });
+    wait_until("the management socket listens", || socket.exists()).await;
+    socket
 }
 
 #[tokio::test]

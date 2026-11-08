@@ -152,6 +152,9 @@ pub struct Timings {
     pub watch_expiry: Duration,
     /// While a follow is open, the target looks for new output this often.
     pub follow_poll: Duration,
+    /// How often a target reads its switches from the file, for a change
+    /// made without the management socket, which tells it at once.
+    pub settings_recheck: Duration,
 }
 
 impl Default for Timings {
@@ -185,6 +188,7 @@ impl Default for Timings {
             watch_every: seconds(2),
             watch_expiry: seconds(120),
             follow_poll: Duration::from_millis(250),
+            settings_recheck: seconds(1),
         }
     }
 }
@@ -289,6 +293,9 @@ struct Shared {
     refresh: Notify,
     #[cfg(test)]
     wake: std::sync::atomic::AtomicBool,
+    /// The most answers that ever waited to be sent as a target, in bytes.
+    #[cfg(test)]
+    pending_peak: AtomicUsize,
     /// The fake cloud's base, trusted for revocation as the override is.
     #[cfg(test)]
     trusted_base: Mutex<Option<String>>,
@@ -412,6 +419,8 @@ impl RemoteLink {
                 #[cfg(test)]
                 wake: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)]
+                pending_peak: AtomicUsize::new(0),
+                #[cfg(test)]
                 trusted_base: Mutex::new(None),
             }),
         }
@@ -441,9 +450,24 @@ impl RemoteLink {
         }
     }
 
-    pub fn change_settings(&self, change: SettingsChange) -> Result<TargetSettings> {
+    /// Saves the switches, then waits until the connection acted on them:
+    /// with `share` off, every follow and waiting answer has ended before
+    /// this returns, so nothing read afterwards reaches a paired machine.
+    pub async fn change_settings(&self, change: SettingsChange) -> Result<TargetSettings> {
         let machine_id = self.shared.signed_in_as()?;
-        self.shared.store.update_settings(&machine_id, change)
+        let settings = self.shared.store.update_settings(&machine_id, change)?;
+        if let Some(conn) = self.shared.conn() {
+            let (reply, done) = oneshot::channel();
+            let command = Command::Share {
+                share: settings.share,
+                reply,
+            };
+            // A closed connection serves nothing; the next one reads the file.
+            if conn.commands.send(command).is_ok() {
+                let _ = done.await;
+            }
+        }
+        Ok(settings)
     }
 
     /// Lets the fake cloud's `401`s revoke, as `LOCALIFY_CLOUD_API` would.

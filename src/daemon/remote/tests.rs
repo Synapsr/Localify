@@ -52,6 +52,9 @@ fn fast() -> Timings {
         watch_every: ms(100),
         watch_expiry: ms(30_000),
         follow_poll: ms(50),
+        // Long: the tests change the switches through the link, which must
+        // act on them by itself.
+        settings_recheck: ms(60_000),
     }
 }
 
@@ -1092,6 +1095,7 @@ async fn a_revoked_machine_loses_its_pin_everywhere_and_signs_out() {
             share: Some(true),
             ..Default::default()
         })
+        .await
         .unwrap();
     let mut subscription = a.link.subscribe();
     cloud.revoke("mB");
@@ -1224,13 +1228,14 @@ const NOT_REVOCATIONS: [&str; 4] = [
 ];
 
 /// `settings.json` with share on, so a wipe would show.
-fn share_on(daemon: &Daemon) {
+async fn share_on(daemon: &Daemon) {
     daemon
         .link
         .change_settings(crate::infrastructure::remote::store::SettingsChange {
             share: Some(true),
             ..Default::default()
         })
+        .await
         .unwrap();
 }
 
@@ -1258,7 +1263,7 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_me_and_key() {
             let token = cloud.add_machine(&id, "laptop");
             cloud.set_unauthorized(route, Some(body));
             let daemon = launch(&cloud, &id, "laptop", &token, tempfile::tempdir().unwrap());
-            share_on(&daemon);
+            share_on(&daemon).await;
             wait_until("it says it can't reach the cloud", || {
                 daemon
                     .link
@@ -1288,7 +1293,7 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_the_upgrade() {
         let token = cloud.add_machine(&id, "laptop");
         cloud.set_unauthorized("connect", Some(body));
         let daemon = launch(&cloud, &id, "laptop", &token, tempfile::tempdir().unwrap());
-        share_on(&daemon);
+        share_on(&daemon).await;
         let upgrades = cloud.upgrades().len();
         wait_until("it says it can't reach the cloud", || {
             daemon
@@ -1321,7 +1326,7 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_leases() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
     pair(&a, &b).await;
-    share_on(&a);
+    share_on(&a).await;
     a.link.open("mB", true).await.unwrap();
     for body in NOT_REVOCATIONS {
         cloud.set_unauthorized("lease", Some(body));
@@ -1468,7 +1473,7 @@ async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
         id: "mU".into(),
         source: Arc::new(FakeSource::default()),
     };
-    share_on(&daemon);
+    share_on(&daemon).await;
     cloud.set_unauthorized(
         "me",
         Some(r#"{"error": "unauthorized", "message": "Signed out."}"#),
@@ -1492,7 +1497,7 @@ async fn an_update_from_before_owner_json_keeps_the_key_pins_and_settings() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
     pair(&a, &b).await;
-    share_on(&a);
+    share_on(&a).await;
     let key = a
         .store()
         .load_identity()

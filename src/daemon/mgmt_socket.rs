@@ -400,6 +400,7 @@ async fn remote_answer(remote: &RemoteLink, command: MgmtCommand) -> MgmtRespons
             .and_then(|machines| Ok(serde_json::to_value(machines)?)),
         MgmtCommand::RemoteSettings { change } => remote
             .change_settings(change)
+            .await
             .and_then(|settings| Ok(serde_json::to_value(settings)?)),
         MgmtCommand::RemotePairAnswer { pairing_id, accept } => remote
             .answer(&pairing_id, accept)

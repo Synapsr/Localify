@@ -218,26 +218,45 @@ impl Actor {
             sent: false,
         };
         session.taps.insert(id.clone(), tap);
-        if session.hello.is_some() {
-            self.send_tap(&key, &id);
-        }
+        self.send_taps(&key);
         Ok(id)
     }
 
-    /// Once the target said hello: every request that waited for it.
+    /// Once the target said hello: the requests that waited for it, in the
+    /// order they came, as long as the send queue has room for them.
     pub(super) fn send_taps(&mut self, key: &Key) {
-        let Some(session) = self.sessions.get(key) else {
+        let Some(session) = self
+            .sessions
+            .get(key)
+            .filter(|session| session.hello.is_some())
+        else {
             return;
         };
-        let mut waiting: Vec<String> = session
+        let mut waiting: Vec<(u64, String)> = session
             .taps
             .iter()
             .filter(|(_, tap)| !tap.sent)
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| (id[1..].parse().unwrap_or(u64::MAX), id.clone()))
             .collect();
         waiting.sort();
-        for id in waiting {
+        for (_, id) in waiting {
+            if !self.out.has_room_for_requests() {
+                return;
+            }
             self.send_tap(key, &id);
+        }
+    }
+
+    /// Requests that waited for room in the send queue.
+    pub(super) fn pump_taps(&mut self) {
+        let keys: Vec<Key> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.taps.values().any(|tap| !tap.sent))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            self.send_taps(&key);
         }
     }
 

@@ -2,7 +2,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { appendNotice, appendOutput, emptyOutput, filterOutput } from "./util.remote-output.ts";
+import {
+  appendNotice,
+  appendOutput,
+  emptyOutput,
+  filterOutput,
+  MAX_OUTPUT_CHARS,
+  MAX_PARTIAL_CHARS,
+} from "./util.remote-output.ts";
 
 const texts = (buffer: ReturnType<typeof emptyOutput>) => buffer.entries.map((e) => e.text);
 
@@ -46,7 +53,11 @@ test("dropped output and notices are said between lines", () => {
 test("only the newest lines are kept, with keys that stay unique", () => {
   let buffer = emptyOutput();
   for (let index = 0; index < 5; index += 1) {
-    buffer = appendOutput(buffer, { lines: [{ text: `line ${index}` }], ended: false }, 3);
+    buffer = appendOutput(
+      buffer,
+      { lines: [{ text: `line ${index}` }], ended: false },
+      { lines: 3 },
+    );
   }
   assert.deepEqual(texts(buffer), ["line 2", "line 3", "line 4"]);
   assert.deepEqual(
@@ -65,4 +76,29 @@ test("search keeps the matching lines, ignoring case", () => {
     ["GET /api 200", "get /health 200"],
   );
   assert.equal(filterOutput(buffer.entries, "  ").length, 3);
+});
+
+test("a line that never ends stays within the panel's bounds", () => {
+  const piece = "x".repeat(8 * 1024);
+  let buffer = emptyOutput();
+  for (let index = 0; index < 2048; index += 1) {
+    buffer = appendOutput(buffer, { lines: [{ text: piece, cut: true }], ended: false });
+    assert.ok((buffer.partial?.length ?? 0) <= MAX_PARTIAL_CHARS);
+    assert.ok(buffer.chars <= MAX_OUTPUT_CHARS);
+  }
+  const kept = buffer.entries.reduce((sum, entry) => sum + entry.text.length, 0);
+  assert.equal(kept + (buffer.partial?.length ?? 0), buffer.chars);
+  assert.ok(buffer.chars <= MAX_OUTPUT_CHARS);
+  assert.ok(buffer.entries.length > 0);
+  assert.ok(buffer.entries.every((entry) => entry.cut && entry.text.length === MAX_PARTIAL_CHARS));
+});
+
+test("the text kept is bounded across many lines too", () => {
+  const line = { text: "y".repeat(1000) };
+  let buffer = emptyOutput();
+  for (let index = 0; index < 100; index += 1) {
+    buffer = appendOutput(buffer, { lines: Array.from({ length: 100 }, () => line), ended: false });
+  }
+  assert.ok(buffer.chars <= MAX_OUTPUT_CHARS);
+  assert.equal(buffer.entries.length, Math.floor(MAX_OUTPUT_CHARS / 1000));
 });
