@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "Agent first, du behältst die Kontrolle",
-    "titleLine1": "Deine Agenten starten es.",
-    "titleLine2": "Du öffnest die URL.",
-    "description": "Jedes Projekt, jeder Worktree und jede Maschine bekommt eine saubere HTTPS-URL. Coding-Agenten richten alles über MCP ein. Du schaust zu und steuerst aus einer App.",
+    "titleLine1": "Saubere URLs für Agenten,",
+    "titleLine2": "Worktrees und Maschinen.",
+    "description": "Jedes Projekt und jeder Git-Worktree bekommt eine vertrauenswürdige HTTPS-URL, lokal oder öffentlich. Dein Coding-Agent richtet sie über MCP ein, und du behältst alles in einer App im Blick.",
     "download": "Download für macOS",
     "source": "Quellcode ansehen",
-    "promptHint": "Füg ihn in Claude Code, Codex oder Cursor ein, und dein Agent installiert Localify für dich. Kostenlos und Open Source."
+    "promptHint": "Kostenlos und Open Source",
+    "chips": {
+      "local": "lokal",
+      "public": "öffentlich",
+      "worktree": "Worktree",
+      "linux": "Linux-Server"
+    }
   },
   "DemoDialog": {
     "title": "Willst du Localify wirklich ausprobieren?",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "Funktioniert über MCP mit deinen Agenten",
-    "more": "und jedem MCP-Client"
+    "more": "Jeder MCP-Client"
   },
   "UseCases": {
     "titleLine1": "Die Agenten arbeiten.",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "Auf jeder deiner Maschinen.",
-        "body": "Lass Agenten auf einem Desktop-Rechner oder einem freien Mac arbeiten, während du auf dem Laptop oder Handy testest. Eine öffentliche URL pro Projekt erreicht jeden Service und jeden Worktree darunter, standardmäßig hinter einem Passwort."
+        "body": "Lass Agenten auf einem entfernten Linux-Server oder einem freien Mac arbeiten, während du auf dem Laptop prüfst. Eine öffentliche URL pro Projekt erreicht jeden Service und jeden Worktree darunter, standardmäßig hinter einem Passwort."
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "Erledigt. Sie läuft unter"
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "Hier arbeiten deine Agenten",
       "laptop": "MacBook",
       "laptopRole": "Hier prüfst du",
-      "phone": "iPhone",
-      "password": "Passwortgeschützt"
+      "password": "Passwortgeschützt",
+      "server": "Linux-Server",
+      "serverRole": "Hier arbeiten deine Agenten"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "Deinem Agenten den Prompt geben.",
-        "body": "Kopiere den Installations-Prompt und füg ihn in Claude Code, Codex oder Cursor ein. Dein Agent installiert die Kommandozeile, richtet HTTPS und DNS ein und verbindet sich selbst. Du bestätigst einmal das Administratorpasswort."
+        "body": "Füg ihn in Claude Code, Codex oder Cursor ein. Dein Agent installiert Localify und verbindet sich selbst. Du bestätigst einmal das Administratorpasswort."
       },
       {
         "title": "Weitere Agenten verbinden.",
-        "body": "Später installierte Agenten verbinden sich über die App, unter Settings → AI agents, oder mit localify agent install. Jeder bekommt alle Localify-Aktionen als MCP-Tools."
+        "body": "Agenten, die du später hinzufügst, verbinden sich in der App, unter Settings → AI agents, oder mit localify agent install."
       },
       {
         "title": "Nach einer URL fragen.",
-        "body": "Frag nach der App in einem Worktree. Dein Agent startet sie, der Worktree erscheint mit eigener URL in der App, und du öffnest sie."
+        "body": "Frag nach der App in einem Worktree. Der Worktree erscheint mit eigener URL in der App."
       }
     ],
-    "dashboardPrefix": "Willst du alles in einem Dashboard verfolgen?",
-    "dashboardLink": "App für macOS herunterladen",
+    "dashboardLink": "Oder lade die App für macOS herunter",
     "demo": {
       "ask": "Starte die App im Worktree fix-auth."
     },
@@ -164,11 +168,10 @@
         "7 Tage kostenlos testen"
       ],
       "cta": "Einladung anfragen",
-      "note": "Vorerst nur auf Einladung. Du meldest dich mit GitHub an.",
       "badge": "Am beliebtesten"
     },
     "addons": {
-      "title": "Add-ons",
+      "title": "Pro-Add-ons",
       "soon": "Bald",
       "machine": "+1 Maschine: $3 pro Monat",
       "urls": "+10 öffentliche URLs: $2 pro Monat"

@@ -41,36 +41,33 @@ export const HowItWorks = async () => {
         />
       </FadeIn>
 
-      <div className="mt-16 space-y-16 md:mt-24 md:space-y-24">
+      <div className="mt-14 grid grid-cols-[minmax(0,1fr)] gap-5 md:mt-20 lg:grid-cols-3">
         {steps.map((step, index) => (
-          <div className="grid grid-cols-[minmax(0,1fr)] items-center gap-8 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] md:gap-16" key={step.title}>
-            <FadeIn className="space-y-4">
-              <span className="inline-flex size-9 items-center justify-center rounded-full bg-foreground text-[14px] font-medium text-background tabular-nums">
-                {index + 1}
-              </span>
-              <h3 className="text-[28px] leading-[1.1] font-medium tracking-[-0.025em] text-balance text-foreground md:text-[34px]">
+          <FadeIn className="flex flex-col gap-5" delay={0.05 + index * 0.08} key={step.title}>
+            {demos[index]}
+            <div className="space-y-2.5 px-1">
+              <h3 className="flex items-center gap-2.5 text-[20px] leading-tight font-medium tracking-tight text-foreground">
+                <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-foreground text-[12px] font-medium text-background tabular-nums">
+                  {index + 1}
+                </span>
                 {step.title}
               </h3>
-              <p className="max-w-md text-[16px] leading-[1.55] text-pretty text-muted-foreground">{step.body}</p>
+              <p className="text-[14.5px] leading-[1.55] text-pretty text-muted-foreground">{step.body}</p>
               {index === 0 ? (
-                <div className="space-y-3 pt-1">
-                  <InstallPromptButton size="default" source="how_it_works" />
-                  <p className="text-[13.5px] text-muted-foreground">
-                    {t("dashboardPrefix")}{" "}
-                    <Link
-                      className="text-foreground underline decoration-border decoration-[1.5px] underline-offset-4 hover:decoration-foreground"
-                      data-umami-event="download_clicked"
-                      data-umami-event-source="how_it_works"
-                      href={MACOS_APP_DOWNLOAD_URL}
-                    >
-                      {t("dashboardLink")}
-                    </Link>
-                  </p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1">
+                  <InstallPromptButton size="default" source="how_it_works" variant="outline" />
+                  <Link
+                    className="text-[13.5px] text-muted-foreground underline decoration-border decoration-[1.5px] underline-offset-4 hover:text-foreground hover:decoration-foreground"
+                    data-umami-event="download_clicked"
+                    data-umami-event-source="how_it_works"
+                    href={MACOS_APP_DOWNLOAD_URL}
+                  >
+                    {t("dashboardLink")}
+                  </Link>
                 </div>
               ) : null}
-            </FadeIn>
-            <FadeIn delay={0.1}>{demos[index]}</FadeIn>
-          </div>
+            </div>
+          </FadeIn>
         ))}
       </div>
 

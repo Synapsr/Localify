@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "Agent first, human in the loop",
-    "titleLine1": "Your agents run it.",
-    "titleLine2": "You open the URL.",
-    "description": "Every project, worktree, and machine gets a clean HTTPS URL. Coding agents set it all up over MCP. You watch and steer from one app.",
+    "titleLine1": "Clean URLs for agents,",
+    "titleLine2": "worktrees, and machines.",
+    "description": "Every project and Git worktree gets a trusted HTTPS URL, local or public. Your coding agent sets it up over MCP, and you follow it from one app.",
     "download": "Download for macOS",
     "source": "View source",
-    "promptHint": "Paste it into Claude Code, Codex, or Cursor, and your agent installs Localify for you. Free and open source."
+    "promptHint": "Free and open source",
+    "chips": {
+      "local": "local",
+      "public": "public",
+      "worktree": "worktree",
+      "linux": "Linux server"
+    }
   },
   "DemoDialog": {
     "title": "Want to try Localify for real?",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "Works with your agents over MCP",
-    "more": "and any MCP client"
+    "more": "Any MCP client"
   },
   "UseCases": {
     "titleLine1": "Agents do the work.",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "On every machine you own.",
-        "body": "Let agents work on a desktop or a spare Mac while you test from your laptop or your phone. One public URL per project reaches every service and worktree under it, behind a password by default."
+        "body": "Let agents work on a remote Linux server or a spare Mac while you review from your laptop. One public URL per project reaches every service and worktree under it, behind a password by default."
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "Done. It's running at"
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "Your agents work here",
       "laptop": "MacBook",
       "laptopRole": "You review here",
-      "phone": "iPhone",
-      "password": "Password protected"
+      "password": "Password protected",
+      "server": "Linux server",
+      "serverRole": "Your agents work here"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "Give your agent the prompt.",
-        "body": "Copy the install prompt and paste it into Claude Code, Codex, or Cursor. Your agent installs the command line, sets up HTTPS and DNS, and connects itself. You approve the administrator password once."
+        "body": "Paste it into Claude Code, Codex, or Cursor. Your agent installs Localify and connects itself. You approve the administrator password once."
       },
       {
         "title": "Connect your other agents.",
-        "body": "Agents installed later connect from the app, in Settings → AI agents, or with localify agent install. Each one gets every Localify action as an MCP tool."
+        "body": "Agents you add later connect in the app, in Settings → AI agents, or with localify agent install."
       },
       {
         "title": "Ask for a URL.",
-        "body": "Ask for the app in a worktree. Your agent starts it, the worktree shows up in the app with its own URL, and you open it."
+        "body": "Ask for the app in a worktree. It shows up in the app with its own URL."
       }
     ],
-    "dashboardPrefix": "Want a dashboard to follow it all?",
-    "dashboardLink": "Download the app for macOS",
+    "dashboardLink": "Or download the app for macOS",
     "demo": {
       "ask": "Run the app in the fix-auth worktree."
     },
@@ -164,11 +168,10 @@
         "7-day free trial"
       ],
       "cta": "Ask for an invite",
-      "note": "Invite-only for now. You sign in with GitHub.",
       "badge": "Most popular"
     },
     "addons": {
-      "title": "Add-ons",
+      "title": "Pro add-ons",
       "soon": "Soon",
       "machine": "+1 machine: $3 a month",
       "urls": "+10 public URLs: $2 a month"

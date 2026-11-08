@@ -11,7 +11,7 @@ import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { ProjectsMockup } from "@/app/projects-mockup";
 import { sourceUrl } from "@/app/site-metadata";
 import { FadeIn, sectionClass } from "@/app/site-ui";
-import { DownloadSolidIcon } from "@/components/icons";
+import { DownloadSolidIcon, PlusIcon } from "@/components/icons";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Link } from "@/i18n/navigation";
 
@@ -42,11 +42,13 @@ export const HeroSection = async () => {
 
   return (
     <section className={`${sectionClass} pt-16 md:pt-24`} id="top">
-      <UrlChipsBg />
+      <UrlChipsBg
+        labels={{ local: t("chips.local"), public: t("chips.public"), worktree: t("chips.worktree"), linux: t("chips.linux") }}
+      />
 
       <motion.div
         animate="show"
-        className="relative mx-auto flex max-w-[870px] flex-col items-center space-y-7 text-center"
+        className="relative mx-auto flex max-w-[1040px] flex-col items-center space-y-7 text-center"
         initial="hidden"
         variants={textContainer}
       >
@@ -68,7 +70,7 @@ export const HeroSection = async () => {
         </motion.span>
 
         <motion.h1
-          className="text-heading-gradient text-[52px] leading-[0.98] font-semibold tracking-[-0.035em] text-balance sm:text-[72px] md:text-[96px] lg:text-[104px]"
+          className="text-heading-gradient text-[44px] leading-[1] font-semibold tracking-[-0.035em] text-balance sm:text-[60px] md:text-[76px] lg:text-[86px]"
           variants={textItem}
         >
           {t("titleLine1")}
@@ -77,7 +79,7 @@ export const HeroSection = async () => {
         </motion.h1>
 
         <motion.p
-          className="max-w-2xl text-[19px] text-pretty text-muted-foreground md:text-[21px]"
+          className="max-w-2xl text-[18px] text-pretty text-muted-foreground md:text-[20px]"
           variants={textItem}
         >
           {t("description")}
@@ -100,10 +102,11 @@ export const HeroSection = async () => {
         </motion.div>
 
         <motion.p
-          className="max-w-md text-[13.5px] text-pretty text-muted-foreground"
+          className="text-[13.5px] text-muted-foreground"
           variants={textItem}
         >
           {t("promptHint")}{" "}
+          <span aria-hidden="true">·</span>{" "}
           <a
             className="inline-flex items-center gap-1 text-foreground underline decoration-border decoration-[1.5px] underline-offset-4 transition-colors hover:decoration-foreground"
             data-umami-event="source_clicked"
@@ -137,14 +140,22 @@ const AgentStrip = async () => {
   return (
     <FadeIn className="mt-14 flex flex-col items-center gap-5 text-center md:mt-20">
       <p className="text-[13px] text-muted-foreground">{t("label")}</p>
-      <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-4 text-foreground/75">
+      <div className="flex flex-wrap items-center justify-center gap-2.5">
         {AGENTS.map(({ name, Logo, color }) => (
-          <span className="inline-flex items-center gap-2.5 text-[20px] font-semibold tracking-tight md:text-[22px]" key={name}>
-            <Logo aria-hidden="true" className="size-7" style={{ color }} />
+          <span
+            className="inline-flex items-center gap-2.5 rounded-full border border-border bg-background py-2 pr-5 pl-2.5 text-[16px] font-semibold tracking-tight text-foreground/85 shadow-[0_1px_2px_rgba(13,13,13,0.05)]"
+            key={name}
+          >
+            <span className="inline-flex size-8 items-center justify-center rounded-full bg-muted">
+              <Logo aria-hidden="true" className="size-[18px]" style={{ color }} />
+            </span>
             {name}
           </span>
         ))}
-        <span className="text-[14px] text-muted-foreground">{t("more")}</span>
+        <span className="inline-flex items-center gap-2 rounded-full border border-dashed border-border py-2 pr-5 pl-3 text-[14px] text-muted-foreground">
+          <PlusIcon className="size-4" />
+          {t("more")}
+        </span>
       </div>
     </FadeIn>
   );

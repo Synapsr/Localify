@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "智能体优先，由你把关",
-    "titleLine1": "智能体负责运行，",
-    "titleLine2": "你只管打开 URL。",
-    "description": "每个项目、worktree 和机器都有一个干净的 HTTPS URL。编程智能体通过 MCP 搞定全部配置。你在一个应用里观察和掌控。",
+    "titleLine1": "为智能体、worktree 和机器",
+    "titleLine2": "提供干净的 URL。",
+    "description": "每个项目和 Git worktree 都有一个受信任的 HTTPS URL，本地或公开皆可。编程智能体通过 MCP 完成配置，你在一个应用里跟进一切。",
     "download": "下载 macOS 版",
     "source": "查看源代码",
-    "promptHint": "粘贴到 Claude Code、Codex 或 Cursor，智能体就会帮你安装 Localify。免费开源。"
+    "promptHint": "免费开源",
+    "chips": {
+      "local": "本地",
+      "public": "公开",
+      "worktree": "worktree",
+      "linux": "Linux 服务器"
+    }
   },
   "DemoDialog": {
     "title": "想真正试试 Localify 吗？",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "通过 MCP 与你的智能体协作",
-    "more": "以及任何 MCP 客户端"
+    "more": "任何 MCP 客户端"
   },
   "UseCases": {
     "titleLine1": "智能体干活，",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "你的每台机器都行。",
-        "body": "让智能体在台式机或闲置的 Mac 上工作，你在笔记本或手机上测试。每个项目一个公开 URL，即可访问其下所有服务和 worktree，默认受密码保护。"
+        "body": "让智能体在远程 Linux 服务器或闲置的 Mac 上工作，你在笔记本上审查。每个项目一个公开 URL，即可访问其下所有服务和 worktree，默认受密码保护。"
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "好了，已运行在"
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "智能体在这里工作",
       "laptop": "MacBook",
       "laptopRole": "你在这里审查",
-      "phone": "iPhone",
-      "password": "密码保护"
+      "password": "密码保护",
+      "server": "Linux 服务器",
+      "serverRole": "智能体在这里工作"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "把提示词交给智能体。",
-        "body": "复制安装提示词，粘贴到 Claude Code、Codex 或 Cursor。智能体会安装命令行工具，配置 HTTPS 和 DNS，并完成自身的连接。你只需确认一次管理员密码。"
+        "body": "粘贴到 Claude Code、Codex 或 Cursor。智能体会安装 Localify 并完成自身的连接。你只需确认一次管理员密码。"
       },
       {
         "title": "连接你的其他智能体。",
-        "body": "之后安装的智能体，可以在应用的 Settings → AI agents 中连接，或运行 localify agent install。每个智能体都能以 MCP 工具的形式使用 Localify 的全部操作。"
+        "body": "之后添加的智能体，可以在应用的 Settings → AI agents 中连接，或运行 localify agent install。"
       },
       {
         "title": "要一个 URL。",
-        "body": "让智能体在某个 worktree 里运行应用。它启动之后，这个 worktree 会带着自己的 URL 出现在应用里，你直接打开即可。"
+        "body": "让智能体在某个 worktree 里运行应用。它会带着自己的 URL 出现在应用里。"
       }
     ],
-    "dashboardPrefix": "想用一个面板掌握全局？",
-    "dashboardLink": "下载 macOS 版应用",
+    "dashboardLink": "或者下载 macOS 版应用",
     "demo": {
       "ask": "在 fix-auth worktree 里运行应用。"
     },
@@ -164,11 +168,10 @@
         "7 天免费试用"
       ],
       "cta": "申请邀请",
-      "note": "目前仅限邀请。使用 GitHub 登录。",
       "badge": "最受欢迎"
     },
     "addons": {
-      "title": "附加项",
+      "title": "Pro 附加项",
       "soon": "即将推出",
       "machine": "+1 台机器：$3 / 月",
       "urls": "+10 个公开 URL：$2 / 月"

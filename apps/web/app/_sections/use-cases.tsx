@@ -36,9 +36,6 @@ export const UseCases = async () => {
           <div className="grid grid-cols-[minmax(0,1fr)] items-center gap-10 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] md:gap-16" key={item.key}>
             <FadeIn className={index % 2 === 1 ? "md:order-2" : ""}>
               <div className="space-y-5">
-                <span className="inline-flex h-7 items-center rounded-full px-2.5 text-[13px] font-medium text-muted-foreground tabular-nums ring-1 ring-border">
-                  {String(index + 1).padStart(2, "0")}
-                </span>
                 <h3 className="text-[32px] leading-[1.05] font-medium tracking-[-0.03em] text-balance text-foreground md:text-[40px]">
                   {t(`items.${item.key}.title`)}
                 </h3>

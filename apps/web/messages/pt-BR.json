@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "Agentes primeiro, com você no controle",
-    "titleLine1": "Seus agentes rodam tudo.",
-    "titleLine2": "Você abre a URL.",
-    "description": "Cada projeto, worktree e máquina ganha uma URL HTTPS limpa. Agentes de código configuram tudo via MCP. Você acompanha e direciona de um só app.",
+    "titleLine1": "URLs limpas para agentes,",
+    "titleLine2": "worktrees e máquinas.",
+    "description": "Cada projeto e worktree do Git ganha uma URL HTTPS confiável, local ou pública. Seu agente de código configura tudo via MCP, e você acompanha de um só app.",
     "download": "Baixar para macOS",
     "source": "Ver o código",
-    "promptHint": "Cole no Claude Code, no Codex ou no Cursor, e seu agente instala o Localify para você. Grátis e open source."
+    "promptHint": "Grátis e open source",
+    "chips": {
+      "local": "local",
+      "public": "pública",
+      "worktree": "worktree",
+      "linux": "servidor Linux"
+    }
   },
   "DemoDialog": {
     "title": "Quer testar o Localify de verdade?",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "Funciona com seus agentes via MCP",
-    "more": "e qualquer cliente MCP"
+    "more": "Qualquer cliente MCP"
   },
   "UseCases": {
     "titleLine1": "Os agentes trabalham.",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "Em todas as suas máquinas.",
-        "body": "Deixe os agentes trabalhando em um desktop ou em um Mac sobrando enquanto você testa no notebook ou no celular. Uma URL pública por projeto alcança todos os serviços e worktrees dele, protegida por senha por padrão."
+        "body": "Deixe os agentes trabalhando em um servidor Linux remoto ou em um Mac sobrando enquanto você revisa no notebook. Uma URL pública por projeto alcança todos os serviços e worktrees dele, protegida por senha por padrão."
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "Pronto. Está rodando em"
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "Seus agentes trabalham aqui",
       "laptop": "MacBook",
       "laptopRole": "Você revisa aqui",
-      "phone": "iPhone",
-      "password": "Protegido por senha"
+      "password": "Protegido por senha",
+      "server": "Servidor Linux",
+      "serverRole": "Seus agentes trabalham aqui"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "Passe o prompt para seu agente.",
-        "body": "Copie o prompt de instalação e cole no Claude Code, no Codex ou no Cursor. Seu agente instala a linha de comando, configura HTTPS e DNS e se conecta sozinho. Você aprova a senha de administrador uma única vez."
+        "body": "Cole no Claude Code, no Codex ou no Cursor. Seu agente instala o Localify e se conecta sozinho. Você aprova a senha de administrador uma única vez."
       },
       {
         "title": "Conecte seus outros agentes.",
-        "body": "Agentes instalados depois se conectam pelo app, em Settings → AI agents, ou com localify agent install. Cada um recebe todas as ações do Localify como ferramentas MCP."
+        "body": "Agentes que você adicionar depois se conectam pelo app, em Settings → AI agents, ou com localify agent install."
       },
       {
         "title": "Peça uma URL.",
-        "body": "Peça o app em uma worktree. Seu agente o inicia, a worktree aparece no app com a própria URL, e você a abre."
+        "body": "Peça o app em uma worktree. Ela aparece no app com a própria URL."
       }
     ],
-    "dashboardPrefix": "Quer um painel para acompanhar tudo?",
-    "dashboardLink": "Baixar o app para macOS",
+    "dashboardLink": "Ou baixe o app para macOS",
     "demo": {
       "ask": "Rode o app na worktree fix-auth."
     },
@@ -164,11 +168,10 @@
         "7 dias de teste grátis"
       ],
       "cta": "Pedir um convite",
-      "note": "Só por convite, por enquanto. Você entra com o GitHub.",
       "badge": "Mais popular"
     },
     "addons": {
-      "title": "Complementos",
+      "title": "Complementos do Pro",
       "soon": "Em breve",
       "machine": "+1 máquina: $3 por mês",
       "urls": "+10 URLs públicas: $2 por mês"

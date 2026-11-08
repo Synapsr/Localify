@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "에이전트 우선, 최종 판단은 사람이",
-    "titleLine1": "실행은 에이전트가.",
-    "titleLine2": "URL은 열기만 하세요.",
-    "description": "모든 프로젝트, 워크트리, 머신에 깔끔한 HTTPS URL을. 설정은 코딩 에이전트가 MCP로 전부 처리합니다. 앱 하나에서 지켜보며 방향만 잡으세요.",
+    "titleLine1": "에이전트, 워크트리, 머신에",
+    "titleLine2": "깔끔한 URL을.",
+    "description": "모든 프로젝트와 Git 워크트리에 신뢰할 수 있는 HTTPS URL을 제공합니다. 로컬이든 공개든 상관없습니다. 설정은 코딩 에이전트가 MCP로 처리하고, 앱 하나에서 지켜보기만 하면 됩니다.",
     "download": "macOS용 다운로드",
     "source": "소스 코드 보기",
-    "promptHint": "Claude Code, Codex, Cursor에 붙여 넣으면 에이전트가 Localify를 설치해 줍니다. 무료 오픈 소스입니다."
+    "promptHint": "무료 오픈 소스",
+    "chips": {
+      "local": "로컬",
+      "public": "공개",
+      "worktree": "워크트리",
+      "linux": "Linux 서버"
+    }
   },
   "DemoDialog": {
     "title": "Localify를 직접 사용해 보시겠어요?",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "MCP로 내 에이전트와 함께 작동",
-    "more": "그 밖의 모든 MCP 클라이언트"
+    "more": "모든 MCP 클라이언트"
   },
   "UseCases": {
     "titleLine1": "일은 에이전트가.",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "가진 모든 머신에서.",
-        "body": "데스크톱이나 남는 Mac에서 에이전트가 일하게 두고, 노트북이나 휴대폰으로 테스트하세요. 프로젝트마다 공개 URL 하나로 그 아래의 모든 서비스와 워크트리에 접속할 수 있으며, 기본적으로 비밀번호로 보호됩니다."
+        "body": "원격 Linux 서버나 남는 Mac에서 에이전트가 일하게 두고, 노트북에서 리뷰하세요. 프로젝트마다 공개 URL 하나로 그 아래의 모든 서비스와 워크트리에 접속할 수 있으며, 기본적으로 비밀번호로 보호됩니다."
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "완료했습니다. 실행 중인 주소:"
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "에이전트가 일하는 곳",
       "laptop": "MacBook",
       "laptopRole": "리뷰하는 곳",
-      "phone": "iPhone",
-      "password": "비밀번호 보호"
+      "password": "비밀번호 보호",
+      "server": "Linux 서버",
+      "serverRole": "에이전트가 일하는 곳"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "에이전트에게 프롬프트를 건네세요.",
-        "body": "설치 프롬프트를 복사해 Claude Code, Codex, Cursor에 붙여 넣으세요. 에이전트가 명령줄 도구를 설치하고, HTTPS와 DNS를 설정하고, 스스로 연결합니다. 관리자 비밀번호는 한 번만 승인하면 됩니다."
+        "body": "Claude Code, Codex, Cursor에 붙여 넣으세요. 에이전트가 Localify를 설치하고 스스로 연결합니다. 관리자 비밀번호는 한 번만 승인하면 됩니다."
       },
       {
         "title": "다른 에이전트도 연결하세요.",
-        "body": "나중에 설치한 에이전트는 앱의 Settings → AI agents나 localify agent install로 연결합니다. 어떤 에이전트든 Localify의 모든 동작을 MCP 도구로 쓸 수 있습니다."
+        "body": "나중에 추가한 에이전트는 앱의 Settings → AI agents나 localify agent install로 연결합니다."
       },
       {
         "title": "URL을 요청하세요.",
-        "body": "워크트리에서 앱을 실행해 달라고 요청하세요. 에이전트가 실행하면 워크트리가 고유한 URL과 함께 앱에 나타나고, 열기만 하면 됩니다."
+        "body": "워크트리에서 앱을 실행해 달라고 요청하세요. 워크트리가 고유한 URL과 함께 앱에 나타납니다."
       }
     ],
-    "dashboardPrefix": "모든 과정을 한눈에 볼 대시보드가 필요하다면?",
-    "dashboardLink": "macOS용 앱 다운로드",
+    "dashboardLink": "또는 macOS용 앱 다운로드",
     "demo": {
       "ask": "fix-auth 워크트리에서 앱 실행해 줘."
     },
@@ -164,11 +168,10 @@
         "7일 무료 체험"
       ],
       "cta": "초대 요청하기",
-      "note": "현재는 초대 전용입니다. GitHub로 로그인합니다.",
       "badge": "가장 인기"
     },
     "addons": {
-      "title": "애드온",
+      "title": "Pro 애드온",
       "soon": "출시 예정",
       "machine": "머신 +1대: 월 $3",
       "urls": "공개 URL +10개: 월 $2"

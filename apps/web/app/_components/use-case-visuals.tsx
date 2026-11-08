@@ -6,8 +6,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 
 import { AppFrame, ProjectCard, TerminalPanel } from "@/app/_components/app-replicas";
 import { AGENTS } from "@/app/_components/agent-logos";
-import { CheckIcon, LockIcon, MobileIcon, MonitorIcon, ServersIcon } from "@/components/icons";
-import { cn } from "@/lib/utils";
+import { CheckIcon, LockIcon, MonitorIcon, ServersIcon } from "@/components/icons";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -174,39 +173,41 @@ export const AppVisual = () => (
   </Stage>
 );
 
-/* 04: devices reach the Mac the agents work on, through one protected project URL. */
-const Browser = ({ url, children, className }: { url: string; children?: ReactNode; className?: string }) => (
-  <div className={cn("overflow-hidden rounded-lg border border-black/5 bg-white shadow-[0_20px_40px_-20px_rgba(13,13,13,0.5)]", className)}>
-    <div className="flex items-center gap-1.5 border-b border-neutral-200/80 bg-neutral-50 px-2 py-1.5">
-      <span className="size-1.5 rounded-full bg-neutral-300" />
-      <span className="size-1.5 rounded-full bg-neutral-300" />
-      <span className="flex min-w-0 flex-1 items-center gap-1 rounded-md bg-white px-1.5 py-0.5 text-[10px] text-neutral-600 ring-1 ring-neutral-200">
-        <LockIcon className="size-2.5 shrink-0 text-neutral-400" />
+/* 04: you review on your MacBook what agents run on a remote Linux server, through one protected URL. */
+const Browser = ({ url, children }: { url: string; children?: ReactNode }) => (
+  <div className="overflow-hidden rounded-lg border border-border bg-background shadow-[0_20px_40px_-24px_rgba(13,13,13,0.35)]">
+    <div className="flex items-center gap-1.5 border-b border-border/70 bg-neutral-50 px-2.5 py-2">
+      <span className="size-2 rounded-full bg-[#FF5C5F]" />
+      <span className="size-2 rounded-full bg-[#FAC800]" />
+      <span className="size-2 rounded-full bg-[#34C759]" />
+      <span className="ml-1.5 flex min-w-0 flex-1 items-center gap-1.5 rounded-md bg-background px-2 py-1 text-[11.5px] text-foreground/80 ring-1 ring-border">
+        <LockIcon className="size-3 shrink-0 text-muted-foreground" />
         <span className="truncate">{url}</span>
       </span>
     </div>
-    <div className="space-y-1.5 p-2.5">{children}</div>
+    <div className="space-y-2 p-3">{children}</div>
   </div>
 );
 
-const PageSkeleton = ({ accent }: { accent: string }) => (
-  <>
-    <div className={cn("h-2 w-1/2 rounded-full", accent)} />
-    <div className="h-1.5 w-5/6 rounded-full bg-neutral-200" />
-    <div className="h-1.5 w-2/3 rounded-full bg-neutral-200" />
-    <div className="mt-2 h-5 w-16 rounded-md bg-neutral-900" />
-  </>
+const MachineLabel = ({ icon, name, role }: { icon: ReactNode; name: string; role: string }) => (
+  <p className="mb-2 flex items-center gap-2 text-[12px] text-muted-foreground">
+    <span className="flex size-6 items-center justify-center rounded-full bg-background text-foreground/80 ring-1 ring-border">
+      {icon}
+    </span>
+    <span className="font-medium text-foreground">{name}</span>
+    {role}
+  </p>
 );
 
-/* A dot that travels down a short vertical line, from the devices to the Mac. */
+/* A dot that travels along a short vertical line between the two machines. */
 const Flow = () => {
   const reduce = useReducedMotion();
   return (
-    <div aria-hidden="true" className="relative mx-auto h-7 w-px bg-white/60">
+    <div aria-hidden="true" className="relative mx-auto h-6 w-px bg-border">
       {reduce ? null : (
         <motion.span
-          animate={{ y: [0, 24], opacity: [0, 1, 0] }}
-          className="absolute -left-[3px] size-[7px] rounded-full bg-white shadow"
+          animate={{ y: [18, 0], opacity: [0, 1, 0] }}
+          className="absolute -left-[3px] size-[7px] rounded-full bg-foreground/60"
           transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
         />
       )}
@@ -214,60 +215,55 @@ const Flow = () => {
   );
 };
 
+const SERVER_LINES: Array<{ text: string; color: string }> = [
+  { text: "$ localify public-url create journal.localify --wildcard", color: "#6b7280" },
+  { text: "Public URL for journal.localify:", color: "#dddddd" },
+  { text: "  https://journal.localify.fyi", color: "#7aa2f7" },
+  { text: "  https://journal--<label>.localify.fyi  for <label>.journal.localify", color: "#7aa2f7" },
+  { text: "Password: ••••••••", color: "#dddddd" },
+];
+
 export const MachinesVisual = () => {
   const t = useTranslations("UseCases.machinesDemo");
 
   return (
-    <Stage image="/sky/urls.jpg">
+    <div className="relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-2xl bg-muted/60 p-4 ring-1 ring-border/60 md:aspect-4/3 md:min-h-0 md:p-8">
       <Sequence className="flex w-full max-w-md flex-col">
-        <motion.div className="grid grid-cols-[1fr_auto] items-end gap-3" variants={step}>
-          <div>
-            <p className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-white">
-              <MonitorIcon className="size-3.5" /> {t("laptop")} · {t("laptopRole")}
-            </p>
-            <Browser url="journal--web--fix-auth.localify.fyi">
-              <PageSkeleton accent="bg-sky-400/70" />
-            </Browser>
-          </div>
-          <div className="w-28">
-            <p className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-white">
-              <MobileIcon className="size-3.5" /> {t("phone")}
-            </p>
-            <div className="rounded-[18px] bg-neutral-900 p-1 shadow-[0_20px_40px_-20px_rgba(13,13,13,0.6)]">
-              <Browser className="rounded-[14px] border-0" url="journal--web.localify.fyi">
-                <PageSkeleton accent="bg-emerald-400/70" />
-              </Browser>
+        <motion.div variants={step}>
+          <MachineLabel icon={<MonitorIcon className="size-3.5" />} name={t("laptop")} role={t("laptopRole")} />
+          <Browser url="journal--web--fix-auth.localify.fyi">
+            <div className="h-2.5 w-2/5 rounded-full bg-foreground/80" />
+            <div className="h-2 w-5/6 rounded-full bg-muted" />
+            <div className="h-2 w-2/3 rounded-full bg-muted" />
+            <div className="flex gap-2 pt-1">
+              <div className="h-6 w-20 rounded-md bg-foreground" />
+              <div className="h-6 w-16 rounded-md ring-1 ring-border" />
             </div>
-          </div>
+          </Browser>
         </motion.div>
 
-        <motion.div variants={step}>
+        <motion.div className="py-1" variants={step}>
           <Flow />
-          <div className="mx-auto flex w-fit items-center gap-1.5 rounded-full bg-white/95 px-3 py-1.5 text-[12px] font-medium text-neutral-800 shadow-lg">
-            <LockIcon className="size-3.5 text-neutral-500" />
+          <div className="mx-auto flex w-fit items-center gap-1.5 rounded-full bg-background px-3 py-1.5 text-[12px] font-medium text-foreground shadow-sm ring-1 ring-border">
+            <LockIcon className="size-3.5 text-muted-foreground" />
             localify.fyi
-            <span className="text-neutral-400">·</span>
-            <span className="text-neutral-500">{t("password")}</span>
+            <span className="text-muted-foreground/60">·</span>
+            <span className="text-muted-foreground">{t("password")}</span>
           </div>
           <Flow />
         </motion.div>
 
         <motion.div variants={step}>
-          <p className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-white">
-            <ServersIcon className="size-3.5" /> {t("studio")} · {t("studioRole")}
-          </p>
-          <div className="rounded-xl bg-white/95 p-1 shadow-[0_20px_40px_-20px_rgba(13,13,13,0.5)]">
-            <ProjectCard
-              domains={[
-                { domain: "web.journal.localify", isPublic: true },
-                { domain: "web--fix-auth.journal.localify", isPublic: true },
-              ]}
-              isPublic
-              name="journal"
-            />
+          <MachineLabel icon={<ServersIcon className="size-3.5" />} name={t("server")} role={t("serverRole")} />
+          <div className="overflow-hidden rounded-lg border border-neutral-800 bg-[#101010] px-4 py-3 font-mono text-[11px] leading-[1.45] shadow-[0_20px_40px_-24px_rgba(13,13,13,0.5)]">
+            {SERVER_LINES.map((line) => (
+              <p className="truncate" key={line.text} style={{ color: line.color }}>
+                {line.text}
+              </p>
+            ))}
           </div>
         </motion.div>
       </Sequence>
-    </Stage>
+    </div>
   );
 };
