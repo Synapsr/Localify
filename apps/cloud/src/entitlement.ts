@@ -217,78 +217,105 @@ export type OwnedUrl = {
   suspended_at: number | null;
 };
 
-/** `?1` is a JSON array of user ids: their URLs that are not deleted, in serving order. */
-export const OWNED_URLS_SQL = `
+const SELECT_OWNED_URLS = `
   SELECT id, user_id, machine_id, taken_down_at, suspended_at FROM public_urls
-  WHERE user_id IN (SELECT value FROM json_each(?1)) AND deleted_at IS NULL
-  ORDER BY user_id, created_at, id`;
+  WHERE deleted_at IS NULL`;
+
+/** `?1` is a JSON array of user ids: their URLs that are not deleted, in serving order. */
+export const OWNED_URLS_SQL = `${SELECT_OWNED_URLS}
+  AND user_id IN (SELECT value FROM json_each(?1)) ORDER BY user_id, created_at, id`;
+/** Every URL that is not deleted, by owner, in serving order. */
+export const ALL_OWNED_URLS_SQL = `${SELECT_OWNED_URLS} ORDER BY user_id, created_at, id`;
 
 /** `?1` is a JSON array of user ids: their accounts. */
 export const ACCOUNTS_SQL = `${SELECT_ACCOUNTS} WHERE u.id IN (SELECT value FROM json_each(?1))`;
+/** The accounts of every owner of a URL that is not deleted, or of a serving slot. */
+export const ALL_ACCOUNTS_SQL = `${SELECT_ACCOUNTS}
+  WHERE u.id IN (SELECT user_id FROM public_urls WHERE deleted_at IS NULL
+                 UNION SELECT user_id FROM machines WHERE tunnel_state != 'none')`;
 
 /** A statement with its values, for D1 or for `wrangler d1 execute`. */
 export type Statement = { sql: string; params: (string | number | null)[] };
 
-/** What a reconcile writes: `?1` a JSON array of ids, `?2` now where it is used. */
+/**
+ * `?1` a JSON array of URL ids of owner `?3`, `?2` now. Marks for a rotation
+ * every machine of the owner that holds a serving slot and has none
+ * pending, when one of these URLs has not recorded that it stopped serving.
+ * Every machine, not the URL's own: the set is resolved here, at write time,
+ * so a claim that moved the URL since it was read cannot escape it. Runs
+ * before `SUSPEND_SQL`, which records the stop, so a retry or a second
+ * reconcile finds nothing left to rotate (ADR 0027).
+ */
+const ROTATE_OWNER_SQL = `
+  UPDATE machines SET rotate_requested_at = ?2
+  WHERE user_id = ?3 AND status = 'active' AND tunnel_state != 'none'
+    AND rotate_requested_at IS NULL
+    AND EXISTS (SELECT 1 FROM public_urls
+                WHERE user_id = ?3 AND id IN (SELECT value FROM json_each(?1))
+                  AND suspended_at IS NULL)
+  RETURNING id, name`;
+/** `?1` a JSON array of URL ids, `?2` now: records that they stopped serving. */
 const SUSPEND_SQL = `
   UPDATE public_urls SET suspended_at = ?2
   WHERE id IN (SELECT value FROM json_each(?1)) AND suspended_at IS NULL`;
-/**
- * Marks for a rotation the machines that hold a serving slot and have none
- * pending, so the next release closes the streams of the URLs that stopped
- * serving (ADR 0027). A release clears the mark with the generation it ends.
- */
-const ROTATE_SQL = `
-  UPDATE machines SET rotate_requested_at = ?2
-  WHERE id IN (SELECT value FROM json_each(?1)) AND status = 'active' AND tunnel_state != 'none'
-    AND rotate_requested_at IS NULL
-  RETURNING id, name`;
+/** `?1` a JSON array of URL ids: records that they serve again. */
 const RESUME_SQL = `
   UPDATE public_urls SET suspended_at = NULL
   WHERE id IN (SELECT value FROM json_each(?1)) AND suspended_at IS NOT NULL`;
 
 /**
+ * The writes for URLs of one owner that stopped serving, deleted ones
+ * included: the owner-wide rotation, then the record of the stop. Both are
+ * guarded at write time, so they are no-ops once the stop is recorded.
+ */
+export function stopStatements(userId: string, urlIds: string[], now: number): Statement[] {
+  if (urlIds.length === 0) return [];
+  const ids = JSON.stringify(urlIds);
+  return [
+    { sql: ROTATE_OWNER_SQL, params: [ids, now, userId] },
+    { sql: SUSPEND_SQL, params: [ids, now] },
+  ];
+}
+
+/**
  * The writes that bring one owner's URLs in line with an entitlement: the
- * oldest live URLs within the limit serve. One that served at the last
- * reconcile and no longer does, taken down or suspended, gets `suspended_at`
- * and its machine a rotation; one that serves again gets `suspended_at`
- * cleared. Empty when nothing changed. `urls` are the owner's, in serving
- * order. The rotation statement is the one that returns the machines marked.
+ * oldest live URLs within the limit serve. URLs that served at the last
+ * reconcile and no longer do, taken down or suspended, get `stopStatements`;
+ * URLs that serve again get `suspended_at` cleared. `urls` are the owner's,
+ * in serving order. From a stale read, the worst they do is an extra
+ * rotation or a clear, which the next reconcile corrects.
  */
 export function reconcileStatements(
+  userId: string,
   entitlement: Entitlement,
   urls: OwnedUrl[],
   now: number,
 ): Statement[] {
-  const serving = new Set(
+  const serving = servingUrlIds(entitlement, urls);
+  const stopped = urls.filter((url) => !serving.has(url.id) && url.suspended_at === null);
+  const resumed = urls.filter((url) => serving.has(url.id) && url.suspended_at !== null);
+  const statements = stopStatements(
+    userId,
+    stopped.map((url) => url.id),
+    now,
+  );
+  if (resumed.length > 0) {
+    statements.push({ sql: RESUME_SQL, params: [JSON.stringify(resumed.map((url) => url.id))] });
+  }
+  return statements;
+}
+
+/** The ids of the URLs that serve: the oldest live ones within the limit. */
+export function servingUrlIds(entitlement: Entitlement, urls: OwnedUrl[]): Set<string> {
+  return new Set(
     urls
       .filter((url) => url.taken_down_at === null)
       .slice(0, servingUrlLimit(entitlement))
       .map((url) => url.id),
   );
-  const stopped = urls.filter((url) => !serving.has(url.id) && url.suspended_at === null);
-  const resumed = urls.filter((url) => serving.has(url.id) && url.suspended_at !== null);
-  const machines = [
-    ...new Set(stopped.flatMap((url) => (url.machine_id === null ? [] : [url.machine_id]))),
-  ].sort();
-  const statements: Statement[] = [];
-  if (stopped.length > 0) {
-    statements.push({ sql: SUSPEND_SQL, params: [ids(stopped), now] });
-  }
-  if (machines.length > 0) {
-    statements.push({ sql: ROTATE_SQL, params: [JSON.stringify(machines), now] });
-  }
-  if (resumed.length > 0) {
-    statements.push({ sql: RESUME_SQL, params: [ids(resumed)] });
-  }
-  return statements;
 }
 
-/** Whether a statement is the rotation, whose rows are the machines it marked. */
+/** Whether a statement is a rotation, whose rows are the machines it marked. */
 export function isRotation(statement: Statement): boolean {
-  return statement.sql === ROTATE_SQL;
-}
-
-function ids(urls: OwnedUrl[]): string {
-  return JSON.stringify(urls.map((url) => url.id));
+  return statement.sql === ROTATE_OWNER_SQL;
 }

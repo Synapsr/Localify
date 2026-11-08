@@ -1100,3 +1100,59 @@ describe("sign-ins by an older Worker", () => {
     expect(row(machineId)).toMatchObject({ tunnel_state: "none", tunnel_id: null });
   });
 });
+
+describe("the sweep's D1 queries", () => {
+  it("stay within 1,000 with 950 owners, and still release 60 pending rotations", async () => {
+    const insertUser = context.sqlite.prepare(
+      "INSERT INTO users (id, github_id, login, created_at) VALUES (?, ?, ?, 1)",
+    );
+    const insertOverride = context.sqlite.prepare(
+      `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
+       VALUES (?, 5, 10, 'team', 1)`,
+    );
+    const insertMachine = context.sqlite.prepare(
+      `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, tunnel_state,
+                             tunnel_generation, tunnel_id, tunnel_ready_at, rotate_requested_at,
+                             dns_record_id)
+       VALUES (?, ?, ?, 'active', 7381, 1, 'ready', 1, ?, 1, ?, ?)`,
+    );
+    const insertUrl = context.sqlite.prepare(
+      `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
+                                password_version, created_at)
+       VALUES (?, ?, ?, ?, 0, ?, 0, 1, 1)`,
+    );
+    const tunnels = [];
+    const records = [];
+    const rotated: string[] = [];
+    for (let u = 0; u < 950; u++) {
+      const id = `m-${u}`;
+      insertUser.run(`u-${u}`, 1000 + u, `user-${u}`);
+      insertOverride.run(`u-${u}`);
+      insertMachine.run(id, `u-${u}`, id, `t-${id}`, u < 60 ? 1 : null, `dns-${id}`);
+      insertUrl.run(`url-${u}`, `u-${u}`, `slug-${u}`, `${id}.localify`, id);
+      if (u < 60) rotated.push(id);
+      tunnels.push({ id: `t-${id}`, name: `localify-${id}-1`, status: "healthy", ageMs: 0 });
+      records.push({
+        id: `dns-${id}`,
+        name: `m-${id}.localify.dev`,
+        content: `t-${id}.cfargotunnel.com`,
+      });
+    }
+    listTunnels(tunnels);
+    listRecords(records);
+    context.routes.set(`PATCH ${TUNNELS}/`, () => cloudflareOk({}));
+    context.routes.set(`DELETE ${TUNNELS}/`, () => cloudflareOk(null));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    context.queries.count = 0;
+    context.queries.limit = 1000;
+    await runSweep(context.env);
+    expect(context.queries.count).toBeLessThanOrEqual(1000);
+    const released = context.sqlite
+      .prepare(
+        `SELECT id FROM machines WHERE tunnel_state = 'none' AND id IN (SELECT value FROM json_each(?))`,
+      )
+      .all(JSON.stringify(rotated));
+    expect(released).toHaveLength(60);
+  });
+});

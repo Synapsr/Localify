@@ -31,7 +31,8 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/index.ts` | Routes by host, and runs the 5-minute and daily jobs |
 | `src/api.ts` | The API routes |
 | `src/machines.ts` | Sign-in, sign-out, replacing a machine, the cleanup of revoked machines, and the purge of deleted URLs |
-| `src/tunnels.ts` | Serving slots, provisioning and releasing tunnels, the machine runtime, and the 5-minute sweep |
+| `src/tunnels.ts` | Serving slots, provisioning and releasing tunnels, the machine runtime, the serving reconcile, and the 5-minute sweep |
+| `src/queries.ts` | The D1 query budget of a sweep |
 | `src/entitlement.ts` | What an account may use: its ban, its override, or its Pro plan from the `billing` snapshot; and which URLs lose their right after a change |
 | `src/public.ts`, `src/sites.ts` | The public traffic path |
 | `src/github.ts`, `src/cloudflare.ts` | The GitHub and Cloudflare API calls |

@@ -18,6 +18,7 @@ import {
   isRotation,
   reconcileStatements,
   servingUrlLimit,
+  stopStatements,
   type AccountRow,
   type Entitlement,
   type OwnedUrl,
@@ -242,11 +243,15 @@ async function takedown(db: AdminDb, args: string[], now: number): Promise<strin
   const reason = readReason(reasonWords, "takedown <slug> <reason>");
   const url = await findUrl(db, slug);
   const user = await userById(db, url.user_id);
-  // A retry repairs what an earlier attempt may have missed: the rotation
-  // of the machine of a URL that served at the last reconcile.
+  // The URL stops serving, deleted or not: every serving machine of its
+  // owner rotates, unless `suspended_at` already records the stop. That
+  // guard is checked at write time, so a retry of a takedown written
+  // without its rotation still rotates, and a repeated one does nothing.
+  const stop = stopStatements(user.id, [url.id], now);
   if (url.taken_down_at !== null) {
     return applyChange(db, user, now, {
       lines: [`${url.slug} was already taken down on ${date(url.taken_down_at)}.`],
+      change: url.suspended_at === null ? stop : [],
     });
   }
   return applyChange(db, user, now, {
@@ -259,6 +264,7 @@ async function takedown(db: AdminDb, args: string[], now: number): Promise<strin
         now,
         reason,
       ),
+      ...stop,
     ],
     predict: ({ row, urls }) => ({
       row,
@@ -420,10 +426,12 @@ type Change = {
 /**
  * Writes the change together with the reconcile it causes, in one call
  * that applies all or nothing: each URL that served at the last reconcile
- * and no longer does gets `suspended_at`, and its machine a rotation (ADR
- * 0027). The reconcile runs without a change too, so a retry repairs what
- * an earlier attempt missed. Prints the entitlement before and after, and
- * the machines marked.
+ * and no longer does gets `suspended_at`, and every serving machine of the
+ * owner a rotation, resolved at write time (ADR 0027). The reconcile runs
+ * without a change too, so a retry repairs what an earlier attempt missed.
+ * The prediction comes from a read, so a change made meanwhile costs at
+ * most an extra rotation or a clear, which the next sweep corrects. Prints
+ * the entitlement before and after, and the machines marked.
  */
 async function applyChange(
   db: AdminDb,
@@ -435,15 +443,17 @@ async function applyChange(
   const after = predict(before);
   const was = accountOf(before.row, now).entitlement;
   const is = accountOf(after.row, now).entitlement;
-  const reconcile = reconcileStatements(is, after.urls, now);
+  const reconcile = reconcileStatements(user.id, is, after.urls, now);
   const out = [...lines];
   if (change.length === 0 && reconcile.length === 0) {
     out.push("Nothing changed.");
     return out;
   }
-  const results = await db([...change, ...reconcile]);
-  const rotation = reconcile.findIndex(isRotation);
-  const rotated = rotation === -1 ? [] : (results[change.length + rotation] ?? []);
+  const statements = [...change, ...reconcile];
+  const results = await db(statements);
+  const rotated = statements.flatMap((written, index) =>
+    isRotation(written) ? (results[index] ?? []) : [],
+  );
   const wasText = describeEntitlement(was);
   const isText = describeEntitlement(is);
   out.push(
@@ -509,17 +519,18 @@ type Url = {
   id: string;
   user_id: string;
   slug: string;
-  machine_id: string | null;
   deleted_at: number | null;
   taken_down_at: number | null;
   taken_down_reason: string | null;
+  suspended_at: number | null;
 };
 
 async function findUrl(db: AdminDb, slug: string): Promise<Url> {
   const [rows] = await query(
     db,
     statement(
-      `SELECT id, user_id, slug, machine_id, deleted_at, taken_down_at, taken_down_reason
+      `SELECT id, user_id, slug, deleted_at, taken_down_at, taken_down_reason,
+              suspended_at
        FROM public_urls WHERE slug = ?1`,
       slug.trim().toLowerCase(),
     ),

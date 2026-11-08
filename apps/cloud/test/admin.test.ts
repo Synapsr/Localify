@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AdminError, bindParams, runCommand, UsageError, type AdminDb } from "../scripts/admin";
 import { runSweep } from "../src/tunnels";
-import { api, createContext, serve, signIn, visit, type TestContext } from "./support";
+import { api, createContext, serve, settle, signIn, visit, type TestContext } from "./support";
 
 let context: TestContext;
 
@@ -23,8 +23,13 @@ afterEach(() => {
  * receives it, and the call applied all or nothing, as D1 runs it. `fail`
  * makes the statements it matches throw.
  */
-function adminDb(fail?: RegExp): AdminDb {
+function adminDb(fail?: RegExp, beforeWrite?: () => void): AdminDb {
   return async (statements) => {
+    // Another request lands between the command's reads and its write.
+    if (beforeWrite && statements.some((statement) => /^\s*UPDATE/.test(statement.sql))) {
+      beforeWrite();
+      beforeWrite = undefined;
+    }
     context.sqlite.exec("BEGIN");
     try {
       const results = statements.map((statement) => {
@@ -204,7 +209,7 @@ describe("takedown and restore", () => {
 });
 
 describe("overrides", () => {
-  it("set and change the limits, rotating the machines of the URLs that stop serving", async () => {
+  it("set and change the limits, rotating every serving machine of the owner when a URL stops", async () => {
     const laptop = await signIn(context, "teo-goulois", 1, "laptop");
     const runner = await signIn(context, "teo-goulois", 1, "runner");
     await createUrl(laptop.token, "a.localify");
@@ -225,8 +230,11 @@ describe("overrides", () => {
     expect(lines).toContain(
       'Override: 5 serving machines, 10 URLs ("team") -> 2 serving machines, 1 URL ("early user"), expires 2099-01-31T00:00:00.000Z.',
     );
-    expect(lines.some((line) => line.startsWith("Rotating runner"))).toBe(true);
-    expect(machine(laptop.machineId).rotate_requested_at).toBeNull();
+    // Only the runner's URL stops, but every serving machine of the owner rotates.
+    expect(lines.some((line) => line.includes(`laptop (${laptop.machineId})`))).toBe(true);
+    expect(lines.some((line) => line.includes(`runner (${runner.machineId})`))).toBe(true);
+    // The releases happen; the next stop marks the machines again.
+    context.sqlite.exec("UPDATE machines SET rotate_requested_at = NULL");
     expect(
       get("SELECT serving_machines, public_urls, reason, expires_at FROM plan_overrides"),
     ).toEqual({
@@ -339,5 +347,44 @@ describe("an admin change that fails", () => {
       expect.stringContaining("was already taken down"),
       "Nothing changed.",
     ]);
+  });
+});
+
+describe("rotations resolved at write time", () => {
+  it("reach a machine that claimed the URL after the command read it", async () => {
+    const laptop = await signIn(context, "teo-goulois", 1, "laptop");
+    const runner = await signIn(context, "teo-goulois", 1, "runner");
+    await createUrl(laptop.token, "a.localify");
+    const c = await createUrl(laptop.token, "c.localify");
+    await createUrl(runner.token, "b.localify");
+    await serve(context, laptop.token);
+    await serve(context, runner.token);
+
+    // The command reads C on the laptop; the runner claims it before the write.
+    const claim = () =>
+      context.sqlite
+        .prepare("UPDATE public_urls SET machine_id = ? WHERE id = ?")
+        .run(runner.machineId, c.id);
+    await runCommand(adminDb(undefined, claim), ["takedown", c.slug, "malware"]);
+    expect(machine(laptop.machineId).rotate_requested_at).not.toBeNull();
+    expect(machine(runner.machineId).rotate_requested_at).not.toBeNull();
+  });
+
+  it("reach the machine of a URL taken down after its owner deleted it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { token, machineId } = await signIn(context);
+    const a = await createUrl(token, "a.localify");
+    await createUrl(token, "b.localify");
+    await serve(context, token);
+    // Deleting A leaves the tunnel to B, and A's open streams on it.
+    expect((await api(context, "DELETE", `/v1/public-urls/${a.id}`, { token })).status).toBe(204);
+    await settle(context);
+    expect(machine(machineId)).toMatchObject({ tunnel_state: "ready", rotate_requested_at: null });
+
+    const lines = await admin("takedown", a.slug, "phishing");
+    expect(lines.some((line) => line.startsWith("Rotating laptop"))).toBe(true);
+    expect(machine(machineId).rotate_requested_at).not.toBeNull();
+    await runSweep(context.env);
+    expect(machine(machineId).tunnel_state).toBe("none");
   });
 });

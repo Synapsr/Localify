@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ACCESS_COOKIE, NOTICE_COOKIE } from "../src/cookie";
 import { hmacHex } from "../src/crypto";
+import { forgetSite } from "../src/sites";
 import { api, createContext, rateLimit, serve, signIn, visit, type TestContext } from "./support";
 
 let context: TestContext;
@@ -965,5 +966,25 @@ describe("the owner's traffic limit", () => {
     } as unknown as RateLimit;
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect((await visit(context, `https://${host()}/`)).status).toBe(200);
+  });
+});
+
+describe("moderation and plans before the warning page", () => {
+  it("answer 402 and 410 to a navigation without cookies, and to the warning's form", async () => {
+    // A form token while the URL served, posted once it no longer does.
+    const notice = await formToken(`https://${host()}/`);
+    const { user_id: owner } = context.sqlite
+      .prepare("SELECT user_id FROM public_urls WHERE id = ?")
+      .get(urlId) as { user_id: string };
+
+    context.sqlite.prepare("DELETE FROM plan_overrides WHERE user_id = ?").run(owner);
+    forgetSite(slug);
+    expect((await visit(context, `https://${host()}/`, { headers: navigation })).status).toBe(402);
+    expect((await acknowledge(host(), "/", { notice })).status).toBe(402);
+
+    context.sqlite.prepare("UPDATE public_urls SET taken_down_at = 1 WHERE id = ?").run(urlId);
+    forgetSite(slug);
+    expect((await visit(context, `https://${host()}/`, { headers: navigation })).status).toBe(410);
+    expect((await acknowledge(host(), "/", { notice })).status).toBe(410);
   });
 });

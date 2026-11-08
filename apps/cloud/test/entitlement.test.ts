@@ -269,18 +269,20 @@ describe("reconciling the serving URLs", () => {
   });
   const urls = [url("a", "m1"), url("b", "m2"), url("c", "m2"), url("d", null)];
   const two = { servingMachines: 2, publicUrls: 2 };
-  /** What the statements write, by kind. */
+  /** What the statements write, by kind, with the URL ids each one covers. */
   const writes = (entitlement: typeof two, owned: OwnedUrl[]) =>
-    reconcileStatements(entitlement, owned, NOW).map((statement) => [
+    reconcileStatements("u", entitlement, owned, NOW).map((statement) => [
       isRotation(statement) ? "rotate" : statement.sql.includes("= NULL") ? "resume" : "suspend",
       JSON.parse(String(statement.params[0])) as string[],
     ]);
 
-  it("suspends the URLs beyond the limit and rotates their machines", () => {
+  it("rotates the owner's machines for the URLs beyond the limit, then records them", () => {
     expect(writes(two, urls)).toEqual([
+      ["rotate", ["c", "d"]],
       ["suspend", ["c", "d"]],
-      ["rotate", ["m2"]],
     ]);
+    const [rotation] = reconcileStatements("u", two, urls, NOW);
+    expect(rotation!.params).toEqual(['["c","d"]', NOW, "u"]);
   });
 
   it("writes nothing once the state is recorded", () => {
@@ -290,15 +292,15 @@ describe("reconciling the serving URLs", () => {
     expect(writes(two, recorded)).toEqual([]);
   });
 
-  it("suspends everything without an entitlement, and a taken-down URL whatever the limit", () => {
+  it("stops everything without an entitlement, and a taken-down URL whatever the limit", () => {
     expect(writes(NONE, urls)).toEqual([
+      ["rotate", ["a", "b", "c", "d"]],
       ["suspend", ["a", "b", "c", "d"]],
-      ["rotate", ["m1", "m2"]],
     ]);
     const takenDown = [url("a", "m1", { taken_down_at: 1 }), url("b", "m2")];
     expect(writes(two, takenDown)).toEqual([
+      ["rotate", ["a"]],
       ["suspend", ["a"]],
-      ["rotate", ["m1"]],
     ]);
   });
 

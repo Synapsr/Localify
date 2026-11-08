@@ -26,7 +26,7 @@ import {
 } from "./names";
 import { generatePassword } from "./passwords";
 import { forgetSite } from "./sites";
-import { background, machineRuntime, reconcileServing, releaseIfUnwanted } from "./tunnels";
+import { background, machineRuntime, reconcileOwner, releaseIfUnwanted } from "./tunnels";
 
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 256;
@@ -485,7 +485,7 @@ async function createUrl(
       }
       forgetSite(slug);
       // The new URL serves: it can only end a suspension recorded earlier.
-      background(ctx, reconcileServing(env, [caller.userId]));
+      background(ctx, reconcileOwner(env, caller.userId));
       break;
     } catch (error) {
       if (isUniqueViolation(error, "public_urls.slug")) {
@@ -535,7 +535,7 @@ async function deleteUrl(
   forgetSite(deleted.slug);
   if (deleted.machine_id) background(ctx, releaseIfUnwanted(env, deleted.machine_id));
   // The next URL in line may serve again.
-  background(ctx, reconcileServing(env, [caller.userId]));
+  background(ctx, reconcileOwner(env, caller.userId));
   return noContent();
 }
 

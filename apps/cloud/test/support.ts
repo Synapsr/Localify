@@ -39,27 +39,43 @@ function countingLimiter(limiter: CountingLimiter): RateLimit {
   } as RateLimit;
 }
 
+/**
+ * The queries a test D1 has run, and the most it accepts, as D1 refuses
+ * query 1,001 of a Worker invocation. A batch counts each statement.
+ */
+export type QueryCounter = { count: number; limit: number };
+
+function countQueries(counter: QueryCounter, queries: number): void {
+  counter.count += queries;
+  if (counter.count > counter.limit)
+    throw new Error("Too many API requests by single worker invocation");
+}
+
 class TestStatement {
   constructor(
     private readonly db: DatabaseSync,
     readonly sql: string,
+    private readonly counter: QueryCounter,
     private readonly params: SQLInputValue[] = [],
   ) {}
 
   bind(...params: SQLInputValue[]): TestStatement {
-    return new TestStatement(this.db, this.sql, params);
+    return new TestStatement(this.db, this.sql, this.counter, params);
   }
 
   async first<T>(): Promise<T | null> {
+    countQueries(this.counter, 1);
     const row = this.db.prepare(this.sql).get(...this.params);
     return row ? ({ ...row } as T) : null;
   }
 
   async all<T>(): Promise<{ results: T[]; success: true; meta: Record<string, never> }> {
+    countQueries(this.counter, 1);
     return { results: this.rows() as T[], success: true, meta: {} };
   }
 
   async run(): Promise<{ results: []; success: true; meta: { changes: number } }> {
+    countQueries(this.counter, 1);
     return this.runSync();
   }
 
@@ -78,13 +94,17 @@ class TestStatement {
 
 /** Runs a batch in one transaction, like D1. */
 class TestD1 {
-  constructor(readonly sqlite: DatabaseSync) {}
+  constructor(
+    readonly sqlite: DatabaseSync,
+    private readonly counter: QueryCounter,
+  ) {}
 
   prepare(sql: string): TestStatement {
-    return new TestStatement(this.sqlite, sql);
+    return new TestStatement(this.sqlite, sql, this.counter);
   }
 
   async batch(statements: TestStatement[]): Promise<unknown[]> {
+    countQueries(this.counter, statements.length);
     this.sqlite.exec("BEGIN");
     try {
       const results = statements.map((statement) =>
@@ -101,11 +121,12 @@ class TestD1 {
   }
 }
 
-export function createTestDb(): { db: D1Database; sqlite: DatabaseSync } {
+export function createTestDb(): { db: D1Database; sqlite: DatabaseSync; queries: QueryCounter } {
   // Foreign keys on, as D1 enforces them.
   const sqlite = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
   applyMigrations(sqlite, () => true);
-  return { db: new TestD1(sqlite) as unknown as D1Database, sqlite };
+  const queries: QueryCounter = { count: 0, limit: Infinity };
+  return { db: new TestD1(sqlite, queries) as unknown as D1Database, sqlite, queries };
 }
 
 /** Applies the migrations whose file name `include` accepts, in order. */
@@ -121,6 +142,8 @@ export type TestContext = {
   /** Work handed to `waitUntil` and not yet awaited by `settle`. */
   background: Promise<unknown>[];
   sqlite: DatabaseSync;
+  /** The D1 queries the Worker ran; set `limit` to refuse the ones past it. */
+  queries: QueryCounter;
   /** Requests the Worker sent with `fetch`, in order. */
   calls: {
     url: string;
@@ -138,7 +161,7 @@ export type TestContext = {
 };
 
 export function createContext(overrides: Partial<Env> = {}): TestContext {
-  const { db, sqlite } = createTestDb();
+  const { db, sqlite, queries } = createTestDb();
   const limiter = { allowed: true };
   const deviceLimiter = { allowed: true };
   const ownerLimiter = { limit: rateLimit("OWNER_LIMITER").limit, counts: new Map() };
@@ -171,6 +194,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     ctx,
     background,
     sqlite,
+    queries,
     calls: [],
     routes: new Map(),
     limiter,
