@@ -22,6 +22,15 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// The API's largest answer is a list of at most 10 public URLs.
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// The API base `LOCALIFY_CLOUD_API` names, when it is set: the explicit
+/// override for a `wrangler dev` or a staging Worker.
+pub fn api_base_override() -> Option<String> {
+    std::env::var(API_BASE_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// The API base for a new sign-in. A signed-in machine uses the one saved in
 /// its credentials.
 pub fn api_base() -> String {

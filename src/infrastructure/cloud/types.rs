@@ -156,6 +156,28 @@ impl fmt::Debug for RuntimeTunnel {
     }
 }
 
+/// One machine of `GET /v1/machines` (`docs/remote-machines.md`, "API").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterMachine {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    /// base64url; `None` until the machine uploads one.
+    #[serde(default)]
+    pub remote_key: Option<String>,
+    #[serde(rename = "self", default)]
+    pub is_self: bool,
+}
+
+/// `GET /v1/remote/lease`: a lifetime in seconds, counted by the client from
+/// when it sent the request, and the account's active machine ids.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LeaseGrant {
+    pub ttl: u64,
+    pub machines: Vec<String>,
+}
+
 /// The daemon's answer to the `public_status` management command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

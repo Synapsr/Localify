@@ -354,20 +354,20 @@ fn prompted_fetch(last_prompt: &mut Option<Instant>) -> Instant {
 
 /// The wall clock and the monotonic one, read together. The monotonic clock
 /// stands still while the machine sleeps; the wall clock does not.
-struct Clocks {
+pub(crate) struct Clocks {
     wall: SystemTime,
     monotonic: std::time::Instant,
 }
 
 impl Clocks {
-    fn now() -> Self {
+    pub(crate) fn now() -> Self {
         Self {
             wall: SystemTime::now(),
             monotonic: std::time::Instant::now(),
         }
     }
 
-    fn slept(&self) -> bool {
+    pub(crate) fn slept(&self) -> bool {
         slept_between(
             self.wall.elapsed().unwrap_or_default(),
             self.monotonic.elapsed(),
@@ -375,7 +375,7 @@ impl Clocks {
     }
 }
 
-fn slept_between(wall: Duration, monotonic: Duration) -> bool {
+pub(crate) fn slept_between(wall: Duration, monotonic: Duration) -> bool {
     wall > monotonic.saturating_add(SLEEP_GAP)
 }
 

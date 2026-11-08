@@ -6,8 +6,32 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::file_security::write_private_file;
+use crate::infrastructure::remote::store::RemoteStore;
 
-const FILE_NAME: &str = "cloud.json";
+pub const FILE_NAME: &str = "cloud.json";
+/// Never deleted, so every process locks the same file.
+const LOCK_FILE: &str = "cloud.lock";
+
+/// The sign-in lock: `login`, sign-out, revocation and every write under
+/// `remote/` take it, so a sign-in is replaced or removed in one step, and a
+/// check of who is signed in holds until the write that depends on it is
+/// done. Released when the file is dropped.
+pub fn sign_in_lock(data_dir: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::create_dir_all(data_dir)
+        .with_context(|| format!("Could not create {}", data_dir.display()))?;
+    let path = data_dir.join(LOCK_FILE);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("Could not open {}", path.display()))?;
+    lock.lock()
+        .with_context(|| format!("Could not lock {}", path.display()))?;
+    Ok(lock)
+}
 
 /// What a signed-in machine keeps. The CLI, the app and the daemon all read
 /// it; the daemon runs outside the login session, so the Keychain is not an
@@ -48,6 +72,13 @@ impl CredentialsStore {
         }
     }
 
+    /// The folder `cloud.json` lives in.
+    pub fn data_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf)
+    }
+
     /// `None` when this machine is not signed in.
     pub fn load(&self) -> Result<Option<CloudCredentials>> {
         let contents = match fs::read_to_string(&self.path) {
@@ -67,25 +98,52 @@ impl CredentialsStore {
         Ok(Some(credentials))
     }
 
+    /// Replaces the sign-in, under the sign-in lock.
     pub fn save(&self, credentials: &CloudCredentials) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Could not create {}", parent.display()))?;
-        }
+        let _lock = sign_in_lock(&self.data_dir())?;
         let contents = serde_json::to_vec_pretty(credentials)?;
         write_private_file(&self.path, &contents)
             .with_context(|| format!("Could not write {}", self.path.display()))
     }
 
-    /// Deleting credentials that are already gone is not an error.
+    /// Signs this machine out here: the credentials go, and with them the
+    /// remote key, the pins and the remote settings, so a new sign-in starts
+    /// over (`docs/remote-machines.md`, "Keys"). Deleting credentials that
+    /// are already gone is not an error.
     pub fn delete(&self) -> Result<()> {
+        let _lock = sign_in_lock(&self.data_dir())?;
+        self.delete_locked()
+    }
+
+    /// Signs out only while `cloud.json` still holds `token`, compared and
+    /// deleted under the sign-in lock: a revocation of an old token never
+    /// takes a newer sign-in with it. `then` runs once it signed out, still
+    /// under the lock, for what goes with the sign-in (the saved passwords),
+    /// so a new login cannot slip in between. Locks are always taken in this
+    /// order: the sign-in lock, then the password store's. `true` when it
+    /// signed out.
+    pub fn delete_if_token(&self, token: &str, then: impl FnOnce()) -> Result<bool> {
+        let _lock = sign_in_lock(&self.data_dir())?;
+        match self.load()? {
+            Some(credentials) if credentials.token == token => {
+                self.delete_locked()?;
+                then();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn delete_locked(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                Err(error).with_context(|| format!("Could not delete {}", self.path.display()))
+                return Err(error)
+                    .with_context(|| format!("Could not delete {}", self.path.display()));
             }
         }
+        RemoteStore::in_data_dir(&self.data_dir()).remove_locked()
     }
 }
 
@@ -133,6 +191,123 @@ mod tests {
         store.delete().unwrap();
         store.delete().unwrap();
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn signing_out_deletes_the_remote_key_pins_and_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::in_data_dir(dir.path());
+        store.save(&credentials()).unwrap();
+        RemoteStore::in_data_dir(dir.path())
+            .identity_for("m1")
+            .unwrap();
+        store.delete().unwrap();
+        assert!(!dir.path().join("remote").exists());
+    }
+
+    /// A revocation of token A that waits for the lock while a new login
+    /// writes token B: once it runs, it finds B and leaves it.
+    #[test]
+    fn a_revocation_racing_a_new_login_leaves_the_new_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::in_data_dir(dir.path());
+        store.save(&credentials()).unwrap();
+
+        let login = sign_in_lock(dir.path()).unwrap();
+        let revocation = {
+            let store = store.clone();
+            std::thread::spawn(move || store.delete_if_token("lfy_secret", || {}).unwrap())
+        };
+        // The new login, inside the lock the revocation waits for.
+        let newer = CloudCredentials {
+            token: "lfy_newer".into(),
+            machine_id: "m2".into(),
+            ..credentials()
+        };
+        write_private_file(&store.path, &serde_json::to_vec(&newer).unwrap()).unwrap();
+        drop(login);
+
+        assert!(
+            !revocation.join().unwrap(),
+            "the revocation signed nothing out"
+        );
+        assert_eq!(store.load().unwrap(), Some(newer));
+        // Without a race, the same revocation does sign out.
+        store.save(&credentials()).unwrap();
+        assert!(store.delete_if_token("lfy_secret", || {}).unwrap());
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    /// A revocation clears the saved passwords; a new login that saves one
+    /// right after the revoked sign-in is deleted keeps it: its login waits
+    /// for the lock until the clearing is done.
+    #[test]
+    fn a_revocation_never_clears_a_newer_sign_ins_passwords() {
+        use crate::infrastructure::cloud::passwords::{PasswordStore, StoredPassword};
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::in_data_dir(dir.path());
+        let passwords = PasswordStore::in_data_dir(dir.path());
+        store.save(&credentials()).unwrap();
+        let saved = |id: &str| {
+            passwords
+                .update(|all| {
+                    all.insert(
+                        id.into(),
+                        StoredPassword {
+                            version: 1,
+                            password: "p".into(),
+                        },
+                    );
+                })
+                .unwrap();
+        };
+        saved("old-url");
+
+        let (deleted, on_delete) = mpsc::channel();
+        let (login_started, on_login) = mpsc::channel();
+        let login = {
+            let (store, passwords) = (store.clone(), passwords.clone());
+            std::thread::spawn(move || {
+                on_delete.recv().unwrap();
+                login_started.send(()).unwrap();
+                // Waits for the revocation's lock, then signs in and saves.
+                store
+                    .save(&CloudCredentials {
+                        token: "lfy_newer".into(),
+                        machine_id: "m2".into(),
+                        ..credentials()
+                    })
+                    .unwrap();
+                passwords
+                    .update(|all| {
+                        all.insert(
+                            "new-url".into(),
+                            StoredPassword {
+                                version: 1,
+                                password: "p".into(),
+                            },
+                        );
+                    })
+                    .unwrap();
+            })
+        };
+        let signed_out = store
+            .delete_if_token("lfy_secret", || {
+                // Between the deletion and the clearing, the new login runs.
+                deleted.send(()).unwrap();
+                on_login.recv().unwrap();
+                passwords.update(|all| all.clear()).unwrap();
+            })
+            .unwrap();
+        login.join().unwrap();
+
+        assert!(signed_out);
+        let left = passwords.load().unwrap();
+        assert!(left.contains_key("new-url"), "{left:?}");
+        assert!(!left.contains_key("old-url"));
+        assert_eq!(store.load().unwrap().unwrap().token, "lfy_newer");
     }
 
     #[test]

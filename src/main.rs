@@ -406,6 +406,16 @@ enum Commands {
         json: bool,
     },
 
+    /// See this account's other machines, pair with them, and choose what they may see and do here
+    Machines {
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long, global = true)]
+        json: bool,
+
+        #[command(subcommand)]
+        command: Option<MachinesCommands>,
+    },
+
     /// Share a project domain at https://<slug>.localify.fyi, behind a password unless opened
     PublicUrl {
         /// Print JSON (the default when stdout is not a terminal)
@@ -427,6 +437,51 @@ enum Commands {
     ShellEnv {
         /// 32 hex digits the app chose for this read
         nonce: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MachinesCommands {
+    /// Pair with another machine: both show a code, and a person confirms it on each
+    Pair {
+        /// The machine's name or id
+        #[arg(required_unless_present = "accept")]
+        machine: Option<String>,
+
+        /// Wait on this machine for another one's pairing request
+        #[arg(long, conflicts_with = "machine")]
+        accept: bool,
+    },
+
+    /// Forget a paired machine here, and on it when a session is open
+    Unpair {
+        /// The machine's name or id
+        machine: String,
+    },
+
+    /// Sign a machine out of the account: it can never connect again
+    Remove {
+        /// The machine's name or id
+        machine: String,
+
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Show or change what paired machines may see and do on this one (all off by default)
+    Settings {
+        /// Share projects, services and output with paired machines; off turns the others off too
+        #[arg(long, value_enum)]
+        share: Option<cli::machines::Switch>,
+
+        /// Allow paired machines to start, stop and restart services here (needs --share on)
+        #[arg(long, value_enum)]
+        control: Option<cli::machines::Switch>,
+
+        /// Allow remote starts in the background when the app is closed (needs --control on)
+        #[arg(long = "background-starts", value_enum)]
+        background_starts: Option<cli::machines::Switch>,
     },
 }
 
@@ -1337,6 +1392,24 @@ fn main() -> Result<()> {
         Commands::Billing { json } => {
             cli::cloud::billing(json, &cloud_adapters(config_path, &paths))
         }
+        Commands::Machines { json, command } => match command {
+            None => cli::machines::list(json, &ctx),
+            Some(MachinesCommands::Pair { accept: true, .. }) => cli::machines::accept(&ctx),
+            Some(MachinesCommands::Pair { machine, .. }) => {
+                cli::machines::pair(machine.as_deref().unwrap_or_default(), &ctx)
+            }
+            Some(MachinesCommands::Unpair { machine }) => {
+                cli::machines::unpair(&machine, json, &ctx)
+            }
+            Some(MachinesCommands::Remove { machine, yes }) => {
+                cli::machines::remove(&machine, yes, json, &ctx, &paths)
+            }
+            Some(MachinesCommands::Settings {
+                share,
+                control,
+                background_starts,
+            }) => cli::machines::settings(share, control, background_starts, json, &ctx),
+        },
         Commands::PublicUrl { json, command } => {
             let cloud = cloud_adapters(config_path, &paths);
             match command {

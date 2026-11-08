@@ -4,17 +4,21 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
+use super::remote::{PairEvent, RemoteLink};
 use super::router::SharedState;
 use crate::application::inventory::Have;
 use crate::infrastructure::cloud::credentials::CredentialsStore;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
+use crate::infrastructure::remote::store::SettingsChange;
 use localify::desktop::ProjectRootStore;
 
 /// Management commands sent over the Unix socket.
@@ -55,6 +59,31 @@ enum MgmtCommand {
         #[serde(default)]
         have: Option<Have>,
     },
+    /// The relay link (`docs/remote-machines.md`, "Daemon").
+    #[serde(rename = "remote_status")]
+    RemoteStatus,
+    /// The roster with states. With `probe`, opens a short session to each
+    /// paired machine online first, so the states are current.
+    #[serde(rename = "remote_machines")]
+    RemoteMachines {
+        #[serde(default)]
+        probe: bool,
+    },
+    #[serde(rename = "remote_settings")]
+    RemoteSettings {
+        #[serde(flatten)]
+        change: SettingsChange,
+    },
+    /// Streaming: the code, then `paired` or `cancelled`.
+    #[serde(rename = "remote_pair", rename_all = "camelCase")]
+    RemotePair { machine_id: String },
+    #[serde(rename = "remote_pair_answer", rename_all = "camelCase")]
+    RemotePairAnswer { pairing_id: String, accept: bool },
+    #[serde(rename = "remote_unpair", rename_all = "camelCase")]
+    RemoteUnpair { machine_id: String },
+    /// Streaming: pairing requests, presence, revocations.
+    #[serde(rename = "remote_events")]
+    RemoteEvents,
 }
 
 /// Response sent back to the management client.
@@ -109,6 +138,9 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "public_refresh" => Some(MgmtCommand::PublicRefresh),
         "public_urls" => Some(MgmtCommand::PublicUrls),
         "inventory" => Some(MgmtCommand::Inventory { have: None }),
+        "remote_status" => Some(MgmtCommand::RemoteStatus),
+        "remote_machines" => Some(MgmtCommand::RemoteMachines { probe: false }),
+        "remote_events" => Some(MgmtCommand::RemoteEvents),
         _ => None,
     }
 }
@@ -122,6 +154,14 @@ pub struct DaemonPorts {
     pub dns: u16,
 }
 
+/// What the machine-wide commands answer from: the tunnel, the inventory
+/// and the relay link.
+pub struct MachineServices {
+    pub tunnel: PublicTunnel,
+    pub inventory: Arc<LocalInventory>,
+    pub remote: RemoteLink,
+}
+
 /// Serve management commands on a Unix domain socket.
 ///
 /// The socket accepts one command per connection (JSON-over-lines protocol).
@@ -133,9 +173,13 @@ pub async fn serve(
     reload_tx: mpsc::Sender<()>,
     shutdown: ShutdownHandle,
     ports: DaemonPorts,
-    tunnel: PublicTunnel,
-    inventory: Arc<LocalInventory>,
+    services: MachineServices,
 ) -> anyhow::Result<()> {
+    let MachineServices {
+        tunnel,
+        inventory,
+        remote,
+    } = services;
     let cancel = shutdown.token();
 
     // Remove stale socket file if it exists
@@ -163,6 +207,7 @@ pub async fn serve(
         let shutdown = shutdown.clone();
         let tunnel = tunnel.clone();
         let inventory = Arc::clone(&inventory);
+        let remote = remote.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -174,8 +219,18 @@ pub async fn serve(
                 return;
             }
 
+            let command = parse_command(&line);
+            match command {
+                Some(MgmtCommand::RemotePair { machine_id }) => {
+                    return stream_pairing(&remote, &machine_id, reader, writer).await;
+                }
+                Some(MgmtCommand::RemoteEvents) => {
+                    return stream_events(&remote, reader, writer).await;
+                }
+                _ => {}
+            }
             let mut exit_after_reply = None;
-            let response = match parse_command(&line) {
+            let response = match command {
                 Some(MgmtCommand::Status) => {
                     let snapshot = state.load();
                     let count = snapshot.registrations().len();
@@ -251,6 +306,7 @@ pub async fn serve(
                 // Answers at once: the client waits 2 s and a cloud call may take 20.
                 Some(MgmtCommand::PublicRefresh) => {
                     tunnel.refresh();
+                    remote.refresh();
                     MgmtResponse::success(serde_json::json!({ "refreshing": true }))
                 }
                 Some(MgmtCommand::PublicUrls) => {
@@ -266,6 +322,7 @@ pub async fn serve(
                 Some(MgmtCommand::Inventory { have }) => {
                     inventory_answer(&inventory, &tunnel, have).await
                 }
+                Some(command) => remote_answer(&remote, command).await,
                 None => MgmtResponse::error(format!("Unknown command: {}", line.trim())),
             };
 
@@ -288,6 +345,112 @@ pub async fn serve(
     info!("Management socket closed");
 
     Ok(())
+}
+
+/// The one-shot remote commands.
+async fn remote_answer(remote: &RemoteLink, command: MgmtCommand) -> MgmtResponse {
+    let answer = match command {
+        MgmtCommand::RemoteStatus => {
+            serde_json::to_value(remote.status()).map_err(anyhow::Error::from)
+        }
+        MgmtCommand::RemoteMachines { probe } => remote
+            .machines(probe)
+            .await
+            .and_then(|machines| Ok(serde_json::to_value(machines)?)),
+        MgmtCommand::RemoteSettings { change } => remote
+            .change_settings(change)
+            .and_then(|settings| Ok(serde_json::to_value(settings)?)),
+        MgmtCommand::RemotePairAnswer { pairing_id, accept } => remote
+            .answer(&pairing_id, accept)
+            .await
+            .map(|()| serde_json::json!({ "ok": true })),
+        MgmtCommand::RemoteUnpair { machine_id } => remote
+            .unpair(&machine_id)
+            .map(|removed| serde_json::json!({ "ok": true, "removed": removed })),
+        _ => return MgmtResponse::error("Not a remote command"),
+    };
+    match answer {
+        Ok(data) => MgmtResponse::success(data),
+        Err(error) => MgmtResponse::error(format!("{error:#}")),
+    }
+}
+
+async fn write_line(writer: &mut OwnedWriteHalf, response: &MgmtResponse) -> bool {
+    let Ok(mut json) = serde_json::to_string(response) else {
+        return false;
+    };
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await.is_ok() && writer.flush().await.is_ok()
+}
+
+/// Resolves when the client closes its end.
+async fn client_gone(reader: &mut BufReader<OwnedReadHalf>) {
+    let mut rest = String::new();
+    loop {
+        match reader.read_line(&mut rest).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => rest.clear(),
+        }
+    }
+}
+
+/// `remote_pair`: one line per event until the pairing ends. Closing the
+/// connection cancels the pairing.
+async fn stream_pairing(
+    remote: &RemoteLink,
+    machine_id: &str,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+) {
+    let mut events = match remote.pair(machine_id).await {
+        Ok(events) => events,
+        Err(error) => {
+            write_line(&mut writer, &MgmtResponse::error(format!("{error:#}"))).await;
+            return;
+        }
+    };
+    loop {
+        tokio::select! {
+            _ = client_gone(&mut reader) => return,
+            event = events.recv() => {
+                let Some(event) = event else { return };
+                let last = !matches!(event, PairEvent::Code { .. });
+                let Ok(data) = serde_json::to_value(&event) else { return };
+                if !write_line(&mut writer, &MgmtResponse::success(data)).await || last {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `remote_events`: while connected, this client counts as a person who can
+/// confirm a pairing here.
+async fn stream_events(
+    remote: &RemoteLink,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+) {
+    let mut subscription = remote.subscribe();
+    let ready = MgmtResponse::success(serde_json::json!({ "event": "subscribed" }));
+    if !write_line(&mut writer, &ready).await {
+        return;
+    }
+    loop {
+        tokio::select! {
+            _ = client_gone(&mut reader) => return,
+            event = subscription.events.recv() => match event {
+                Ok(event) => {
+                    let Ok(data) = serde_json::to_value(&event) else { return };
+                    if !write_line(&mut writer, &MgmtResponse::success(data)).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+        }
+    }
 }
 
 /// A fresh snapshot, built off the async threads: it reads the config and
@@ -376,6 +539,7 @@ mod tests {
                 .unwrap()
                 .with_services_dir(dir.path().join("services")),
         );
+        let data_dir = dir.path().join("data");
         let test_ports = DaemonPorts {
             http: 80,
             https: 443,
@@ -388,8 +552,11 @@ mod tests {
                 reload_tx,
                 serve_shutdown,
                 test_ports,
-                PublicTunnel::new(1),
-                inventory,
+                MachineServices {
+                    tunnel: PublicTunnel::new(1),
+                    inventory,
+                    remote: RemoteLink::new(&data_dir),
+                },
             )
             .await;
         });
