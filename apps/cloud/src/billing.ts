@@ -30,7 +30,7 @@ import {
   type PolarSubscription,
 } from "./polar";
 import { meteredDb } from "./queries";
-import { CLOSE, pushToRelay } from "./relay";
+import { pushToRelay } from "./relay";
 import { forgetSite } from "./sites";
 import { reconcileOwnerIf } from "./tunnels";
 
@@ -481,7 +481,7 @@ async function commit(
     );
   }
   if (owed?.results[0]?.serving_due_at != null) {
-    await pushLostRemoteAccess(env, userId, now);
+    await pushLostRemoteAccess(env, userId, revision, now);
     await applyEntitlement(env, userId, revision, now);
   }
   if (watermark !== null) {
@@ -537,14 +537,20 @@ async function applyEntitlement(
 /**
  * A committed change of the snapshot that leaves the account without
  * remote access closes its relay sockets at once (docs/remote-machines.md,
- * "Entitlement"). The relay does nothing when none is open, and its lazy
+ * "Entitlement"). The relay reads the account again before closing
+ * anything, so a push that arrives after a newer refresh gave access back
+ * closes nothing. It does nothing when no socket is open, and its lazy
  * checks and the leases cover a push that fails.
  */
-async function pushLostRemoteAccess(env: Env, userId: string, now: number): Promise<void> {
+async function pushLostRemoteAccess(
+  env: Env,
+  userId: string,
+  revision: number,
+  now: number,
+): Promise<void> {
   const account = await loadAccount(env.DB, userId, now);
   if (!account || account.entitlement.remoteAccess) return;
-  const code = account.banned ? CLOSE.banned : CLOSE.lapsed;
-  await pushToRelay(env, userId, (relay) => relay.revokeAccount(code));
+  await pushToRelay(env, userId, (relay) => relay.revokeAccount(revision));
 }
 
 /**

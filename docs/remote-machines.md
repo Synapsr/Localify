@@ -176,7 +176,7 @@ The object stores nothing: no storage calls, no alarms, no timers, no history. E
 
 `ctx.setWebSocketAutoResponse` answers the text frame `ping` with `pong` without waking the object. Clients send `ping` every 30 seconds and treat 75 seconds without `pong` or any frame as a lost relay connection.
 
-Authorization is checked lazily, on both ends of every frame. Before forwarding a frame other than `ping`, the object looks at the `authorizedUntil` of the sender's socket and of the recipient's. For each one that has passed, it reads the account and the machine from D1, in one query for both: still entitled, not banned, machine active. A socket that passes gets `authorizedUntil` 60 seconds ahead. One that fails is closed with `4402`, `4403` or `4401`, and the frame is not forwarded. When D1 fails, the frame is dropped and the sender gets `error` `unavailable` with `retryAfter: 5`: the relay fails closed. A dropped frame ends its Noise session (see "Relay frames"). This bounds unauthorized relaying to a minute without a timer. It does not promise to close idle sockets: an idle socket of an account that lost access stays open until its next frame or a push (see "Entitlement"), and relays nothing in between.
+Authorization is checked lazily, on both ends of every frame. Before it does anything with a frame other than `ping`, answering it with an error included, the object looks at the `authorizedUntil` of the sender's socket and of the recipient's. For each one that has passed, it reads the account and the machine from D1, in one query for both: still entitled, not banned, machine active. A socket that passes gets `authorizedUntil` 60 seconds ahead. One that fails is closed with `4402`, `4403` or `4401`, and the frame is not forwarded. A sender due for a check is checked even for a frame it addressed to itself or got wrong, and hears nothing before its check passes; the recipient is checked with it when the frame names one that is connected. When D1 fails, the frame is dropped and the sender gets `error` `unavailable` with `retryAfter: 5`: the relay fails closed. A dropped frame ends its Noise session (see "Relay frames"). This bounds unauthorized relaying to a minute without a timer. It does not promise to close idle sockets: an idle socket of an account that lost access stays open until its next frame or a push (see "Entitlement"), and relays nothing in between.
 
 A frame for a machine with no socket gets `error` with `peer_offline` back, and so does a frame whose recipient the check just closed. The object never queues.
 
@@ -191,7 +191,7 @@ A frame for a machine with no socket gets `error` with `peer_offline` back, and 
 | Bytes from one socket | 512 KiB a second on average over 10 seconds | same |
 | Upgrades | `REMOTE_IP_LIMITER` 30 a minute per IP, `REMOTE_CONNECT_LIMITER` 6 a minute per token, both approximate and per location | `429` with `Retry-After` |
 
-The two budgets are token buckets: one of 200 frames refilled at 50 a second, one of 5 MiB refilled at 512 KiB a second. A refused frame takes nothing from them. The counters live in memory and start over after hibernation, which only makes them more permissive for a moment.
+The two budgets are token buckets: one of 200 frames refilled at 50 a second, one of 5 MiB refilled at 512 KiB a second. A refused frame takes nothing from them. The size cap, the frame's shape and both budgets are checked as a frame arrives, before it waits for anything. A socket's frames are handled in order, and at most 32 frames or 512 KiB wait behind the one being handled, as when its check waits for D1; a frame past that is refused like one past the budget. While a socket is due for a check, a refusal gets no `rate_limited` answer, and the 50th in a row still closes it with `4429`. The counters live in memory and start over after hibernation, which only makes them more permissive for a moment.
 
 **Send pacing.** Each daemon sends everything through one queue per relay socket, paced below the relay's budget: at most 40 frames and 384 KiB a second averaged over 10 seconds, for all its sessions together, whatever role it plays in each. Handshakes, heartbeats, pairing and control messages go first, then inventory pages, then output, taken round-robin between follows. Concurrent snapshots and follows therefore slow down instead of tripping the relay's limit, and a follow's window stops it from queuing more than it may.
 
@@ -204,7 +204,7 @@ The daemon keeps one connection while it is signed in, holds a key, and its acco
 - **Server hints:** a `Retry-After`, or a close reason carrying `{"retryAfter": n}`, sets the least wait; jitter adds up to 20% on top.
 - **Deploys:** a close with `1012` or `1001` waits `random(0, 10)` seconds first, so a deploy that drops every socket does not bring them all back in the same second.
 - **Wake and network change:** one immediate attempt after a wake from sleep (the wall clock moved more than a minute past the monotonic one, as in public-urls.md, "Tunnel"), with `random(0, 2)` seconds of jitter, then the backoff.
-- **Final closes:** `4401` signs the machine out locally, as a `401` does. `4403` stops and says the account is suspended. `4402` waits for `public_refresh` or a plan change, or 1 hour. `4002` waits for an update.
+- **Final closes:** `4401` signs the machine out locally, as a `401` does. `4403` stops and says the account is suspended. `4402` asks for a lease after `random(30, 60)` seconds and reconnects once one is granted; while leases answer `402`, it asks again every 15 minutes, and at once on `public_refresh` or a plan change. A `4402` can be a moment stale, so the daemon never waits on it alone. `4002` waits for an update.
 - **After a reconnect:** every session is new. The viewer asks for fresh snapshots and offsets, and never resends a control that had no answer (see "Controls").
 
 ### Cost
@@ -276,7 +276,7 @@ Close codes:
 | `4001` | replaced by a newer connection of this machine | does not reconnect from this connection |
 | `4002` | protocol version no longer accepted | waits for an update |
 | `4401` | token revoked | signs out locally |
-| `4402` | remote access lapsed | waits for a plan change, or 1 hour |
+| `4402` | remote access lapsed | asks for a lease after `random(30, 60)` s, reconnects once one is granted, and otherwise asks every 15 minutes |
 | `4403` | banned | stops |
 | `4429` | rate limited | reconnects after `retryAfter` |
 
@@ -673,7 +673,7 @@ No table holds sessions, presence, pairings, inventory or output. A revoked mach
 
 - `fetch(request)`: the upgrade, after the Worker's checks. It is `fetch` rather than an RPC method, since a stub's `connect` is its TCP socket method;
 - `revokeMachine(machineId)`: closes that machine's socket with `4401` and sends `revoked` to the others;
-- `revokeAccount(code)`: closes every socket with `4402` or `4403`.
+- `revokeAccount(revision)`: a billing refresh at that revision found the account without remote access. The push may arrive after a newer refresh gave access back, so the object reads the account and its billing revision again first. It does nothing when the account has remote access now, or when a newer revision decided. Otherwise it closes with `4402`, or `4403` for a banned account, the sockets last authorized before that read: a socket authorized since was checked after it. Removal and sign-out stay unconditional, through `revokeMachine`.
 
 New configuration: two rate-limit bindings, `REMOTE_IP_LIMITER` (30 per 60 seconds, keyed by client IP) and `REMOTE_CONNECT_LIMITER` (6 per 60 seconds, keyed by the token's SHA-256), both load shedding as described in "Connecting". Nothing else: the relay needs no secret, since it authenticates nothing itself.
 
@@ -692,7 +692,7 @@ New configuration: two rate-limit bindings, `REMOTE_IP_LIMITER` (30 per 60 secon
 **Losing it.** When the account loses `remoteAccess`, through a lapse, a ban or an override that ends, or a machine is removed or signs out:
 
 1. New operations are refused: the connect route answers `402` or `403`, and each lease request too.
-2. The Worker pushes at once where it makes the change: a billing refresh that leaves the account without `remoteAccess` calls `revokeAccount`, which does nothing when no socket is open; sign-out, roster removal and a same-name sign-in that replaces a machine call `revokeMachine`. Open sessions and output follows end with their sockets.
+2. The Worker pushes at once where it makes the change: a billing refresh that leaves the account without `remoteAccess` calls `revokeAccount` with its revision, which reads the account again and does nothing when no socket is open or access came back; sign-out, roster removal and a same-name sign-in that replaces a machine call `revokeMachine`. Open sessions and output follows end with their sockets.
 3. Where the Worker does not see the change (an override expiring, the end of a canceled period or of the `past_due` grace, a `cloud:admin` command, which writes D1 only), two lazy checks take over. The relay checks the sender and the recipient of each frame once their `authorizedUntil` has passed, and fails closed when D1 does not answer. Each endpoint's lease ends its sessions when renewal fails. An open output stream keeps sending frames, so it stops within about a minute. An idle socket may stay open longer, relaying nothing.
 4. Before each control, the target asks for a fresh lease (see "Target checks").
 

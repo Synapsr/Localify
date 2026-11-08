@@ -8,7 +8,13 @@
 
 import { DurableObject } from "cloudflare:workers";
 
-import { accountOf, REMOTE_CHECK_SQL, type RemoteCheckRow } from "./entitlement";
+import {
+  accountOf,
+  REMOTE_CHECK_SQL,
+  REMOTE_REVOKE_SQL,
+  type RemoteCheckRow,
+  type RemoteRevokeRow,
+} from "./entitlement";
 
 /** The WebSocket subprotocol: the relay protocol's version. */
 export const RELAY_PROTOCOL = "localify-remote.1";
@@ -56,6 +62,13 @@ const BYTE_BURST = 10 * BYTE_RATE;
 const REFUSALS_BEFORE_CLOSE = 50;
 /** The wait a 4429 close asks for, in seconds. */
 const RATE_LIMITED_RETRY_AFTER = 10;
+/**
+ * The most frames, and bytes, of one socket waiting behind the one being
+ * handled, as when its check waits for D1. More are refused as the rate
+ * budget refuses them.
+ */
+export const MAX_PENDING_FRAMES = 32;
+export const MAX_PENDING_BYTES = 512 * 1024;
 const OPEN = 1;
 
 /** A socket's identity, in its attachment (at most 2 KiB). */
@@ -74,6 +87,8 @@ export type Attachment = {
 type Connection = { ws: WebSocket; attachment: Attachment };
 type Verdict = "ok" | "unavailable" | typeof CLOSE.revoked | AccountClose;
 type Budget = { frames: number; bytes: number; at: number; refused: number };
+type Refusal = { retryAfter: number; close: boolean };
+type Pending = { frames: number; bytes: number };
 
 type Send = {
   to: string;
@@ -82,6 +97,8 @@ type Send = {
   purpose?: "pair" | "session";
   data?: string;
 };
+/** A `send` frame, or what is wrong with one whose envelope parsed. */
+type Parsed = Send | { error: string; sid?: string };
 
 const MACHINE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_ID = /^[A-Za-z0-9_-]{22}$/;
@@ -94,6 +111,8 @@ export class RemoteRelay extends DurableObject<Env> {
   private readonly budgets = new Map<string, Budget>();
   /** Each connection's frames, handled one after the other so none overtakes another. */
   private readonly tails = new Map<string, Promise<void>>();
+  /** What each connection has queued in `tails`, bounded. */
+  private readonly pending = new Map<string, Pending>();
   /** The D1 check in flight for a machine, which concurrent frames share. */
   private readonly checks = new Map<string, Promise<Verdict>>();
 
@@ -158,13 +177,53 @@ export class RemoteRelay extends DurableObject<Env> {
     });
   }
 
+  /**
+   * The size cap, the frame's shape and the socket's budgets are enforced
+   * here, synchronously, before the frame joins the socket's queue, which
+   * is bounded: nothing a socket sends piles up while its check waits for
+   * D1.
+   */
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const sender = this.connectionOf(ws);
     if (!sender) return;
-    const connId = sender.attachment.connId;
+    const size = typeof message === "string" ? utf8Length(message) : message.byteLength;
+    if (size > MAX_FRAME_BYTES) {
+      this.drop(sender, CLOSE.tooLarge, "frame too large", true);
+      return;
+    }
+    if (typeof message !== "string") {
+      this.drop(sender, CLOSE.badFrame, "binary frame", true);
+      return;
+    }
+    // The platform's auto-response answers it without waking the object;
+    // this is the same answer, should one reach the object awake.
+    if (message === "ping") {
+      send(sender.ws, "pong");
+      return;
+    }
+    const parsed = parseSend(message);
+    if (parsed === null) {
+      this.drop(sender, CLOSE.badFrame, "not a send frame", true);
+      return;
+    }
+    const { connId, machineId } = sender.attachment;
+    const pending = this.pending.get(connId) ?? { frames: 0, bytes: 0 };
+    const full = pending.frames >= MAX_PENDING_FRAMES || pending.bytes + size > MAX_PENDING_BYTES;
+    const refused = this.spend(sender, size, full);
+    if (refused) {
+      this.refuse(sender, parsed.sid, refused);
+      return;
+    }
+    pending.frames += 1;
+    pending.bytes += size;
+    this.pending.set(connId, pending);
     const tail = (this.tails.get(connId) ?? Promise.resolve())
-      .then(() => this.handle(sender.attachment.machineId, connId, message))
-      .catch((error: unknown) => console.error("The relay could not handle a frame", error));
+      .then(() => this.handle(machineId, connId, parsed))
+      .catch((error: unknown) => console.error("The relay could not handle a frame", error))
+      .finally(() => {
+        pending.frames -= 1;
+        pending.bytes -= size;
+      });
     this.tails.set(connId, tail);
     await tail;
     if (this.tails.get(connId) === tail) this.tails.delete(connId);
@@ -193,68 +252,53 @@ export class RemoteRelay extends DurableObject<Env> {
     this.broadcast({ t: "revoked", machineId });
   }
 
-  /** The account lost remote access (4402) or was banned (4403): every socket closes. */
-  async revokeAccount(code: AccountClose): Promise<void> {
-    if (code !== CLOSE.lapsed && code !== CLOSE.banned)
-      throw new Error(`Not an account close: ${code}`);
-    for (const connection of [...this.sockets.values()]) {
-      this.drop(connection, code, closeReason(code));
+  /**
+   * A billing refresh at `revision` found the account without remote
+   * access. The push may arrive late, after a newer refresh gave it back,
+   * so the object reads the account again first, and does nothing when it
+   * has remote access now or a newer billing revision decided. Otherwise
+   * it closes, with 4402 or, banned, 4403, the sockets last authorized
+   * before that read; a socket authorized since was checked after it.
+   */
+  async revokeAccount(revision: number): Promise<void> {
+    if (!Number.isSafeInteger(revision)) throw new Error(`Not a billing revision: ${revision}`);
+    const [first] = this.sockets.values();
+    if (!first) return;
+    const decidedAt = Date.now();
+    let row: RemoteRevokeRow | null;
+    try {
+      row = await this.env.DB.prepare(REMOTE_REVOKE_SQL)
+        .bind(first.attachment.userId)
+        .first<RemoteRevokeRow>();
+    } catch (error) {
+      console.error("The relay could not read the account to revoke; its lazy checks will", error);
+      return;
     }
-    for (const ws of this.ctx.getWebSockets()) closeQuietly(ws, code, closeReason(code));
+    // An unknown user: the lazy checks close its sockets with 4401.
+    if (!row || (row.billing_revision ?? 0) > revision) return;
+    const account = accountOf(row, Date.now());
+    if (account.entitlement.remoteAccess) return;
+    const code = account.banned ? CLOSE.banned : CLOSE.lapsed;
+    for (const connection of [...this.sockets.values()]) {
+      if (connection.attachment.authorizedUntil - AUTHORIZATION_MS < decidedAt) {
+        this.drop(connection, code, closeReason(code));
+      }
+    }
   }
 
   // --- Frames ---
 
-  private async handle(machineId: string, connId: string, message: string | ArrayBuffer) {
+  /**
+   * One frame, after the checks of `webSocketMessage`. A socket whose
+   * authorization has passed is checked before anything else, an error
+   * answer included.
+   */
+  private async handle(machineId: string, connId: string, parsed: Parsed) {
     const sender = this.sockets.get(machineId);
     if (!sender || sender.attachment.connId !== connId) return;
-    const size = typeof message === "string" ? utf8Length(message) : message.byteLength;
-    if (size > MAX_FRAME_BYTES) {
-      this.drop(sender, CLOSE.tooLarge, "frame too large", true);
-      return;
-    }
-    if (typeof message !== "string") {
-      this.drop(sender, CLOSE.badFrame, "binary frame", true);
-      return;
-    }
-    // The auto-response answers it while the object sleeps; this is the same answer awake.
-    if (message === "ping") {
-      send(sender.ws, "pong");
-      return;
-    }
-    const parsed = parseSend(message);
-    if (parsed === null) {
-      this.drop(sender, CLOSE.badFrame, "not a send frame", true);
-      return;
-    }
     const sid = parsed.sid;
-    const refused = this.spend(sender, size);
-    if (refused?.close) {
-      const reason = JSON.stringify({ retryAfter: RATE_LIMITED_RETRY_AFTER });
-      this.drop(sender, CLOSE.rateLimited, reason, true);
-      return;
-    }
-    if (refused) {
-      sendError(
-        sender.ws,
-        "rate_limited",
-        "Too many frames from this machine.",
-        sid,
-        refused.retryAfter,
-      );
-      return;
-    }
-    if ("error" in parsed) {
-      sendError(sender.ws, "bad_frame", parsed.error, sid);
-      return;
-    }
-    const frame = parsed;
-    if (frame.to === machineId) {
-      sendError(sender.ws, "bad_frame", "A frame cannot go to its own sender.", sid);
-      return;
-    }
-
-    const recipient = this.sockets.get(frame.to);
+    const routable = !("error" in parsed) && parsed.to !== machineId;
+    const recipient = routable ? this.sockets.get(parsed.to) : undefined;
     const now = Date.now();
     const due = [sender, recipient].filter(
       (connection): connection is Connection =>
@@ -290,6 +334,15 @@ export class RemoteRelay extends DurableObject<Env> {
       });
     }
     if (!this.isCurrent(sender)) return;
+    if ("error" in parsed) {
+      sendError(sender.ws, "bad_frame", parsed.error, sid);
+      return;
+    }
+    const frame = parsed;
+    if (frame.to === machineId) {
+      sendError(sender.ws, "bad_frame", "A frame cannot go to its own sender.", sid);
+      return;
+    }
     const target = this.sockets.get(frame.to);
     if (!target) {
       sendError(sender.ws, "peer_offline", `${frame.to} is not connected.`, sid);
@@ -355,12 +408,10 @@ export class RemoteRelay extends DurableObject<Env> {
 
   /**
    * Takes the frame from the socket's budget, or says how many seconds to
-   * wait, and whether the socket went on long enough to be closed.
+   * wait, and whether the socket went on long enough to be closed. A frame
+   * past a full queue is refused like one past the budget.
    */
-  private spend(
-    connection: Connection,
-    bytes: number,
-  ): { retryAfter: number; close: boolean } | null {
+  private spend(connection: Connection, bytes: number, queueFull: boolean): Refusal | null {
     const now = Date.now();
     const connId = connection.attachment.connId;
     const budget = this.budgets.get(connId) ?? {
@@ -374,18 +425,35 @@ export class RemoteRelay extends DurableObject<Env> {
     budget.frames = Math.min(FRAME_BURST, budget.frames + elapsed * FRAME_RATE);
     budget.bytes = Math.min(BYTE_BURST, budget.bytes + elapsed * BYTE_RATE);
     budget.at = now;
-    if (budget.frames >= 1 && budget.bytes >= bytes) {
+    if (!queueFull && budget.frames >= 1 && budget.bytes >= bytes) {
       budget.frames -= 1;
       budget.bytes -= bytes;
       budget.refused = 0;
       return null;
     }
     budget.refused += 1;
-    const wait = Math.max((1 - budget.frames) / FRAME_RATE, (bytes - budget.bytes) / BYTE_RATE);
+    const wait = queueFull
+      ? 1
+      : Math.max((1 - budget.frames) / FRAME_RATE, (bytes - budget.bytes) / BYTE_RATE);
     return {
       retryAfter: Math.max(1, Math.ceil(wait)),
       close: budget.refused >= REFUSALS_BEFORE_CLOSE,
     };
+  }
+
+  /**
+   * A refused frame: the socket closes with 4429 once it went on long
+   * enough. Before that, the sender hears `rate_limited` only while its
+   * authorization holds: a socket due for a check gets no answer before it.
+   */
+  private refuse(sender: Connection, sid: string | undefined, refusal: Refusal): void {
+    if (refusal.close) {
+      const reason = JSON.stringify({ retryAfter: RATE_LIMITED_RETRY_AFTER });
+      this.drop(sender, CLOSE.rateLimited, reason, true);
+    } else if (sender.attachment.authorizedUntil > Date.now()) {
+      const message = "Too many frames from this machine.";
+      sendError(sender.ws, "rate_limited", message, sid, refusal.retryAfter);
+    }
   }
 
   // --- Connections ---
@@ -422,6 +490,7 @@ export class RemoteRelay extends DurableObject<Env> {
   private forget(connection: Connection): void {
     if (this.isCurrent(connection)) this.sockets.delete(connection.attachment.machineId);
     this.budgets.delete(connection.attachment.connId);
+    this.pending.delete(connection.attachment.connId);
   }
 
   /** Sends to every connected machine but `except`. */
@@ -470,7 +539,7 @@ export function parseProto(value: string | null): Proto | null {
  * session id when it has a valid one; null for anything that is not a JSON
  * `send` frame at all. Unknown fields are ignored.
  */
-function parseSend(text: string): Send | { error: string; sid?: string } | null {
+function parseSend(text: string): Parsed | null {
   let value: unknown;
   try {
     value = JSON.parse(text);

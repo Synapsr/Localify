@@ -449,6 +449,54 @@ describe("the refresh", () => {
     expect(socket.closed?.code).toBe(4402);
   });
 
+  it("lets a late revocation of a lapse close nothing once a newer refresh gave access back", async () => {
+    const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
+      entitled: false,
+    });
+    const sub = subscription(userId);
+    expect(await refresh(userId)).toBe("committed");
+    const publicKey = randomBytes(32).toString("base64url");
+    await api(context, "PUT", "/v1/machines/self/remote-key", { token, body: { publicKey } });
+
+    // Refresh A sees the lapse; its push to the relay is held.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let held = false;
+    const relays = context.env.RELAY;
+    (context.env as { RELAY: unknown }).RELAY = {
+      idFromName: (name: string) => relays.idFromName(name),
+      get: (id: DurableObjectId) => {
+        const relay = relays.get(id);
+        return {
+          fetch: (request: Request) => relay.fetch(request),
+          revokeMachine: (machineId: string) => relay.revokeMachine(machineId),
+          revokeAccount: async (revision: number) => {
+            held = true;
+            await gate;
+            return relay.revokeAccount(revision);
+          },
+        };
+      },
+    };
+    Object.assign(sub, { status: "canceled", ended_at: iso(Date.now()) });
+    const a = refresh(userId);
+    await vi.waitFor(() => expect(held).toBe(true));
+
+    // Refresh B: a new subscription gives access back, and the machine connects.
+    subscription(userId);
+    expect(await refresh(userId)).toBe("committed");
+    const connected = await api(context, "GET", "/v1/remote/connect", {
+      token,
+      headers: { upgrade: "websocket", "sec-websocket-protocol": "localify-remote.1" },
+    });
+    expect(connected.status).toBe(101);
+    const socket = (connected as unknown as { webSocket: FakeSocket }).webSocket.peer!;
+
+    release();
+    expect(await a).toBe("committed");
+    expect(socket.closed).toBeNull();
+  });
+
   it("lets a newer refresh overwrite an older one that finished first", async () => {
     const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
     const held = holdListings();

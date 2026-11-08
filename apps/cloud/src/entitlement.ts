@@ -77,6 +77,18 @@ export const REMOTE_CHECK_SQL = `
             AND m.id IN (SELECT value FROM json_each(?2))) AS active_machines
   FROM (${ACCOUNT_SQL}) a`;
 
+/** The row `REMOTE_REVOKE_SQL` returns: the account, and its billing revision. */
+export type RemoteRevokeRow = AccountRow & { billing_revision: number | null };
+
+/**
+ * The relay's read before a billing revocation: `?1` is the user id; the
+ * account, and the revision of its `billing` snapshot. No row for an
+ * unknown user.
+ */
+export const REMOTE_REVOKE_SQL = `
+  SELECT a.*, (SELECT revision FROM billing WHERE user_id = ?1) AS billing_revision
+  FROM (${ACCOUNT_SQL}) a`;
+
 export const NO_ENTITLEMENT: Entitlement = {
   servingMachines: 0,
   publicUrls: 0,

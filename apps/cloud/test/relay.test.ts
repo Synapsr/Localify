@@ -8,11 +8,12 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sha256Hex } from "../src/crypto";
-import { REMOTE_CHECK_SQL } from "../src/entitlement";
+import { REMOTE_CHECK_SQL, REMOTE_REVOKE_SQL } from "../src/entitlement";
 import {
   AUTHORIZATION_MS,
   CLOSE,
   MAX_FRAME_BYTES,
+  MAX_PENDING_FRAMES,
   RELAY_PROTOCOL,
   type Attachment,
 } from "../src/relay";
@@ -781,6 +782,24 @@ describe("lazy authorization", () => {
     expect(sr.framesOf("recv")).toHaveLength(1);
   });
 
+  it("checks an expired sender before answering anything, a malformed frame included", async () => {
+    const laptop = await linked("teo-goulois", 1, "laptop");
+    await linked("teo-goulois", 1, "runner");
+    const sl = await online(laptop);
+    vi.setSystemTime(Date.now() + AUTHORIZATION_MS);
+    const checks = recordChecks();
+    await deliver(laptop, sl, hs(laptop.machineId));
+    expect(checks).toEqual([[laptop.machineId]]);
+    expect(sl.framesOf("error")).toEqual([expect.objectContaining({ code: "bad_frame" })]);
+
+    sql("UPDATE users SET banned_at = 1");
+    vi.setSystemTime(Date.now() + AUTHORIZATION_MS);
+    await deliver(laptop, sl, hs(laptop.machineId, { sid: "short" }));
+    expect(checks).toHaveLength(2);
+    expect(sl.closed?.code).toBe(CLOSE.banned);
+    expect(sl.framesOf("error")).toHaveLength(1);
+  });
+
   it("shares one check of a machine between the frames that need it at once", async () => {
     unlimited();
     const target = await linked("teo-goulois", 1, "target");
@@ -801,25 +820,164 @@ describe("lazy authorization", () => {
 });
 
 describe("revocation pushes", () => {
-  it("close every socket of the account with the account's code", async () => {
-    for (const code of [CLOSE.lapsed, CLOSE.banned] as const) {
-      const laptop = await linked("teo-goulois", 1, `laptop-${code}`);
-      const runner = await linked("teo-goulois", 1, `runner-${code}`);
-      const [sl, sr] = [await online(laptop), await online(runner)];
-      await context.relays.object(laptop.userId).revokeAccount(code);
-      expect([sl.closed?.code, sr.closed?.code]).toEqual([code, code]);
-      await deliver(laptop, sl, msg(runner.machineId));
-      expect(sr.framesOf("recv")).toEqual([]);
-    }
-    await expect(
-      context.relays.object("anyone").revokeAccount(CLOSE.revoked as never),
-    ).rejects.toThrow();
+  it("close the account's sockets only once the account, read again, has no remote access", async () => {
+    const laptop = await linked("teo-goulois", 1, "laptop");
+    const runner = await linked("teo-goulois", 1, "runner");
+    const [sl, sr] = [await online(laptop), await online(runner)];
+    const relay = context.relays.object(laptop.userId);
+
+    // A late push for an account entitled again closes nothing.
+    await relay.revokeAccount(1);
+    expect([sl.closed, sr.closed]).toEqual([null, null]);
+
+    // Nor does one that a newer billing revision overtook.
+    sql("DELETE FROM plan_overrides");
+    sql(`INSERT INTO billing (user_id, revision, refreshed_at) VALUES (?, 5, 1)`, laptop.userId);
+    await relay.revokeAccount(4);
+    expect([sl.closed, sr.closed]).toEqual([null, null]);
+
+    vi.setSystemTime(Date.now() + 1);
+    await relay.revokeAccount(5);
+    expect([sl.closed?.code, sr.closed?.code]).toEqual([CLOSE.lapsed, CLOSE.lapsed]);
+    await deliver(laptop, sl, msg(runner.machineId));
+    expect(sr.framesOf("recv")).toEqual([]);
+    await expect(relay.revokeAccount(Number.NaN)).rejects.toThrow();
   });
 
-  it("do nothing for an account with no socket open", async () => {
-    await context.relays.object("nobody").revokeAccount(CLOSE.lapsed);
+  it("close a banned account's sockets with 4403", async () => {
+    const laptop = await linked();
+    const sl = await online(laptop);
+    sql("UPDATE users SET banned_at = 1");
+    vi.setSystemTime(Date.now() + 1);
+    await context.relays.object(laptop.userId).revokeAccount(0);
+    expect(sl.closed?.code).toBe(CLOSE.banned);
+  });
+
+  it("spare a socket authorized after the account was read", async () => {
+    const laptop = await linked("teo-goulois", 1, "laptop");
+    const runner = await linked("teo-goulois", 1, "runner");
+    const sl = await online(laptop);
+    sql("UPDATE plan_overrides SET remote_access = 0");
+    vi.setSystemTime(Date.now() + 1);
+    // The read happens now, and its answer comes back late.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const db = context.env.DB;
+    (context.env as { DB: D1Database }).DB = {
+      prepare: (text: string) => {
+        const statement = db.prepare(text);
+        if (text !== REMOTE_REVOKE_SQL) return statement;
+        return {
+          bind: (...params: unknown[]) => ({
+            first: async () => {
+              const row = await statement.bind(...params).first();
+              await gate;
+              return row;
+            },
+          }),
+        };
+      },
+      batch: (statements: D1PreparedStatement[]) => db.batch(statements),
+    } as unknown as D1Database;
+    const revoking = context.relays.object(laptop.userId).revokeAccount(0);
+
+    sql("UPDATE plan_overrides SET remote_access = 1");
+    const sr = await online(runner);
+    release();
+    await revoking;
+    expect(sl.closed?.code).toBe(CLOSE.lapsed);
+    expect(sr.closed).toBeNull();
+  });
+
+  it("do nothing, and read nothing, for an account with no socket open", async () => {
+    const before = context.queries.count;
+    await context.relays.object("nobody").revokeAccount(1);
     await context.relays.object("nobody").revokeMachine("gone");
     expect(context.relays.state("nobody").sockets).toEqual([]);
+    expect(context.queries.count).toBe(before);
+  });
+});
+
+describe("a socket's queue", () => {
+  /** Holds the relay's checks in D1 until the returned function is called. */
+  function holdChecks(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const db = context.env.DB;
+    (context.env as { DB: D1Database }).DB = {
+      prepare: (text: string) => {
+        const statement = db.prepare(text);
+        if (text !== REMOTE_CHECK_SQL) return statement;
+        return {
+          bind: (...params: unknown[]) => ({
+            first: async () => {
+              await gate;
+              return statement.bind(...params).first();
+            },
+          }),
+        };
+      },
+      batch: (statements: D1PreparedStatement[]) => db.batch(statements),
+    } as unknown as D1Database;
+    return release;
+  }
+
+  /** Lets every settled delivery run its callbacks. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  async function expiredPair() {
+    const laptop = await linked("teo-goulois", 1, "laptop");
+    const runner = await linked("teo-goulois", 1, "runner");
+    const [sl, sr] = [await online(laptop), await online(runner)];
+    vi.setSystemTime(Date.now() + AUTHORIZATION_MS);
+    return { laptop, runner, sl, sr };
+  }
+
+  it("closes on an oversized frame at once, while a check waits for D1", async () => {
+    const { laptop, runner, sl, sr } = await expiredPair();
+    const release = holdChecks();
+    const first = deliver(laptop, sl, msg(runner.machineId));
+    const big = JSON.stringify({ ...msg(runner.machineId), data: "A".repeat(MAX_FRAME_BYTES) });
+    const oversized = Array.from({ length: 1000 }, () => deliver(laptop, sl, big));
+    expect(sl.closed?.code).toBe(CLOSE.tooLarge);
+    release();
+    await Promise.all([first, ...oversized]);
+    expect(sr.framesOf("recv")).toEqual([]);
+  });
+
+  it("bounds what waits behind a check, and closes a socket that keeps sending, unanswered", async () => {
+    const { laptop, runner, sl, sr } = await expiredPair();
+    const release = holdChecks();
+    let settled = 0;
+    const all = Array.from({ length: 1000 }, () =>
+      deliver(laptop, sl, msg(runner.machineId)).then(() => {
+        settled += 1;
+      }),
+    );
+    await flush();
+    expect(1000 - settled).toBeLessThanOrEqual(MAX_PENDING_FRAMES);
+    expect(sl.closed).toEqual({ code: CLOSE.rateLimited, reason: '{"retryAfter":10}' });
+    // The socket was due for a check: it got no answer before one.
+    expect(sl.framesOf("error")).toEqual([]);
+    release();
+    await Promise.all(all);
+    expect(sr.framesOf("recv")).toEqual([]);
+  });
+
+  it("keeps the order of what it queued", async () => {
+    const { laptop, runner, sl, sr } = await expiredPair();
+    const release = holdChecks();
+    const frames = Array.from({ length: 10 }, (_, index) =>
+      deliver(laptop, sl, { ...msg(runner.machineId), data: `AAA${index}` }),
+    );
+    release();
+    await Promise.all(frames);
+    expect(sr.framesOf("recv").map((frame) => frame.data)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `AAA${index}`),
+    );
+    expect(sl.closed).toBeNull();
   });
 });
 
