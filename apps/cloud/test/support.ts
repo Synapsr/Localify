@@ -9,6 +9,8 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import ts from "typescript";
 import { vi } from "vitest";
 
+import { QUIET_AFTER_STOP_MS } from "../src/tunnels";
+
 const MIGRATIONS = join(import.meta.dirname, "..", "migrations");
 const WRANGLER = join(import.meta.dirname, "..", "wrangler.jsonc");
 
@@ -300,6 +302,13 @@ export async function signIn(
       .run(userId);
   }
   return { token: body.token, machineId: body.machine.id, userId };
+}
+
+/** Moves every owner's last serving stop to just before the quiet period, as if it had elapsed. */
+export function endQuietPeriods(context: TestContext): void {
+  context.sqlite
+    .prepare(`UPDATE users SET serving_stopped_at = ? WHERE serving_stopped_at IS NOT NULL`)
+    .run(Date.now() - QUIET_AFTER_STOP_MS - 1);
 }
 
 export async function api(

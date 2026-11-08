@@ -254,6 +254,17 @@ const ROTATE_OWNER_SQL = `
                 WHERE user_id = ?3 AND id IN (SELECT value FROM json_each(?1))
                   AND suspended_at IS NULL)
   RETURNING id, name`;
+/**
+ * Records, on the owner `?3`, when one of the URLs `?1` stopped serving, at
+ * `?2`: no new tunnel generation of theirs starts within the quiet period
+ * after it. Guarded like `ROTATE_OWNER_SQL`, and before `SUSPEND_SQL`.
+ */
+const STOPPED_SQL = `
+  UPDATE users SET serving_stopped_at = ?2
+  WHERE id = ?3
+    AND EXISTS (SELECT 1 FROM public_urls
+                WHERE user_id = ?3 AND id IN (SELECT value FROM json_each(?1))
+                  AND suspended_at IS NULL)`;
 /** `?1` a JSON array of URL ids, `?2` now: records that they stopped serving. */
 const SUSPEND_SQL = `
   UPDATE public_urls SET suspended_at = ?2
@@ -265,14 +276,16 @@ const RESUME_SQL = `
 
 /**
  * The writes for URLs of one owner that stopped serving, deleted ones
- * included: the owner-wide rotation, then the record of the stop. Both are
- * guarded at write time, so they are no-ops once the stop is recorded.
+ * included: the owner-wide rotation, the owner's quiet period, then the
+ * record of the stop. All are guarded at write time, so they are no-ops
+ * once the stop is recorded.
  */
 export function stopStatements(userId: string, urlIds: string[], now: number): Statement[] {
   if (urlIds.length === 0) return [];
   const ids = JSON.stringify(urlIds);
   return [
     { sql: ROTATE_OWNER_SQL, params: [ids, now, userId] },
+    { sql: STOPPED_SQL, params: [ids, now, userId] },
     { sql: SUSPEND_SQL, params: [ids, now] },
   ];
 }

@@ -5,7 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AdminError, bindParams, runCommand, UsageError, type AdminDb } from "../scripts/admin";
 import { runSweep } from "../src/tunnels";
-import { api, createContext, serve, settle, signIn, visit, type TestContext } from "./support";
+import {
+  api,
+  createContext,
+  endQuietPeriods,
+  serve,
+  settle,
+  signIn,
+  visit,
+  type TestContext,
+} from "./support";
 
 let context: TestContext;
 
@@ -166,7 +175,9 @@ describe("takedown and restore", () => {
 
     await runSweep(context.env);
     expect(machine(machineId)).toMatchObject({ tunnel_state: "none", tunnel_generation: 1 });
-    // The machine still serves the other URL: its next fetch provisions generation 2.
+    // The machine still serves the other URL: once the quiet period after the
+    // stop is over, its next fetch provisions generation 2.
+    endQuietPeriods(context);
     const next = await serve(context, token, 1);
     expect(next.body.state).toBe("provisioning");
     expect(machine(machineId)).toMatchObject({ tunnel_state: "ready", tunnel_generation: 2 });
@@ -199,6 +210,7 @@ describe("takedown and restore", () => {
     await createUrl(runner.token, "new.localify");
     await admin("override", "teo-goulois", "5", "1", "team");
     await admin("takedown", old.slug, "spam");
+    endQuietPeriods(context);
     await serve(context, runner.token);
     expect(machine(runner.machineId).tunnel_state).toBe("ready");
 
@@ -438,6 +450,7 @@ describe("a suspension waiting for its reconcile", () => {
     const { runner, b } = await deleteWithoutResume();
     await runSweep(context.env);
     expect(suspendedAt(b.id)).toBeNull();
+    endQuietPeriods(context);
     await serve(context, runner.token);
     expect(machine(runner.machineId).tunnel_state).toBe("ready");
 

@@ -34,6 +34,7 @@ import {
   type AccountRow,
   type Entitlement,
   type OwnedUrl,
+  type Statement,
 } from "./entitlement";
 import {
   cleanUpRevokedMachines,
@@ -44,7 +45,15 @@ import {
   tunnelName,
 } from "./machines";
 import { meteredDb } from "./queries";
+import { SITE_CACHE_TTL_MS } from "./sites";
 
+/**
+ * No new tunnel generation of an owner starts until this long after one of
+ * their URLs stopped serving. A public path lookup that still said it
+ * served was cached before the stop, so it has expired by then, and no
+ * request can follow it to the new tunnel.
+ */
+export const QUIET_AFTER_STOP_MS = SITE_CACHE_TTL_MS + 5_000;
 /** An operation older than this is abandoned. */
 const OP_STALE_MS = 2 * 60 * 1000;
 /** Two down readings this far apart, on a tunnel ready this long, reap it. */
@@ -69,13 +78,28 @@ const SLOT_QUERIES = 3;
 /** The orphan listing and the slot count, at the end of a run. */
 const FINAL_QUERIES = 2;
 /**
- * The revocations every run can do, whatever came before them: the
- * reconcile stops while their queries are left, and they run before any
- * maintenance, with all the calls (60 × 4 = 240 of 300).
+ * The revocations every run attempts first, whatever came before them: the
+ * reconcile stops while their queries are left, and they take at most
+ * 60 × 4 = 240 of the 300 calls.
  */
 const REVOCATIONS_PER_RUN = 60;
-/** What the reconcile leaves for the slot read, 60 revocations and the end of the run. */
-const REVOCATION_QUERIES = SLOT_QUERIES + REVOCATIONS_PER_RUN * RELEASE_QUERIES + FINAL_QUERIES;
+/**
+ * What maintenance keeps after those 60 (reaps, CNAME repairs, the
+ * revoked-machine cleanup, orphan tunnels), however many revocations are
+ * queued: 240 + 40 fits in 300. Revocations get what it leaves.
+ */
+const MAINTENANCE_CALLS = 40;
+/** The queries 40 calls of maintenance can need: at most 4 per call, and a few reads. */
+const MAINTENANCE_QUERIES = 60;
+/** What the reconcile leaves: the slot reads, 60 revocations, maintenance, the end of the run. */
+const QUERIES_AFTER_RECONCILE =
+  SLOT_QUERIES + REVOCATIONS_PER_RUN * RELEASE_QUERIES + MAINTENANCE_QUERIES + FINAL_QUERIES;
+/**
+ * Statements per reconcile batch. D1 limits a batch to 30 seconds and
+ * rolls all of it back on a failure, so one owner's failure, or a slow
+ * batch, costs at most its chunk.
+ */
+const RECONCILE_BATCH = 150;
 /** A revoked machine's cleanup records its lookups, the tunnel, the record and its attempts. */
 const CLEANUP_QUERIES_PER_MACHINE = 4;
 /** Correcting a CNAME takes the row, records the record, and lets the row go. */
@@ -162,13 +186,20 @@ export async function machineRuntime(
   }
 
   if (row.tunnel_state === "none") {
+    const quiet = await quietLeft(env, caller.userId, now);
+    if (quiet > 0) return { ...provisioning, retryAfter: Math.ceil(quiet / 1000) };
     const reserved = await reserveSlot(env, caller, entitlement.servingMachines, now);
     if (reserved) {
       background(ctx, provisionTunnel(env, reserved));
       return provisioning;
     }
     row = await tunnelRow(env, caller.machineId);
-    if (row.tunnel_state === "none") return blockedRuntime(env, caller, entitlement, base);
+    if (row.tunnel_state === "none") {
+      // A stop that landed since the check above.
+      const late = await quietLeft(env, caller.userId, now);
+      if (late > 0) return { ...provisioning, retryAfter: Math.ceil(late / 1000) };
+      return blockedRuntime(env, caller, entitlement, base);
+    }
   }
 
   if (row.tunnel_state === "ready" && row.tunnel_id !== null && row.rotate_requested_at === null) {
@@ -273,10 +304,19 @@ type Reservation = {
   dnsRecordId: string | null;
 };
 
+/** How long the owner's quiet period after a stop still lasts, in milliseconds. */
+async function quietLeft(env: Env, userId: string, now: number): Promise<number> {
+  const row = await env.DB.prepare(`SELECT serving_stopped_at FROM users WHERE id = ?1`)
+    .bind(userId)
+    .first<{ serving_stopped_at: number | null }>();
+  const stoppedAt = row?.serving_stopped_at ?? null;
+  return stoppedAt === null ? 0 : Math.max(0, stoppedAt + QUIET_AFTER_STOP_MS - now);
+}
+
 /**
  * Reserves a serving slot in one statement, so concurrent requests can pass
- * neither the owner's limit nor the account's cap. Null when the row is no
- * longer `none` or a limit stops it.
+ * neither the owner's limit, nor the account's cap, nor the owner's quiet
+ * period. Null when the row is no longer `none` or one of them stops it.
  */
 async function reserveSlot(
   env: Env,
@@ -292,9 +332,18 @@ async function reserveSlot(
      WHERE id = ?1 AND status = 'active' AND tunnel_state = 'none'
        AND (SELECT COUNT(*) FROM machines WHERE user_id = ?4 AND tunnel_state != 'none') < ?5
        AND (SELECT COUNT(*) FROM machines WHERE tunnel_state != 'none') < ?6
+       AND NOT EXISTS (SELECT 1 FROM users WHERE id = ?4 AND serving_stopped_at > ?7)
      RETURNING tunnel_generation, ingress_port, dns_record_id`,
   )
-    .bind(caller.machineId, op, now, caller.userId, servingMachines, maxTunnels(env))
+    .bind(
+      caller.machineId,
+      op,
+      now,
+      caller.userId,
+      servingMachines,
+      maxTunnels(env),
+      now - QUIET_AFTER_STOP_MS,
+    )
     .first<{ tunnel_generation: number; ingress_port: number; dns_record_id: string | null }>();
   return row
     ? {
@@ -549,8 +598,11 @@ export async function loadOwners(
  * entitlements. A URL that stopped serving since the last reconcile,
  * through a downgrade, an expiry, a ban or a takedown, gets `suspended_at`,
  * and every serving machine of its owner a rotation, so its open streams
- * close at the next release (ADR 0027). Each owner's statements go in one
- * batch; with a budget, the batches stop while `reserve` queries are left.
+ * close at the next release (ADR 0027). The statements go in batches of
+ * about `RECONCILE_BATCH`, each owner's in one batch, and each batch counts
+ * as one query. A batch that fails is logged and the others still run; the
+ * next reconcile retries it. With a budget, the batches stop while
+ * `reserve` queries are left.
  */
 export async function reconcileServing(
   env: Env,
@@ -558,16 +610,23 @@ export async function reconcileServing(
   now = Date.now(),
   queries: { budget: CallBudget; reserve: number } | null = null,
 ): Promise<void> {
-  const statements = [...owners.entitlements].flatMap(([userId, entitlement]) =>
-    reconcileStatements(userId, entitlement, owners.urls.get(userId) ?? [], now),
-  );
-  if (statements.length === 0) return;
-  // One batch, which D1 counts as one query and runs as one transaction, so
-  // an owner's rotation and the record of its stop always land together.
-  // Each statement binds at most 3 values to fixed SQL, far below D1's
-  // per-statement limits, so nothing needs the batch split.
-  if (queries && !queries.budget.has(1 + queries.reserve)) return;
-  await env.DB.batch(statements.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)));
+  const batches: Statement[][] = [];
+  for (const [userId, entitlement] of owners.entitlements) {
+    const statements = reconcileStatements(userId, entitlement, owners.urls.get(userId) ?? [], now);
+    if (statements.length === 0) continue;
+    const last = batches.at(-1);
+    // An owner's rotation and the record of its stop always share a batch.
+    if (last && last.length + statements.length <= RECONCILE_BATCH) last.push(...statements);
+    else batches.push(statements);
+  }
+  for (const batch of batches) {
+    if (queries && !queries.budget.has(1 + queries.reserve)) return;
+    try {
+      await env.DB.batch(batch.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)));
+    } catch (error) {
+      console.error("A reconcile batch failed; the next sweep retries it", error);
+    }
+  }
 }
 
 /** Reconciles one owner, after a change of their URLs. */
@@ -602,11 +661,13 @@ type SlotRow = {
 /**
  * The 5-minute sweep, within a budget of Cloudflare calls and one of D1
  * queries. It first marks for a rotation the machines of URLs that stopped
- * serving. Revocations come next, with what they need of both budgets:
- * rotations, and the slots of owners who lost their entitlement or hold
- * more than it allows. Then, with what they leave, the revoked machines'
- * cleanup, the status readings and reaps, abandoned operations, machines
- * with nothing to serve, CNAME drift and orphan tunnels.
+ * serving. Revocations come next: rotations, and the slots of owners who
+ * lost their entitlement or hold more than it allows. The first 60 are
+ * attempted whatever else waits, then more while maintenance keeps its
+ * share: the revoked machines' cleanup, the status readings and reaps,
+ * abandoned operations, machines with nothing to serve, CNAME drift and
+ * orphan tunnels. What maintenance leaves goes to the revocations still
+ * queued.
  */
 export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
@@ -618,7 +679,7 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   // the rotations it marks are revoked in this run.
   const owners = await loadOwners(env, null, now);
   try {
-    await reconcileServing(env, owners, now, { budget: queries, reserve: REVOCATION_QUERIES });
+    await reconcileServing(env, owners, now, { budget: queries, reserve: QUERIES_AFTER_RECONCILE });
   } catch (error) {
     console.error("Reconciling the serving URLs failed; the next sweep retries it", error);
   }
@@ -650,15 +711,23 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
     }
     done.add(slot.id);
   }
-  // They take what they need before any maintenance, which gets the rest.
-  while (
-    queue.length > 0 &&
-    budget.has(RELEASE_CALLS) &&
-    queries.has(RELEASE_QUERIES + FINAL_QUERIES)
-  ) {
-    const slot = queue.shift()!;
-    await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
-  }
+  const revoke = async (most: number, callReserve: number, queryReserve: number) => {
+    for (
+      let tried = 0;
+      tried < most &&
+      queue.length > 0 &&
+      budget.has(RELEASE_CALLS + callReserve) &&
+      queries.has(RELEASE_QUERIES + queryReserve + FINAL_QUERIES);
+      tried++
+    ) {
+      const slot = queue.shift()!;
+      await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
+    }
+  };
+  // The 60 every run attempts, then all but maintenance's share. What
+  // maintenance leaves comes back to them at the end of the run.
+  await revoke(REVOCATIONS_PER_RUN, 0, MAINTENANCE_QUERIES);
+  await revoke(Number.POSITIVE_INFINITY, MAINTENANCE_CALLS, MAINTENANCE_QUERIES);
 
   // 2. Revoked machines, as many as the queries left allow.
   const cleanups = Math.floor((queries.left - FINAL_QUERIES - 1) / CLEANUP_QUERIES_PER_MACHINE);
@@ -785,6 +854,9 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
       }
     }
   }
+
+  // The revocations still queued get what maintenance left.
+  await revoke(Number.POSITIVE_INFINITY, 0, 0);
 
   // 8. The account's slots.
   const total = await env.DB.prepare(

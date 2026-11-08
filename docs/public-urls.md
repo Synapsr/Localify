@@ -108,7 +108,7 @@ In Polar, the organization turns on "Prevent trial abuse", and once add-ons ship
 
 ```sql
 users       (id TEXT PRIMARY KEY, github_id INTEGER UNIQUE NOT NULL, login TEXT NOT NULL, created_at INTEGER NOT NULL,
-             trial_used_at INTEGER, banned_at INTEGER, banned_reason TEXT)
+             trial_used_at INTEGER, banned_at INTEGER, banned_reason TEXT, serving_stopped_at INTEGER)
 machines    (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
              status TEXT NOT NULL CHECK (status IN ('provisioning', 'active', 'revoked')),
              tunnel_state TEXT NOT NULL DEFAULT 'none'
@@ -285,6 +285,8 @@ It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A
 
 **Rotating.** One of a machine's URLs can stop serving, through a takedown or a suspension, while the machine keeps serving others. Releasing would not be enough for that URL: its open WebSockets and SSE streams ride the same tunnel as the others. Whoever removes the URL's right (a refresh, `cloud:admin`, or the sweep's reconcile, see "Downgrades") sets `rotate_requested_at` on the machine. The Worker, right away or at the next sweep, then releases the machine's current generation as above. The machine still wants a tunnel, so its next runtime fetch provisions generation `n + 1`. The daemon's next fetch comes when `cloudflared` exits twice, which deleting the tunnel causes. The URLs that keep their right to serve are offline for those seconds. ADR 0027 covers this case.
 
+**Quiet period.** The public path caches each lookup for 10 seconds (see "Public traffic"), so a request can still find a URL serving for up to 10 seconds after it stopped. Without more, such a request could reach the machine's next generation, provisioned for the URLs that keep serving, and a stream it opens there would outlive the rotation. The batch that records a stop (see "Downgrades") therefore also sets `users.serving_stopped_at`, and so does a ban. No new generation of that owner's machines is reserved until 15 seconds after it: the cache lifetime plus 5 seconds, from one constant shared with the cache. The runtime answers `provisioning` meanwhile, with `retryAfter` set to the seconds left, and the reservation statement checks the same condition. A lookup that still says the URL serves was cached before the stop committed, so it has expired before any new generation exists.
+
 **Edge rule.** A machine hostname is public, and whoever holds its tunnel token could run their own origin behind it and serve arbitrary pages on `localify.dev`. The `localify.dev` zone therefore has two rules:
 
 - a WAF custom rule that blocks every request to a host matching `m-*.localify.dev` unless its `X-Localify-Edge` header equals `EDGE_KEY`;
@@ -292,7 +294,7 @@ It keeps the CNAME and `dns_record_id`: the next tunnel only moves the record. A
 
 The Worker sends that header on every forwarded request (see "Public traffic"). A tenant who learns the key gains nothing, since a victim's browser never sends it, and the tunnel never sees it.
 
-**The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes, and of 900 D1 queries, below the 1,000 a Worker invocation may send. D1 counts a batch as one query. The run reads every owner's entitlement and URLs in a fixed number of queries, whatever their number, and writes the whole reconcile in one batch, which it skips while fewer than 125 queries would be left: the slot reads, 60 revocations at 2 queries each, and the end of the run. 60 revocations take at most 240 of the 300 calls:
+**The sweep**, every 5 minutes, within a budget of 300 Cloudflare calls a run, below the account's limit of 1,200 calls per 5 minutes, and of 900 D1 queries, below the 1,000 a Worker invocation may send. D1 counts a batch as one query. The run reads every owner's entitlement and URLs in a fixed number of queries, whatever their number, and writes the reconcile in batches of about 150 statements, each owner's in one batch. D1 gives a batch 30 seconds and rolls it back whole on a failure, so a failed batch is logged, the others still run, and the next run retries it. The batches stop while fewer than 185 queries would be left: the slot reads, 60 revocations at 2 queries each, 60 for maintenance, and the end of the run. 60 revocations take at most 240 of the 300 calls, which leaves maintenance its 40:
 
 1. Lists the account's tunnels, page by page.
 2. For each `ready` machine, reads the status of its tunnel in that listing; a tunnel missing from a complete listing reads as down:
@@ -307,7 +309,7 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
 
 Before all of this, the run reconciles the serving state of every owner with a URL (see "Downgrades"), so the rotations it marks are revoked in the same run. It also takes over any active machine that has a `tunnel_id` but `tunnel_state` `none`. A Worker from before this contract can sign such a machine in while a deploy rolls out. It becomes `ready` at generation 1 when it has a live URL, and `releasing` otherwise, so it holds a slot and its tunnel is released like any other.
 
-Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. They take what they need of both budgets before any maintenance runs, and the revoked-machine cleanup, the reaps, the CNAME corrections and the orphan tunnels get what they leave. They never back off longer than one run. A revocation costs at most 4 calls (a lookup by name, the new secret, the connections, the delete), so at least 60 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 60. A revocation keeps `rotate_requested_at` set until Cloudflare confirms the delete. The queue takes the revocations not yet tried first, then the others by their last attempt, so one that keeps failing goes to the back of the queue without losing its urgency, and cannot starve the others. The budget counts every request actually sent, fallbacks included. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
+Revocations come first in every run: releases and rotations caused by `rotate_requested_at`, a ban, a takedown or a lost entitlement. Each run attempts the first 60 whatever else waits, then more while maintenance keeps its share of 40 calls and 60 queries: the revoked-machine cleanup, the reaps, the CNAME corrections and the orphan tunnels. What maintenance leaves goes back to the revocations still queued. Revocations that keep failing therefore cannot hold maintenance back, nor maintenance the first 60. They never back off longer than one run. A revocation costs at most 4 calls (a lookup by name, the new secret, the connections, the delete), so at least 60 queued revocations are done in the next run, within 5 minutes. More than that, or Cloudflare failing, delays them by one run per 60. A revocation keeps `rotate_requested_at` set until Cloudflare confirms the delete. The queue takes the revocations not yet tried first, then the others by their last attempt, so one that keeps failing goes to the back of the queue without losing its urgency, and cannot starve the others. The budget counts every request actually sent, fallbacks included. The run logs an error for every revocation older than 10 minutes. The rest of the work is taken oldest `down_seen_at` first, with what the budget leaves. What it leaves undone waits for the next run, and a machine whose release keeps failing backs off like the revoked-machine cleanup.
 
 **Runtime.** `GET /v2/machines/self/runtime?generation=<n>` answers:
 
@@ -326,7 +328,7 @@ type MachineRuntime = {
 ```
 
 - `idle`: the machine wants no tunnel. Its owner may still be entitled.
-- `provisioning`: a slot is reserved and the tunnel is on its way, including while the previous generation is being released for a rotation; `retryAfter` is 3.
+- `provisioning`: a slot is reserved and the tunnel is on its way, including while the previous generation is being released for a rotation; `retryAfter` is 3. During an owner's quiet period (see "Quiet period"), no slot is reserved yet and `retryAfter` is the seconds the period has left.
 - `ready`: serve with this generation's tunnel.
 - `blocked`: the machine has something to serve but may not. The reason is the plan, its owner's slots, or the account cap. `retryAfter` is 60 for `capacity` and `null` otherwise, since only a plan or a URL change unblocks it, and the CLI and the app send `public_refresh` after either.
 
@@ -420,7 +422,7 @@ Reports arrive at `abuse@localify.dev`, linked from every page the Worker serves
 
 For a request to `*.localify.fyi`, the Worker:
 
-1. Parses the host into slug and label. It loads the public URL with its machine and tunnel state, and its owner's GitHub login, ban and entitlement, including the URL's rank among the owner's live URLs. Lookups are cached in the isolate for 10 seconds, so a deleted URL, a new password, a claim, a plan change, a ban or a takedown reaches every location within that time. New requests feel it then. Streams already open close when the tunnel is released (ADR 0027).
+1. Parses the host into slug and label. It loads the public URL with its machine and tunnel state, and its owner's GitHub login, ban and entitlement, including the URL's rank among the owner's live URLs. Lookups are cached in the isolate for 10 seconds, so a deleted URL, a new password, a claim, a plan change, a ban or a takedown reaches every location within that time. New requests feel it then. Streams already open close when the tunnel is released (ADR 0027). A machine starts no new tunnel generation until this cache can no longer hold a URL its owner stopped serving (see "Quiet period").
 
    | Case | Page |
    |---|---|

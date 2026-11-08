@@ -49,7 +49,12 @@ type SiteRow = {
   tunnel_state: string | null;
 };
 
-const TTL_MS = 10_000;
+/**
+ * How long an isolate trusts a lookup. A tunnel generation starts no sooner
+ * than this, plus a margin, after its owner's URL stopped serving
+ * (`QUIET_AFTER_STOP_MS` in tunnels.ts).
+ */
+export const SITE_CACHE_TTL_MS = 10_000;
 const MAX_ENTRIES = 1_000;
 const cache = new Map<string, { site: Site | null; expires: number }>();
 
@@ -59,7 +64,7 @@ export async function findSite(env: Env, slug: string, now = Date.now()): Promis
   if (cached && cached.expires > now) return cached.site;
   const site = await loadSite(env, slug, now);
   if (cache.size >= MAX_ENTRIES) cache.clear();
-  cache.set(slug, { site, expires: now + TTL_MS });
+  cache.set(slug, { site, expires: now + SITE_CACHE_TTL_MS });
   return site;
 }
 

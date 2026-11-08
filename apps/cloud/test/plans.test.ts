@@ -4,10 +4,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { purgeDeletedUrls } from "../src/machines";
-import { runSweep } from "../src/tunnels";
+import { QUIET_AFTER_STOP_MS, runSweep } from "../src/tunnels";
 import {
   api,
   createContext,
+  endQuietPeriods,
   fakeSignIn,
   serve,
   settle,
@@ -459,7 +460,9 @@ describe("timed transitions", () => {
     expect(suspendedAt(ids[9]!)).toBeNull();
     expect(tunnelState(machineId)).toBe("none");
 
-    // The machine still serves the others: its next fetch provisions generation 2.
+    // The machine still serves the others: after the quiet period, its next
+    // fetch provisions generation 2.
+    endQuietPeriods(context);
     const next = await serve(context, token, 1);
     expect(next.body.state).toBe("provisioning");
     expect(
@@ -484,5 +487,60 @@ describe("timed transitions", () => {
     await api(context, "DELETE", `/v1/public-urls/${a.body.publicUrl.id}`, { token });
     await settle(context);
     expect(suspendedAt(b.body.publicUrl.id)).toBeNull();
+  });
+});
+
+describe("the quiet period after a stop", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps a URL cached as serving from reaching its machine's next tunnel", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.parse("2026-11-08T10:00:00Z");
+    vi.setSystemTime(t0);
+    const { token, userId, machineId } = await signIn(context);
+    await createUrl(token, "a.localify");
+    const b = await createUrl(token, "b.localify");
+    await serve(context, token);
+    context.routes.set(`GET https://m-${machineId}.localify.dev/`, () => new Response("app"));
+    const forwarded = () =>
+      context.calls.filter((call) => call.url.startsWith(`https://m-${machineId}.`)).length;
+
+    // B is cached as serving by this isolate.
+    expect((await visit(context, `https://${b.body.publicUrl.slug}.localify.fyi/`)).status).toBe(
+      200,
+    );
+    expect(forwarded()).toBe(1);
+
+    // B stops serving; the sweep marks it and releases generation 1.
+    setOverride(userId, 5, 1);
+    vi.setSystemTime(t0 + 1_000);
+    await runSweep(context.env, Date.now());
+    expect(tunnelState(machineId)).toBe("none");
+
+    // A still serves, but generation 2 waits while B's cached entry may live.
+    vi.setSystemTime(t0 + 5_000);
+    const early = await serve(context, token, 1);
+    expect(early.body).toMatchObject({ state: "provisioning" });
+    expect(early.body.retryAfter).toBe(Math.ceil((1_000 + QUIET_AFTER_STOP_MS - 5_000) / 1000));
+    expect(
+      context.sqlite
+        .prepare("SELECT tunnel_state, tunnel_generation FROM machines WHERE id = ?")
+        .get(machineId),
+    ).toEqual({ tunnel_state: "none", tunnel_generation: 1 });
+
+    // After it, generation 2 starts, and B's cached entry has expired.
+    vi.setSystemTime(t0 + 1_000 + QUIET_AFTER_STOP_MS + 1);
+    expect((await serve(context, token, 1)).body.state).toBe("provisioning");
+    expect(
+      context.sqlite
+        .prepare("SELECT tunnel_state, tunnel_generation FROM machines WHERE id = ?")
+        .get(machineId),
+    ).toEqual({ tunnel_state: "ready", tunnel_generation: 2 });
+    expect((await visit(context, `https://${b.body.publicUrl.slug}.localify.fyi/`)).status).toBe(
+      402,
+    );
+    expect(forwarded()).toBe(1);
   });
 });

@@ -970,7 +970,7 @@ describe("second review", () => {
     expect(JSON.stringify(body)).not.toContain("token-after-rotation");
   });
 
-  it("lets no failing revocation starve the others, and leaves the rest of the sweep what they spare", async () => {
+  it("lets no failing revocation starve the others or the rest of the sweep", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     context.sqlite.exec(`
@@ -1019,8 +1019,8 @@ describe("second review", () => {
       context.calls.length = 0;
       await runSweep(context.env, start + run * 5 * MINUTE);
       expect(cloudflareCalls().length, `run ${run}`).toBeLessThanOrEqual(300);
-      // The revocations take what they need first: no call is left for the CNAME.
-      expect(count("PATCH /zones/zone-1/dns_records/dns-keep"), `run ${run}`).toBe(0);
+      // Maintenance keeps its share while 100 revocations keep failing.
+      expect(count("PATCH /zones/zone-1/dns_records/dns-keep"), `run ${run}`).toBe(1);
       for (const call of cloudflareCalls()) {
         const match = /^PATCH \/accounts\/account-1\/cfd_tunnel\/(t-[rg]-\d+)$/.exec(call);
         if (match) tried.add(match[1]!);
@@ -1034,13 +1034,6 @@ describe("second review", () => {
       )
       .get();
     expect(unmarked).toEqual({ n: 0 });
-
-    // Once Cloudflare deletes them, the rest of the sweep gets its calls back.
-    context.routes.set(`DELETE ${TUNNELS}/t-`, () => cloudflareOk(null));
-    await runSweep(context.env, start + 10 * MINUTE);
-    context.calls.length = 0;
-    await runSweep(context.env, start + 15 * MINUTE);
-    expect(count("PATCH /zones/zone-1/dns_records/dns-keep")).toBe(1);
   });
 
   it("cleans up at sign-in only what that sign-in replaced, within a small budget", async () => {

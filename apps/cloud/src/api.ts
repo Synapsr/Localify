@@ -584,8 +584,9 @@ async function claimUrl(
   if (before.taken_down_at !== null) throw takenDown();
   const entitlement = await requireEntitlement(env, caller);
   // Only a URL that serves moves: live, among the owner's `publicUrls`
-  // oldest, and resumed by a reconcile if it was suspended. A takedown or a
-  // deletion between the read and this update leaves it where it was.
+  // oldest, and not marked suspended. A URL whose mark a reconcile has yet
+  // to clear waits for it, within 5 minutes. A takedown or a deletion
+  // between the read and this update leaves it where it was.
   const claimed = await env.DB.prepare(
     `UPDATE public_urls SET machine_id = ?3
      WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL AND taken_down_at IS NULL
@@ -609,7 +610,7 @@ async function claimUrl(
     throw new ApiError(
       403,
       "quota_exceeded",
-      `Your plan serves your ${entitlement.publicUrls} oldest public URLs, and this one comes after them. Remove an older one with \`localify public-url remove\`, then try again.`,
+      `This public URL is not serving: your plan serves your ${entitlement.publicUrls} oldest public URLs, and this one comes after them, or it is waiting to serve again, which takes up to 5 minutes. Remove an older one with \`localify public-url remove\`, or try again in a few minutes.`,
     );
   }
   forgetSite(claimed.slug);
