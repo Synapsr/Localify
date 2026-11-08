@@ -1,4 +1,4 @@
-import { RiGithubFill } from "@remixicon/react";
+import { RiGithubFill, RiPlug2Fill } from "@remixicon/react";
 import * as motion from "motion/react-client";
 import { getTranslations } from "next-intl/server";
 
@@ -11,7 +11,7 @@ import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { ProjectsMockup } from "@/app/projects-mockup";
 import { sourceUrl } from "@/app/site-metadata";
 import { FadeIn, sectionClass } from "@/app/site-ui";
-import { DownloadSolidIcon, PlusIcon } from "@/components/icons";
+import { DownloadSolidIcon } from "@/components/icons";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Link } from "@/i18n/navigation";
 
@@ -140,20 +140,15 @@ const AgentStrip = async () => {
   return (
     <FadeIn className="mt-14 flex flex-col items-center gap-5 text-center md:mt-20">
       <p className="text-[13px] text-muted-foreground">{t("label")}</p>
-      <div className="flex flex-wrap items-center justify-center gap-2.5">
+      <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-4 text-[20px] font-semibold tracking-tight text-foreground/75 md:text-[22px]">
         {AGENTS.map(({ name, Logo, color }) => (
-          <span
-            className="inline-flex items-center gap-2.5 rounded-full border border-border bg-background py-2 pr-5 pl-2.5 text-[16px] font-semibold tracking-tight text-foreground/85 shadow-[0_1px_2px_rgba(13,13,13,0.05)]"
-            key={name}
-          >
-            <span className="inline-flex size-8 items-center justify-center rounded-full bg-muted">
-              <Logo aria-hidden="true" className="size-[18px]" style={{ color }} />
-            </span>
+          <span className="inline-flex items-center gap-2.5" key={name}>
+            <Logo aria-hidden="true" className="size-7" style={{ color }} />
             {name}
           </span>
         ))}
-        <span className="inline-flex items-center gap-2 rounded-full border border-dashed border-border py-2 pr-5 pl-3 text-[14px] text-muted-foreground">
-          <PlusIcon className="size-4" />
+        <span className="inline-flex items-center gap-2.5">
+          <RiPlug2Fill aria-hidden="true" className="size-7" />
           {t("more")}
         </span>
       </div>
