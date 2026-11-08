@@ -18,14 +18,18 @@
     "description": "Jedes Projekt, jeder Worktree und jede Maschine bekommt eine saubere HTTPS-URL. Coding-Agenten richten alles über MCP ein. Du schaust zu und steuerst aus einer App.",
     "download": "Download für macOS",
     "source": "Quellcode ansehen",
-    "terminal": "Oder die Kommandozeile installieren",
-    "availability": "Kostenlos und Open Source unter der AGPL. Desktop-App für macOS."
+    "promptHint": "Füg ihn in Claude Code, Codex oder Cursor ein, und dein Agent installiert Localify für dich. Kostenlos und Open Source."
   },
   "DemoDialog": {
     "title": "Willst du Localify wirklich ausprobieren?",
     "description": "Lade die Desktop-App herunter und richte deine erste lokale Domain ein.",
     "later": "Vielleicht später",
     "download": "Jetzt herunterladen"
+  },
+  "InstallPrompt": {
+    "cta": "Installations-Prompt kopieren",
+    "copied": "Kopiert. Füg ihn in deinen Agenten ein",
+    "fallback": "Kopiere diesen Prompt in deinen Agenten:"
   },
   "AgentStrip": {
     "label": "Funktioniert über MCP mit deinen Agenten",
@@ -38,7 +42,8 @@
     "items": {
       "agent": {
         "title": "Dein Agent richtet es ein.",
-        "body": "Verbinde Claude Code, Codex oder Cursor ein einziges Mal. Jede Aktion der App ist ein MCP-Tool: Dein Agent legt das Projekt an, wählt freie Ports, passt die Next.js- oder Vite-Config an und startet jeden Service hinter seiner URL. Du musst nur fragen."
+        "body": "Verbinde Claude Code, Codex oder Cursor ein einziges Mal. Jede Aktion der App ist ein MCP-Tool: Dein Agent legt das Projekt an, wählt freie Ports, passt die Next.js- oder Vite-Config an und startet jeden Service hinter seiner URL. Du musst nur fragen.",
+        "hint": "Ein Prompt, und dein Agent installiert alles."
       },
       "worktrees": {
         "title": "Ein Worktree, eine URL.",
@@ -57,24 +62,12 @@
       "prompt": "Starte die Web-App im Worktree fix-auth und schick mir den Link.",
       "reply": "Erledigt. Sie läuft unter"
     },
-    "worktreeDemo": {
-      "title": "Umgebungen",
-      "primary": "main",
-      "running": "Läuft",
-      "stopped": "Gestoppt",
-      "removed": "Nach dem Merge entfernt"
-    },
-    "appDemo": {
-      "terminal": "Terminal",
-      "checkouts": "Checkouts"
-    },
     "machinesDemo": {
       "studio": "Mac Studio",
       "studioRole": "Hier arbeiten deine Agenten",
       "laptop": "MacBook",
       "laptopRole": "Hier prüfst du",
       "phone": "iPhone",
-      "phoneRole": "Hier testest du",
       "password": "Passwortgeschützt"
     }
   },
@@ -101,31 +94,42 @@
     "titleLine2": "dann fragst du einfach.",
     "steps": [
       {
-        "title": "App herunterladen.",
-        "body": "Beim ersten Start fragt sie einmal nach deinem Administratorpasswort und richtet dann HTTPS, DNS und den Hintergrunddienst ein. Danach läuft nichts von Localify mehr als root."
+        "title": "Deinem Agenten den Prompt geben.",
+        "body": "Kopiere den Installations-Prompt und füg ihn in Claude Code, Codex oder Cursor ein. Dein Agent installiert die Kommandozeile, richtet HTTPS und DNS ein und verbindet sich selbst. Du bestätigst einmal das Administratorpasswort."
       },
       {
-        "title": "Agenten verbinden.",
-        "body": "Settings → AI agents oder localify agent install registriert den MCP-Server bei Claude Code, Codex und Cursor."
+        "title": "Weitere Agenten verbinden.",
+        "body": "Später installierte Agenten verbinden sich über die App, unter Settings → AI agents, oder mit localify agent install. Jeder bekommt alle Localify-Aktionen als MCP-Tools."
       },
       {
         "title": "Nach einer URL fragen.",
-        "body": "„Starte die App in diesem Worktree.“ Dein Agent startet sie in der App und gibt dir ihre URL."
+        "body": "Frag nach der App in einem Worktree. Dein Agent startet sie, der Worktree erscheint mit eigener URL in der App, und du öffnest sie."
       }
     ],
+    "dashboardPrefix": "Willst du alles in einem Dashboard verfolgen?",
+    "dashboardLink": "App für macOS herunterladen",
+    "demo": {
+      "ask": "Starte die App im Worktree fix-auth."
+    },
     "diagram": {
+      "title": "Wie alles zusammenspielt",
       "you": "Du",
       "youDetail": "Desktop-App",
       "agents": "Deine Agenten",
       "agentsDetail": "MCP-Server",
       "machine": "Localify auf jedem Mac",
-      "machineDetail": "DNS · HTTPS · Router",
+      "dns": "DNS",
+      "dnsDetail": "Löst jeden .localify-Namen auf",
+      "https": "HTTPS",
+      "httpsDetail": "Eine lokale Zertifizierungsstelle",
+      "router": "Router",
+      "routerDetail": "Eine URL pro Worktree",
       "servers": "Dev-Server",
-      "serversDetail": "Eine URL pro Worktree",
-      "devices": "Deine anderen Geräte",
-      "devicesDetail": "Laptop, Handy",
+      "serversDetail": "Hinter ihren URLs",
       "cloud": "Localify Cloud",
-      "cloudDetail": "Passwort · Tunnel"
+      "cloudDetail": "Passwort und Tunnel",
+      "devices": "Deine anderen Geräte",
+      "devicesDetail": "Laptop, Handy, überall"
     }
   },
   "Pricing": {
@@ -160,7 +164,27 @@
         "7 Tage kostenlos testen"
       ],
       "cta": "Einladung anfragen",
-      "note": "Vorerst nur auf Einladung. Du meldest dich mit GitHub an."
+      "note": "Vorerst nur auf Einladung. Du meldest dich mit GitHub an.",
+      "badge": "Am beliebtesten"
+    },
+    "addons": {
+      "title": "Add-ons",
+      "soon": "Bald",
+      "machine": "+1 Maschine: $3 pro Monat",
+      "urls": "+10 öffentliche URLs: $2 pro Monat"
+    },
+    "team": {
+      "name": "Localify Cloud Team",
+      "price": "$49",
+      "period": "pro Monat",
+      "tagline": "Für ein Team, das seine Maschinen teilt.",
+      "features": [
+        "Alles aus Pro",
+        "3 Nutzer, eine Rechnung",
+        "Mehr Maschinen und öffentliche URLs fürs Team",
+        "Priorisierter Support"
+      ],
+      "cta": "Kontakt aufnehmen"
     }
   },
   "Faq": {
@@ -219,7 +243,6 @@
     "description": "Lass deine Agenten die Dev-Server starten. Ruf jeden davon beim Namen auf.",
     "download": "Download für macOS",
     "source": "Quellcode ansehen",
-    "terminal": "Oder im Terminal, unter macOS und Linux:",
     "requirements": "macOS mit Apple Silicon · Kommandozeile auch für Linux x86_64"
   },
   "Footer": {
@@ -235,7 +258,14 @@
     "cookies": "Cookies",
     "copyright": "© 2026 Téo Goulois · Open Source unter der AGPL · Still in Rust gebaut.",
     "language": "Sprache",
-    "switchLanguage": "Zu {locale} wechseln"
+    "switchLanguage": "Zu {locale} wechseln",
+    "product": "Produkt",
+    "useCases": "Anwendungsfälle",
+    "howItWorks": "So funktioniert es",
+    "pricing": "Preise",
+    "faq": "FAQ",
+    "tagline": "Saubere URLs für jeden Agenten, jeden Worktree und jede Maschine.",
+    "github": "Auf GitHub einen Stern geben"
   },
   "CookieBanner": {
     "label": "Cookie-Einwilligung",

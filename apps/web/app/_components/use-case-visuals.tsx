@@ -1,31 +1,21 @@
 "use client";
 
-import { motion, useReducedMotion } from "motion/react";
+import { motion, useInView, useReducedMotion } from "motion/react";
 import { useTranslations } from "next-intl";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { CheckIcon, LockIcon } from "@/components/icons";
+import { AppFrame, ProjectCard, TerminalPanel } from "@/app/_components/app-replicas";
+import { AGENTS } from "@/app/_components/agent-logos";
+import { CheckIcon, LockIcon, MobileIcon, MonitorIcon, ServersIcon } from "@/components/icons";
 import { cn } from "@/lib/utils";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
-const WORKTREE_URL = "https://web--fix-auth.journal.localify";
+export const WORKTREE_URL = "https://web--fix-auth.journal.localify";
 
-/* Shared frame: a light app panel that sits on the sky background. */
-const Panel = ({ children, className }: { children: ReactNode; className?: string }) => (
+export const Stage = ({ image, children }: { image: string; children: ReactNode }) => (
   <div
-    className={cn(
-      "w-full overflow-hidden rounded-xl border border-black/5 bg-white/95 text-neutral-900 shadow-[0_30px_60px_-30px_rgba(13,13,13,0.45)] backdrop-blur-sm",
-      className,
-    )}
-  >
-    {children}
-  </div>
-);
-
-const Stage = ({ image, children }: { image: string; children: ReactNode }) => (
-  <div
-    className="relative flex aspect-4/3 items-center justify-center overflow-hidden rounded-2xl border border-border p-5 md:p-8"
+    className="relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-2xl border border-border p-4 md:aspect-4/3 md:min-h-0 md:p-8"
     style={{ backgroundImage: `url(${image})`, backgroundSize: "cover", backgroundPosition: "center" }}
   >
     {children}
@@ -39,8 +29,8 @@ const Sequence = ({ children, className }: { children: ReactNode; className?: st
     <motion.div
       className={className}
       initial="hidden"
-      variants={{ hidden: {}, show: { transition: { staggerChildren: reduce ? 0 : 0.45, delayChildren: 0.2 } } }}
-      viewport={{ once: true, amount: 0.5 }}
+      variants={{ hidden: {}, show: { transition: { staggerChildren: reduce ? 0 : 0.4, delayChildren: 0.2 } } }}
+      viewport={{ once: true, amount: 0.4 }}
       whileInView="show"
     >
       {children}
@@ -53,186 +43,229 @@ const step = {
   show: { opacity: 1, y: 0, transition: { duration: 0.45, ease } },
 };
 
+/* Steps through `length` states while in view; holds the last one when motion is reduced. */
+export const useCycle = (ref: RefObject<Element | null>, length: number, ms: number) => {
+  const inView = useInView(ref, { amount: 0.4 });
+  const reduce = useReducedMotion();
+  const [index, setIndex] = useState(0);
+  useEffect(() => {
+    if (reduce || !inView) return;
+    const timer = window.setInterval(() => setIndex((i) => (i + 1) % length), ms);
+    return () => window.clearInterval(timer);
+  }, [inView, length, ms, reduce]);
+  return reduce ? length - 1 : index;
+};
+
 /* 01: an agent conversation that calls Localify's MCP tools. */
 export const AgentVisual = () => {
   const t = useTranslations("UseCases.agentDemo");
+  const claude = AGENTS[0];
   const calls = [
-    { tool: "service_start", detail: "cwd: ~/journal/.claude/worktrees/fix-auth" },
-    { tool: "service_logs", detail: "▲ Next.js · Ready in 1.2s" },
+    { tool: "service_start", detail: "~/journal/.claude/worktrees/fix-auth" },
+    { tool: "service_logs", detail: "Next.js ready in 1.2s" },
     { tool: "get_service_url", detail: WORKTREE_URL },
   ];
 
   return (
     <Stage image="/sky/agents.jpg">
-      <Panel className="max-w-md">
-        <Sequence className="space-y-3 p-4 font-sans text-[13px] leading-snug md:p-5">
+      <div className="w-full max-w-md overflow-hidden rounded-xl border border-black/5 bg-white/95 text-neutral-900 shadow-[0_30px_60px_-30px_rgba(13,13,13,0.45)] backdrop-blur-sm">
+        <div className="flex items-center gap-2 border-b border-neutral-200/80 px-4 py-2.5 text-[12.5px] font-medium text-neutral-500">
+          <claude.Logo className="size-3.5" style={{ color: claude.color }} />
+          {claude.name}
+        </div>
+        <Sequence className="space-y-2.5 p-4 text-[13px] leading-snug md:p-5">
           <motion.div className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-md bg-neutral-900 px-3.5 py-2.5 text-white" variants={step}>
             {t("prompt")}
           </motion.div>
           {calls.map((call) => (
-            <motion.div className="flex items-start gap-2.5 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2" key={call.tool} variants={step}>
+            <motion.div className="flex items-start gap-2.5 px-1" key={call.tool} variants={step}>
               <span className="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600">
                 <CheckIcon className="size-2.5" strokeWidth={3} />
               </span>
               <span className="min-w-0">
-                <span className="block font-mono text-[12px] font-medium">localify · {call.tool}</span>
-                <span className="block truncate font-mono text-[11.5px] text-neutral-500">{call.detail}</span>
+                <span className="block font-medium">
+                  localify <span className="text-neutral-400">·</span> {call.tool}
+                </span>
+                <span className="block truncate text-[12px] text-neutral-500">{call.detail}</span>
               </span>
             </motion.div>
           ))}
-          <motion.p className="text-neutral-700" variants={step}>
+          <motion.p className="px-1 pt-1 text-neutral-700" variants={step}>
             {t("reply")}{" "}
-            <span className="font-mono text-[12px] font-medium text-sky-700">{WORKTREE_URL.replace("https://", "")}</span>
+            <span className="font-medium text-sky-700">{WORKTREE_URL.replace("https://", "")}</span>
           </motion.p>
         </Sequence>
-      </Panel>
+      </div>
     </Stage>
   );
 };
 
-/* 02: one project, one URL per worktree. */
-export const WorktreesVisual = () => {
-  const t = useTranslations("UseCases.worktreeDemo");
-  const rows = [
-    { branch: t("primary"), url: "web.journal.localify", state: "running" },
-    { branch: "fix-auth", url: "web--fix-auth.journal.localify", state: "running" },
-    { branch: "new-onboarding", url: "web--new-onboarding.journal.localify", state: "running" },
-    { branch: "new-onboarding", url: "api--new-onboarding.journal.localify", state: "stopped" },
-    { branch: "dark-mode", url: "web--dark-mode.journal.localify", state: "removed" },
-  ] as const;
+/* 02: the project card of the app, one environment per worktree. */
+export const WorktreesVisual = () => (
+  <Stage image="/sky/urls.jpg">
+    <Sequence className="w-full max-w-lg">
+      <motion.div variants={step}>
+        <AppFrame>
+          <ProjectCard
+            domains={[
+              { domain: "web.journal.localify", port: "3000" },
+              { domain: "api.journal.localify", port: "4000" },
+            ]}
+            environments={[
+              {
+                slug: "fix-auth",
+                branch: "fix/auth-callback",
+                open: true,
+                services: [
+                  { name: "web", domain: "web--fix-auth.journal.localify" },
+                  { name: "api", domain: "api--fix-auth.journal.localify", state: "stopped" },
+                ],
+              },
+              {
+                slug: "new-onboarding",
+                services: [
+                  { domain: "web--new-onboarding.journal.localify" },
+                  { domain: "api--new-onboarding.journal.localify" },
+                ],
+              },
+              { slug: "dark-mode", services: [{ domain: "web--dark-mode.journal.localify", state: "stopped" }] },
+            ]}
+            name="journal"
+          />
+        </AppFrame>
+      </motion.div>
+    </Sequence>
+  </Stage>
+);
 
-  return (
-    <Stage image="/sky/urls.jpg">
-      <Panel className="max-w-md">
-        <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3">
-          <span className="text-[14px] font-semibold">journal</span>
-          <span className="text-[12px] text-neutral-500">{t("title")}</span>
-        </div>
-        <Sequence className="divide-y divide-neutral-100">
-          {rows.map((row) => (
-            <motion.div
-              className={cn("flex items-center gap-3 px-4 py-2.5", row.state === "removed" && "opacity-45")}
-              key={row.url}
-              variants={step}
-            >
-              <span
-                className={cn(
-                  "size-2 shrink-0 rounded-full",
-                  row.state === "running" && "bg-emerald-500",
-                  row.state === "stopped" && "bg-neutral-300",
-                  row.state === "removed" && "bg-transparent ring-1 ring-neutral-300",
-                )}
-              />
-              <span className="min-w-0 flex-1">
-                <span className={cn("block truncate font-mono text-[12.5px] font-medium", row.state === "removed" && "line-through")}>
-                  {row.url}
-                </span>
-                <span className="block text-[11.5px] text-neutral-500">{row.branch}</span>
-              </span>
-              <span className="shrink-0 text-[11.5px] text-neutral-500">{t(row.state)}</span>
-            </motion.div>
-          ))}
-        </Sequence>
-      </Panel>
-    </Stage>
-  );
-};
+/* 03: the app's terminal panel, where what an agent starts runs. */
+const TERMINAL_LINES: Array<{ text: string; color: string }> = [
+  { text: "$ localify dev web", color: "#6b7280" },
+  { text: `Starting 'web' at ${WORKTREE_URL}`, color: "#dddddd" },
+  { text: "  injected LOCALIFY_URL", color: "#6b7280" },
+  { text: "  ▲ Next.js 16.2.4", color: "#dddddd" },
+  { text: "  ✓ Ready in 1.2s", color: "#4ade80" },
+  { text: " GET / 200 in 84ms", color: "#7aa2f7" },
+  { text: " GET /login 200 in 41ms", color: "#7aa2f7" },
+  { text: " POST /api/auth/callback 302 in 63ms", color: "#facc15" },
+];
 
-/* 03: the app's terminal panel, with the checkouts that have a session. */
-export const AppVisual = () => {
-  const t = useTranslations("UseCases.appDemo");
-  const lines = [
-    { text: "$ localify dev web", tone: "text-neutral-400" },
-    { text: `Starting 'web' at ${WORKTREE_URL}`, tone: "text-neutral-200" },
-    { text: "  injected LOCALIFY_URL", tone: "text-neutral-400" },
-    { text: "  ▲ Next.js 16.2.4", tone: "text-neutral-200" },
-    { text: "  ✓ Ready in 1.2s", tone: "text-emerald-400" },
-    { text: " GET / 200 in 84ms", tone: "text-neutral-400" },
-    { text: " GET /login 200 in 41ms", tone: "text-neutral-400" },
-  ];
-
-  return (
-    <Stage image="/sky/ui.jpg">
-      <Panel className="max-w-lg">
-        <div className="flex items-center gap-1.5 border-b border-neutral-200 px-3 py-2.5">
-          <span className="size-2.5 rounded-full bg-[#FF5C5F]" />
-          <span className="size-2.5 rounded-full bg-[#FAC800]" />
-          <span className="size-2.5 rounded-full bg-[#34C759]" />
-          <span className="ml-2 text-[12px] font-medium text-neutral-500">{t("terminal")}</span>
-        </div>
-        <div className="grid grid-cols-[34%_1fr]">
-          <div className="space-y-1 border-r border-neutral-200 bg-neutral-50 p-2.5 text-[12px]">
-            <p className="px-2 pb-1 text-[10.5px] font-medium tracking-wide text-neutral-400 uppercase">{t("checkouts")}</p>
-            {["main", "fix-auth", "new-onboarding"].map((name) => (
-              <div
-                className={cn(
-                  "flex items-center gap-2 truncate rounded-md px-2 py-1.5",
-                  name === "fix-auth" ? "bg-white font-medium shadow-sm ring-1 ring-neutral-200" : "text-neutral-600",
-                )}
-                key={name}
-              >
-                <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                {name}
-              </div>
-            ))}
-          </div>
-          <Sequence className="min-h-[190px] space-y-1 bg-neutral-900 p-3 font-mono text-[11px] leading-relaxed">
-            {lines.map((line) => (
-              <motion.p className={cn("truncate", line.tone)} key={line.text} variants={step}>
+export const AppVisual = () => (
+  <Stage image="/sky/ui.jpg">
+    <div className="w-full max-w-xl">
+      <TerminalPanel
+        checkouts={[
+          { project: "journal", label: "primary", tabs: 2 },
+          { project: "journal", label: "fix-auth", worktree: true, tabs: 1, active: true },
+          { project: "journal", label: "new-onboarding", worktree: true, tabs: 2 },
+        ]}
+        lines={
+          <Sequence className="space-y-0.5">
+            {TERMINAL_LINES.map((line) => (
+              <motion.p className="truncate" key={line.text} style={{ color: line.color }} variants={step}>
                 {line.text}
               </motion.p>
             ))}
           </Sequence>
-        </div>
-      </Panel>
-    </Stage>
+        }
+        tabs={[{ label: "web", active: true }, { label: "Shell" }]}
+      />
+    </div>
+  </Stage>
+);
+
+/* 04: devices reach the Mac the agents work on, through one protected project URL. */
+const Browser = ({ url, children, className }: { url: string; children?: ReactNode; className?: string }) => (
+  <div className={cn("overflow-hidden rounded-lg border border-black/5 bg-white shadow-[0_20px_40px_-20px_rgba(13,13,13,0.5)]", className)}>
+    <div className="flex items-center gap-1.5 border-b border-neutral-200/80 bg-neutral-50 px-2 py-1.5">
+      <span className="size-1.5 rounded-full bg-neutral-300" />
+      <span className="size-1.5 rounded-full bg-neutral-300" />
+      <span className="flex min-w-0 flex-1 items-center gap-1 rounded-md bg-white px-1.5 py-0.5 text-[10px] text-neutral-600 ring-1 ring-neutral-200">
+        <LockIcon className="size-2.5 shrink-0 text-neutral-400" />
+        <span className="truncate">{url}</span>
+      </span>
+    </div>
+    <div className="space-y-1.5 p-2.5">{children}</div>
+  </div>
+);
+
+const PageSkeleton = ({ accent }: { accent: string }) => (
+  <>
+    <div className={cn("h-2 w-1/2 rounded-full", accent)} />
+    <div className="h-1.5 w-5/6 rounded-full bg-neutral-200" />
+    <div className="h-1.5 w-2/3 rounded-full bg-neutral-200" />
+    <div className="mt-2 h-5 w-16 rounded-md bg-neutral-900" />
+  </>
+);
+
+/* A dot that travels down a short vertical line, from the devices to the Mac. */
+const Flow = () => {
+  const reduce = useReducedMotion();
+  return (
+    <div aria-hidden="true" className="relative mx-auto h-7 w-px bg-white/60">
+      {reduce ? null : (
+        <motion.span
+          animate={{ y: [0, 24], opacity: [0, 1, 0] }}
+          className="absolute -left-[3px] size-[7px] rounded-full bg-white shadow"
+          transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+        />
+      )}
+    </div>
   );
 };
 
-/* 04: one project URL reaches the Mac the agents work on, from any device. */
 export const MachinesVisual = () => {
   const t = useTranslations("UseCases.machinesDemo");
-  const devices = [
-    { name: t("laptop"), role: t("laptopRole"), url: "journal--web--fix-auth.localify.fyi" },
-    { name: t("phone"), role: t("phoneRole"), url: "journal--web.localify.fyi" },
-  ];
 
   return (
     <Stage image="/sky/urls.jpg">
-      <Sequence className="flex w-full max-w-md flex-col items-stretch gap-3">
-        {devices.map((device) => (
-          <motion.div key={device.name} variants={step}>
-            <Panel className="px-4 py-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[13px] font-semibold">{device.name}</span>
-                <span className="text-[11.5px] text-neutral-500">{device.role}</span>
-              </div>
-              <div className="mt-2 flex items-center gap-2 rounded-md bg-neutral-100 px-2.5 py-1.5">
-                <LockIcon className="size-3 shrink-0 text-neutral-500" />
-                <span className="truncate font-mono text-[12px]">{device.url}</span>
-              </div>
-            </Panel>
-          </motion.div>
-        ))}
-        <motion.div className="flex items-center justify-center gap-2 py-1 text-[11.5px] font-medium text-white/90" variants={step}>
-          <span className="h-px w-8 bg-white/50" />
-          {t("password")}
-          <span className="h-px w-8 bg-white/50" />
+      <Sequence className="flex w-full max-w-md flex-col">
+        <motion.div className="grid grid-cols-[1fr_auto] items-end gap-3" variants={step}>
+          <div>
+            <p className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-white">
+              <MonitorIcon className="size-3.5" /> {t("laptop")} · {t("laptopRole")}
+            </p>
+            <Browser url="journal--web--fix-auth.localify.fyi">
+              <PageSkeleton accent="bg-sky-400/70" />
+            </Browser>
+          </div>
+          <div className="w-28">
+            <p className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-white">
+              <MobileIcon className="size-3.5" /> {t("phone")}
+            </p>
+            <div className="rounded-[18px] bg-neutral-900 p-1 shadow-[0_20px_40px_-20px_rgba(13,13,13,0.6)]">
+              <Browser className="rounded-[14px] border-0" url="journal--web.localify.fyi">
+                <PageSkeleton accent="bg-emerald-400/70" />
+              </Browser>
+            </div>
+          </div>
         </motion.div>
+
         <motion.div variants={step}>
-          <Panel className="px-4 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-[13px] font-semibold">{t("studio")}</span>
-              <span className="text-[11.5px] text-neutral-500">{t("studioRole")}</span>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {["web.journal", "web--fix-auth.journal", "api.journal"].map((host) => (
-                <span className="rounded-md bg-emerald-500/10 px-2 py-1 font-mono text-[11.5px] text-emerald-700" key={host}>
-                  {host}.localify
-                </span>
-              ))}
-            </div>
-          </Panel>
+          <Flow />
+          <div className="mx-auto flex w-fit items-center gap-1.5 rounded-full bg-white/95 px-3 py-1.5 text-[12px] font-medium text-neutral-800 shadow-lg">
+            <LockIcon className="size-3.5 text-neutral-500" />
+            localify.fyi
+            <span className="text-neutral-400">·</span>
+            <span className="text-neutral-500">{t("password")}</span>
+          </div>
+          <Flow />
+        </motion.div>
+
+        <motion.div variants={step}>
+          <p className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-white">
+            <ServersIcon className="size-3.5" /> {t("studio")} · {t("studioRole")}
+          </p>
+          <div className="rounded-xl bg-white/95 p-1 shadow-[0_20px_40px_-20px_rgba(13,13,13,0.5)]">
+            <ProjectCard
+              domains={[
+                { domain: "web.journal.localify", isPublic: true },
+                { domain: "web--fix-auth.journal.localify", isPublic: true },
+              ]}
+              isPublic
+              name="journal"
+            />
+          </div>
         </motion.div>
       </Sequence>
     </Stage>

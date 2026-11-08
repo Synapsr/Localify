@@ -18,14 +18,18 @@
     "description": "每个项目、worktree 和机器都有一个干净的 HTTPS URL。编程智能体通过 MCP 搞定全部配置。你在一个应用里观察和掌控。",
     "download": "下载 macOS 版",
     "source": "查看源代码",
-    "terminal": "或安装命令行工具",
-    "availability": "免费开源，采用 AGPL 许可。桌面应用支持 macOS。"
+    "promptHint": "粘贴到 Claude Code、Codex 或 Cursor，智能体就会帮你安装 Localify。免费开源。"
   },
   "DemoDialog": {
     "title": "想真正试试 Localify 吗？",
     "description": "下载桌面应用，设置你的第一个本地域名。",
     "later": "以后再说",
     "download": "立即下载"
+  },
+  "InstallPrompt": {
+    "cta": "复制安装提示词",
+    "copied": "已复制，粘贴给你的智能体吧",
+    "fallback": "把这段提示词复制给你的智能体："
   },
   "AgentStrip": {
     "label": "通过 MCP 与你的智能体协作",
@@ -38,7 +42,8 @@
     "items": {
       "agent": {
         "title": "智能体帮你配好。",
-        "body": "只需连接一次 Claude Code、Codex 或 Cursor。应用的每个操作都是一个 MCP 工具，所以智能体会创建项目、挑选空闲端口、修改 Next.js 或 Vite 配置，并在各自的 URL 上启动每个服务。你只需开口。"
+        "body": "只需连接一次 Claude Code、Codex 或 Cursor。应用的每个操作都是一个 MCP 工具，所以智能体会创建项目、挑选空闲端口、修改 Next.js 或 Vite 配置，并在各自的 URL 上启动每个服务。你只需开口。",
+        "hint": "一条提示词，智能体帮你装好一切。"
       },
       "worktrees": {
         "title": "一个 worktree，一个 URL。",
@@ -57,24 +62,12 @@
       "prompt": "在 fix-auth worktree 里启动 web 应用，然后把链接发给我。",
       "reply": "好了，已运行在"
     },
-    "worktreeDemo": {
-      "title": "环境",
-      "primary": "main",
-      "running": "运行中",
-      "stopped": "已停止",
-      "removed": "合并后删除"
-    },
-    "appDemo": {
-      "terminal": "终端",
-      "checkouts": "检出目录"
-    },
     "machinesDemo": {
       "studio": "Mac Studio",
       "studioRole": "智能体在这里工作",
       "laptop": "MacBook",
       "laptopRole": "你在这里审查",
       "phone": "iPhone",
-      "phoneRole": "你在这里测试",
       "password": "密码保护"
     }
   },
@@ -101,31 +94,42 @@
     "titleLine2": "之后只管开口。",
     "steps": [
       {
-        "title": "下载应用。",
-        "body": "首次启动时，它只会询问一次管理员密码，然后配置 HTTPS、DNS 和后台服务。此后 Localify 不再以 root 身份运行任何东西。"
+        "title": "把提示词交给智能体。",
+        "body": "复制安装提示词，粘贴到 Claude Code、Codex 或 Cursor。智能体会安装命令行工具，配置 HTTPS 和 DNS，并完成自身的连接。你只需确认一次管理员密码。"
       },
       {
-        "title": "连接你的智能体。",
-        "body": "在 Settings → AI agents 中，或运行 localify agent install，即可把 MCP 服务器注册到 Claude Code、Codex 和 Cursor。"
+        "title": "连接你的其他智能体。",
+        "body": "之后安装的智能体，可以在应用的 Settings → AI agents 中连接，或运行 localify agent install。每个智能体都能以 MCP 工具的形式使用 Localify 的全部操作。"
       },
       {
         "title": "要一个 URL。",
-        "body": "“在这个 worktree 里运行应用。”智能体会在应用中启动它，并把 URL 交给你。"
+        "body": "让智能体在某个 worktree 里运行应用。它启动之后，这个 worktree 会带着自己的 URL 出现在应用里，你直接打开即可。"
       }
     ],
+    "dashboardPrefix": "想用一个面板掌握全局？",
+    "dashboardLink": "下载 macOS 版应用",
+    "demo": {
+      "ask": "在 fix-auth worktree 里运行应用。"
+    },
     "diagram": {
+      "title": "各部分如何协作",
       "you": "你",
       "youDetail": "桌面应用",
       "agents": "你的智能体",
       "agentsDetail": "MCP 服务器",
       "machine": "每台 Mac 上的 Localify",
-      "machineDetail": "DNS · HTTPS · 路由",
+      "dns": "DNS",
+      "dnsDetail": "解析所有 .localify 域名",
+      "https": "HTTPS",
+      "httpsDetail": "本地证书颁发机构",
+      "router": "路由",
+      "routerDetail": "每个 worktree 一个 URL",
       "servers": "开发服务器",
-      "serversDetail": "每个 worktree 一个 URL",
-      "devices": "你的其他设备",
-      "devicesDetail": "笔记本、手机",
+      "serversDetail": "运行在各自的 URL 之后",
       "cloud": "Localify Cloud",
-      "cloudDetail": "密码 · 隧道"
+      "cloudDetail": "密码和隧道",
+      "devices": "你的其他设备",
+      "devicesDetail": "笔记本、手机，随时随地"
     }
   },
   "Pricing": {
@@ -160,7 +164,27 @@
         "7 天免费试用"
       ],
       "cta": "申请邀请",
-      "note": "目前仅限邀请。使用 GitHub 登录。"
+      "note": "目前仅限邀请。使用 GitHub 登录。",
+      "badge": "最受欢迎"
+    },
+    "addons": {
+      "title": "附加项",
+      "soon": "即将推出",
+      "machine": "+1 台机器：$3 / 月",
+      "urls": "+10 个公开 URL：$2 / 月"
+    },
+    "team": {
+      "name": "Localify Cloud Team",
+      "price": "$49",
+      "period": "/ 月",
+      "tagline": "适合共享机器的团队。",
+      "features": [
+        "包含 Pro 的全部功能",
+        "3 个席位，一张账单",
+        "为团队提供更多机器和公开 URL",
+        "优先支持"
+      ],
+      "cta": "联系我们"
     }
   },
   "Faq": {
@@ -219,7 +243,6 @@
     "description": "让智能体去跑 dev server。你按名字打开每一个。",
     "download": "下载 macOS 版",
     "source": "查看源代码",
-    "terminal": "或在终端中安装（macOS 和 Linux）：",
     "requirements": "Apple Silicon 的 macOS · 命令行也支持 Linux x86_64"
   },
   "Footer": {
@@ -235,7 +258,14 @@
     "cookies": "Cookie",
     "copyright": "© 2026 Téo Goulois · 基于 AGPL 开源 · 用 Rust 安静构建。",
     "language": "语言",
-    "switchLanguage": "切换到 {locale}"
+    "switchLanguage": "切换到 {locale}",
+    "product": "产品",
+    "useCases": "使用场景",
+    "howItWorks": "工作方式",
+    "pricing": "价格",
+    "faq": "FAQ",
+    "tagline": "为每个智能体、worktree 和机器提供干净的 URL。",
+    "github": "在 GitHub 上点 Star"
   },
   "CookieBanner": {
     "label": "Cookie 同意",

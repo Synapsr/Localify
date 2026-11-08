@@ -18,14 +18,18 @@
     "description": "すべてのプロジェクト、ワークツリー、マシンにクリーンな HTTPS URL を。設定はコーディングエージェントが MCP 経由ですべて行います。あなたは一つのアプリから見守り、指示を出すだけです。",
     "download": "macOS 版をダウンロード",
     "source": "ソースコードを見る",
-    "terminal": "またはコマンドライン版をインストール",
-    "availability": "AGPL の無料オープンソース。デスクトップアプリは macOS 向けです。"
+    "promptHint": "Claude Code、Codex、Cursor に貼り付けるだけで、エージェントが Localify をインストールします。無料のオープンソースです。"
   },
   "DemoDialog": {
     "title": "Localify を実際に試してみませんか？",
     "description": "デスクトップアプリをダウンロードして、最初のローカルドメインを設定しましょう。",
     "later": "あとで",
     "download": "今すぐダウンロード"
+  },
+  "InstallPrompt": {
+    "cta": "インストール用プロンプトをコピー",
+    "copied": "コピーしました。エージェントに貼り付けてください",
+    "fallback": "このプロンプトをエージェントに貼り付けてください："
   },
   "AgentStrip": {
     "label": "MCP であなたのエージェントと連携",
@@ -38,7 +42,8 @@
     "items": {
       "agent": {
         "title": "設定はエージェントが。",
-        "body": "Claude Code、Codex、Cursor を一度つなぐだけ。アプリのすべての操作が MCP ツールになっているので、エージェントがプロジェクトを作成し、空いているポートを選び、Next.js や Vite の設定をパッチして、各サービスをそれぞれの URL で起動します。あなたは頼むだけです。"
+        "body": "Claude Code、Codex、Cursor を一度つなぐだけ。アプリのすべての操作が MCP ツールになっているので、エージェントがプロジェクトを作成し、空いているポートを選び、Next.js や Vite の設定をパッチして、各サービスをそれぞれの URL で起動します。あなたは頼むだけです。",
+        "hint": "プロンプト一つで、エージェントがすべてをインストールします。"
       },
       "worktrees": {
         "title": "ワークツリーごとに、URL を一つ。",
@@ -57,24 +62,12 @@
       "prompt": "fix-auth ワークツリーで web アプリを起動して、リンクを送って。",
       "reply": "完了しました。起動先："
     },
-    "worktreeDemo": {
-      "title": "環境",
-      "primary": "main",
-      "running": "実行中",
-      "stopped": "停止中",
-      "removed": "マージ時に削除"
-    },
-    "appDemo": {
-      "terminal": "ターミナル",
-      "checkouts": "チェックアウト"
-    },
     "machinesDemo": {
       "studio": "Mac Studio",
       "studioRole": "ここでエージェントが作業",
       "laptop": "MacBook",
       "laptopRole": "ここでレビュー",
       "phone": "iPhone",
-      "phoneRole": "ここでテスト",
       "password": "パスワード保護"
     }
   },
@@ -101,31 +94,42 @@
     "titleLine2": "あとは頼むだけ。",
     "steps": [
       {
-        "title": "アプリをダウンロード。",
-        "body": "初回起動時に管理者パスワードを一度だけ尋ね、HTTPS、DNS、バックグラウンドサービスをセットアップします。それ以降、Localify が root 権限で動かすものはありません。"
+        "title": "エージェントにプロンプトを渡す。",
+        "body": "インストール用プロンプトをコピーして、Claude Code、Codex、Cursor に貼り付けます。エージェントがコマンドラインをインストールし、HTTPS と DNS をセットアップして、自分自身を接続します。あなたは管理者パスワードを一度承認するだけです。"
       },
       {
-        "title": "エージェントをつなぐ。",
-        "body": "Settings → AI agents か localify agent install で、MCP サーバーを Claude Code、Codex、Cursor に登録します。"
+        "title": "ほかのエージェントもつなぐ。",
+        "body": "あとからインストールしたエージェントは、アプリの Settings → AI agents か localify agent install でつなげます。どのエージェントも、Localify のすべての操作を MCP ツールとして使えます。"
       },
       {
         "title": "URL を頼む。",
-        "body": "「このワークツリーでアプリを起動して」。エージェントがアプリ内で起動し、URL を渡してくれます。"
+        "body": "ワークツリーでアプリを起動するよう頼みます。エージェントが起動すると、そのワークツリーが専用の URL とともにアプリに表示されるので、あとは開くだけです。"
       }
     ],
+    "dashboardPrefix": "すべてを見渡せるダッシュボードが欲しいですか？",
+    "dashboardLink": "macOS 版アプリをダウンロード",
+    "demo": {
+      "ask": "fix-auth ワークツリーでアプリを起動して。"
+    },
     "diagram": {
+      "title": "全体の仕組み",
       "you": "あなた",
       "youDetail": "デスクトップアプリ",
       "agents": "エージェント",
       "agentsDetail": "MCP サーバー",
       "machine": "各 Mac の Localify",
-      "machineDetail": "DNS · HTTPS · ルーター",
+      "dns": "DNS",
+      "dnsDetail": ".localify の名前をすべて解決",
+      "https": "HTTPS",
+      "httpsDetail": "ローカルの認証局",
+      "router": "ルーター",
+      "routerDetail": "ワークツリーごとに URL",
       "servers": "開発サーバー",
-      "serversDetail": "ワークツリーごとに URL",
-      "devices": "ほかのデバイス",
-      "devicesDetail": "ノートパソコン、スマートフォン",
+      "serversDetail": "それぞれの URL の裏側で",
       "cloud": "Localify Cloud",
-      "cloudDetail": "パスワード · トンネル"
+      "cloudDetail": "パスワードとトンネル",
+      "devices": "ほかのデバイス",
+      "devicesDetail": "ノートパソコン、スマートフォン、どこからでも"
     }
   },
   "Pricing": {
@@ -160,7 +164,27 @@
         "7 日間の無料トライアル"
       ],
       "cta": "招待をリクエスト",
-      "note": "現在は招待制です。GitHub でサインインします。"
+      "note": "現在は招待制です。GitHub でサインインします。",
+      "badge": "一番人気"
+    },
+    "addons": {
+      "title": "アドオン",
+      "soon": "近日公開",
+      "machine": "マシン +1 台：月額 $3",
+      "urls": "公開 URL +10 個：月額 $2"
+    },
+    "team": {
+      "name": "Localify Cloud Team",
+      "price": "$49",
+      "period": "/ 月",
+      "tagline": "マシンを共有するチームに。",
+      "features": [
+        "Pro のすべての機能",
+        "3 シート、請求書は 1 つ",
+        "チームで使えるマシンと公開 URL を追加",
+        "優先サポート"
+      ],
+      "cta": "お問い合わせ"
     }
   },
   "Faq": {
@@ -219,7 +243,6 @@
     "description": "dev server はエージェントに任せて。どれも名前で開けます。",
     "download": "macOS 版をダウンロード",
     "source": "ソースコードを見る",
-    "terminal": "またはターミナルから（macOS と Linux）：",
     "requirements": "Apple Silicon の macOS · コマンドラインは Linux x86_64 にも対応"
   },
   "Footer": {
@@ -235,7 +258,14 @@
     "cookies": "Cookie",
     "copyright": "© 2026 Téo Goulois · AGPL のオープンソース · Rust で静かに作られています。",
     "language": "言語",
-    "switchLanguage": "{locale} に切り替え"
+    "switchLanguage": "{locale} に切り替え",
+    "product": "プロダクト",
+    "useCases": "ユースケース",
+    "howItWorks": "使い方",
+    "pricing": "料金",
+    "faq": "FAQ",
+    "tagline": "すべてのエージェント、ワークツリー、マシンにクリーンな URL を。",
+    "github": "GitHub でスターする"
   },
   "CookieBanner": {
     "label": "Cookie の同意",
