@@ -204,7 +204,7 @@ Error codes this contract adds, everywhere they apply:
 | `503 capacity` | Localify Cloud holds `MAX_TUNNELS` slots | serving resumes by itself as slots free up |
 
 ```ts
-type User = { login: string };
+type User = { id: string; login: string }; // id: the account id, used in remote-machines handshakes
 type Machine = { id: string; name: string };
 type PublicUrl = {
   id: string;

@@ -410,7 +410,7 @@ async function me(_request: Request, env: Env, caller: Caller): Promise<Response
     .first<{ machines: number; urls: number }>();
   const { addons, ...plan } = account.plan;
   return json({
-    user: { login: caller.login },
+    user: { id: caller.userId, login: caller.login },
     machine: { id: caller.machineId, name: caller.machineName },
     plan: {
       ...plan,

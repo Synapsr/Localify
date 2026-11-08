@@ -266,7 +266,7 @@ describe("signing in", () => {
 
     const me = await api(context, "GET", "/v1/me", { token });
     expect(await me.json()).toMatchObject({
-      user: { login: "Teo-Goulois" },
+      user: { id: expect.any(String), login: "Teo-Goulois" },
       machine: { id: machineId, name: "laptop" },
     });
   });
