@@ -2,6 +2,7 @@
 // *.<PUBLIC_BASE_DOMAIN>, and the scheduled jobs. One Worker, routed by host.
 
 import { handleApi } from "./api";
+import { reconcileBilling, runBillingJobs } from "./billing";
 import { purgeDeletedUrls, revokeStuckSignIns } from "./machines";
 import { isPublicHost } from "./names";
 import { handlePublic } from "./public";
@@ -21,14 +22,34 @@ export default {
 
   async scheduled(controller, env, ctx): Promise<void> {
     if (controller.cron === EVERY_FIVE_MINUTES) ctx.waitUntil(everyFiveMinutes(env));
-    else if (controller.cron === DAILY) ctx.waitUntil(purgeDeletedUrls(env));
+    else if (controller.cron === DAILY) ctx.waitUntil(daily(env));
     else console.error("Unknown cron", controller.cron);
   },
 } satisfies ExportedHandler<Env>;
 
-/** The tunnel sweep, which also retries the cleanup of revoked machines. */
+/**
+ * Billing refreshes first, so the sweep applies what they changed in the
+ * same run; then the tunnel sweep, which also retries the cleanup of
+ * revoked machines.
+ */
 async function everyFiveMinutes(env: Env): Promise<void> {
   const now = Date.now();
   await revokeStuckSignIns(env, now);
+  try {
+    await runBillingJobs(env, now);
+  } catch (error) {
+    console.error("The billing jobs failed; the next run retries them", error);
+  }
   await runSweep(env, now);
+}
+
+/** Queues every customer for a billing check, and purges old deleted URLs. */
+async function daily(env: Env): Promise<void> {
+  const now = Date.now();
+  try {
+    await reconcileBilling(env, now);
+  } catch (error) {
+    console.error("The daily billing reconciliation failed", error);
+  }
+  await purgeDeletedUrls(env, now);
 }

@@ -31,9 +31,11 @@ Anyone with a GitHub account can sign in. Serving public URLs takes a paid plan:
 | Plan | Price | Serving machines | Public URLs |
 |---|---|---|---|
 | None (signed in, no plan) | — | 0 | 0 |
-| Pro | $7.99 a month or $79 a year, after a 7-day trial with a card | 2 | 10 |
+| Pro | $7.99 a month or $79 a year (€7.99 or €79), after a 7-day trial with a card | 2 | 10 |
 | Add-on: machine | $3 a month per unit, monthly only | +1 per unit | — |
 | Add-on: URLs | $2 a month per unit, monthly only | — | +10 per unit |
+
+Each Polar product has a USD and an EUR price. Polar picks the currency from the IP address that creates the checkout, so the Worker passes the buyer's (see "Billing").
 
 Add-ons ship after launch. The contract counts them from the start, so that adding them changes no table or response shape. An add-on counts only while the Pro plan is entitled. Add-ons have no trial. The Team plan appears on the pricing page as "contact us" and is not part of this contract.
 
@@ -92,14 +94,14 @@ One Cloudflare Worker on the Workers Paid plan, deployed with wrangler, with a D
 | `MACHINE_DOMAIN` | var | `localify.dev` |
 | `CLOUDFLARE_ACCOUNT_ID`, `MACHINE_ZONE_ID` | var | account, and the `localify.dev` zone |
 | `POLAR_API_BASE` | var | `https://api.polar.sh`, or `https://sandbox-api.polar.sh` outside production |
-| `POLAR_PRODUCT_PRO_MONTHLY`, `POLAR_PRODUCT_PRO_YEARLY` | var | the two Pro product ids; both carry a 7-day trial in Polar |
+| `POLAR_PRODUCT_PRO_MONTHLY`, `POLAR_PRODUCT_PRO_YEARLY` | var | the two Pro product ids; both carry a USD and an EUR price and a 7-day trial in Polar |
 | `POLAR_PRODUCT_ADDON_MACHINE`, `POLAR_PRODUCT_ADDON_URLS` | var | the add-on product ids, unit-priced, without trial; empty until add-ons ship |
 | `CLOUDFLARE_API_TOKEN` | secret | Tunnel Edit, DNS Edit (Infisical `localify` `/cloud`) |
 | `EDGE_KEY` | secret | the value the Worker sends in `X-Localify-Edge` to machine hostnames; the `localify.dev` zone refuses those hostnames without it (see "Edge rule") |
 | `COOKIE_KEY` | secret | signs access and warning cookies |
 | `INGRESS_KEY` | secret | derives each machine's ingress secret |
 | `POLAR_ACCESS_TOKEN` | secret | an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write`, `orders:read` and `refunds:write` |
-| `POLAR_WEBHOOK_SECRET` | secret | the `whsec_…` secret of the webhook endpoint |
+| `POLAR_WEBHOOK_SECRET` | secret | the `whsec_…` secret of the webhook endpoint, a Standard Webhooks secret; optional, since the endpoint is created after the first deploy, and webhooks answer `503` without it |
 
 In Polar, the organization turns on "Prevent trial abuse", and once add-ons ship, "Enable subscription unit changes" in the customer portal. The webhook endpoint is `https://api.localify.dev/v1/webhooks/polar` with `api_version: "2026-10"`, and subscribes to every `subscription.*` event and to `customer.state_changed`. Every REST call sends `Polar-Version: 2026-10`, so requests and webhook payloads share one contract. Polar removes a version about nine months after it ships (2026-10 is removed in April 2027), so the Worker and the endpoint move to a newer version together, before then.
 
@@ -177,9 +179,9 @@ Every request except the device flow carries `Authorization: Bearer <token>`. Th
 | `POST /v1/auth/device` | — | `{deviceCode, userCode, verificationUri, interval, expiresIn}` |
 | `POST /v1/auth/device/token` | `{deviceCode, machineName, ingressPort}` | `200 {token, user, machine}`; `428 authorization_pending`; `429 slow_down` with `{interval}`, the new polling interval; `403 access_denied` (the person declined on GitHub); `403 not_allowed` (under `SIGNUP=allowlist`); `403 banned`; `403 quota_exceeded` (10 signed-in machines); `410 expired_token` |
 | `GET /v1/me` | — | `{user, machine, plan: Plan}` |
-| `POST /v1/billing/checkout` | `{product: "pro_monthly" \| "pro_yearly"}`; after launch also `{product: "addon_machine" \| "addon_urls", units}` | `{kind: "checkout" \| "portal", url}`, the page to open in a browser. When the Pro plan is already entitled, a Pro request gets the customer portal (`kind: "portal"`), where the interval is switched, instead of a checkout. `409 checkout_in_progress` while another request of the same user is creating one (retry after 2 seconds); `402 subscription_required` for an add-on without an entitled Pro plan; `422 invalid_product`. |
+| `POST /v1/billing/checkout` | `{product: "pro_monthly" \| "pro_yearly"}`; after launch also `{product: "addon_machine" \| "addon_urls", units}` | `{kind: "checkout" \| "portal", url}`, the page to open in a browser. When the Pro plan is already entitled, a Pro request gets the customer portal (`kind: "portal"`), where the interval is switched, instead of a checkout. `409 checkout_in_progress` while another request of the same user is creating one (retry after 2 seconds); `402 subscription_required` for an add-on without an entitled Pro plan; `422 invalid_product`, for an add-on too until add-ons ship; `502 billing_unavailable` when Polar fails. |
 | `POST /v1/billing/portal` | — | `{url}`, a Polar customer portal session. `404 no_billing` when the user has never checked out. |
-| `POST /v1/webhooks/polar` | Polar's signed delivery | `202`; `403` on a bad signature. Not authenticated by a Localify token. |
+| `POST /v1/webhooks/polar` | Polar's signed delivery | `202`; `403` on a bad signature; `503` while `POLAR_WEBHOOK_SECRET` is not set. Not authenticated by a Localify token. |
 | `POST /v1/auth/logout` | — | `204`, see "Signing out" |
 | `GET /v1/public-urls` | — | `{publicUrls: [PublicUrl]}`, the user's URLs, deleted ones excluded |
 | `GET /v1/slugs?localDomain=<domain>` | — | `{slug, url}`: the slug a new URL for that domain would get, and its URL, so clients never write the public domain themselves. `422 invalid_local_domain`. |
@@ -352,7 +354,7 @@ Polar is the merchant of record (ADR 0024). The Worker calls it at `POLAR_API_BA
 **Checkout.** `POST /v1/billing/checkout` maps `product` to its configured product ids, so a client can only buy those. A Pro request from a user whose Pro plan is entitled gets the portal instead (below). Otherwise, one checkout per user and kind exists at a time, and creating it is serialized through the `checkouts` row:
 
 1. Claims the row: inserts `creating` with a random `op`, or takes over a row that is `open` and expires less than 5 minutes from now, or `creating` for more than 30 seconds. An `open` row that expires more than 5 minutes from now is returned as is. A Pro checkout lists both intervals, so a request for the other one reuses it, and the person picks the interval on Polar's page. A row another request is `creating` answers `409 checkout_in_progress`.
-2. Calls `POST /v1/checkouts/` with the fields below.
+2. Calls `POST /v1/checkouts/` with the fields below. When the call fails, deletes the row it claimed, so the next request tries again at once.
 3. Sets `open`, `checkout_id`, `url` and `expires_at`, conditioned on `op`.
 
 | Field | Value |
@@ -364,15 +366,16 @@ Polar is the merchant of record (ADR 0024). The Worker calls it at `POLAR_API_BA
 | `success_url` | `https://localify.dev/cloud/subscribed?checkout_id={CHECKOUT_ID}` |
 | `return_url` | `https://localify.dev/pricing` |
 | `units` | for an add-on |
+| `customer_ip_address` | the request's `CF-Connecting-IP`, when present: Polar picks the currency, USD or EUR, from it, and would otherwise see the Worker's Cloudflare address |
 
 The success page only says to go back to Localify: it grants nothing. Access starts when a refresh sees the subscription.
 
-**Portal.** `POST /v1/billing/portal` calls `POST /v1/customer-sessions/` with `external_customer_id` and `return_url: https://localify.dev/cloud`, and returns `customer_portal_url`. Cancelling, the card, invoices, refunds requested through support, and (after launch) add-on quantities all live there.
+**Portal.** `POST /v1/billing/portal` calls `POST /v1/customer-sessions/` with `external_customer_id` and `return_url: https://localify.dev/cloud`, and returns `customer_portal_url`. It answers `404 no_billing` when the user has neither a `billing` row naming a Polar customer nor a `checkouts` row, and when Polar knows no such customer (a checkout never completed). Cancelling, the card, invoices, refunds requested through support, and (after launch) add-on quantities all live there.
 
 **Webhooks.** `POST /v1/webhooks/polar`:
 
-1. Reads the raw body and verifies `webhook-id`, `webhook-timestamp` and `webhook-signature` with `POLAR_WEBHOOK_SECRET`, Standard Webhooks style. A bad signature, or a timestamp more than 5 minutes off, answers 403.
-2. `INSERT OR IGNORE`s the event into `webhook_events` with its user. The user is the customer's `external_id`: `data.customer.external_id` on `subscription.*`, `data.external_id` on `customer.state_changed`.
+1. Reads the raw body and verifies `webhook-id`, `webhook-timestamp` and `webhook-signature` with `POLAR_WEBHOOK_SECRET`, Standard Webhooks style: the key is the base64 part of `whsec_<base64>`, and the signed content is `<webhook-id>.<webhook-timestamp>.<raw body>`. A bad signature, or a timestamp more than 5 minutes off, answers 403. While `POLAR_WEBHOOK_SECRET` is not set, it answers 503 and Polar retries.
+2. `INSERT OR IGNORE`s the event into `webhook_events` with its user. The user is the customer's `external_id`: `data.customer.external_id` on `subscription.*`, `data.external_id` on `customer.state_changed`. An event that names no existing user is stored as processed, so a repeat is still recognized. A pending event gets `next_attempt_at` one minute ahead: the 5-minute job retries it only if the refresh of step 4 did not settle it.
 3. Answers `202` within Polar's 10-second timeout, also for event types it ignores and for customers without an external id.
 4. Refreshes that user in `waitUntil`. A refresh that fails leaves the event pending. The 5-minute job retries pending events with backoff (1 minute, doubling, up to 6 hours), and logs an error after 10 attempts.
 
@@ -388,24 +391,22 @@ The payload is never trusted for state: it only names who to refresh.
    - sums the units of add-on subscriptions that are `active` or `trialing`;
    - copies Polar's `past_due_at`;
    - sets `trial_used_at` when any Pro subscription, past ones included, has a `trial_start`.
-5. Upserts `billing` with its revision, only `WHERE excluded.revision > billing.revision`.
-6. Runs the follow-up work, each step conditioned on `billing.revision` still being its own:
-   - applying the entitlement: downgrades, releases and rotations (ADR 0027), and `forgetSite` for the user's slugs;
-   - the duplicate check below.
+5. Upserts `billing` with its revision, only `WHERE excluded.revision > billing.revision`. In the same batch, each conditioned on `billing.revision` being its own: `trial_used_at`, the duplicates (below), and clearing `check_due_at` when it was set before the refresh started.
+6. When that revision holds and the entitlement differs from the one the batch read before its write: the serving reconcile of the user (see "Downgrades"), whose rotations the sweep then releases (ADR 0027), and `forgetSite` for the user's slugs.
 7. When steps 5 and 6 have committed, marks processed the user's events with `seq` at or below the watermark.
 
-Losing to a newer revision is not a failure: the newer refresh read Polar later. Events stored after the watermark stay pending and cause another refresh. A refresh that fails leaves its events pending for the retry.
+Losing to a newer revision is not a failure: the newer refresh read Polar later, and marks the events. Events stored after the watermark stay pending and cause another refresh. A refresh that fails leaves its events pending for the retry, and sends the user to the back of the reconciliation queue. More than 5 pages of subscriptions for one user fails the refresh rather than reading half of them.
 
 **Duplicate Pro subscriptions.** A single pending checkout makes a second Pro subscription rare, but a second checkout opened from an old link could still create one. When a refresh finds two entitled Pro subscriptions:
 
-1. It keeps the one ending latest.
+1. It keeps the one ending latest: one that renews ends after one that is canceling, then the later `current_period_end`, the later `started_at` and the id break ties. A subscription already recorded as a duplicate is never the one kept, so a second refresh cannot pick the other one.
 2. It records the other in `duplicate_subscriptions`, in the same commit as the snapshot, before calling Polar. Revoking does not refund, and once revoked the subscription no longer looks like a duplicate, so the obligation has to outlive the call.
-3. The 5-minute job revokes it with `DELETE /v1/subscriptions/{id}` and sets `revoked_at`. Separately, it refunds that subscription's paid orders, found with `GET /v1/orders/?subscription_id=`, through `POST /v1/refunds/` with the full `amount` and reason `duplicate`, and sets `refunded_at`. Each step is retried with backoff until it is settled. A refund Polar reports as already made counts as settled.
+3. The 5-minute job revokes it with `DELETE /v1/subscriptions/{id}` and sets `revoked_at`; Polar's `AlreadyCanceledSubscription` counts as revoked. Once it is revoked, so that no order can follow, it refunds that subscription's orders, found with `GET /v1/orders/?subscription_id=`, through `POST /v1/refunds/` with each order's `refundable_amount` and reason `duplicate`, and sets `refunded_at`. Each step is retried with backoff (5 minutes, doubling, up to a day) until it is settled. A refund Polar reports as already made (`RefundedAlready`) counts as settled.
 4. It logs an error when the row is created and again while a step stays unsettled for more than a day, so a person follows up.
 
 **Add-ons**, contracted and deferred: they need an entitled Pro plan. When the Pro plan stops being entitled, the refresh cancels them at period end, so they stop charging for nothing.
 
-**Reconciliation.** Once a day, the job sets `check_due_at` for every user who has a `billing` row or a `checkouts` row. It also pages through all the organization's subscriptions (`GET /v1/subscriptions/?limit=100`) and does the same for each `customer.external_id` it finds. That catches a customer whose state changed without any event reaching us. The 5-minute job refreshes due users, oldest first, within its budget, and clears `check_due_at` when a refresh commits. Every user is therefore checked against Polar at least once a day, so a missed webhook costs at most a day, and the 7-day `past_due` grace ends on time.
+**Reconciliation.** Once a day, the job sets `check_due_at` for every user who has a `billing` row or a `checkouts` row. It also pages through the organization's subscriptions (`GET /v1/subscriptions/?limit=100`) and does the same for each `customer.external_id` that is a user. That catches a customer whose state changed without any event reaching us. It reads at most 20 pages a day: the first, which holds the newest subscriptions, then a window over the others that moves each day, so every page is read within a few days whatever their number. A user already queued keeps their place. The 5-minute job refreshes the users with a webhook retry due, then those due for the check, oldest first, within its budget (25 refreshes, 80 D1 queries and 40 Polar calls a run), and clears `check_due_at` when a refresh commits. Every user is therefore checked against Polar at least once a day, so a missed webhook costs at most a day, and the 7-day `past_due` grace ends on time.
 
 ### Moderation
 

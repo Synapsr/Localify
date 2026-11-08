@@ -15,7 +15,11 @@ type Setting =
   | "CLOUDFLARE_API_TOKEN"
   | "COOKIE_KEY"
   | "INGRESS_KEY"
-  | "EDGE_KEY";
+  | "EDGE_KEY"
+  | "POLAR_API_BASE"
+  | "POLAR_ACCESS_TOKEN"
+  | "POLAR_PRODUCT_PRO_MONTHLY"
+  | "POLAR_PRODUCT_PRO_YEARLY";
 
 /** A setting's value, or a ConfigError when it is empty: nothing runs on a default. */
 export function setting(env: Env, name: Setting): string {
@@ -62,4 +66,21 @@ export function isAllowedGithubId(env: Env, githubId: number): boolean {
  */
 export function isTeamGithubId(env: Env, githubId: number): boolean {
   return listsGithubId(env.TEAM_GITHUB_IDS, githubId);
+}
+
+/** The two Pro product ids, monthly then yearly: the only Pro products a checkout offers. */
+export function proProducts(env: Env): { month: string; year: string } {
+  return {
+    month: setting(env, "POLAR_PRODUCT_PRO_MONTHLY"),
+    year: setting(env, "POLAR_PRODUCT_PRO_YEARLY"),
+  };
+}
+
+/**
+ * `POLAR_WEBHOOK_SECRET`, or null while the webhook endpoint does not exist
+ * yet: it is created after the first deploy, so a deploy runs without it.
+ */
+export function webhookSecret(env: Env): string | null {
+  const value = (env as Env & { POLAR_WEBHOOK_SECRET?: unknown }).POLAR_WEBHOOK_SECRET;
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }

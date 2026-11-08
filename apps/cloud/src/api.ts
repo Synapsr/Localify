@@ -3,6 +3,7 @@
 // scoped to that user, and an unknown id and someone else's id both answer
 // 404.
 
+import { handlePolarWebhook, portalUrl, proCheckout } from "./billing";
 import { CloudflareError } from "./cloudflare";
 import { ConfigError, isAllowedGithubId, isTeamGithubId, setting, signup } from "./config";
 import { hashPassword, sha256Hex } from "./crypto";
@@ -25,6 +26,7 @@ import {
   SLUG_RULES,
 } from "./names";
 import { generatePassword } from "./passwords";
+import { PolarError } from "./polar";
 import { forgetSite } from "./sites";
 import { background, machineRuntime, reconcileOwner, releaseIfUnwanted } from "./tunnels";
 
@@ -59,6 +61,10 @@ const ROUTES: Route[] = [
   { method: "POST", pattern: /^\/v1\/auth\/device$/, handle: deviceStart },
   { method: "POST", pattern: /^\/v1\/auth\/device\/token$/, handle: deviceToken },
   { method: "GET", pattern: /^\/v1\/me$/, handle: authed(me) },
+  { method: "POST", pattern: /^\/v1\/billing\/checkout$/, handle: authed(checkout) },
+  { method: "POST", pattern: /^\/v1\/billing\/portal$/, handle: authed(portal) },
+  // Polar signs its deliveries; no Localify token.
+  { method: "POST", pattern: /^\/v1\/webhooks\/polar$/, handle: handlePolarWebhook },
   // Signing out is the one route a banned account keeps.
   { method: "POST", pattern: /^\/v1\/auth\/logout$/, handle: authed(logout, { banned: true }) },
   { method: "GET", pattern: /^\/v1\/slugs$/, handle: authed(suggestSlug) },
@@ -117,6 +123,14 @@ function toApiError(error: unknown): ApiError {
       502,
       "cloudflare_unavailable",
       "Cloudflare did not answer as expected. Try again in a minute.",
+    );
+  }
+  if (error instanceof PolarError) {
+    console.error("Polar API call failed:", error.message);
+    return new ApiError(
+      502,
+      "billing_unavailable",
+      "Polar, which handles Localify Cloud billing, did not answer as expected. Try again in a minute.",
     );
   }
   console.error("Unexpected API error", error);
@@ -350,6 +364,29 @@ async function me(_request: Request, env: Env, caller: Caller): Promise<Response
       addons,
     },
   });
+}
+
+// --- Billing ---
+
+/**
+ * `POST /v1/billing/checkout`: a Pro checkout, or the portal when Pro is
+ * already entitled. Products come from the configuration only. Polar picks
+ * the currency from `customer_ip_address`, so it gets the caller's address
+ * rather than the Worker's.
+ */
+async function checkout(request: Request, env: Env, caller: Caller): Promise<Response> {
+  const { product } = await readJson(request);
+  const interval = product === "pro_monthly" ? "month" : product === "pro_yearly" ? "year" : null;
+  if (interval === null) {
+    throw new ApiError(422, "invalid_product", 'product must be "pro_monthly" or "pro_yearly".');
+  }
+  const clientIp = request.headers.get("cf-connecting-ip")?.trim() || null;
+  return json(await proCheckout(env, caller.userId, interval, clientIp));
+}
+
+/** `POST /v1/billing/portal`: a Polar customer portal session. */
+async function portal(_request: Request, env: Env, caller: Caller): Promise<Response> {
+  return json({ url: await portalUrl(env, caller.userId) });
 }
 
 async function logout(_request: Request, env: Env, caller: Caller): Promise<Response> {

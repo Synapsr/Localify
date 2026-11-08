@@ -108,13 +108,30 @@ export function accountOf(row: AccountRow, now: number): Account {
   };
 }
 
-type ProPlan = {
+export type ProPlan = {
   entitled: boolean;
   plan: Pick<PlanState, "status" | "interval" | "trialEndsAt" | "renewsAt" | "endsAt">;
 };
 
-/** The lifecycle table: Polar's status, and the dates that bound it. */
-function proPlan(row: AccountRow, now: number): ProPlan {
+/** The fields of one Pro subscription, as the `billing` snapshot keeps them. */
+export type ProFields = Pick<
+  AccountRow,
+  | "pro_status"
+  | "pro_interval"
+  | "cancel_at_period_end"
+  | "current_period_end"
+  | "trial_end"
+  | "ends_at"
+  | "ended_at"
+  | "past_due_at"
+>;
+
+/**
+ * The lifecycle table: Polar's status, and the dates that bound it. The
+ * refresh reads each subscription through it too, so the subscription it
+ * keeps and the plan it reports agree.
+ */
+export function proPlan(row: ProFields, now: number): ProPlan {
   const interval =
     row.pro_interval === "month" || row.pro_interval === "year" ? row.pro_interval : null;
   const plan = (
