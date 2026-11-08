@@ -116,14 +116,15 @@ fn open(size: WindowSize) -> Result<(File, File)> {
     let (mut master, mut slave): (RawFd, RawFd) = (0, 0);
     let mut winsize = size.winsize();
     // SAFETY: openpty writes two descriptors into the integers. A null name
-    // and termios mean the defaults; the winsize is read only.
+    // and termios mean the defaults; the winsize is read only. A raw pointer
+    // fits both signatures: `*mut` on macOS, `*const` on Linux.
     let opened = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut winsize,
+            &raw mut winsize,
         )
     };
     if opened != 0 {
