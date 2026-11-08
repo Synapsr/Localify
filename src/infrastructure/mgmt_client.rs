@@ -3,6 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::application::inventory::Have;
 use crate::application::ports::{
     DaemonConnection, DaemonConnectionError, DaemonRegistrationInfo, DaemonRuntimeInfo,
 };
@@ -120,6 +121,18 @@ impl MgmtSocketClient {
         let response = self.send_command(r#"{"cmd":"public_status"}"#)?;
         serde_json::from_value(response["data"].clone())
             .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
+    }
+
+    /// This machine's inventory snapshot (docs/remote-machines.md,
+    /// "Inventory"), or `{unchanged, epoch, rev}` when `have` names the
+    /// revision the daemon would send.
+    pub fn inventory(
+        &self,
+        have: Option<&Have>,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let command = serde_json::json!({ "cmd": "inventory", "have": have });
+        let mut response = self.send_command(&command.to_string())?;
+        Ok(response["data"].take())
     }
 
     /// Asks the daemon to fetch this machine's public URLs again, after a

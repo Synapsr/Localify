@@ -333,6 +333,39 @@ impl Config {
         environments
     }
 
+    /// A service as it runs in one environment of its project: that
+    /// environment's domain, checkout and route target in place of the
+    /// primary ones. `None` when the environment does not map the service.
+    /// `launch_plan::environment_service` adds the folder the route detects.
+    pub fn environment_service(
+        &self,
+        mut service: ConfiguredService,
+        environment: &ConfiguredProjectEnvironment,
+    ) -> Option<ConfiguredService> {
+        let mapping = environment
+            .services
+            .iter()
+            .find(|mapping| mapping.service_id == service.id)?;
+        service.primary_domain = mapping.domain.clone();
+        service.domains = vec![mapping.domain.clone()];
+        service.project_root_path = environment
+            .root_path
+            .clone()
+            .or_else(|| service.project_root_path.clone());
+        service.primary_target = self
+            .domains
+            .values()
+            .find(|domain| domain.pattern.display_pattern() == mapping.domain)
+            .and_then(root_route_target);
+        Some(service)
+    }
+
+    /// Whether the domain is served over HTTPS, as a service URL says.
+    pub fn https_enabled_for(&self, domain: &str) -> bool {
+        self.registration_for_domain(domain)
+            .is_some_and(|registration| registration.https_enabled)
+    }
+
     fn configured_explicit_service(
         &self,
         project_id: &str,
