@@ -16,8 +16,8 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CloudIcon,
+  CopyIcon,
   DangerTriangleIcon,
-  FolderIcon,
   LockIcon,
   PowerIcon,
   SparklesIcon,
@@ -25,8 +25,10 @@ import {
   ZapIcon,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { captureDesktopEvent } from "@/lib/analytics";
-import { bootstrapQueries, daemonMutations, systemMutations } from "@/lib/queries";
+import { bootstrapQueries, configMutations, daemonMutations, systemMutations } from "@/lib/queries";
+import { tauriClient } from "@/lib/tauri-client";
 import { assertInstallCompleted } from "@/lib/util.install-result";
 import { cn } from "@/lib/utils";
 
@@ -45,6 +47,25 @@ export function Onboarding({ bootstrap, onActivated, startAtActivation }: Onboar
   const reduceMotion = useReducedMotion();
 
   const currentStep = STEPS[stepIndex]!;
+  const queryClient = useQueryClient();
+  const updateConfig = useMutation(configMutations.update(queryClient));
+  const [connectAgents, setConnectAgents] = useState(bootstrap.config.agent.connectAgents);
+
+  // Activation reads this setting from the config, so it is saved as soon as it changes.
+  const changeConnectAgents = (next: boolean) => {
+    setConnectAgents(next);
+    updateConfig.mutate(
+      { agent: { ...bootstrap.config.agent, connectAgents: next } },
+      {
+        onError: (error) => {
+          setConnectAgents(!next);
+          toast.error("Could not change the agent setting", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        },
+      },
+    );
+  };
 
   useEffect(() => {
     captureDesktopEvent("desktop_onboarding_step_viewed", { step: currentStep });
@@ -104,6 +125,8 @@ export function Onboarding({ bootstrap, onActivated, startAtActivation }: Onboar
               {currentStep === "how" && (
                 <HowItWorksStep
                   bootstrap={bootstrap}
+                  connectAgents={connectAgents}
+                  onConnectAgentsChange={changeConnectAgents}
                   onBack={() => go(1)}
                   onContinue={() => go(3)}
                 />
@@ -111,6 +134,7 @@ export function Onboarding({ bootstrap, onActivated, startAtActivation }: Onboar
               {currentStep === "activate" && (
                 <ActivateStep
                   bootstrap={bootstrap}
+                  connectAgents={connectAgents}
                   onActivated={onActivated}
                   onBack={() => go(2)}
                 />
@@ -222,7 +246,7 @@ function WelcomeStep({
   const reduceMotion = useReducedMotion();
   const item = reduceMotion ? welcomeItemReduced : welcomeItem;
 
-  const subtitle = `Clean ${bootstrap.environment.fixedDomainSuffix} URLs with trusted HTTPS, for every project, worktree, and coding agent.`;
+  const subtitle = `Clean ${bootstrap.environment.fixedDomainSuffix} URLs for your agents, worktrees, and machines. Your agents run the dev servers; you open the URLs.`;
 
   return (
     <motion.div
@@ -277,9 +301,7 @@ function WhyStep({
   const httpsPort = bootstrap.config.daemon.httpsPort;
 
   const paragraphs = [
-    "AI makes it easy to juggle many projects at once. The problem: they all default to localhost:3000.",
-    "Open a second one and it bumps to :3001, then :3002. The moment an env var hardcodes a base URL, things quietly break.",
-    `Localify gives every project and every Git worktree a fixed, memorable ${suffix} domain. No port drift, no collisions, even with several agents at work.`,
+    `Several agents, several dev servers, all fighting over localhost:3000. Localify gives each project and worktree a fixed ${suffix} URL instead, with trusted HTTPS.`,
   ];
 
   return (
@@ -516,46 +538,85 @@ function MorphText({
 
 // ---------- Step 3: How it works ----------
 
+const DOCS_URL = "https://github.com/Synapsr/Localify/blob/main/docs/README.md";
+
+/* The prompt that sets Localify up the way a person works, pasted into their agent. */
+const SETUP_PROMPT = `Set up Localify for this project, using its MCP tools. First ask me how I work: which apps you should run, whether you work in Git worktrees, and whether I need to open them from another device. Then set the project up, start its services, and give me their URLs.`;
+
+const openDocs = (anchor: string) => {
+  const url = `${DOCS_URL}#${anchor}`;
+  tauriClient.openExternalUrl(url).catch(() => window.open(url, "_blank", "noopener"));
+};
+
+function LearnMore({ anchor }: { anchor: string }) {
+  return (
+    <button
+      type="button"
+      onClick={() => openDocs(anchor)}
+      className="shrink-0 text-xs font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+    >
+      Learn more
+    </button>
+  );
+}
+
 function HowItWorksStep({
   bootstrap,
+  connectAgents,
+  onConnectAgentsChange,
   onBack,
   onContinue,
 }: {
   bootstrap: BootstrapDto;
+  connectAgents: boolean;
+  onConnectAgentsChange: (next: boolean) => void;
   onBack: () => void;
   onContinue: () => void;
 }) {
   const suffix = bootstrap.environment.fixedDomainSuffix;
+  const [copied, setCopied] = useState(false);
 
-  const items: Array<{ icon: ReactNode; title: string; description: string }> = [
-    {
-      icon: <SparklesIcon className="size-4" />,
-      title: "Your agent sets it up",
-      description: `Claude Code, Codex, and Cursor get every Localify action over MCP. Ask your agent to run a project: it picks free ports, sets its ${suffix} domains, and starts it here.`,
-    },
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_PROMPT);
+      setCopied(true);
+    } catch {
+      toast.error("Could not copy the prompt");
+    }
+  };
+
+  const items: Array<{ icon: ReactNode; title: string; description: string; anchor: string }> = [
     {
       icon: <ZapIcon className="size-4" />,
       title: "One worktree, one URL",
-      description: `Each Git worktree an agent works in gets its own ${suffix} URLs, next to your main checkout. When the agent is done, it removes the worktree and its domains.`,
+      description: `Each Git worktree gets its own ${suffix} URL, removed when the agent is done.`,
+      anchor: "cleaning-up-worktrees",
     },
     {
       icon: <TerminalIcon className="size-4" />,
       title: "You watch from here",
-      description:
-        "What an agent starts runs in this app's terminal. Open a URL, read the output, restart or stop a service.",
+      description: "What your agents start runs in this app's terminal.",
+      anchor: "services-in-the-app-from-the-command-line",
     },
     {
       icon: <CloudIcon className="size-4" />,
-      title: "Reach it from your other devices",
-      description:
-        "With Localify Cloud, one public URL per project opens every service and worktree from your laptop or phone, behind a password.",
-    },
-    {
-      icon: <FolderIcon className="size-4" />,
-      title: "Or add a project yourself",
-      description: "Pick a folder in the app, or run localify init-project from its terminal.",
+      title: "Reach it from anywhere",
+      description: "With Localify Cloud, one password-protected URL per project.",
+      anchor: "public-urls",
     },
   ];
+
+  const enter = (i: number) => ({
+    initial: { opacity: 0, y: 12, filter: "blur(8px)" },
+    animate: { opacity: 1, y: 0, filter: "blur(0px)" },
+    transition: { duration: 0.5, delay: 0.1 + i * 0.08, ease: [0.22, 1, 0.36, 1] as const },
+  });
 
   return (
     <div>
@@ -571,29 +632,58 @@ function HowItWorksStep({
         </p>
       </motion.div>
 
-      <ul className="space-y-3">
+      <motion.div {...enter(0)} className="rounded-2xl border border-border bg-card p-4">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <SparklesIcon className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="text-sm font-medium text-foreground">Your agent sets it up</h3>
+              <LearnMore anchor="coding-agents" />
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Claude Code, Codex, and Cursor run your projects through Localify, over MCP.
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3 pl-10">
+          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-foreground">
+            <Switch checked={connectAgents} onCheckedChange={onConnectAgentsChange} />
+            Connect my agents automatically
+          </label>
+          <Button variant="outline" size="sm" onClick={() => void copyPrompt()}>
+            {copied ? (
+              <CheckIcon data-icon="inline-start" />
+            ) : (
+              <CopyIcon data-icon="inline-start" />
+            )}
+            {copied ? "Copied" : "Copy a setup prompt"}
+          </Button>
+        </div>
+      </motion.div>
+
+      <ul className="mt-3 divide-y divide-border/60 rounded-2xl border border-border bg-card">
         {items.map((item, i) => (
-          <motion.li
-            key={item.title}
-            initial={{ opacity: 0, y: 12, filter: "blur(8px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{
-              duration: 0.55,
-              delay: 0.1 + i * 0.1,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-            className="flex items-start gap-3 rounded-xl border border-border bg-card p-4"
-          >
+          <motion.li key={item.title} {...enter(i + 1)} className="flex items-start gap-3 p-4">
             <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
               {item.icon}
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium text-foreground">{item.title}</h3>
+              <div className="flex items-baseline justify-between gap-3">
+                <h3 className="text-sm font-medium text-foreground">{item.title}</h3>
+                <LearnMore anchor={item.anchor} />
+              </div>
               <p className="mt-1 text-sm text-muted-foreground">{item.description}</p>
             </div>
           </motion.li>
         ))}
       </ul>
+
+      <motion.p {...enter(4)} className="mt-4 text-center text-xs text-muted-foreground">
+        Working without an agent? Pick a folder in the app, or run localify init-project.{" "}
+        <LearnMore anchor="quick-start" />
+      </motion.p>
 
       <motion.div
         initial={{ opacity: 0, y: 8 }}
@@ -624,10 +714,12 @@ const waitForNextPaint = () =>
 
 function ActivateStep({
   bootstrap,
+  connectAgents,
   onActivated,
   onBack,
 }: {
   bootstrap: BootstrapDto;
+  connectAgents: boolean;
   onActivated: () => void;
   onBack: () => void;
 }) {
@@ -683,70 +775,65 @@ function ActivateStep({
     }
   }
 
-  const bullets = [
+  const suffix = bootstrap.environment.fixedDomainSuffix;
+  const checks = [
     {
-      icon: <CheckIcon className="size-4" />,
-      title: "Create a local certificate authority",
-      description:
-        "A private CA is generated on your machine. Node.js trusts it right away, and browsers trust it once you confirm in macOS.",
+      icon: <CheckIcon className="size-3.5" />,
+      label: "A local certificate authority, for trusted HTTPS",
     },
     {
-      icon: <ZapIcon className="size-4" />,
-      title: "Configure DNS for .localify domains",
-      description: `A resolver is added so your system sends ${bootstrap.environment.fixedDomainSuffix} lookups to Localify — without touching /etc/hosts.`,
+      icon: <ZapIcon className="size-3.5" />,
+      label: `DNS for ${suffix} domains, without /etc/hosts`,
     },
-    {
-      icon: <PowerIcon className="size-4" />,
-      title: `Run ${appName} as you, not as root`,
-      description:
-        "macOS opens ports 80 and 443 and hands them to Localify, which runs under your account from then on. Updates need no password.",
-    },
-    {
-      icon: <SparklesIcon className="size-4" />,
-      title: "Connect your coding agents",
-      description:
-        "Claude Code, Codex, and Cursor, when installed, get Localify's MCP server. Turn this off in Settings → AI agents.",
-    },
+    { icon: <PowerIcon className="size-3.5" />, label: `${appName} runs as you, not as root` },
+    ...(connectAgents
+      ? [
+          {
+            icon: <SparklesIcon className="size-3.5" />,
+            label: "Your coding agents, connected over MCP",
+          },
+        ]
+      : []),
   ];
 
   return (
-    <div>
+    <div className="mx-auto max-w-md text-center">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.9, filter: "blur(6px)" }}
+        animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+        transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        className="mx-auto mb-6 flex size-14 items-center justify-center rounded-2xl bg-foreground text-background"
+      >
+        <LockIcon className="size-6" />
+      </motion.div>
+
       <motion.div
         initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
         animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-        transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        className="mb-8 text-center"
+        transition={{ duration: 0.5, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+        className="mb-7"
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Activate {appName}</h2>
-        <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Localify needs an administrator's password once to set up its domains and background
-          service. After that, nothing of Localify's runs as root.
+        <p className="text-sm text-muted-foreground">
+          One administrator password, once. After that, nothing of {appName}'s runs as root.
         </p>
       </motion.div>
 
-      <ul className="mb-6 space-y-3">
-        {bullets.map((b, i) => (
-          <motion.li
-            key={b.title}
-            initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{
-              duration: 0.5,
-              delay: 0.1 + i * 0.08,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-            className="flex items-start gap-3 rounded-xl border border-border bg-card p-4"
-          >
-            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-              {b.icon}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-foreground">{b.title}</div>
-              <p className="mt-1 text-sm text-muted-foreground">{b.description}</p>
-            </div>
-          </motion.li>
+      <motion.ul
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
+        className="space-y-2.5 text-left"
+      >
+        {checks.map((check) => (
+          <li key={check.label} className="flex items-center gap-3 text-sm text-foreground/90">
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              {check.icon}
+            </span>
+            {check.label}
+          </li>
         ))}
-      </ul>
+      </motion.ul>
 
       {showPortConflicts && (
         <div className="mt-4">
