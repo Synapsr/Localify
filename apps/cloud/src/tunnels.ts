@@ -20,7 +20,18 @@ import {
 } from "./cloudflare";
 import { maxTunnels, setting } from "./config";
 import { urlsOfMachine, type PublicUrl } from "./db";
-import { entitlementOf, isEntitled, servingUrlLimit, type Entitlement } from "./entitlement";
+import {
+  accountOf,
+  ACCOUNTS_SQL,
+  entitlementOf,
+  isEntitled,
+  OWNED_URLS_SQL,
+  reconcileStatements,
+  servingUrlLimit,
+  type AccountRow,
+  type Entitlement,
+  type OwnedUrl,
+} from "./entitlement";
 import {
   cleanUpRevokedMachines,
   ingressSecret,
@@ -468,6 +479,42 @@ export async function releaseIfUnwanted(env: Env, machineId: string): Promise<vo
   }
 }
 
+/**
+ * Brings the serving state of the owners' URLs in line with their
+ * entitlements, in one batch: a URL that stopped serving since the last
+ * reconcile, through a downgrade, an expiry, a ban or a takedown, gets
+ * `suspended_at` and its machine a rotation, so its open streams close at
+ * the next release (ADR 0027). `userIds` null means every owner with a URL.
+ */
+export async function reconcileServing(
+  env: Env,
+  userIds: string[] | null,
+  now = Date.now(),
+): Promise<void> {
+  const owners =
+    userIds ??
+    (
+      await env.DB.prepare(
+        `SELECT DISTINCT user_id FROM public_urls WHERE deleted_at IS NULL`,
+      ).all<{ user_id: string }>()
+    ).results.map((row) => row.user_id);
+  if (owners.length === 0) return;
+  const list = JSON.stringify(owners);
+  const [accounts, urls] = await Promise.all([
+    env.DB.prepare(ACCOUNTS_SQL).bind(list).all<AccountRow>(),
+    env.DB.prepare(OWNED_URLS_SQL).bind(list).all<OwnedUrl>(),
+  ]);
+  const byOwner = new Map<string, OwnedUrl[]>();
+  for (const url of urls.results) {
+    byOwner.set(url.user_id, [...(byOwner.get(url.user_id) ?? []), url]);
+  }
+  const statements = accounts.results.flatMap((row) =>
+    reconcileStatements(accountOf(row, now).entitlement, byOwner.get(row.user_id) ?? [], now),
+  );
+  if (statements.length === 0) return;
+  await env.DB.batch(statements.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)));
+}
+
 /** Runs work after the response, logging what fails. */
 export function background(ctx: ExecutionContext, work: Promise<unknown>): void {
   ctx.waitUntil(
@@ -493,7 +540,8 @@ type SlotRow = {
 };
 
 /**
- * The 5-minute sweep, within a budget of Cloudflare calls. Revocations come
+ * The 5-minute sweep, within a budget of Cloudflare calls. It first marks
+ * for a rotation the machines of URLs that stopped serving. Revocations come
  * first, with all but a reserve of the budget: rotations, and the slots of
  * owners who lost their entitlement or hold more than it allows. Then the
  * revoked machines' cleanup, the status readings and reaps, abandoned
@@ -503,6 +551,12 @@ type SlotRow = {
 export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
   await adoptUntrackedTunnels(env, now, null);
+  // Before the slots are read, so its rotations are revoked in this run.
+  try {
+    await reconcileServing(env, null, now);
+  } catch (error) {
+    console.error("Reconciling the serving URLs failed; the next sweep retries it", error);
+  }
   const { results: slots } = await env.DB.prepare(
     `SELECT id, user_id, tunnel_state, tunnel_generation, tunnel_op_at, tunnel_id,
             tunnel_ready_at, down_seen_at, rotate_requested_at, dns_record_id, cleanup_attempts,

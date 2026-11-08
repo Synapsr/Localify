@@ -1,7 +1,7 @@
 /// <reference types="node" />
 // `pnpm cloud:admin [--local] <command>`: the operator's moderation actions
-// (docs/public-urls.md, "Moderation"). Each command writes D1 only, through
-// wrangler with the deploy identity (infisical.mjs), and prints what it
+// (docs/public-urls.md, "Moderation"). Each command writes D1 only, in one
+// wrangler call with the deploy identity (infisical.mjs), and prints what it
 // changed. The public path feels it within its 10-second cache; the next
 // sweep releases or rotates the affected tunnels, which closes open streams
 // (ADR 0027). `--local` works on the database of `pnpm cloud:dev` instead.
@@ -13,15 +13,15 @@ import { pathToFileURL } from "node:url";
 
 import {
   ACCOUNT_SQL,
-  LIVE_URLS_SQL,
-  ROTATE_SQL,
+  OWNED_URLS_SQL,
   accountOf,
-  machinesThatLostUrls,
+  isRotation,
+  reconcileStatements,
   servingUrlLimit,
-  type Account,
   type AccountRow,
   type Entitlement,
-  type LiveUrl,
+  type OwnedUrl,
+  type Statement,
 } from "../src/entitlement.ts";
 import { readCloudValues, wranglerOutput } from "./infisical.mjs";
 
@@ -39,8 +39,7 @@ export const USAGE = `Usage: pnpm cloud:admin [--local] <command>
 <github-login> may also be id:<numeric GitHub id>, for a login two accounts held.
 <date> is an ISO 8601 date or time, such as 2027-01-31.`;
 
-type Param = string | number | null;
-export type Statement = { sql: string; params: Param[] };
+type Param = Statement["params"][number];
 type Row = Record<string, unknown>;
 /** Runs the statements in order and returns the rows of each one. */
 export type AdminDb = (statements: Statement[]) => Promise<Row[][]>;
@@ -152,7 +151,7 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
       user.id,
     ),
   );
-  const { account } = await snapshot(db, user.id, now);
+  const account = accountOf((await snapshot(db, user.id)).row, now);
   const lines = [describeUser(user)];
   lines.push(
     user.banned_at === null
@@ -202,16 +201,13 @@ async function ban(db: AdminDb, args: string[], now: number): Promise<string[]> 
   const reason = readReason(reasonWords, "ban <github-login> <reason>");
   const user = await findUser(db, who);
   if (user.banned_at !== null) {
-    return [
-      `${describeUser(user)} was already banned on ${date(user.banned_at)}. Nothing changed.`,
-    ];
+    return applyChange(db, user, now, {
+      lines: [`${describeUser(user)} was already banned on ${date(user.banned_at)}.`],
+    });
   }
-  return applyChange(
-    db,
-    user,
-    now,
-    [describeUser(user), `Banned: ${reason}.`],
-    [
+  return applyChange(db, user, now, {
+    lines: [describeUser(user), `Banned: ${reason}.`],
+    change: [
       statement(
         `UPDATE users SET banned_at = ?2, banned_reason = ?3 WHERE id = ?1 AND banned_at IS NULL`,
         user.id,
@@ -219,22 +215,25 @@ async function ban(db: AdminDb, args: string[], now: number): Promise<string[]> 
         reason,
       ),
     ],
-  );
+    predict: ({ row, urls }) => ({ row: { ...row, banned_at: now }, urls }),
+  });
 }
 
 async function unban(db: AdminDb, who: string, now: number): Promise<string[]> {
   const user = await findUser(db, who);
-  if (user.banned_at === null) return [`${describeUser(user)} is not banned. Nothing changed.`];
-  return applyChange(
-    db,
-    user,
-    now,
-    [
+  if (user.banned_at === null) {
+    return applyChange(db, user, now, { lines: [`${describeUser(user)} is not banned.`] });
+  }
+  return applyChange(db, user, now, {
+    lines: [
       describeUser(user),
       `Unbanned; the ban of ${date(user.banned_at)} was: ${user.banned_reason ?? "(no reason)"}.`,
     ],
-    [statement(`UPDATE users SET banned_at = NULL, banned_reason = NULL WHERE id = ?1`, user.id)],
-  );
+    change: [
+      statement(`UPDATE users SET banned_at = NULL, banned_reason = NULL WHERE id = ?1`, user.id),
+    ],
+    predict: ({ row, urls }) => ({ row: { ...row, banned_at: null }, urls }),
+  });
 }
 
 async function takedown(db: AdminDb, args: string[], now: number): Promise<string[]> {
@@ -242,16 +241,17 @@ async function takedown(db: AdminDb, args: string[], now: number): Promise<strin
   if (!slug) throw new UsageError("takedown <slug> <reason>");
   const reason = readReason(reasonWords, "takedown <slug> <reason>");
   const url = await findUrl(db, slug);
-  if (url.taken_down_at !== null) {
-    return [`${url.slug} was already taken down on ${date(url.taken_down_at)}. Nothing changed.`];
-  }
   const user = await userById(db, url.user_id);
-  return applyChange(
-    db,
-    user,
-    now,
-    [`${url.slug}, owned by ${describeUser(user)}: taken down: ${reason}.`],
-    [
+  // A retry repairs what an earlier attempt may have missed: the rotation
+  // of the machine of a URL that served at the last reconcile.
+  if (url.taken_down_at !== null) {
+    return applyChange(db, user, now, {
+      lines: [`${url.slug} was already taken down on ${date(url.taken_down_at)}.`],
+    });
+  }
+  return applyChange(db, user, now, {
+    lines: [`${url.slug}, owned by ${describeUser(user)}: taken down: ${reason}.`],
+    change: [
       statement(
         `UPDATE public_urls SET taken_down_at = ?2, taken_down_reason = ?3
          WHERE id = ?1 AND taken_down_at IS NULL`,
@@ -260,30 +260,35 @@ async function takedown(db: AdminDb, args: string[], now: number): Promise<strin
         reason,
       ),
     ],
-    // Its machine rotates even when the URL did not serve: no stream of it may stay open.
-    url.machine_id === null ? [] : [url.machine_id],
-  );
+    predict: ({ row, urls }) => ({
+      row,
+      urls: urls.map((owned) => (owned.id === url.id ? { ...owned, taken_down_at: now } : owned)),
+    }),
+  });
 }
 
 async function restore(db: AdminDb, slug: string, now: number): Promise<string[]> {
   const url = await findUrl(db, slug);
-  if (url.taken_down_at === null) return [`${url.slug} is not taken down. Nothing changed.`];
   const user = await userById(db, url.user_id);
-  return applyChange(
-    db,
-    user,
-    now,
-    [
+  if (url.taken_down_at === null) {
+    return applyChange(db, user, now, { lines: [`${url.slug} is not taken down.`] });
+  }
+  return applyChange(db, user, now, {
+    lines: [
       `${url.slug}, owned by ${describeUser(user)}: restored; the takedown of ${date(url.taken_down_at)} was: ${url.taken_down_reason ?? "(no reason)"}.`,
       ...(url.deleted_at !== null ? ["Its owner had deleted it, so it stays deleted."] : []),
     ],
-    [
+    change: [
       statement(
         `UPDATE public_urls SET taken_down_at = NULL, taken_down_reason = NULL WHERE id = ?1`,
         url.id,
       ),
     ],
-  );
+    predict: ({ row, urls }) => ({
+      row,
+      urls: urls.map((owned) => (owned.id === url.id ? { ...owned, taken_down_at: null } : owned)),
+    }),
+  });
 }
 
 async function setOverride(db: AdminDb, args: string[], now: number): Promise<string[]> {
@@ -312,17 +317,14 @@ async function setOverride(db: AdminDb, args: string[], now: number): Promise<st
       user.id,
     ),
   );
-  return applyChange(
-    db,
-    user,
-    now,
-    [
+  return applyChange(db, user, now, {
+    lines: [
       describeUser(user),
       `Override: ${previous ? `${limits(previous.serving_machines, previous.public_urls)} ("${previous.reason}")` : "none"} -> ${limits(servingMachines, publicUrls)} ("${reason}"), ${
         expiresAt === null ? "no expiry" : `expires ${date(expiresAt)}`
       }.`,
     ],
-    [
+    change: [
       statement(
         `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, expires_at, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -337,7 +339,16 @@ async function setOverride(db: AdminDb, args: string[], now: number): Promise<st
         now,
       ),
     ],
-  );
+    predict: ({ row, urls }) => ({
+      row: {
+        ...row,
+        override_machines: servingMachines,
+        override_urls: publicUrls,
+        override_expires_at: expiresAt,
+      },
+      urls,
+    }),
+  });
 }
 
 async function removeOverride(db: AdminDb, who: string, now: number): Promise<string[]> {
@@ -349,17 +360,20 @@ async function removeOverride(db: AdminDb, who: string, now: number): Promise<st
       user.id,
     ),
   );
-  if (!previous) return [`${describeUser(user)} has no override. Nothing changed.`];
-  return applyChange(
-    db,
-    user,
-    now,
-    [
+  if (!previous) {
+    return applyChange(db, user, now, { lines: [`${describeUser(user)} has no override.`] });
+  }
+  return applyChange(db, user, now, {
+    lines: [
       describeUser(user),
       `Override removed: ${limits(previous.serving_machines, previous.public_urls)} ("${previous.reason}"). The plan applies again.`,
     ],
-    [statement(`DELETE FROM plan_overrides WHERE user_id = ?1`, user.id)],
-  );
+    change: [statement(`DELETE FROM plan_overrides WHERE user_id = ?1`, user.id)],
+    predict: ({ row, urls }) => ({
+      row: { ...row, override_machines: null, override_urls: null, override_expires_at: null },
+      urls,
+    }),
+  });
 }
 
 /**
@@ -382,52 +396,65 @@ async function refresh(db: AdminDb, who: string, now: number): Promise<string[]>
 
 // --- Applying a change ---
 
-type Snapshot = { account: Account; liveUrls: LiveUrl[] };
+/** What decides which of an owner's URLs serve. */
+type Snapshot = { row: AccountRow; urls: OwnedUrl[] };
 
-async function snapshot(db: AdminDb, userId: string, now: number): Promise<Snapshot> {
-  const [[row], liveUrls] = await query(
+async function snapshot(db: AdminDb, userId: string): Promise<Snapshot> {
+  const [[row], urls] = await query(
     db,
     statement(ACCOUNT_SQL, userId),
-    statement(LIVE_URLS_SQL, userId),
+    statement(OWNED_URLS_SQL, JSON.stringify([userId])),
   );
   if (!row) throw new Error(`User ${userId} has no row`);
-  return { account: accountOf(row as AccountRow, now), liveUrls: liveUrls as LiveUrl[] };
+  return { row: row as AccountRow, urls: urls as OwnedUrl[] };
 }
 
+type Change = {
+  lines: string[];
+  /** The moderation statements; none when the command finds nothing to change. */
+  change?: Statement[];
+  /** The owner's state once `change` applied. */
+  predict?: (before: Snapshot) => Snapshot;
+};
+
 /**
- * Writes the change, then marks for a rotation every machine that served a
- * URL which no longer serves (ADR 0027), plus `alsoRotate`. Prints the
- * entitlement before and after, and the machines marked.
+ * Writes the change together with the reconcile it causes, in one call
+ * that applies all or nothing: each URL that served at the last reconcile
+ * and no longer does gets `suspended_at`, and its machine a rotation (ADR
+ * 0027). The reconcile runs without a change too, so a retry repairs what
+ * an earlier attempt missed. Prints the entitlement before and after, and
+ * the machines marked.
  */
 async function applyChange(
   db: AdminDb,
   user: User,
   now: number,
-  lines: string[],
-  change: Statement[],
-  alsoRotate: string[] = [],
+  { lines, change = [], predict = (before) => before }: Change,
 ): Promise<string[]> {
-  const before = await snapshot(db, user.id, now);
-  await db(change);
-  const after = await snapshot(db, user.id, now);
-  const lost = new Set([
-    ...machinesThatLostUrls(
-      { entitlement: before.account.entitlement, liveUrls: before.liveUrls },
-      { entitlement: after.account.entitlement, liveUrls: after.liveUrls },
-    ),
-    ...alsoRotate,
-  ]);
+  const before = await snapshot(db, user.id);
+  const after = predict(before);
+  const was = accountOf(before.row, now).entitlement;
+  const is = accountOf(after.row, now).entitlement;
+  const reconcile = reconcileStatements(is, after.urls, now);
   const out = [...lines];
-  const was = describeEntitlement(before.account.entitlement);
-  const is = describeEntitlement(after.account.entitlement);
-  out.push(was === is ? `Entitlement unchanged: ${is}.` : `Entitlement: ${was} -> ${is}.`);
-  if (lost.size > 0) {
-    const [rotated] = await query(db, statement(ROTATE_SQL, JSON.stringify([...lost].sort()), now));
-    if (rotated && rotated.length > 0) {
-      out.push(
-        `Rotating ${rotated.map((machine) => `${machine.name} (${machine.id})`).join(", ")}: the next sweep closes their open streams.`,
-      );
-    }
+  if (change.length === 0 && reconcile.length === 0) {
+    out.push("Nothing changed.");
+    return out;
+  }
+  const results = await db([...change, ...reconcile]);
+  const rotation = reconcile.findIndex(isRotation);
+  const rotated = rotation === -1 ? [] : (results[change.length + rotation] ?? []);
+  const wasText = describeEntitlement(was);
+  const isText = describeEntitlement(is);
+  out.push(
+    wasText === isText
+      ? `Entitlement unchanged: ${isText}.`
+      : `Entitlement: ${wasText} -> ${isText}.`,
+  );
+  if (rotated.length > 0) {
+    out.push(
+      `Rotating ${rotated.map((machine) => `${machine.name} (${machine.id})`).join(", ")}: the next sweep closes their open streams.`,
+    );
   }
   out.push("The public path applies this within 10 seconds.");
   return out;

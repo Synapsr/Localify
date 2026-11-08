@@ -25,6 +25,7 @@ export type Account = { banned: boolean; entitlement: Entitlement; plan: PlanSta
 
 /** The row `ACCOUNT_SQL` returns. Times are Unix milliseconds. */
 export type AccountRow = {
+  user_id: string;
   banned_at: number | null;
   trial_used_at: number | null;
   override_machines: number | null;
@@ -42,17 +43,18 @@ export type AccountRow = {
   addon_url_packs: number | null;
 };
 
-/** `?1` is the user id. No row for an unknown user. */
-export const ACCOUNT_SQL = `
-  SELECT u.banned_at, u.trial_used_at,
+const SELECT_ACCOUNTS = `
+  SELECT u.id AS user_id, u.banned_at, u.trial_used_at,
          o.serving_machines AS override_machines, o.public_urls AS override_urls,
          o.expires_at AS override_expires_at,
          b.pro_status, b.pro_interval, b.cancel_at_period_end, b.current_period_end, b.trial_end,
          b.ends_at, b.ended_at, b.past_due_at, b.addon_machines, b.addon_url_packs
   FROM users u
     LEFT JOIN plan_overrides o ON o.user_id = u.id
-    LEFT JOIN billing b ON b.user_id = u.id
-  WHERE u.id = ?1`;
+    LEFT JOIN billing b ON b.user_id = u.id`;
+
+/** `?1` is the user id. No row for an unknown user. */
+export const ACCOUNT_SQL = `${SELECT_ACCOUNTS} WHERE u.id = ?1`;
 
 export const NO_ENTITLEMENT: Entitlement = { servingMachines: 0, publicUrls: 0 };
 /** What Pro includes before add-ons. */
@@ -203,43 +205,90 @@ export async function entitlementOf(
 
 // --- Downgrades ---
 
-/** A live URL of one owner, oldest first: neither deleted nor taken down. */
-export type LiveUrl = { id: string; machine_id: string | null };
-
-/** `?1` is the owner: their live URLs in the order that decides which serve. */
-export const LIVE_URLS_SQL = `
-  SELECT id, machine_id FROM public_urls
-  WHERE user_id = ?1 AND deleted_at IS NULL AND taken_down_at IS NULL
-  ORDER BY created_at, id`;
-
-/** The URLs that serve: the oldest live ones, up to the limit (docs/public-urls.md, "Downgrades"). */
-export function servingUrls(entitlement: Entitlement, liveUrls: LiveUrl[]): LiveUrl[] {
-  return liveUrls.slice(0, servingUrlLimit(entitlement));
-}
-
 /**
- * The machines to rotate after a change of one owner's entitlement or URLs:
- * those that served a URL which no longer serves. Their open streams ride
- * the tunnel, so only a new generation closes them (ADR 0027).
+ * A public URL of one owner that is not deleted, oldest first. `suspended_at`
+ * is null while it served at the last reconcile.
  */
-export function machinesThatLostUrls(
-  before: { entitlement: Entitlement; liveUrls: LiveUrl[] },
-  after: { entitlement: Entitlement; liveUrls: LiveUrl[] },
-): string[] {
-  const still = new Set(servingUrls(after.entitlement, after.liveUrls).map((url) => url.id));
-  const machines = new Set<string>();
-  for (const url of servingUrls(before.entitlement, before.liveUrls)) {
-    if (!still.has(url.id) && url.machine_id !== null) machines.add(url.machine_id);
-  }
-  return [...machines].sort();
-}
+export type OwnedUrl = {
+  id: string;
+  user_id: string;
+  machine_id: string | null;
+  taken_down_at: number | null;
+  suspended_at: number | null;
+};
 
+/** `?1` is a JSON array of user ids: their URLs that are not deleted, in serving order. */
+export const OWNED_URLS_SQL = `
+  SELECT id, user_id, machine_id, taken_down_at, suspended_at FROM public_urls
+  WHERE user_id IN (SELECT value FROM json_each(?1)) AND deleted_at IS NULL
+  ORDER BY user_id, created_at, id`;
+
+/** `?1` is a JSON array of user ids: their accounts. */
+export const ACCOUNTS_SQL = `${SELECT_ACCOUNTS} WHERE u.id IN (SELECT value FROM json_each(?1))`;
+
+/** A statement with its values, for D1 or for `wrangler d1 execute`. */
+export type Statement = { sql: string; params: (string | number | null)[] };
+
+/** What a reconcile writes: `?1` a JSON array of ids, `?2` now where it is used. */
+const SUSPEND_SQL = `
+  UPDATE public_urls SET suspended_at = ?2
+  WHERE id IN (SELECT value FROM json_each(?1)) AND suspended_at IS NULL`;
 /**
- * `?1` is a JSON array of machine ids, `?2` now. Marks the ones that hold a
- * serving slot for a rotation; the next sweep, or their next runtime fetch,
- * releases their current generation.
+ * Marks for a rotation the machines that hold a serving slot and have none
+ * pending, so the next release closes the streams of the URLs that stopped
+ * serving (ADR 0027). A release clears the mark with the generation it ends.
  */
-export const ROTATE_SQL = `
-  UPDATE machines SET rotate_requested_at = COALESCE(rotate_requested_at, ?2)
+const ROTATE_SQL = `
+  UPDATE machines SET rotate_requested_at = ?2
   WHERE id IN (SELECT value FROM json_each(?1)) AND status = 'active' AND tunnel_state != 'none'
+    AND rotate_requested_at IS NULL
   RETURNING id, name`;
+const RESUME_SQL = `
+  UPDATE public_urls SET suspended_at = NULL
+  WHERE id IN (SELECT value FROM json_each(?1)) AND suspended_at IS NOT NULL`;
+
+/**
+ * The writes that bring one owner's URLs in line with an entitlement: the
+ * oldest live URLs within the limit serve. One that served at the last
+ * reconcile and no longer does, taken down or suspended, gets `suspended_at`
+ * and its machine a rotation; one that serves again gets `suspended_at`
+ * cleared. Empty when nothing changed. `urls` are the owner's, in serving
+ * order. The rotation statement is the one that returns the machines marked.
+ */
+export function reconcileStatements(
+  entitlement: Entitlement,
+  urls: OwnedUrl[],
+  now: number,
+): Statement[] {
+  const serving = new Set(
+    urls
+      .filter((url) => url.taken_down_at === null)
+      .slice(0, servingUrlLimit(entitlement))
+      .map((url) => url.id),
+  );
+  const stopped = urls.filter((url) => !serving.has(url.id) && url.suspended_at === null);
+  const resumed = urls.filter((url) => serving.has(url.id) && url.suspended_at !== null);
+  const machines = [
+    ...new Set(stopped.flatMap((url) => (url.machine_id === null ? [] : [url.machine_id]))),
+  ].sort();
+  const statements: Statement[] = [];
+  if (stopped.length > 0) {
+    statements.push({ sql: SUSPEND_SQL, params: [ids(stopped), now] });
+  }
+  if (machines.length > 0) {
+    statements.push({ sql: ROTATE_SQL, params: [JSON.stringify(machines), now] });
+  }
+  if (resumed.length > 0) {
+    statements.push({ sql: RESUME_SQL, params: [ids(resumed)] });
+  }
+  return statements;
+}
+
+/** Whether a statement is the rotation, whose rows are the machines it marked. */
+export function isRotation(statement: Statement): boolean {
+  return statement.sql === ROTATE_SQL;
+}
+
+function ids(urls: OwnedUrl[]): string {
+  return JSON.stringify(urls.map((url) => url.id));
+}

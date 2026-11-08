@@ -18,15 +18,30 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** Each statement bound into SQL text, as `wrangler d1 execute --command` receives it. */
-function adminDb(): AdminDb {
-  return async (statements) =>
-    statements.map((statement) =>
-      context.sqlite
-        .prepare(bindParams(statement.sql, statement.params))
-        .all()
-        .map((row) => ({ ...row })),
-    );
+/**
+ * Each statement bound into SQL text, as `wrangler d1 execute --command`
+ * receives it, and the call applied all or nothing, as D1 runs it. `fail`
+ * makes the statements it matches throw.
+ */
+function adminDb(fail?: RegExp): AdminDb {
+  return async (statements) => {
+    context.sqlite.exec("BEGIN");
+    try {
+      const results = statements.map((statement) => {
+        const sql = bindParams(statement.sql, statement.params);
+        if (fail?.test(sql)) throw new Error("D1 failed");
+        return context.sqlite
+          .prepare(sql)
+          .all()
+          .map((row) => ({ ...row }));
+      });
+      context.sqlite.exec("COMMIT");
+      return results;
+    } catch (error) {
+      context.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  };
 }
 
 function admin(...args: string[]): Promise<string[]> {
@@ -104,6 +119,7 @@ describe("ban and unban", () => {
 
     expect(await admin("ban", "teo-goulois", "again")).toEqual([
       expect.stringContaining("was already banned"),
+      "Nothing changed.",
     ]);
     const unbanned = await admin("unban", "teo-goulois");
     expect(unbanned).toContain("Entitlement: none -> 5 serving machines, 10 URLs.");
@@ -158,6 +174,7 @@ describe("takedown and restore", () => {
 
     expect(await admin("takedown", bad.slug, "again")).toEqual([
       expect.stringContaining("was already taken down"),
+      "Nothing changed.",
     ]);
     const restored = await admin("restore", bad.slug.toUpperCase());
     expect(restored[0]).toContain("restored; the takedown of");
@@ -166,6 +183,7 @@ describe("takedown and restore", () => {
     });
     expect(await admin("restore", bad.slug)).toEqual([
       expect.stringContaining("is not taken down"),
+      "Nothing changed.",
     ]);
   });
 
@@ -224,6 +242,7 @@ describe("overrides", () => {
     expect(get("SELECT COUNT(*) AS n FROM plan_overrides")).toEqual({ n: 0 });
     expect(await admin("override", "--remove", "teo-goulois")).toEqual([
       expect.stringContaining("has no override"),
+      "Nothing changed.",
     ]);
   });
 
@@ -273,5 +292,52 @@ describe("the other commands", () => {
     await expect(admin("ban", "nobody")).rejects.toThrow(UsageError);
     await expect(admin("launch")).rejects.toThrow(/Unknown command/);
     await expect(admin()).rejects.toThrow(/No command/);
+  });
+});
+
+describe("an admin change that fails", () => {
+  const ROTATION = /UPDATE machines SET rotate_requested_at/;
+
+  it("applies nothing, and its retry writes the change with its rotation", async () => {
+    const { token, machineId } = await signIn(context);
+    await createUrl(token, "journal.localify");
+    await serve(context, token);
+
+    await expect(runCommand(adminDb(ROTATION), ["ban", "teo-goulois", "spam"])).rejects.toThrow(
+      "D1 failed",
+    );
+    expect(get("SELECT banned_at FROM users")).toEqual({ banned_at: null });
+    expect(machine(machineId).rotate_requested_at).toBeNull();
+
+    const retry = await admin("ban", "teo-goulois", "spam");
+    expect(retry.some((line) => line.startsWith("Rotating laptop"))).toBe(true);
+    expect(
+      get<{ banned_at: number | null }>("SELECT banned_at FROM users").banned_at,
+    ).not.toBeNull();
+    expect(machine(machineId).rotate_requested_at).not.toBeNull();
+  });
+
+  it("is repaired by a retry that finds the change already made", async () => {
+    const { token, machineId } = await signIn(context);
+    const bad = await createUrl(token, "bad.localify");
+    await createUrl(token, "good.localify");
+    await serve(context, token);
+    // A takedown written without its rotation.
+    context.sqlite.prepare("UPDATE public_urls SET taken_down_at = 1 WHERE id = ?").run(bad.id);
+
+    const retry = await admin("takedown", bad.slug, "malware");
+    expect(retry[0]).toContain("was already taken down");
+    expect(retry.some((line) => line.startsWith("Rotating laptop"))).toBe(true);
+    expect(machine(machineId).rotate_requested_at).not.toBeNull();
+    expect(
+      get<{ suspended_at: number | null }>(
+        "SELECT suspended_at FROM public_urls WHERE id = ?",
+        bad.id,
+      ).suspended_at,
+    ).not.toBeNull();
+    expect(await admin("takedown", bad.slug, "malware")).toEqual([
+      expect.stringContaining("was already taken down"),
+      "Nothing changed.",
+    ]);
   });
 });

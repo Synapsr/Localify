@@ -5,7 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { purgeDeletedUrls } from "../src/machines";
 import { runSweep } from "../src/tunnels";
-import { api, createContext, fakeSignIn, serve, signIn, visit, type TestContext } from "./support";
+import {
+  api,
+  createContext,
+  fakeSignIn,
+  serve,
+  settle,
+  signIn,
+  visit,
+  type TestContext,
+} from "./support";
 
 let context: TestContext;
 const DAY = 24 * 60 * 60 * 1000;
@@ -377,5 +386,103 @@ describe("takedowns", () => {
       expect(await check.json()).toEqual({ slug, available: false });
     }
     expect((await visit(context, `https://${slug}.localify.fyi/`)).status).toBe(410);
+  });
+});
+
+describe("claiming beyond the limit", () => {
+  it("answers 403 quota_exceeded for a suspended URL, and moves one that serves", async () => {
+    const laptop = await signIn(context, "teo-goulois", 1, "laptop");
+    const runner = await signIn(context, "teo-goulois", 1, "runner");
+    const old = await createUrl(laptop.token, "a.localify");
+    const recent = await createUrl(laptop.token, "b.localify");
+    setOverride(laptop.userId, 2, 1);
+    const machineOf = (id: string) =>
+      (
+        context.sqlite.prepare("SELECT machine_id FROM public_urls WHERE id = ?").get(id) as {
+          machine_id: string;
+        }
+      ).machine_id;
+
+    const refused = await api(
+      context,
+      "POST",
+      `/v1/public-urls/${recent.body.publicUrl.id}/claim`,
+      {
+        token: runner.token,
+      },
+    );
+    expect(refused.status).toBe(403);
+    expect(await errorOf(refused)).toBe("quota_exceeded");
+    expect(machineOf(recent.body.publicUrl.id)).toBe(laptop.machineId);
+
+    const moved = await api(context, "POST", `/v1/public-urls/${old.body.publicUrl.id}/claim`, {
+      token: runner.token,
+    });
+    expect(moved.status).toBe(200);
+    expect(machineOf(old.body.publicUrl.id)).toBe(runner.machineId);
+  });
+});
+
+describe("timed transitions", () => {
+  function suspendedAt(id: string): number | null {
+    return (
+      context.sqlite.prepare("SELECT suspended_at FROM public_urls WHERE id = ?").get(id) as {
+        suspended_at: number | null;
+      }
+    ).suspended_at;
+  }
+
+  it("rotate a machine that keeps serving once an expired override suspends one of its URLs", async () => {
+    const { token, userId, machineId } = await signIn(context);
+    const expiresAt = Date.now() + DAY;
+    sql(
+      "UPDATE plan_overrides SET public_urls = 11, expires_at = ? WHERE user_id = ?",
+      expiresAt,
+      userId,
+    );
+    setBilling(userId, { pro_status: "active", current_period_end: expiresAt + 30 * DAY });
+    const ids: string[] = [];
+    for (let i = 0; i < 11; i++) {
+      ids.push((await createUrl(token, `u${i}.localify`)).body.publicUrl.id);
+    }
+    await serve(context, token);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Before the expiry, nothing changes.
+    await runSweep(context.env, expiresAt - 1);
+    expect(tunnelState(machineId)).toBe("ready");
+    expect(suspendedAt(ids[10]!)).toBeNull();
+
+    // After it, Pro serves the 10 oldest: the 11th stops, and its streams with the tunnel.
+    await runSweep(context.env, expiresAt + 1);
+    expect(suspendedAt(ids[10]!)).toBe(expiresAt + 1);
+    expect(suspendedAt(ids[9]!)).toBeNull();
+    expect(tunnelState(machineId)).toBe("none");
+
+    // The machine still serves the others: its next fetch provisions generation 2.
+    const next = await serve(context, token, 1);
+    expect(next.body.state).toBe("provisioning");
+    expect(
+      context.sqlite
+        .prepare("SELECT tunnel_state, tunnel_generation FROM machines WHERE id = ?")
+        .get(machineId),
+    ).toEqual({ tunnel_state: "ready", tunnel_generation: 2 });
+
+    // Recorded once: the next sweep rotates nothing.
+    await runSweep(context.env, expiresAt + 2);
+    expect(tunnelState(machineId)).toBe("ready");
+  });
+
+  it("clear the suspension of a URL that serves again after a removal", async () => {
+    const { token, userId } = await signIn(context);
+    const a = await createUrl(token, "a.localify");
+    const b = await createUrl(token, "b.localify");
+    setOverride(userId, 1, 1);
+    await runSweep(context.env);
+    expect(suspendedAt(b.body.publicUrl.id)).not.toBeNull();
+
+    await api(context, "DELETE", `/v1/public-urls/${a.body.publicUrl.id}`, { token });
+    await settle(context);
+    expect(suspendedAt(b.body.publicUrl.id)).toBeNull();
   });
 });

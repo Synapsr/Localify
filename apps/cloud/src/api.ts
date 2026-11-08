@@ -26,7 +26,7 @@ import {
 } from "./names";
 import { generatePassword } from "./passwords";
 import { forgetSite } from "./sites";
-import { background, machineRuntime, releaseIfUnwanted } from "./tunnels";
+import { background, machineRuntime, reconcileServing, releaseIfUnwanted } from "./tunnels";
 
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 256;
@@ -414,7 +414,13 @@ async function listUrls(_request: Request, env: Env, caller: Caller): Promise<Re
   });
 }
 
-async function createUrl(request: Request, env: Env, caller: Caller): Promise<Response> {
+async function createUrl(
+  request: Request,
+  env: Env,
+  caller: Caller,
+  _params: string[],
+  ctx: ExecutionContext,
+): Promise<Response> {
   const body = await readJson(request);
   const localDomain = readLocalDomain(body.localDomain);
   if (body.wildcard !== undefined && typeof body.wildcard !== "boolean") {
@@ -478,6 +484,8 @@ async function createUrl(request: Request, env: Env, caller: Caller): Promise<Re
         );
       }
       forgetSite(slug);
+      // The new URL serves: it can only end a suspension recorded earlier.
+      background(ctx, reconcileServing(env, [caller.userId]));
       break;
     } catch (error) {
       if (isUniqueViolation(error, "public_urls.slug")) {
@@ -526,6 +534,8 @@ async function deleteUrl(
   if (!deleted) throw urlNotFound();
   forgetSite(deleted.slug);
   if (deleted.machine_id) background(ctx, releaseIfUnwanted(env, deleted.machine_id));
+  // The next URL in line may serve again.
+  background(ctx, reconcileServing(env, [caller.userId]));
   return noContent();
 }
 
@@ -572,16 +582,35 @@ async function claimUrl(
     .first<{ machine_id: string | null; taken_down_at: number | null }>();
   if (!before) throw urlNotFound();
   if (before.taken_down_at !== null) throw takenDown();
-  await requireEntitlement(env, caller);
-  // A takedown between the read and this update leaves the URL where it was.
+  const entitlement = await requireEntitlement(env, caller);
+  // Only a URL that serves moves: live, and among the owner's `publicUrls`
+  // oldest. A takedown or a deletion between the read and this update
+  // leaves it where it was.
   const claimed = await env.DB.prepare(
     `UPDATE public_urls SET machine_id = ?3
      WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL AND taken_down_at IS NULL
+       AND (SELECT COUNT(*) FROM public_urls q
+            WHERE q.user_id = ?2 AND q.deleted_at IS NULL AND q.taken_down_at IS NULL
+              AND (q.created_at < public_urls.created_at
+                   OR (q.created_at = public_urls.created_at AND q.id <= public_urls.id))) <= ?4
      RETURNING slug`,
   )
-    .bind(id, caller.userId, caller.machineId)
+    .bind(id, caller.userId, caller.machineId, entitlement.publicUrls)
     .first<{ slug: string }>();
-  if (!claimed) throw urlNotFound();
+  if (!claimed) {
+    const current = await env.DB.prepare(
+      `SELECT taken_down_at FROM public_urls WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL`,
+    )
+      .bind(id, caller.userId)
+      .first<{ taken_down_at: number | null }>();
+    if (!current) throw urlNotFound();
+    if (current.taken_down_at !== null) throw takenDown();
+    throw new ApiError(
+      403,
+      "quota_exceeded",
+      `Your plan serves your ${entitlement.publicUrls} oldest public URLs, and this one comes after them. Remove an older one with \`localify public-url remove\`, then try again.`,
+    );
+  }
   forgetSite(claimed.slug);
   const previous = before.machine_id;
   if (previous && previous !== caller.machineId) {

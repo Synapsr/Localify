@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { loadAccount, machinesThatLostUrls, PAST_DUE_GRACE_MS } from "../src/entitlement";
+import {
+  isRotation,
+  loadAccount,
+  PAST_DUE_GRACE_MS,
+  reconcileStatements,
+  type OwnedUrl,
+} from "../src/entitlement";
 import { createTestDb } from "./support";
 
 const NOW = Date.parse("2026-11-07T12:00:00Z");
@@ -252,56 +258,52 @@ describe("overrides and bans", () => {
   });
 });
 
-describe("downgrades", () => {
-  const urls = [
-    { id: "a", machine_id: "m1" },
-    { id: "b", machine_id: "m2" },
-    { id: "c", machine_id: "m2" },
-    { id: "d", machine_id: null },
-  ];
-  const five = { servingMachines: 2, publicUrls: 5 };
+describe("reconciling the serving URLs", () => {
+  const url = (id: string, machine: string | null, extra: Partial<OwnedUrl> = {}): OwnedUrl => ({
+    id,
+    user_id: "u",
+    machine_id: machine,
+    taken_down_at: null,
+    suspended_at: null,
+    ...extra,
+  });
+  const urls = [url("a", "m1"), url("b", "m2"), url("c", "m2"), url("d", null)];
+  const two = { servingMachines: 2, publicUrls: 2 };
+  /** What the statements write, by kind. */
+  const writes = (entitlement: typeof two, owned: OwnedUrl[]) =>
+    reconcileStatements(entitlement, owned, NOW).map((statement) => [
+      isRotation(statement) ? "rotate" : statement.sql.includes("= NULL") ? "resume" : "suspend",
+      JSON.parse(String(statement.params[0])) as string[],
+    ]);
 
-  it("rotates the machines of the URLs beyond a lower limit", () => {
-    expect(
-      machinesThatLostUrls(
-        { entitlement: five, liveUrls: urls },
-        { entitlement: { servingMachines: 2, publicUrls: 1 }, liveUrls: urls },
-      ),
-    ).toEqual(["m2"]);
+  it("suspends the URLs beyond the limit and rotates their machines", () => {
+    expect(writes(two, urls)).toEqual([
+      ["suspend", ["c", "d"]],
+      ["rotate", ["m2"]],
+    ]);
   });
 
-  it("rotates every serving machine when the entitlement goes to zero", () => {
-    expect(
-      machinesThatLostUrls(
-        { entitlement: five, liveUrls: urls },
-        { entitlement: NONE, liveUrls: urls },
-      ),
-    ).toEqual(["m1", "m2"]);
+  it("writes nothing once the state is recorded", () => {
+    const recorded = urls.map((owned) =>
+      ["c", "d"].includes(owned.id) ? { ...owned, suspended_at: 1 } : owned,
+    );
+    expect(writes(two, recorded)).toEqual([]);
   });
 
-  it("rotates the machine of a URL that left the live ones, and nothing for a gain", () => {
-    const withoutA = urls.slice(1);
-    expect(
-      machinesThatLostUrls(
-        { entitlement: five, liveUrls: urls },
-        { entitlement: five, liveUrls: withoutA },
-      ),
-    ).toEqual(["m1"]);
-    expect(
-      machinesThatLostUrls(
-        { entitlement: { servingMachines: 2, publicUrls: 1 }, liveUrls: urls },
-        { entitlement: five, liveUrls: urls },
-      ),
-    ).toEqual([]);
+  it("suspends everything without an entitlement, and a taken-down URL whatever the limit", () => {
+    expect(writes(NONE, urls)).toEqual([
+      ["suspend", ["a", "b", "c", "d"]],
+      ["rotate", ["m1", "m2"]],
+    ]);
+    const takenDown = [url("a", "m1", { taken_down_at: 1 }), url("b", "m2")];
+    expect(writes(two, takenDown)).toEqual([
+      ["suspend", ["a"]],
+      ["rotate", ["m1"]],
+    ]);
   });
 
-  it("rotates the machine of the URL a restored older one pushes beyond the limit", () => {
-    const two = { servingMachines: 2, publicUrls: 2 };
-    expect(
-      machinesThatLostUrls(
-        { entitlement: two, liveUrls: urls.slice(1) },
-        { entitlement: two, liveUrls: urls },
-      ),
-    ).toEqual(["m2"]);
+  it("resumes a suspended URL that serves again, rotating nothing", () => {
+    const suspended = [url("a", "m1"), url("b", "m2", { suspended_at: 1 })];
+    expect(writes(two, suspended)).toEqual([["resume", ["b"]]]);
   });
 });

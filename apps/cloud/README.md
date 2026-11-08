@@ -17,7 +17,7 @@ One Worker, routed by host:
   - forwards to `https://m-<machine-id>.localify.dev` with the `X-Localify-*` headers the daemon checks.
 
   It removes `Domain` from the app's `Set-Cookie` headers on the way back.
-- **Every 5 minutes**: reaps tunnels that have been down for 15 minutes, and releases machines with nothing left to serve. It corrects CNAMEs, retries failed webhook refreshes, and removes what a sign-out could not remove.
+- **Every 5 minutes**: rotates the machines of URLs that stopped serving since the last run (a plan change, an expiry, a ban or a takedown), reaps tunnels that have been down for 15 minutes, and releases machines with nothing left to serve. It corrects CNAMEs, retries failed webhook refreshes, and removes what a sign-out could not remove.
 - **Every day**: reconciles every plan with Polar, and purges URLs deleted more than 30 days ago.
 
 Data lives in D1 (`localify-cloud`, schema in [`migrations/`](migrations/)). Tokens are stored as SHA-256 hashes, passwords as PBKDF2-SHA-256 with 100,000 iterations.
