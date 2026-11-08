@@ -111,7 +111,6 @@
         "body": "Ask for the app in a worktree. It shows up in the app with its own URL."
       }
     ],
-    "dashboardLink": "Or download the app for macOS",
     "demo": {
       "ask": "Run the app in the fix-auth worktree."
     },

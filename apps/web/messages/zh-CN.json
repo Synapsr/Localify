@@ -111,7 +111,6 @@
         "body": "让智能体在某个 worktree 里运行应用。它会带着自己的 URL 出现在应用里。"
       }
     ],
-    "dashboardLink": "或者下载 macOS 版应用",
     "demo": {
       "ask": "在 fix-auth worktree 里运行应用。"
     },
