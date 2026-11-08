@@ -1,7 +1,7 @@
 Localify gives local apps stable `https://<name>.localify` URLs with trusted HTTPS, through a local DNS server and proxy. Each tool runs one `localify` CLI command and returns its output.
 
 Working on an app:
-- Start it with `service_start` (pass `cwd`, the app or repo folder). It runs in the Localify app's terminal, where the user sees it, and returns the URL once the service listens; use that URL, never `localhost:<port>`. If it already runs, it says so and starts nothing. On first use in a folder it creates the Localify project, picks free ports, registers domains and patches Next.js/Vite allowlists. Without the app, pass `background: true`.
+- Start it with `service_start` (pass `cwd`, the app or repo folder). It runs in the Localify app's terminal, where the user sees it, and returns the URL once the service listens; use that URL, never `localhost:<port>`. If it already runs, it says so and starts nothing; pass `replace: true` to stop the running instance first and start it again. On first use in a folder it creates the Localify project, picks free ports, registers domains and patches Next.js/Vite allowlists. Without the app, pass `background: true`.
 - Get a URL with `get_service_url`, and service names with `list_services`.
 - Read its output with `service_logs`: the same lines as the app's terminal. Each result ends with a cursor; pass it back to read only the new lines. `service_status` shows what runs, since when, and the exit code of what stopped. `service_restart` restarts where it ran; `service_stop` stops it. Stop what you started before you finish, unless the user wants it kept running.
 - Do not pick ports like 3000 yourself, and pass `target` only when the user asked for a fixed one.

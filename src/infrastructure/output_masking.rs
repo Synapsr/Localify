@@ -287,12 +287,20 @@ mod tests {
 
     impl Write for FullDisk {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let left = self.room.load(Ordering::SeqCst);
-            if left < bytes.len() {
-                return Err(io::Error::other("No space left on device"));
+            // One step, so two writers never both take the last room.
+            let mut left = self.room.load(Ordering::SeqCst);
+            loop {
+                let Some(rest) = left.checked_sub(bytes.len()) else {
+                    return Err(io::Error::other("No space left on device"));
+                };
+                match self
+                    .room
+                    .compare_exchange(left, rest, Ordering::SeqCst, Ordering::SeqCst)
+                {
+                    Ok(_) => return Ok(bytes.len()),
+                    Err(now) => left = now,
+                }
             }
-            self.room.fetch_sub(bytes.len(), Ordering::SeqCst);
-            Ok(bytes.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
