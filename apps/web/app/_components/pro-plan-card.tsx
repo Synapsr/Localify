@@ -23,7 +23,7 @@ type ProPlanCardProps = {
   tagline: string;
   badge: string;
   intervalLabel: string;
-  saveLabel: string;
+  saveLabel?: string;
   monthly: IntervalOption;
   yearly: IntervalOption;
   features: string[];
@@ -76,7 +76,7 @@ export const ProPlanCard = ({
                 type="button"
               >
                 {option.label}
-                {value === "yearly" ? (
+                {value === "yearly" && saveLabel ? (
                   <span className="text-[11.5px] font-normal text-muted-foreground">{saveLabel}</span>
                 ) : null}
               </button>

@@ -26,7 +26,8 @@ const PRICING_URL = "https://api.localify.dev/v1/pricing";
 const REVALIDATE_SECONDS = 60 * 60;
 // After a failure, the fallback is kept this long before the endpoint is tried again.
 const RETRY_SECONDS = 5 * 60;
-const TIMEOUT_MS = 2500;
+// A stalled endpoint costs a page at most this much render time.
+const TIMEOUT_MS = 1000;
 
 // The same numbers in both currencies.
 const fallback = (currency: Currency): Pricing => ({
@@ -52,23 +53,26 @@ const EURO_COUNTRIES = new Set([
 const currencyForCountry = (country: string | null | undefined): Currency =>
   country && EURO_COUNTRIES.has(country.toUpperCase()) ? "eur" : "usd";
 
-const isCount = (value: unknown): value is number =>
-  typeof value === "number" && Number.isInteger(value) && value > 0;
+// Sane bounds: anything outside them is a bad response, not a price to show.
+const MAX_AMOUNT = 100_000; // minor units, so 1,000.00
+const MAX_COUNT = 1_000;
+
+const isIntegerIn = (value: unknown, max: number): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
 
 const isMoney = (value: unknown, currency: Currency): value is Money => {
   const money = value as Partial<Money> | null;
   return (
     typeof money === "object" &&
     money !== null &&
-    typeof money.amount === "number" &&
-    Number.isInteger(money.amount) &&
-    money.amount >= 0 &&
+    isIntegerIn(money.amount, MAX_AMOUNT) &&
     money.currency === currency
   );
 };
 
-const isAddon = (value: unknown, currency: Currency): value is Money & { unit: number } =>
-  isMoney(value, currency) && isCount((value as { unit?: unknown }).unit);
+// The copy says "+1 serving machine" and "+10 public URLs", so the units must match it.
+const isAddon = (value: unknown, currency: Currency, unit: number): value is Money & { unit: number } =>
+  isMoney(value, currency) && (value as { unit?: unknown }).unit === unit;
 
 // Keeps only the fields the site shows, after checking each one.
 const parsePricing = (body: unknown, currency: Currency): Pricing | null => {
@@ -83,10 +87,10 @@ const parsePricing = (body: unknown, currency: Currency): Pricing | null => {
   if (
     !isMoney(pro?.monthly, currency) ||
     !isMoney(pro?.yearly, currency) ||
-    !isCount(pro?.includes?.servingMachines) ||
-    !isCount(pro?.includes?.publicUrls) ||
-    !isAddon(addons?.machine, currency) ||
-    !isAddon(addons?.urls, currency)
+    !isIntegerIn(pro?.includes?.servingMachines, MAX_COUNT) ||
+    !isIntegerIn(pro?.includes?.publicUrls, MAX_COUNT) ||
+    !isAddon(addons?.machine, currency, 1) ||
+    !isAddon(addons?.urls, currency, 10)
   ) {
     return null;
   }
@@ -106,8 +110,9 @@ const parsePricing = (body: unknown, currency: Currency): Pricing | null => {
 };
 
 // Per Worker isolate: OpenNext keeps no data cache by default, so this keeps the
-// endpoint from being asked on every page view.
-const cache = new Map<Currency, { pricing: Pricing; expiresAt: number }>();
+// endpoint from being asked on every page view. An entry holds the promise, so
+// concurrent misses share one request per currency.
+const cache = new Map<Currency, { pricing: Promise<Pricing>; expiresAt: number }>();
 
 const fetchPricing = async (currency: Currency): Promise<Pricing | null> => {
   try {
@@ -123,14 +128,18 @@ const fetchPricing = async (currency: Currency): Promise<Pricing | null> => {
   }
 };
 
-const getPricingFor = async (currency: Currency): Promise<Pricing> => {
+const getPricingFor = (currency: Currency): Promise<Pricing> => {
   const cached = cache.get(currency);
   if (cached && cached.expiresAt > Date.now()) return cached.pricing;
 
-  const live = await fetchPricing(currency);
-  const pricing = live ?? fallback(currency);
-  const ttl = live ? REVALIDATE_SECONDS : RETRY_SECONDS;
-  cache.set(currency, { pricing, expiresAt: Date.now() + ttl * 1000 });
+  // In flight, the entry never expires; once settled, it lasts by outcome.
+  // fetchPricing never rejects, so neither does this promise.
+  const pricing = fetchPricing(currency).then((live) => {
+    const ttl = live ? REVALIDATE_SECONDS : RETRY_SECONDS;
+    cache.set(currency, { pricing, expiresAt: Date.now() + ttl * 1000 });
+    return live ?? fallback(currency);
+  });
+  cache.set(currency, { pricing, expiresAt: Infinity });
   return pricing;
 };
 

@@ -20,8 +20,14 @@ export const Plans = async ({ source }: { source: "landing" | "pricing" }) => {
   const { currency, pro, addons } = await getPricing();
   const money = (amount: number) => formatMoney(amount, currency, locale);
 
-  const yearlySaving = Math.floor((1 - pro.yearly.amount / (pro.monthly.amount * 12)) * 100) / 100;
-  const percent = new Intl.NumberFormat(locale, { style: "percent" }).format(yearlySaving);
+  // Whole percent saved by paying yearly; no badge unless it's a plausible saving.
+  const savingPercent = Math.floor((1 - pro.yearly.amount / (pro.monthly.amount * 12)) * 100);
+  const saveLabel =
+    Number.isFinite(savingPercent) && savingPercent >= 1 && savingPercent <= 90
+      ? t("pro.save", {
+          percent: new Intl.NumberFormat(locale, { style: "percent" }).format(savingPercent / 100),
+        })
+      : undefined;
   const features = (t.raw("pro.features") as string[]).map((_, index) =>
     t(`pro.features.${index}`, {
       machines: pro.includes.servingMachines,
@@ -61,7 +67,7 @@ export const Plans = async ({ source }: { source: "landing" | "pricing" }) => {
           }}
           loginCommand={LOGIN_COMMAND}
           name={t("pro.name")}
-          saveLabel={t("pro.save", { percent })}
+          saveLabel={saveLabel}
           source={source}
           steps={t("pro.steps")}
           tagline={t("pro.tagline", { url: publicUrlPattern })}
