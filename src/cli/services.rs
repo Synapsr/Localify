@@ -25,6 +25,7 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
 use crate::domain::value_objects::{ProxyTarget, RouteTarget};
 use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
+use crate::infrastructure::inventory::public_origins;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::launch_plan::{
@@ -64,6 +65,10 @@ const DEFAULT_URL_ENV_KEYS: &[&str] = &[
     "VITE_PUBLIC_APP_URL",
     "VITE_SITE_URL",
 ];
+
+/// Better Auth adds it to its `trustedOrigins` option, split on commas.
+const TRUSTED_ORIGINS_ENV_KEY: &str = "BETTER_AUTH_TRUSTED_ORIGINS";
+const PUBLIC_URL_ENV_KEY: &str = "LOCALIFY_PUBLIC_URL";
 
 const DEFAULT_DOMAIN_ENV_KEYS: &[&str] = &[
     "LOCALIFY_DOMAIN",
@@ -324,8 +329,14 @@ pub fn run(
     let app_domain = service_public_domain(&service, endpoint);
     ensure_next_allowed_dev_origin(&workdir, &app_host);
     ensure_vite_allowed_host(&workdir, &app_host);
-    let url_envs =
+    let mut url_envs =
         url_environment_overrides(&workdir, &url, &app_domain, &profile_keys(profile.as_ref()))?;
+    url_envs.extend(public_url_overrides(
+        &app_host,
+        &[workdir.as_path(), project_root.as_path()],
+        profile.as_ref(),
+        ctx,
+    )?);
     eprintln!("Starting '{}' at {}", service.id, url);
     eprintln!("  route target: {proxy_target}");
     eprintln!("  injected HOST: 127.0.0.1");
@@ -340,10 +351,14 @@ pub fn run(
     let ca_cert_path = paths.data_dir.join("ca.crt");
     let environment = service_environment(port, &url_envs, &ca_cert_path, profile.as_ref());
     if profile.is_some() {
-        launch_profile::print_conflicts(
-            &environment.shadowed_by_shell,
-            &environment.replaced_by_runtime,
-        );
+        // The profile's trusted origins are merged in, not replaced.
+        let replaced: Vec<String> = environment
+            .replaced_by_runtime
+            .iter()
+            .filter(|key| *key != TRUSTED_ORIGINS_ENV_KEY)
+            .cloned()
+            .collect();
+        launch_profile::print_conflicts(&environment.shadowed_by_shell, &replaced);
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
@@ -1956,6 +1971,134 @@ fn url_environment_overrides(
         .collect())
 }
 
+/// Better Auth's trusted origins and `LOCALIFY_PUBLIC_URL` for this
+/// machine's public URLs that reach the service (docs/README.md, "Apps That
+/// Check Origin"). The daemon answers with what it last learned, so a launch
+/// never waits on the network; without a daemon or a sign-in, nothing.
+fn public_url_overrides(
+    app_host: &str,
+    env_dirs: &[&Path],
+    profile: Option<&PreparedProfile>,
+    ctx: &AppContext,
+) -> Result<Vec<(String, String)>> {
+    let origins = match ctx.mgmt_client.public_urls() {
+        Ok((urls, Some(machine_id))) => public_origins(app_host, &urls, &machine_id),
+        _ => Vec::new(),
+    };
+    if origins.is_empty() {
+        return Ok(Vec::new());
+    }
+    let trusted = match process_env_value(TRUSTED_ORIGINS_ENV_KEY, profile) {
+        Some(value) => UserValue::Process(value),
+        None => match env_file_defining(TRUSTED_ORIGINS_ENV_KEY, env_dirs)? {
+            Some(file) => UserValue::EnvFile(file),
+            None => UserValue::Unset,
+        },
+    };
+    let public_url_set = process_env_value(PUBLIC_URL_ENV_KEY, profile).is_some()
+        || env_file_defining(PUBLIC_URL_ENV_KEY, env_dirs)?.is_some();
+    let (envs, hint) = public_url_environment(&origins, &trusted, public_url_set);
+    if let Some(hint) = hint {
+        eprintln!("  {hint}");
+    }
+    Ok(envs)
+}
+
+/// Where the user set a variable, if anywhere.
+#[derive(Debug)]
+enum UserValue {
+    /// In the shell or the launch profile: the value the service gets.
+    Process(String),
+    /// Only in an env file, which a variable in the process would hide.
+    EnvFile(PathBuf),
+    Unset,
+}
+
+/// The public origins join trusted origins set in the process, which win
+/// over env files anyway. Set in an env file only, the framework decides
+/// which value applies, so Localify leaves it alone and says what to add,
+/// in the returned hint. A `LOCALIFY_PUBLIC_URL` the user set stays theirs.
+fn public_url_environment(
+    origins: &[String],
+    trusted: &UserValue,
+    public_url_set: bool,
+) -> (Vec<(String, String)>, Option<String>) {
+    let Some(primary) = origins.first() else {
+        return (Vec::new(), None);
+    };
+    let mut envs = Vec::new();
+    let mut hint = None;
+    match trusted {
+        UserValue::Process(value) => {
+            let mut merged: Vec<&str> = Vec::new();
+            for origin in value
+                .split(',')
+                .map(str::trim)
+                .chain(origins.iter().map(String::as_str))
+            {
+                if !origin.is_empty() && !merged.contains(&origin) {
+                    merged.push(origin);
+                }
+            }
+            envs.push((TRUSTED_ORIGINS_ENV_KEY.to_string(), merged.join(",")));
+        }
+        UserValue::EnvFile(file) => {
+            hint = Some(format!(
+                "{TRUSTED_ORIGINS_ENV_KEY} is set in {}: add {} to it so Better Auth accepts your public URL.",
+                file.display(),
+                origins.join(",")
+            ));
+        }
+        UserValue::Unset => envs.push((TRUSTED_ORIGINS_ENV_KEY.to_string(), origins.join(","))),
+    }
+    if !public_url_set {
+        envs.push((PUBLIC_URL_ENV_KEY.to_string(), primary.clone()));
+    }
+    (envs, hint)
+}
+
+/// The value `key` reaches the service with: the shell's, which wins over
+/// the launch profile's.
+fn process_env_value(key: &str, profile: Option<&PreparedProfile>) -> Option<String> {
+    env::var(key).ok().or_else(|| {
+        profile?
+            .resolved
+            .pairs()
+            .into_iter()
+            .find_map(|(existing, value)| (existing == key).then_some(value))
+    })
+}
+
+/// The first env file in `dirs` with a line that assigns `key`. Values are
+/// never read: quotes, comments and multiline values are the framework's.
+fn env_file_defining(key: &str, dirs: &[&Path]) -> Result<Option<PathBuf>> {
+    for dir in dirs {
+        for file_name in ENV_FILE_NAMES {
+            let path = dir.join(file_name);
+            if !path.is_file() {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read env file '{}'", path.display()))?;
+            if content.lines().any(|line| assigns_env_key(line, key)) {
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `^\s*(export\s+)?KEY\s*=`.
+fn assigns_env_key(line: &str, key: &str) -> bool {
+    let line = line.trim_start();
+    let line = match line.strip_prefix("export") {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+        _ => line,
+    };
+    line.strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
 fn discover_url_env_keys(workdir: &Path) -> Result<Vec<String>> {
     let mut keys = Vec::new();
     for file_name in ENV_FILE_NAMES {
@@ -2702,6 +2845,145 @@ INVALID-NAME=https://old.example
         assert_eq!(env_value(&envs, "NEXT_PUBLIC_API_KEY"), None);
         assert_eq!(env_value(&envs, "DIRECTUS_URL"), None);
         assert_eq!(env_value(&envs, "INVALID-NAME"), None);
+    }
+
+    fn public_url(
+        slug: &str,
+        local_domain: &str,
+        wildcard: bool,
+        machine: &str,
+    ) -> crate::infrastructure::cloud::types::PublicUrl {
+        serde_json::from_value(serde_json::json!({
+            "id": slug, "slug": slug, "url": format!("https://{slug}.localify.fyi"),
+            "localDomain": local_domain, "wildcard": wildcard,
+            "machine": { "id": machine, "name": "laptop" },
+            "protection": { "mode": "password" }, "createdAt": "2026-11-08T10:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn public_envs(domain: &str, trusted: &UserValue) -> Vec<(String, String)> {
+        let urls = [
+            public_url("journal", "journal.localify", false, "m1"),
+            public_url("louez", "louez.localify", true, "m1"),
+            public_url("louez-ana", "louez.localify", true, "teammate-machine"),
+        ];
+        public_url_environment(&public_origins(domain, &urls, "m1"), trusted, false).0
+    }
+
+    #[test]
+    fn an_exact_public_url_is_trusted_and_named() {
+        let envs = public_envs("journal.localify", &UserValue::Unset);
+
+        assert_eq!(
+            env_value(&envs, TRUSTED_ORIGINS_ENV_KEY),
+            Some("https://journal.localify.fyi")
+        );
+        assert_eq!(
+            env_value(&envs, PUBLIC_URL_ENV_KEY),
+            Some("https://journal.localify.fyi")
+        );
+    }
+
+    #[test]
+    fn a_wildcard_project_url_trusts_the_host_of_the_service_label_only() {
+        let envs = public_envs("api.louez.localify", &UserValue::Unset);
+        assert_eq!(
+            env_value(&envs, TRUSTED_ORIGINS_ENV_KEY),
+            Some("https://louez--api.localify.fyi")
+        );
+        assert_eq!(
+            env_value(&envs, PUBLIC_URL_ENV_KEY),
+            Some("https://louez--api.localify.fyi")
+        );
+
+        let project = public_envs("louez.localify", &UserValue::Unset);
+        assert_eq!(
+            env_value(&project, TRUSTED_ORIGINS_ENV_KEY),
+            Some("https://louez.localify.fyi")
+        );
+    }
+
+    #[test]
+    fn public_origins_join_trusted_origins_set_in_the_process() {
+        let set = UserValue::Process(
+            "https://louez.localify, https://louez--api.localify.fyi,".to_string(),
+        );
+        let envs = public_envs("api.louez.localify", &set);
+
+        assert_eq!(
+            env_value(&envs, TRUSTED_ORIGINS_ENV_KEY),
+            Some("https://louez.localify,https://louez--api.localify.fyi")
+        );
+
+        let origins = ["https://louez.localify.fyi".to_string()];
+        let (kept, _) = public_url_environment(&origins, &UserValue::Unset, true);
+        assert_eq!(env_value(&kept, PUBLIC_URL_ENV_KEY), None);
+    }
+
+    #[test]
+    fn trusted_origins_set_in_an_env_file_are_left_alone_with_a_hint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let app = root.join("apps/web");
+        std::fs::create_dir_all(&app).unwrap();
+        // A multiline, commented value: only the key is matched.
+        std::fs::write(
+            root.join(".env.local"),
+            "# trusted\n  export BETTER_AUTH_TRUSTED_ORIGINS = \"https://a.example,\n\
+             https://b.example\" # both\n",
+        )
+        .unwrap();
+        std::fs::write(app.join(".env"), "BETTER_AUTH_TRUSTED_ORIGINS_X=1\n").unwrap();
+
+        let file = env_file_defining(TRUSTED_ORIGINS_ENV_KEY, &[app.as_path(), root])
+            .unwrap()
+            .unwrap();
+        assert_eq!(file, root.join(".env.local"));
+        assert!(
+            env_file_defining(PUBLIC_URL_ENV_KEY, &[app.as_path(), root])
+                .unwrap()
+                .is_none()
+        );
+
+        let origins = ["https://louez.localify.fyi".to_string()];
+        let (envs, hint) = public_url_environment(&origins, &UserValue::EnvFile(file), false);
+        assert_eq!(env_value(&envs, TRUSTED_ORIGINS_ENV_KEY), None);
+        assert_eq!(
+            env_value(&envs, PUBLIC_URL_ENV_KEY),
+            Some("https://louez.localify.fyi")
+        );
+        let hint = hint.unwrap();
+        assert!(hint.starts_with("BETTER_AUTH_TRUSTED_ORIGINS is set in "));
+        assert!(hint.ends_with(
+            ".env.local: add https://louez.localify.fyi to it so Better Auth accepts your public URL."
+        ));
+    }
+
+    #[test]
+    fn env_key_assignments_are_matched_by_key_only() {
+        let key = TRUSTED_ORIGINS_ENV_KEY;
+        assert!(assigns_env_key("BETTER_AUTH_TRUSTED_ORIGINS=", key));
+        assert!(assigns_env_key(
+            "\texport\tBETTER_AUTH_TRUSTED_ORIGINS =x",
+            key
+        ));
+        assert!(!assigns_env_key("# BETTER_AUTH_TRUSTED_ORIGINS=x", key));
+        assert!(!assigns_env_key("exportBETTER_AUTH_TRUSTED_ORIGINS=x", key));
+        assert!(!assigns_env_key("BETTER_AUTH_TRUSTED_ORIGINS_DEV=x", key));
+    }
+
+    #[test]
+    fn nothing_is_injected_without_a_public_url_of_this_machine() {
+        assert!(public_envs("other.localify", &UserValue::Unset).is_empty());
+        let set = UserValue::Process("https://a.example".into());
+        assert_eq!(public_url_environment(&[], &set, false), (Vec::new(), None));
+
+        let theirs = [public_url("louez-ana", "louez.localify", true, "m2")];
+        assert!(public_origins("louez.localify", &theirs, "m1").is_empty());
+        for (_, value) in public_envs("api.louez.localify", &UserValue::Unset) {
+            assert!(!value.contains("louez-ana") && !value.contains('*'));
+        }
     }
 
     #[test]

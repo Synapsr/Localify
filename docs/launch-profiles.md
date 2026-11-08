@@ -158,6 +158,8 @@ From strongest to weakest:
    URL variables, `NODE_EXTRA_CA_CERTS`, `LOCALIFY_LAUNCH_PROFILE` and `LOCALIFY_DANGER`. URL keys
    found in the profile, such as `NEXT_PUBLIC_APP_URL` or `AUTH_URL`, are rewritten to the local
    domain, so a production profile cannot send OAuth callbacks to production.
+   `BETTER_AUTH_TRUSTED_ORIGINS` from the profile or the shell is kept, with your public URLs'
+   origins appended ([README](README.md#apps-that-check-origin)).
 2. **Variables already exported in your shell.** Localify prints the names of the profile keys your
    shell overrides.
 3. **`[profiles.<name>.env]`, then `--env-file`, then the profile's sources.**

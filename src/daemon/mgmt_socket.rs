@@ -11,6 +11,7 @@ use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
 use super::router::SharedState;
 use crate::application::inventory::Have;
+use crate::infrastructure::cloud::credentials::CredentialsStore;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
@@ -43,6 +44,10 @@ enum MgmtCommand {
     /// Fetch this machine's public URLs again, in the background.
     #[serde(rename = "public_refresh")]
     PublicRefresh,
+    /// The public URLs the daemon last learned from Localify Cloud, and this
+    /// machine's id: what `localify dev` trusts without calling the network.
+    #[serde(rename = "public_urls")]
+    PublicUrls,
     /// This machine's inventory (`docs/remote-machines.md`, "Inventory"), or
     /// `unchanged` when `have` names its current revision.
     #[serde(rename = "inventory")]
@@ -102,6 +107,7 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "restart" => Some(MgmtCommand::Restart),
         "public_status" => Some(MgmtCommand::PublicStatus),
         "public_refresh" => Some(MgmtCommand::PublicRefresh),
+        "public_urls" => Some(MgmtCommand::PublicUrls),
         "inventory" => Some(MgmtCommand::Inventory { have: None }),
         _ => None,
     }
@@ -246,6 +252,16 @@ pub async fn serve(
                 Some(MgmtCommand::PublicRefresh) => {
                     tunnel.refresh();
                     MgmtResponse::success(serde_json::json!({ "refreshing": true }))
+                }
+                Some(MgmtCommand::PublicUrls) => {
+                    let current = CredentialsStore::in_data_dir(inventory.data_dir())
+                        .load()
+                        .ok()
+                        .flatten();
+                    let (urls, machine_id) = tunnel.known_urls_for(current.as_ref());
+                    MgmtResponse::success(
+                        serde_json::json!({ "urls": urls, "machineId": machine_id }),
+                    )
                 }
                 Some(MgmtCommand::Inventory { have }) => {
                     inventory_answer(&inventory, &tunnel, have).await

@@ -540,6 +540,8 @@ The management command `public_status` describes this machine only:
 
 `runtime` is `null` before the first answer. The new fields are added next to the old ones, so an older app that reads `public_status` keeps working.
 
+`public_urls` answers `{ "urls": [PublicUrl], "machineId": "…" | null }`, the URLs of the last `ready` runtime, at once and without calling the network. They are empty unless `cloud.json` still holds the account and machine they were fetched for, so a sign-out or a sign-in as someone else hides them before the next fetch. `localify dev` reads it to trust the origins of the URLs this machine serves for the service ([README](README.md#apps-that-check-origin)); a daemon that does not know the command, or one signed out, makes it trust none.
+
 `connections` comes from the `/ready` endpoint of the metrics server. A connected tunnel does not mean the dev server behind a URL is running.
 
 ## CLI

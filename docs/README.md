@@ -695,16 +695,36 @@ Through a public URL, your app gets the local host in `Host` and the public host
 `X-Forwarded-Host` ([ADR 0023](adr/0023-public-traffic-reaches-upstream-with-the-local-host.md)).
 Writes such as a `POST` keep the browser's public `Origin`; only Next.js's own dev files
 and hot reload get the local origin. An app that checks `Origin` against its own URL
-therefore refuses them, as Better Auth does with `Invalid origin`. In development, also
-trust your own public URL and the hosts of its services and worktrees, so a new worktree
-needs no change. With Better Auth 1.6 and the project URL `https://journal.localify.fyi`:
+therefore refuses them, as Better Auth does with `Invalid origin`.
+
+For Better Auth, `localify dev` does it for you. When public URLs of yours that this
+machine serves reach the service, it sets `BETTER_AUTH_TRUSTED_ORIGINS` to their exact
+origins: `https://journal.localify.fyi` for the URL on `journal.localify`, and
+`https://journal--api.localify.fyi` for `api.journal.localify` under a wildcard URL. Better
+Auth adds this variable to its `trustedOrigins` option, so `trustedOrigins: [env.AUTH_URL]`
+keeps working.
+
+- Set in your shell or a launch profile, your value is kept and the public origins are
+  appended to it.
+- Set only in an env file of the service or the checkout root (`.env`, `.env.local`…),
+  Localify leaves it alone, since your framework decides which file wins. It prints what to
+  add instead: `BETTER_AUTH_TRUSTED_ORIGINS is set in <file>: add <origins> to it so Better
+  Auth accepts your public URL.`
+
+`LOCALIFY_PUBLIC_URL` gets the first of these origins, unless you set it. Localify reads
+the URLs the daemon last learned from Localify Cloud, so a launch never waits on the
+network; signed out, or with no URL served here, it adds nothing. A URL you create while
+the service runs takes effect at its next restart.
+
+Other libraries need the public origins in their own allowlist. In development, trust your
+own public URL and the hosts of its services and worktrees, so a new worktree needs no
+change. With the project URL `https://journal.localify.fyi`:
 
 ```ts
 const publicUrls = ["https://journal.localify.fyi", "https://journal--*.localify.fyi"];
-trustedOrigins: [env.AUTH_URL, ...(isDev ? publicUrls : [])],
+allowedOrigins: [env.APP_URL, ...(isDev ? publicUrls : [])],
 ```
 
-or `BETTER_AUTH_TRUSTED_ORIGINS=https://journal.localify.fyi,https://journal--*.localify.fyi`.
 For links Better Auth builds, such as OAuth redirects, give it a base URL that follows
 `X-Forwarded-Host`, from an allowlist:
 `baseURL: { allowedHosts: ["journal.localify", "*.journal.localify", "journal.localify.fyi", "journal--*.localify.fyi"], fallback: "https://journal.localify" }`.

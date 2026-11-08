@@ -119,6 +119,11 @@ impl LocalInventory {
         })
     }
 
+    /// Where the daemon keeps its data, `cloud.json` among it.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Reads run records from `dir` instead of the user's `services/`.
     #[cfg(test)]
     pub fn with_services_dir(mut self, dir: PathBuf) -> Self {
@@ -425,6 +430,56 @@ fn public_url_facts(domain: &str, public: &PublicFacts) -> Option<PublicUrlFacts
             .as_ref()
             .is_some_and(|machine| Some(&machine.id) == public.machine_id.as_ref()),
     })
+}
+
+/// The origins at which this machine's public URLs reach `domain`: those on
+/// that domain first, then a wildcard URL on its parent at `<slug>--<label>`.
+/// Only the URLs the ingress serves: this machine's, since another machine's
+/// URL reaches another checkout, serving (or from a cloud older than the
+/// states), and with an address that starts with their slug.
+pub fn public_origins(domain: &str, urls: &[PublicUrl], machine_id: &str) -> Vec<String> {
+    let domain = domain.trim();
+    let domain = domain
+        .strip_prefix("*.")
+        .unwrap_or(domain)
+        .to_ascii_lowercase();
+    let served: Vec<&PublicUrl> = urls
+        .iter()
+        .filter(|url| {
+            url.machine
+                .as_ref()
+                .is_some_and(|machine| machine.id == machine_id)
+                && matches!(url.state, None | Some(PublicUrlState::Serving))
+        })
+        .collect();
+    let exact = served
+        .iter()
+        .filter(|url| url.local_domain.eq_ignore_ascii_case(&domain))
+        .filter_map(|url| own_origin(url));
+    let environments = served.iter().filter(|url| url.wildcard).filter_map(|url| {
+        own_origin(url)?;
+        let parent = format!(".{}", url.local_domain.to_ascii_lowercase());
+        environment_address(url, domain.strip_suffix(&parent)?)
+    });
+    let mut origins = Vec::new();
+    for origin in exact.chain(environments) {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
+}
+
+/// `https://<slug>.<base>`, when the URL's address starts with its slug.
+fn own_origin(url: &PublicUrl) -> Option<String> {
+    let host = url
+        .url
+        .strip_prefix("https://")?
+        .split('/')
+        .next()?
+        .to_ascii_lowercase();
+    host.strip_prefix(&format!("{}.", url.slug.to_ascii_lowercase()))?;
+    Some(format!("https://{host}"))
 }
 
 /// `https://<slug>--<label>.<base>` for one environment of a wildcard URL,
@@ -912,6 +967,54 @@ domain = "web.feature.localify"
         let long = format!("{}.app.localify", "x".repeat(60));
         assert!(public_url_facts(&long, &public).is_none());
         assert!(public_url_facts("other.localify", &public).is_none());
+    }
+
+    #[test]
+    fn public_origins_are_the_hosts_this_machine_serves_for_the_domain() {
+        let here = r#","machine":{"id":"m1","name":"laptop"},"state":"serving""#;
+        let exact = public_url("exact", "web.localify", false, here);
+        let namespace = public_url("ns", "app.localify", true, here);
+        let origins = |domain: &str, urls: &[PublicUrl]| public_origins(domain, urls, "m1");
+
+        assert_eq!(
+            origins("web.localify", std::slice::from_ref(&exact)),
+            ["https://app-a8f3.localify.fyi"]
+        );
+        let urls = [namespace];
+        assert_eq!(
+            origins("api.app.localify", &urls),
+            ["https://app-a8f3--api.localify.fyi"]
+        );
+        assert_eq!(
+            origins("app.localify", &urls),
+            ["https://app-a8f3.localify.fyi"]
+        );
+        assert!(origins("a.b.app.localify", &urls).is_empty());
+        assert!(origins("other.localify", &urls).is_empty());
+    }
+
+    #[test]
+    fn public_origins_leave_out_what_the_ingress_does_not_serve() {
+        let elsewhere = r#","machine":{"id":"m2","name":"desktop"},"state":"serving""#;
+        let taken_down = r#","machine":{"id":"m1","name":"laptop"},"state":"taken_down""#;
+        let suspended = r#","machine":{"id":"m1","name":"laptop"},"state":"suspended""#;
+        let foreign: PublicUrl = serde_json::from_str(
+            r#"{"id":"evil","slug":"app-a8f3","url":"https://evil.example",
+                "localDomain":"app.localify","wildcard":true,
+                "machine":{"id":"m1","name":"laptop"},
+                "protection":{"mode":"password"},"createdAt":"2026-11-05T18:00:00Z"}"#,
+        )
+        .unwrap();
+        let urls = [
+            public_url("other", "app.localify", true, elsewhere),
+            public_url("down", "app.localify", true, taken_down),
+            public_url("suspended", "app.localify", true, suspended),
+            public_url("unserved", "app.localify", true, r#","machine":null"#),
+            foreign,
+        ];
+
+        assert!(public_origins("app.localify", &urls, "m1").is_empty());
+        assert!(public_origins("api.app.localify", &urls, "m1").is_empty());
     }
 
     #[test]
