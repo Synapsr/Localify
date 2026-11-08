@@ -301,7 +301,9 @@ type InventoryWatch = { t: "inventory.watch"; id: string; have: Have | null };
 type InventoryUnwatch = { t: "inventory.unwatch"; id: string };
 type Have = { epoch: string; rev: number };
 type OutputRead   = { t: "output.read"; id: string; runId: string; offset: number; maxBytes: number };  // ≤ 16,384
-type OutputFollow = { t: "output.follow"; id: string; runId: string; offset: number; window: number }; // ≤ 131,072
+type OutputFollow = { t: "output.follow"; id: string; runId: string; offset: number; window: number;  // ≤ 131,072
+  tail?: number;                       // optional: start this many bytes before the end, ignoring offset
+};
 type OutputAck    = { t: "output.ack"; re: string; offset: number };
 type OutputUnfollow = { t: "output.unfollow"; re: string };
 type Keep = { t: "keep"; ids: string[] };   // heartbeat; also renews these watches and follows
@@ -358,7 +360,7 @@ type PairConfirm = { t: "pair.confirm"; accept: boolean };
 type PairDeclined = { t: "pair.declined"; reason: "nobody_to_confirm" | "busy" | "cancelled" };
 ```
 
-`InventoryItem` and `MachineSummary` are in "Inventory". A message that does not parse, has an unknown `t`, or breaks a bound ends the session with `error` `bad_request` then `bye`.
+`InventoryItem` and `MachineSummary` are in "Inventory". A message that does not parse, has an unknown `t`, or breaks a bound ends the session with `error` `bad_request` then `bye`. An `error` with `re` answers that one request, which is over, and the session goes on; an `error` without `re` ends the session.
 
 ### Errors
 
@@ -431,7 +433,7 @@ type InventoryItem = {
 - **`share` off:** the target sends `machine` and no items.
 - **Epoch and revision:** `epoch` is random, chosen at daemon start; `rev` starts at 1 and goes up whenever the snapshot's content changes. A request whose `have` matches gets `inventory.unchanged`.
 - **Pages:** items sorted by project name, environment and service; split so each page fits 32 KiB; at most 32 pages. A viewer replaces its copy only once it holds every page of one revision; pages of an older revision are dropped.
-- **When it is sent:** on `inventory.get`; while a watch is open, whenever the content changes, checked every 2 seconds for config and records and every 10 seconds for ports; right after every control's result; and on a 30-second reconcile while watched. Unchanged snapshots are never sent.
+- **When it is sent:** on `inventory.get`; while a watch is open, whenever the content changes, checked every 2 seconds (in PR 3, each check builds the whole snapshot, ports probed included: the inventory has no cheaper partial build, and the probe is bounded to 1 second); right after every control's result; and on a 30-second reconcile while watched. Unchanged snapshots are never sent.
 - **Watches:** at most one per session. A watch ends with `inventory.unwatch`, with the session, or 120 seconds after the last `keep` that names it. The viewer names it in its `keep` while the machine is on screen, and stops when the window is hidden. With no watch open, the target computes nothing and sends nothing.
 - **Deltas,** if they come later, carry the epoch and the revision they apply to. A gap or another epoch makes the viewer ask for a snapshot.
 
@@ -493,7 +495,7 @@ A finisher never calls a session empty while something still carries it. When ev
 
 ### Following
 
-`output.follow {runId, offset, window}` sends `output.data` as lines arrive, the first one at once. The target never has more than `window` bytes sent and not acknowledged; the viewer sends `output.ack` with the `next` it has shown. The target looks for new bytes every 250 ms while a follow is open, locally. A follow ends with `output.unfollow`, at the end of the run once everything was sent, with the session, or 120 seconds after the last `ack` or `keep` that names it. At most 2 follows per session, 4 per target. The viewer stops following when the Output panel closes or the window is hidden for 60 seconds, so an output nobody looks at costs nothing.
+`output.follow {runId, offset, window}` sends `output.data` as lines arrive, the first one at once. The target never has more than `window` bytes sent and not acknowledged; the viewer sends `output.ack` with the `next` it has shown. The target looks for new bytes every 250 ms while a follow is open, locally. A follow ends with `output.unfollow`, at the end of the run once everything was sent, with the session, or 120 seconds after the last `ack` or `keep` that names it. At most 2 follows per session, 4 per target. With `tail`, an optional field, the follow starts that many bytes before the end, and at least at the oldest byte kept, so a viewer opening a long run reads its last lines rather than megabytes; that start is usually inside a line, and the viewer drops the piece before the first line break. A target that predates `tail` ignores it and starts at `offset`. The app's viewer gives each follow a 64 KiB window and acknowledges every 16 KiB it has shown. The viewer stops following when the Output panel closes or the window is hidden for 60 seconds, so an output nobody looks at costs nothing.
 
 ### Showing it
 
@@ -713,20 +715,20 @@ New management socket commands. The streaming ones keep the connection open and 
 | `remote_pair_answer {pairingId, accept}` | `{ok}` |
 | `remote_unpair {machineId}` | `{ok}` |
 | `remote_inventory {machineId}` | one snapshot, all pages |
-| `remote_watch {machineId}` | streaming: snapshots, connection states |
+| `remote_watch {machineId}` | streaming: `{event: "connecting"}`, `{event: "snapshot", machine, epoch, rev, truncated, items}` with every page of a revision, and `{event: "lost", code, message, retryIn}`, after which the daemon asks again by itself |
 | `remote_output_read {machineId, runId, offset, maxBytes}` | one `output.data` |
-| `remote_output_follow {machineId, runId, offset}` | streaming `output.data`; the daemon acknowledges as the client reads |
+| `remote_output_follow {machineId, runId, offset?, tail?}` | streaming `{event: "data", …output.data}`; the daemon acknowledges as the client reads. Without `offset`, from the last `tail` bytes (256 KiB by default). `{event: "ended", code, message}` when the follow stops before its run did: `gone` for a restart, a refusal, or a lost session |
 | `remote_control {machineId, action, service, profile, expect}` | streaming: progress, then the result; the client waits up to 120 s, not the usual 2 |
 | `remote_events` | streaming: pairing requests, presence, revocations; the app subscribes while it runs |
 
-One local command serves this machine's own inventory: `inventory {have?}` answers the snapshot the relay will page (`schema`, `epoch`, `rev`, `pages`, `truncated`, `items`), or `{unchanged: true, epoch, rev}` when `have` names its revision. One snapshot is built at a time; a request that arrives during a build shares its result. Until PR 2 and PR 4, every switch counts as off and the app as absent, so each control is refused with `control_disabled`. The hidden `localify inventory [--have <epoch>:<rev>]` prints it, for tests.
+One local command serves this machine's own inventory: `inventory {have?}` answers the snapshot the relay will page (`schema`, `epoch`, `rev`, `pages`, `truncated`, `items`), or `{unchanged: true, epoch, rev}` when `have` names its revision. One snapshot is built at a time; a request that arrives during a build shares its result. Until PR 4, every switch counts as off for `controls` and the app as absent, so each control is refused with `control_disabled`, whatever `control` says; the inventory pages' `machine.settings` show the switches as set. The hidden `localify inventory [--have <epoch>:<rev>]` prints it, for tests.
 
-The daemon opens a session only when one of these asks for it, and closes it when the last one ends. `public_refresh` also re-reads `/v1/me` for `remoteAccess`, so subscribing turns remote access on without a restart.
+The daemon opens a session only when one of these asks for it, carries every request to one target over its one session, and closes it when the last one ends. `remote_machines` without a probe reads the roster from Localify Cloud at most every 30 seconds, so the app can poll it; a probe, a pairing, presence of a machine it does not know and a revocation read it at once. `public_refresh` also re-reads `/v1/me` for `remoteAccess`, so subscribing turns remote access on without a restart.
 
 ## Desktop app
 
 - **Service tabs,** on every machine, change with PR 1, whether or not remote access is used. A service tab is the run, not a shell: it opens when the service starts, shows the service's terminal interactively, and when the run exits shows its exit code with `Restart` and `Open a terminal here`. Typing a command after the service stops now happens in a shell tab, which `Open a terminal here` or the terminal button opens. Stop signals the service instead of pressing Ctrl-C in the tab. While `share` is on, the footer of a service tab says "What you type here appears in this service's output." Ctrl-Z does nothing in a service tab. Services start with the shell environment the app resolved (see "Output"): `Reload shell environment` is in the terminal panel's menu, and a warning there says when it could not be read. A service still running from a shell tab of the previous version keeps running there, marked "Started before this update".
-- **Machine switcher,** at the top of the sidebar. Its header shows this machine's relay connection, which says whether anything about the others is known: "Remote access: connected", "Connecting…", "Reconnecting… (in 8 s)" with `Retry now`, or "Off" with the reason. While it is not connected, the targets below show no state of their own. Then "This Mac" first, and every machine of the roster with its name and a state, using T3 Code's distinct states plus Localify's own:
+- **Machine switcher,** next to the Projects screen's title (the app has no sidebar), shown only while the account has another machine. Its header shows this machine's relay connection, which says whether anything about the others is known: "Remote access: connected", "Connecting…", "Reconnecting… (in 8 s)" with `Retry now`, or "Off" with the reason. While it is not connected, the targets below show no state of their own. Then "This Mac" first, and every machine of the roster with its name and a state, using T3 Code's distinct states plus Localify's own:
 
   | State | Shows |
   |---|---|
@@ -743,7 +745,7 @@ The daemon opens a session only when one of these asks for it, and closes it whe
 
 - **A remote machine's view** is the Projects screen of that machine, read-only: no editor, no domain or profile editing, no terminal. A banner says "You're viewing B. Its .localify URLs open only on B." Each service row shows its owner ("In the app", "In the background", "In a terminal", "Unknown process"), and four chips: Process, Port, Output, Public URL. The Start, Stop and Restart buttons follow `controls`; a disabled one says why in its tooltip. A control in flight shows its progress, and `unknown` shows "Outcome unknown. Checking B…".
 - **URLs:** a remote `.localify` URL is shown as "web.louez.localify · on B", with a copy button and never an open button. When the service has a public URL that serves, `Open public URL` opens it.
-- **Output** opens in the bottom panel as a tab "Output · web · B", with search, Follow / Pause and selectable text (see "Output").
+- **Output** opens in a panel "Output · web · B" at the bottom of the remote machine's view, with search, Follow / Pause and selectable text (see "Output"). The terminal panel holds this Mac's PTYs only, so remote output stays out of it.
 - **Settings → Remote access,** on every machine: the three switches with one line each ("Share projects and output with paired machines", "Allow paired machines to start, stop and restart services", "Allow background starts when the app is closed"), a note that output can contain secrets the services print and what is typed into service tabs, this machine's fingerprint, and the paired machines with `Unpair` and `Remove from account`.
 - **Pairing dialogs,** with the wording of "Pairing".
 
