@@ -6,7 +6,7 @@
 //! stay readable. Offsets are logical bytes from the start of the run and are
 //! never reused. Reads are bounded: they never read a segment to its end.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -119,14 +119,6 @@ pub struct FinalizeLock {
     _file: File,
 }
 
-pub enum TryFinalizeLock {
-    Acquired(FinalizeLock),
-    /// Another finisher holds it.
-    Busy,
-    /// The run's folder is gone: its service moved on or was forgotten.
-    Gone,
-}
-
 impl FinalizeLock {
     /// Waits for the lock. `None` when the run's folder is gone, before or
     /// while waiting: nothing is left to finalize, and nothing is recreated.
@@ -137,19 +129,6 @@ impl FinalizeLock {
         file.lock()
             .with_context(|| format!("Failed to lock '{}'", dir.join(LOCK_FILE).display()))?;
         Ok(dir.is_dir().then_some(Self { _file: file }))
-    }
-
-    pub fn try_acquire(dir: &Path) -> Result<TryFinalizeLock> {
-        let Some(file) = open_lock_file(dir)? else {
-            return Ok(TryFinalizeLock::Gone);
-        };
-        match file.try_lock() {
-            Ok(()) if dir.is_dir() => Ok(TryFinalizeLock::Acquired(Self { _file: file })),
-            Ok(()) => Ok(TryFinalizeLock::Gone),
-            Err(TryLockError::WouldBlock) => Ok(TryFinalizeLock::Busy),
-            Err(TryLockError::Error(error)) => Err(error)
-                .with_context(|| format!("Failed to lock '{}'", dir.join(LOCK_FILE).display())),
-        }
     }
 }
 
@@ -822,16 +801,15 @@ mod tests {
         let run = dir.path().join("run");
         create_run_dir(&run).unwrap();
 
+        let other = File::open(run.join(LOCK_FILE)).unwrap();
         let held = FinalizeLock::acquire(&run).unwrap().unwrap();
         assert!(matches!(
-            FinalizeLock::try_acquire(&run).unwrap(),
-            TryFinalizeLock::Busy
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
         ));
         drop(held);
-        assert!(matches!(
-            FinalizeLock::try_acquire(&run).unwrap(),
-            TryFinalizeLock::Acquired(_)
-        ));
+        assert!(other.try_lock().is_ok());
+        drop(other);
 
         fs::remove_dir_all(&run).unwrap();
         assert!(FinalizeLock::acquire(&run).unwrap().is_none());

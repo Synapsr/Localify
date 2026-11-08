@@ -24,9 +24,7 @@ use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::process::{
     self, Identity, NativeProcesses, Signal, process_info, signal_identities, track_tree,
 };
-use crate::infrastructure::runs::finish::{
-    Finish, FinishMode, Finisher, Membership, RunSession, membership,
-};
+use crate::infrastructure::runs::finish::{Finish, Finisher, Membership, RunSession, membership};
 use crate::infrastructure::runs::output::{self, plain_lines};
 use crate::infrastructure::runs::{RunId, run_dir};
 
@@ -156,6 +154,13 @@ impl RunningService {
             .is_some_and(|run| run.output == Some(RunOutput::Pipe))
     }
 
+    /// Whether this run's executor, `localify dev` itself, still runs: what a
+    /// launch replaces only when asked to, unlike what a dead one left.
+    pub fn executor_runs(&self) -> bool {
+        self.session()
+            .is_some_and(|session| session.executor_alive(&NativeProcesses))
+    }
+
     fn session(&self) -> Option<RunSession> {
         let run = self.run.as_ref()?;
         Some(RunSession {
@@ -231,6 +236,25 @@ pub struct RunLock {
     key: ServiceKey,
 }
 
+/// What an executor finds when it asks for its service's lock.
+pub enum Admission {
+    /// The service is free, and the lock is this executor's.
+    Admitted(RunLock),
+    /// Another run of the service is going: its record, when one names it.
+    Running(Option<Box<RunningService>>),
+}
+
+impl Admission {
+    /// The lock, in a test that expects the service free.
+    #[cfg(test)]
+    pub fn admitted(self) -> RunLock {
+        match self {
+            Self::Admitted(lock) => lock,
+            Self::Running(_) => panic!("the service is already running"),
+        }
+    }
+}
+
 pub struct RunningServiceStore {
     dir: PathBuf,
     /// Runs between reading a record and writing it back, to replay races.
@@ -296,9 +320,12 @@ impl RunningServiceStore {
     }
 
     /// Takes the service's lock, for the executor, before it runs anything.
-    /// Refuses while another executor holds it, or while the previous run is
-    /// not finalized: it is finalized here when nothing of it is left alive.
-    pub fn lock(&self, key: &ServiceKey) -> Result<RunLock> {
+    /// While another executor holds it, or the previous run's executor still
+    /// runs, the service is running. Otherwise the previous run is ended
+    /// here if it was not: what is proven to be left of it is stopped, as
+    /// `stop` would, and it is finalized. Nothing unproven is signalled, and a
+    /// proof that cannot be made is an error that says to try again.
+    pub fn lock(&self, key: &ServiceKey) -> Result<Admission> {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("Failed to create '{}'", self.dir.display()))?;
         let path = self.dir.join(format!("{}.lock", record_name(key)));
@@ -309,69 +336,41 @@ impl RunningServiceStore {
             .with_context(|| format!("Failed to open '{}'", path.display()))?;
         match file.try_lock() {
             Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(self.already_running(key)),
+            Err(TryLockError::WouldBlock) => {
+                return Ok(Admission::Running(
+                    self.get(key).ok().flatten().map(Box::new),
+                ));
+            }
             Err(TryLockError::Error(error)) => {
                 return Err(error).with_context(|| format!("Failed to lock '{}'", path.display()));
             }
         }
-        if let Some(previous) = self.get(key)? {
-            self.admit_after(&previous)?;
+        if let Some(previous) = self.get(key)?
+            && self.end_previous(&previous)?
+        {
+            return Ok(Admission::Running(Some(Box::new(previous))));
         }
-        Ok(RunLock {
+        Ok(Admission::Admitted(RunLock {
             _file: file,
             key: key.clone(),
-        })
+        }))
     }
 
-    fn already_running(&self, key: &ServiceKey) -> anyhow::Error {
-        let running = self.get(key).ok().flatten();
-        let detail = running
-            .map(|run| format!(" (PID {}) at {}", run.pid, run.url))
-            .unwrap_or_default();
-        anyhow::anyhow!(
-            "'{}' is already running{detail}. Stop it first with: {} stop {}",
-            key.service_id,
-            BRANDING.cli_command(),
-            service_selector(key)
-        )
-    }
-
-    /// The next launcher's part in ending the previous run: it finalizes a run
-    /// with nothing left alive, and refuses otherwise.
-    fn admit_after(&self, previous: &RunningService) -> Result<()> {
-        let key = &previous.key;
+    /// The next launcher's part in ending the previous run, through the same
+    /// finisher as `stop` and the daemon. Returns whether it still runs.
+    fn end_previous(&self, previous: &RunningService) -> Result<bool> {
         let (Some(run), Some(session)) = (&previous.run, previous.session()) else {
             // An unverifiable PID is not proof of a run: the port check still
             // refuses a service that listens.
-            if previous.legacy_state() == RunState::Running {
-                return Err(self.already_running(key));
-            }
-            return Ok(());
+            return Ok(previous.legacy_state() == RunState::Running);
         };
         let dir = self.run_dir(&run.run_id);
-        let finish =
-            Finisher::native().finish(&dir, &session, previous.has_stream(), FinishMode::Admit)?;
-        match finish {
-            Finish::AlreadyFinalized | Finish::Finalized(_) | Finish::Gone => {
-                self.mark_ended(previous)?;
-                Ok(())
-            }
-            Finish::ExecutorAlive => Err(self.already_running(key)),
-            Finish::LiveMembers(pids) => {
-                let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
-                bail!(
-                    "'{}' still has processes from its previous run (PID {}). Stop them first with: {} stop {}",
-                    key.service_id,
-                    pids.join(", "),
-                    BRANDING.cli_command(),
-                    service_selector(key)
-                )
-            }
-            Finish::Busy => bail!(
-                "'{}' is still stopping: its previous run is being finalized. Try again in a moment.",
-                key.service_id
-            ),
+        let finish = Finisher::native().finish(&dir, &session, previous.has_stream())?;
+        if finish == Finish::ExecutorAlive {
+            return Ok(true);
         }
+        self.mark_ended(previous)?;
+        Ok(false)
     }
 
     /// Records that the current process runs this service, under its lock, and
@@ -593,7 +592,7 @@ impl RunningServiceStore {
         let finish = if running && run.sid.is_some() {
             finisher.stop(&dir, &session, service.has_stream())?
         } else {
-            finisher.finish(&dir, &session, service.has_stream(), FinishMode::End)?
+            finisher.finish(&dir, &session, service.has_stream())?
         };
         if finish == Finish::ExecutorAlive {
             bail!(
@@ -622,7 +621,7 @@ impl RunningServiceStore {
             {
                 continue;
             }
-            let finish = Finisher::native().finish(&dir, &session, true, FinishMode::End)?;
+            let finish = Finisher::native().finish(&dir, &session, true)?;
             self.mark_ended(&service)?;
             finished.push((service.key.clone(), finish));
         }
@@ -895,7 +894,7 @@ mod tests {
     fn a_registered_service_runs_in_this_process() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let lock = store.lock(&key("web")).unwrap();
+        let lock = store.lock(&key("web")).unwrap().admitted();
 
         let record = store.register(&lock, run("web", None)).unwrap();
 
@@ -916,13 +915,16 @@ mod tests {
     fn the_lock_admits_one_executor_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let lock = store.lock(&key("web")).unwrap();
+        let lock = store.lock(&key("web")).unwrap().admitted();
 
-        let error = store.lock(&key("web")).err().unwrap();
+        let second = store.lock(&key("web")).unwrap();
 
-        assert!(error.to_string().contains("already running"), "{error}");
+        assert!(matches!(second, Admission::Running(None)));
         drop(lock);
-        assert!(store.lock(&key("web")).is_ok());
+        assert!(matches!(
+            store.lock(&key("web")).unwrap(),
+            Admission::Admitted(_)
+        ));
     }
 
     /// What an older version recorded for `pid`: the start `ps` printed.
@@ -951,8 +953,8 @@ mod tests {
         store.write(&record).unwrap();
 
         assert_eq!(store.state(&record), RunState::Running);
-        let error = store.lock(&key("web")).err().unwrap();
-        assert!(error.to_string().contains("already running"), "{error}");
+        let running = store.lock(&key("web")).unwrap();
+        assert!(matches!(running, Admission::Running(Some(ref run)) if run.run_id().is_none()));
 
         assert!(store.stop(&record).unwrap());
         service.wait().unwrap();
@@ -1011,7 +1013,7 @@ mod tests {
             let _ = wait_resume.lock().unwrap().recv();
         }));
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let lock = store.lock(&key("web")).unwrap();
+        let lock = store.lock(&key("web")).unwrap().admitted();
         let first = store.register(&lock, run("web", None)).unwrap();
 
         let second = thread::scope(|scope| {
@@ -1048,7 +1050,7 @@ mod tests {
         let store = RunningServiceStore::new(dir.path().to_path_buf());
         let first_log = dir.path().join("first.log");
         fs::write(&first_log, "old output").unwrap();
-        let lock = store.lock(&key("web")).unwrap();
+        let lock = store.lock(&key("web")).unwrap().admitted();
         let first = store
             .register(&lock, run("web", Some(first_log.clone())))
             .unwrap();
@@ -1069,7 +1071,7 @@ mod tests {
     fn the_exit_code_is_kept_after_the_run() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let lock = store.lock(&key("web")).unwrap();
+        let lock = store.lock(&key("web")).unwrap().admitted();
         let record = store.register(&lock, run("web", None)).unwrap();
 
         store
@@ -1084,7 +1086,7 @@ mod tests {
     fn a_heartbeat_moves_last_alive_at_forward_in_monotonic_time() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let lock = store.lock(&key("web")).unwrap();
+        let lock = store.lock(&key("web")).unwrap().admitted();
         let record = store.register(&lock, run("web", None)).unwrap();
         let before = record.run.unwrap();
         thread::sleep(Duration::from_millis(30));
@@ -1168,7 +1170,7 @@ mod tests {
         };
         let registering = std::sync::Arc::new(RunningServiceStore::new(dir.path().to_path_buf()));
         registering.write(&first).unwrap();
-        let lock = std::sync::Arc::new(registering.lock(&key("web")).unwrap());
+        let lock = std::sync::Arc::new(registering.lock(&key("web")).unwrap().admitted());
         let second = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut forgetting = RunningServiceStore::new(dir.path().to_path_buf());
         let (store, held, registered) = (registering.clone(), lock.clone(), second.clone());

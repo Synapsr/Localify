@@ -20,11 +20,14 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::context::AppContext;
-use super::services::{RunTarget, resolve_launch_target, resolve_service_key};
+use super::services::{
+    Replace, RunTarget, already_running, older_version_running, resolve_launch_target,
+    resolve_service_key,
+};
 use crate::branding::BRANDING;
 use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::running_services::{
-    self, RunState, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
+    self, Admission, RunState, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
     ServiceOrigin, service_selector,
 };
 use crate::infrastructure::runs::RunId;
@@ -39,11 +42,26 @@ const LOGS_WINDOW: u64 = 1024 * 1024;
 /// How much one read of a stream takes.
 const READ_CHUNK: usize = 64 * 1024;
 
+/// Which service a detached start runs, and what it does if that one already
+/// runs.
+pub struct Detached<'a> {
+    pub target: RunTarget<'a>,
+    pub replace: Replace,
+}
+
 /// Runs the same `dev` command again in the background, in its own session
 /// and with its output in the run's stream, and returns once the service
 /// listens, stopped, or is still starting.
-pub fn start_detached(launch_id: Option<&str>) -> Result<i32> {
+pub fn start_detached(
+    launch_id: Option<&str>,
+    detached: Detached<'_>,
+    config_path: &Path,
+    ctx: &AppContext,
+) -> Result<i32> {
     let store = RunningServiceStore::new_default()?;
+    // The executor has no terminal: a person at this one is asked here.
+    let replace = detached.replace == Replace::Ask
+        && ask_before_detaching(&store, detached.target, config_path, ctx)?;
     let (launch_id, chosen) = match launch_id {
         Some(id) => (RunId::parse(id)?, false),
         None => (RunId::generate()?, true),
@@ -61,6 +79,7 @@ pub fn start_detached(launch_id: Option<&str>) -> Result<i32> {
         .args(foreground_args(
             std::env::args_os().skip(1),
             chosen.then_some(&launch_id),
+            replace,
         ))
         .env(SERVICE_ORIGIN_ENV, ServiceOrigin::Background.as_env())
         .stdin(Stdio::null())
@@ -82,34 +101,61 @@ pub fn start_detached(launch_id: Option<&str>) -> Result<i32> {
     wait_for_child(&mut child, &store, &launch_id, &launch_log)
 }
 
+/// Whether a person agrees to stop the service before it starts in the
+/// background. Nothing running, or a run of an older version, which the
+/// executor refuses itself, asks nothing.
+fn ask_before_detaching(
+    store: &RunningServiceStore,
+    target: RunTarget<'_>,
+    config_path: &Path,
+    ctx: &AppContext,
+) -> Result<bool> {
+    let launch = resolve_launch_target(target, config_path, ctx)?;
+    let Some(running) = store
+        .get(&launch.key)?
+        .filter(|run| run.run_id().is_some() && run.executor_runs())
+    else {
+        return Ok(false);
+    };
+    if !Replace::Ask.stops(&running)? {
+        bail!("{}", already_running(&running));
+    }
+    Ok(true)
+}
+
 /// The arguments of this command without `--detach`, with the launch id this
-/// dispatcher chose. What follows `--` is the service's own command and stays
-/// as it is.
+/// dispatcher chose, and `--replace` when a person agreed to it. What follows
+/// `--` is the service's own command and stays as it is.
 fn foreground_args(
     args: impl Iterator<Item = OsString>,
     launch_id: Option<&RunId>,
+    replace: bool,
 ) -> Vec<OsString> {
     let mut foreground = Vec::new();
     let mut in_service_command = false;
     for arg in args {
         if !in_service_command && arg == "--" {
             in_service_command = true;
-            push_launch_id(&mut foreground, launch_id);
+            push_dispatcher_args(&mut foreground, launch_id, replace);
         }
         if in_service_command || arg != "--detach" {
             foreground.push(arg);
         }
     }
     if !in_service_command {
-        push_launch_id(&mut foreground, launch_id);
+        push_dispatcher_args(&mut foreground, launch_id, replace);
     }
     foreground
 }
 
-/// In one argument: an id may start with `-`, which would read as a flag.
-fn push_launch_id(args: &mut Vec<OsString>, launch_id: Option<&RunId>) {
+/// The launch id in one argument: an id may start with `-`, which would read
+/// as a flag.
+fn push_dispatcher_args(args: &mut Vec<OsString>, launch_id: Option<&RunId>, replace: bool) {
     if let Some(launch_id) = launch_id {
         args.push(format!("--launch-id={launch_id}").into());
+    }
+    if replace && !args.iter().any(|arg| arg == "--replace") {
+        args.push("--replace".into());
     }
 }
 
@@ -172,6 +218,7 @@ fn wait_for_child(
 pub fn start_in_app(
     target: RunTarget<'_>,
     profile: Option<&str>,
+    replace: Replace,
     config_path: &Path,
     ctx: &AppContext,
 ) -> Result<()> {
@@ -184,16 +231,39 @@ pub fn start_in_app(
         );
     };
     let store = RunningServiceStore::new_default()?;
-    let previous = store.get(&launch.key)?;
-    if let Some(run) = previous.as_ref().filter(|run| store.is_running(run)) {
-        println!(
-            "'{}' is already running (PID {}, {}), not started again.\n  url: {}",
-            run.key.service_id,
-            run.pid,
-            describe_origin(run.origin),
-            run.url
-        );
-        return Ok(());
+    // Admitted as the app's executor will be: what a dead executor left is
+    // ended here, so its port is free. The lock is the app's to take.
+    if let Admission::Running(running) = store.lock(&launch.key)? {
+        let Some(run) = running.as_deref() else {
+            println!(
+                "'{}' is already running: another launch is starting it, not started again.",
+                launch.key.service_id
+            );
+            return Ok(());
+        };
+        // A run of an older version is never stopped here; nor is one without
+        // `--replace` or a yes, which an agent sees as already running.
+        let replaceable = run.run_id().is_some() && run.executor_runs();
+        if replaceable && replace.stops(run)? {
+            eprintln!(
+                "Stopping '{}' (PID {}) to start it again...",
+                run.key.service_id, run.pid
+            );
+            store.stop(run)?;
+        } else if replace == Replace::Ask && replaceable {
+            bail!("{}", already_running(run));
+        } else if replace != Replace::No && run.run_id().is_none() {
+            bail!("{}", older_version_running(run));
+        } else {
+            println!(
+                "'{}' is already running (PID {}, {}), not started again.\n  url: {}",
+                run.key.service_id,
+                run.pid,
+                describe_origin(run.origin),
+                run.url
+            );
+            return Ok(());
+        }
     }
     if listens(launch.port) {
         println!(
@@ -757,12 +827,33 @@ mod tests {
     }
 
     #[test]
+    fn a_yes_given_before_detaching_reaches_the_executor_once() {
+        let result = foreground_args(
+            args(&["dev", "web", "--detach", "--", "pnpm", "dev"]).into_iter(),
+            None,
+            true,
+        );
+        assert_eq!(
+            result,
+            args(&["dev", "web", "--replace", "--", "pnpm", "dev"])
+        );
+
+        let already = foreground_args(
+            args(&["dev", "web", "--replace", "--detach"]).into_iter(),
+            None,
+            true,
+        );
+        assert_eq!(already, args(&["dev", "web", "--replace"]));
+    }
+
+    #[test]
     fn a_launch_id_that_starts_with_a_dash_is_passed_as_one_argument() {
         let launch_id = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
 
         let result = foreground_args(
             args(&["dev", "web", "--detach"]).into_iter(),
             Some(&launch_id),
+            false,
         );
 
         assert_eq!(
@@ -780,6 +871,7 @@ mod tests {
             ])
             .into_iter(),
             Some(&launch_id),
+            false,
         );
 
         assert_eq!(
@@ -810,6 +902,7 @@ mod tests {
             ])
             .into_iter(),
             None,
+            false,
         );
 
         assert_eq!(
@@ -838,7 +931,7 @@ mod tests {
             log_file: None,
             output: None,
         };
-        let lock = store.lock(&key).unwrap();
+        let lock = store.lock(&key).unwrap().admitted();
         let first = store.register(&lock, new_run()).unwrap();
         let first_dir = store.run_dir(first.run_id().unwrap());
         let (done, finished) = std::sync::mpsc::channel();

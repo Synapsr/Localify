@@ -12,9 +12,9 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -171,6 +171,12 @@ fn run_with(
     stops: Arc<StopRequests>,
     watch_signals: bool,
 ) -> Result<LaunchEnd> {
+    // Watching first: a Ctrl+C right after the service starts must not end
+    // `localify dev` before it can stop the service.
+    let service = Arc::new(OnceLock::new());
+    if watch_signals {
+        watch_stop_signals(Arc::clone(&service), Arc::clone(&stops));
+    }
     let mut child = spawn(&launch)?;
     // A service that already exited is a zombie no table shows: nothing to signal.
     let root = launch
@@ -182,10 +188,8 @@ fn run_with(
             pid: child.id(),
             start: 0,
         });
+    let _ = service.set(root);
     (launch.heartbeat)();
-    if watch_signals {
-        watch_stop_signals(root, Arc::clone(&stops));
-    }
     let output_done = copy_output(&mut child, &launch);
 
     let (outcome, cleanup) = supervise(&mut child, root, &launch, &stops);
@@ -612,7 +616,7 @@ fn respond_to_stop_requests(
 
 /// Counts each Ctrl+C, keeping Localify alive to stop the service in bounds,
 /// and forwards SIGTERM and SIGHUP sent to Localify alone to the service's tree.
-fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
+fn watch_stop_signals(service: Arc<OnceLock<Identity>>, stops: Arc<StopRequests>) {
     let (ready_sender, ready_receiver) = mpsc::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -637,7 +641,9 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
             };
             let _ = ready_sender.send(());
             let forward = |signal: Signal| {
-                signal_identities(&track_tree(&[root], &all_processes()), signal);
+                if let Some(root) = service.get() {
+                    signal_identities(&track_tree(&[*root], &all_processes()), signal);
+                }
             };
             loop {
                 tokio::select! {
@@ -1003,18 +1009,16 @@ mod tests {
             last_alive_at: last_alive.get(),
         };
         crate::infrastructure::runs::output::create_run_dir(dir.path()).unwrap();
-        let next = finisher
-            .finish(
-                dir.path(),
-                &recorded,
-                true,
-                crate::infrastructure::runs::finish::FinishMode::Admit,
-            )
-            .unwrap();
+        let next = finisher.finish(dir.path(), &recorded, true);
 
-        assert_eq!(
-            next,
-            crate::infrastructure::runs::finish::Finish::LiveMembers(vec![u32::MAX - 7])
+        // The survivor is proven to be the run's, so the next launch tries to
+        // end it, cannot, and finalizes nothing.
+        let error = next.unwrap_err().to_string();
+        assert!(error.contains(&(u32::MAX - 7).to_string()), "{error}");
+        assert!(
+            crate::infrastructure::runs::output::read_end(dir.path())
+                .unwrap()
+                .is_none()
         );
     }
 

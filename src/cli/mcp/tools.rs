@@ -169,7 +169,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "service_start",
-        description: "Starts a service in the Localify app's terminal, as its launch button does, so the user sees it there, and returns once it listens, with its URL. If it already runs, says so and starts nothing. Without a service, uses the one in cwd; in a folder that is not a project yet, creates the project and its domains first. Set background when the app is not installed. Read its output with service_logs.",
+        description: "Starts a service in the Localify app's terminal, as its launch button does, so the user sees it there, and returns once it listens, with its URL. If it already runs, says so and starts nothing, unless replace stops it first. Without a service, uses the one in cwd; in a folder that is not a project yet, creates the project and its domains first. Set background when the app is not installed. Read its output with service_logs.",
         params: &[
             param(
                 "service",
@@ -196,6 +196,11 @@ pub const TOOLS: &[Tool] = &[
                 Kind::StringList,
                 "With background: command to run instead of the service's dev command, one argument per item.",
             ),
+            param(
+                "replace",
+                Kind::Boolean,
+                "Stop the running instance first, then start it again. Without it, a service that already runs is left running and nothing starts.",
+            ),
         ],
         uses_cwd: true,
         read_only: false,
@@ -209,6 +214,7 @@ pub const TOOLS: &[Tool] = &[
             command
                 .flag("--in-app", !background)
                 .flag("--detach", background)
+                .flag("--replace", args.flag("replace")?)
                 .option("--project", args.string("project")?)
                 .option("--env", args.string("env")?)
                 .option("--domain", args.string("domain")?)
@@ -1124,6 +1130,22 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), TOOLS.len());
+    }
+
+    #[test]
+    fn service_start_replaces_a_running_instance_only_when_asked() {
+        assert_eq!(
+            build("service_start", json!({ "service": "web" })).unwrap(),
+            ["dev", "web", "--in-app"]
+        );
+        assert_eq!(
+            build(
+                "service_start",
+                json!({ "service": "web", "background": true, "replace": true })
+            )
+            .unwrap(),
+            ["dev", "web", "--detach", "--replace"]
+        );
     }
 
     #[test]
