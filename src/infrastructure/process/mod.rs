@@ -136,6 +136,22 @@ pub fn send_signal(pid: u32, signal: Signal) -> bool {
     unsafe { libc::kill(pid, signal.raw()) == 0 }
 }
 
+/// The foreground process group of this process's controlling terminal, as
+/// the terminal itself says, or `None` without a controlling terminal. A
+/// Ctrl+C typed there reached every process of that group.
+pub fn terminal_foreground_group() -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let terminal = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open("/dev/tty")
+        .ok()?;
+    // SAFETY: tcgetpgrp takes an open descriptor and touches no memory.
+    let group = unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
+    u32::try_from(group).ok().filter(|group| *group > 0)
+}
+
 /// A process known by its PID and start time, so a reused PID is never
 /// signalled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

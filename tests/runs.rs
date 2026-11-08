@@ -1318,77 +1318,122 @@ fn open_pty() -> (fs::File, fs::File) {
     unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) }
 }
 
-/// A service that writes a line to `count` for each SIGINT it gets, and ends
-/// by itself after about 3 seconds.
-fn counting_interrupts(count: &Path) -> String {
-    format!(
-        "trap \"echo int >> {}\" INT; i=0; while [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done",
-        count.display()
-    )
+/// A service that writes `ready` once it traps SIGINT, a line to `count` for
+/// each SIGINT it gets, and ends by itself after about 3 seconds.
+struct CountingService {
+    ready: PathBuf,
+    count: PathBuf,
 }
 
-fn interrupts_counted(count: &Path) -> usize {
-    fs::read_to_string(count)
-        .unwrap_or_default()
-        .lines()
-        .count()
+impl CountingService {
+    fn new(sandbox: &Sandbox) -> Self {
+        Self {
+            ready: sandbox.root.join("ready"),
+            count: sandbox.root.join("interrupts"),
+        }
+    }
+
+    fn script(&self) -> String {
+        format!(
+            "trap \"echo int >> {}\" INT; touch {}; i=0; while [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done",
+            self.count.display(),
+            self.ready.display()
+        )
+    }
+
+    fn wait_until_ready(&self) {
+        let ready = wait_until(Duration::from_secs(30), || {
+            self.ready.exists().then_some(())
+        });
+        assert!(ready.is_some(), "the service never trapped SIGINT");
+    }
+
+    fn interrupts(&self) -> usize {
+        fs::read_to_string(&self.count)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
 }
 
-#[test]
-fn a_terminal_s_ctrl_c_reaches_a_foreground_service_exactly_once() {
-    let sandbox = Sandbox::new();
-    let count = sandbox.root.join("interrupts");
+/// Runs `command` as the leader of a new session whose controlling terminal
+/// is a fresh PTY, types Ctrl+C there once `service` is ready, and returns how
+/// the command exited.
+fn ctrl_c_on_a_terminal(mut command: Command, service: &CountingService) -> Option<i32> {
     let (mut master, slave) = open_pty();
-    // A shell leads the terminal's session and runs `localify dev` in its
-    // foreground group, as a person's shell would. It traps Ctrl+C rather than
-    // ignore it: an ignored signal stays ignored in what it runs.
-    let mut shell = sandbox.in_sandbox("/bin/sh");
-    shell
-        .arg("-c")
-        .arg(format!(
-            "trap : INT; '{}' --config '{}' dev web --project app -- sh -c '{}'",
-            env!("CARGO_BIN_EXE_localify"),
-            sandbox.config.display(),
-            counting_interrupts(&count)
-        ))
+    command
         .stdin(slave.try_clone().unwrap())
         .stdout(slave.try_clone().unwrap())
         .stderr(slave);
     // SAFETY: only setsid and ioctl run between fork and exec; both are
     // async-signal-safe and touch no memory of the parent.
     unsafe {
-        shell.pre_exec(|| {
+        command.pre_exec(|| {
             if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    let mut shell = shell.spawn().unwrap();
-    drop(shell.stdin.take());
+    let mut child = command.spawn().unwrap();
     // What the terminal shows is read and dropped, so no writer ever blocks.
     let mut output = master.try_clone().unwrap();
     thread::spawn(move || io::copy(&mut output, &mut io::sink()));
-    sandbox.wait_for_record(|run| run.run_id().is_some());
-    thread::sleep(Duration::from_millis(500));
+    service.wait_until_ready();
 
     io::Write::write_all(&mut master, b"\x03").unwrap();
 
-    let status = shell.wait().unwrap();
-    assert_eq!(status.code(), Some(130));
-    assert_eq!(interrupts_counted(&count), 1);
+    child.wait().unwrap().code()
+}
+
+#[test]
+fn a_ctrl_c_typed_in_a_shell_s_terminal_reaches_the_service_once() {
+    let sandbox = Sandbox::new();
+    let service = CountingService::new(&sandbox);
+    // A shell leads the terminal's session and runs `localify dev` in its
+    // foreground group, as a person's shell would. It traps Ctrl+C rather than
+    // ignore it: an ignored signal stays ignored in what it runs.
+    let mut shell = sandbox.in_sandbox("/bin/sh");
+    shell.arg("-c").arg(format!(
+        "trap : INT; '{}' --config '{}' dev web --project app -- sh -c '{}'",
+        env!("CARGO_BIN_EXE_localify"),
+        sandbox.config.display(),
+        service.script()
+    ));
+
+    assert_eq!(ctrl_c_on_a_terminal(shell, &service), Some(130));
+    assert_eq!(service.interrupts(), 1);
+}
+
+#[test]
+fn a_ctrl_c_typed_in_the_terminal_localify_leads_reaches_the_service_once() {
+    let sandbox = Sandbox::new();
+    let service = CountingService::new(&sandbox);
+    // `localify dev` itself leads the session, with the PTY as its terminal.
+    let dev = sandbox.localify(&[
+        "dev",
+        "web",
+        "--project",
+        "app",
+        "--",
+        "sh",
+        "-c",
+        &service.script(),
+    ]);
+
+    assert_eq!(ctrl_c_on_a_terminal(dev, &service), Some(130));
+    assert_eq!(service.interrupts(), 1);
 }
 
 #[test]
 fn a_ctrl_c_sent_to_a_detached_run_is_forwarded_to_its_service() {
     let sandbox = Sandbox::new();
-    let count = sandbox.root.join("interrupts");
-    let mut executor = sandbox.spawn_background(&counting_interrupts(&count));
-    sandbox.wait_for_record(|run| run.run_id().is_some());
-    thread::sleep(Duration::from_millis(500));
+    let service = CountingService::new(&sandbox);
+    let mut executor = sandbox.spawn_background(&service.script());
+    service.wait_until_ready();
 
     assert!(process::send_signal(executor.id(), Signal::Interrupt));
 
     executor.wait().unwrap();
-    assert_eq!(interrupts_counted(&count), 1);
+    assert_eq!(service.interrupts(), 1);
 }

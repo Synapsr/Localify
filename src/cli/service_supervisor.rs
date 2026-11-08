@@ -28,7 +28,8 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
 use crate::infrastructure::process::{
-    Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities, track_tree,
+    Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities,
+    terminal_foreground_group, track_tree,
 };
 use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT};
 use crate::infrastructure::runs::output::StreamSink;
@@ -128,12 +129,19 @@ pub enum Capture {
     Failed(String),
 }
 
-/// Stop requests from outside the service: each Ctrl+C, and a SIGTERM or
-/// SIGHUP sent to `localify dev` itself.
+/// Requests from outside the service: each Ctrl+C, and a SIGTERM or SIGHUP
+/// sent to `localify dev` itself.
 #[derive(Default)]
 pub struct StopRequests {
     pub interrupts: AtomicUsize,
-    pub signalled: AtomicBool,
+    /// A SIGTERM was forwarded: a stop, as `localify stop` asks for one.
+    pub terminated: AtomicBool,
+    /// A SIGHUP was forwarded, and nothing more: a service may trap it to
+    /// reload, or ignore a terminal that closed.
+    pub hung_up: AtomicBool,
+    /// Held by a test to keep supervision from polling.
+    #[cfg(test)]
+    pub poll_gate: std::sync::Mutex<()>,
 }
 
 impl StopRequests {
@@ -141,8 +149,14 @@ impl StopRequests {
         self.interrupts.load(Ordering::SeqCst)
     }
 
+    /// Whether a stop was asked for, which the run then stops on.
+    fn stopping(&self) -> bool {
+        self.presses() > 0 || self.terminated.load(Ordering::SeqCst)
+    }
+
+    /// Whether anything from outside ended the service.
     fn any(&self) -> bool {
-        self.presses() > 0 || self.signalled.load(Ordering::SeqCst)
+        self.stopping() || self.hung_up.load(Ordering::SeqCst)
     }
 }
 
@@ -298,8 +312,8 @@ struct Stopping<'a> {
     members: Vec<Identity>,
     expiring_since: Option<Instant>,
     interrupted_since: Option<Instant>,
-    /// A SIGTERM or SIGHUP sent to `localify dev` was forwarded to the service.
-    signalled_since: Option<Instant>,
+    /// A SIGTERM sent to `localify dev` was forwarded to the service.
+    terminated_since: Option<Instant>,
     /// The service exited by itself, and its session is being emptied.
     cleaning_since: Option<Instant>,
     terminated: bool,
@@ -316,7 +330,7 @@ impl<'a> Stopping<'a> {
             members: Vec::new(),
             expiring_since: None,
             interrupted_since: None,
-            signalled_since: None,
+            terminated_since: None,
             cleaning_since: None,
             terminated: false,
         }
@@ -342,7 +356,7 @@ impl<'a> Stopping<'a> {
     fn stopping(&self) -> bool {
         self.expiring_since.is_some()
             || self.interrupted_since.is_some()
-            || self.signalled_since.is_some()
+            || self.terminated_since.is_some()
     }
 
     /// A stop is after the service's tree and the session; a cleanup after a
@@ -377,12 +391,8 @@ impl<'a> Stopping<'a> {
     /// The first Ctrl+C: SIGINT to whoever no terminal reached (see
     /// [`interrupt_targets`]).
     fn interrupt(&mut self, now: Instant, scan: &[ProcessInfo]) {
-        let own_group = scan
-            .iter()
-            .find(|process| process.pid == std::process::id())
-            .map(|process| process.pgid);
-        let dedicated = self.leader.is_some();
-        let targets = interrupt_targets(&self.targets_on_interrupt(), scan, own_group, dedicated);
+        let terminal_group = terminal_foreground_group();
+        let targets = interrupt_targets(&self.targets_on_interrupt(), scan, terminal_group);
         self.signal(&targets, Signal::Interrupt);
         self.interrupted_since = Some(now);
     }
@@ -404,7 +414,7 @@ impl<'a> Stopping<'a> {
         let targets = self.targets();
         let kill = match (
             self.interrupted_since,
-            self.expiring_since.or(self.signalled_since),
+            self.expiring_since.or(self.terminated_since),
             self.cleaning_since,
         ) {
             (Some(since), _, _) => presses >= 2 || now >= since + self.grace * 2,
@@ -429,7 +439,7 @@ impl<'a> Stopping<'a> {
     fn kill_due(&self) -> Option<Instant> {
         match (
             self.interrupted_since,
-            self.expiring_since.or(self.signalled_since),
+            self.expiring_since.or(self.terminated_since),
             self.cleaning_since,
         ) {
             (Some(since), _, _) => Some(since + self.grace * 2),
@@ -439,19 +449,18 @@ impl<'a> Stopping<'a> {
     }
 }
 
-/// Who gets a forwarded SIGINT. In a terminal, `localify dev` does not lead
-/// its session, and the terminal delivers a Ctrl+C to the whole foreground
-/// group, so only processes outside `localify dev`'s own group get one: those
-/// that left it. In a session of its own, no terminal delivers anything, so
-/// every process does. Where the SIGINT came from is not asked: on macOS a
-/// terminal's Ctrl+C carries a sender, as a `kill` does. A `kill -INT` of
-/// `localify dev` in a terminal therefore reaches its group only through the
-/// SIGTERM and SIGKILL that follow.
+/// Who gets a forwarded SIGINT: every process outside the foreground group
+/// of `localify dev`'s controlling terminal, which the terminal already
+/// reached with the Ctrl+C, whoever leads the session and wherever a shell
+/// moved that group. Without a controlling terminal (a detached run), every
+/// process gets one. Where the SIGINT came from is not asked: on macOS a
+/// terminal's Ctrl+C names a sender, as a `kill` does. A `kill -INT` of
+/// `localify dev` in a terminal therefore reaches the foreground group only
+/// through the SIGTERM and SIGKILL that follow.
 fn interrupt_targets(
     targets: &[Identity],
     scan: &[ProcessInfo],
-    own_group: Option<u32>,
-    dedicated_session: bool,
+    terminal_group: Option<u32>,
 ) -> Vec<Identity> {
     targets
         .iter()
@@ -460,7 +469,7 @@ fn interrupt_targets(
                 .iter()
                 .find(|process| Identity::of(process) == **target)
                 .map(|process| process.pgid);
-            dedicated_session || (own_group.is_some() && group.is_some() && group != own_group)
+            terminal_group.is_none() || group != terminal_group
         })
         .copied()
         .collect()
@@ -506,12 +515,14 @@ fn supervise(
     let mut next_scan = started;
     let mut scan = Vec::new();
     let status = loop {
+        #[cfg(test)]
+        drop(stops.poll_gate.lock());
         let now = Instant::now();
         let expiring = launch
             .max_duration
             .is_some_and(|duration| now.duration_since(started) >= duration);
         // Every process is scanned only as often as the run's state needs.
-        let busy = stopping.stopping() || expiring || stops.any();
+        let busy = stopping.stopping() || expiring || stops.stopping();
         if busy || now >= next_scan {
             scan = stopping.track();
             next_scan = now
@@ -580,9 +591,9 @@ fn supervise(
     (Ok(outcome), cleanup)
 }
 
-/// Turns pending stop requests into a stop: a Ctrl+C, or a SIGTERM or SIGHUP
-/// already forwarded to the service, whose survivors get SIGKILL after the
-/// grace period.
+/// Turns pending stop requests into a stop: a Ctrl+C, or a SIGTERM already
+/// forwarded to the service, whose survivors get SIGKILL after the grace
+/// period. A SIGHUP is only forwarded.
 fn respond_to_stop_requests(
     stopping: &mut Stopping<'_>,
     stops: &StopRequests,
@@ -593,8 +604,8 @@ fn respond_to_stop_requests(
     if presses > 0 && stopping.interrupted_since.is_none() {
         stopping.interrupt(now, scan);
     }
-    if stops.signalled.load(Ordering::SeqCst) && stopping.signalled_since.is_none() {
-        stopping.signalled_since = Some(now);
+    if stops.terminated.load(Ordering::SeqCst) && stopping.terminated_since.is_none() {
+        stopping.terminated_since = Some(now);
     }
     stopping.escalate(now, presses);
 }
@@ -626,7 +637,6 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
             };
             let _ = ready_sender.send(());
             let forward = |signal: Signal| {
-                stops.signalled.store(true, Ordering::SeqCst);
                 signal_identities(&track_tree(&[root], &all_processes()), signal);
             };
             loop {
@@ -634,8 +644,14 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
                     _ = interrupt.recv() => {
                         stops.interrupts.fetch_add(1, Ordering::SeqCst);
                     }
-                    _ = terminate.recv() => forward(Signal::Terminate),
-                    _ = hangup.recv() => forward(Signal::Hangup),
+                    _ = terminate.recv() => {
+                        stops.terminated.store(true, Ordering::SeqCst);
+                        forward(Signal::Terminate);
+                    }
+                    _ = hangup.recv() => {
+                        stops.hung_up.store(true, Ordering::SeqCst);
+                        forward(Signal::Hangup);
+                    }
                 }
             }
         });
@@ -1198,16 +1214,22 @@ mod tests {
         let stops = Arc::new(StopRequests::default());
         let pressing = Arc::clone(&stops);
         thread::spawn(move || {
-            // Once a healthy scan has seen the worker, a terminal's Ctrl+C:
-            // counted by `localify dev`, and the launcher ended at once.
+            // Once a healthy scan has seen the worker, a terminal's Ctrl+C,
+            // with supervision held until the launcher has really exited, so
+            // its next poll finds the exit and the Ctrl+C together.
             thread::sleep(SCAN_WHILE_HEALTHY + Duration::from_millis(500));
             let launcher: u32 = std::fs::read_to_string(launcher_pid)
                 .unwrap()
                 .trim()
                 .parse()
                 .unwrap();
-            pressing.interrupts.fetch_add(1, Ordering::SeqCst);
+            let held = pressing.poll_gate.lock().unwrap();
             crate::infrastructure::process::send_signal(launcher, Signal::Interrupt);
+            while crate::infrastructure::process::process_info(launcher).is_some() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            pressing.interrupts.fetch_add(1, Ordering::SeqCst);
+            drop(held);
         });
 
         let end = run_with(request, stops, false).unwrap();
@@ -1220,7 +1242,45 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_c_in_a_terminal_skips_the_group_the_terminal_reached() {
+    fn a_forwarded_sighup_is_only_forwarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let done = dir.path().join("done");
+        // Traps SIGHUP, as a service that reloads does, and ends by itself.
+        let command = shell(&format!(
+            "trap : HUP; echo $$ > '{}'; i=0; while [ $i -lt 15 ]; do sleep 0.1; i=$((i+1)); done; touch '{}'",
+            ready.display(),
+            done.display()
+        ));
+        let environment = LaunchEnvironment::default();
+        let finisher = Finisher {
+            table: &crate::infrastructure::process::NativeProcesses,
+            grace: Duration::from_millis(200),
+        };
+        let mut request = launch(&command, &environment, dir.path(), &|| {});
+        request.finisher = &finisher;
+        let stops = Arc::new(StopRequests::default());
+        let hanging_up = Arc::clone(&stops);
+        thread::spawn(move || {
+            let service = loop {
+                match std::fs::read_to_string(&ready).map(|pid| pid.trim().parse::<u32>()) {
+                    Ok(Ok(pid)) => break pid,
+                    _ => thread::sleep(Duration::from_millis(10)),
+                }
+            };
+            // What the watcher does with a SIGHUP sent to `localify dev`.
+            hanging_up.hung_up.store(true, Ordering::SeqCst);
+            crate::infrastructure::process::send_signal(service, Signal::Hangup);
+        });
+
+        let end = run_with(request, stops, false).unwrap();
+
+        assert!(end.cleanup.is_ok());
+        assert!(done.exists(), "a SIGHUP ended the service");
+    }
+
+    #[test]
+    fn a_ctrl_c_skips_the_group_the_terminal_reached() {
         let own = |pid, pgid| crate::infrastructure::process::ProcessInfo {
             pid,
             ppid: 1,
@@ -1232,11 +1292,11 @@ mod tests {
         let scan = [own(10, 7), own(11, 8)];
         let targets: Vec<Identity> = scan.iter().map(Identity::of).collect();
 
-        let in_a_terminal = interrupt_targets(&targets, &scan, Some(7), false);
-        let in_its_own_session = interrupt_targets(&targets, &scan, Some(7), true);
+        let with_a_terminal = interrupt_targets(&targets, &scan, Some(7));
+        let without_one = interrupt_targets(&targets, &scan, None);
 
-        assert_eq!(in_a_terminal, [Identity::of(&scan[1])]);
-        assert_eq!(in_its_own_session, targets);
+        assert_eq!(with_a_terminal, [Identity::of(&scan[1])]);
+        assert_eq!(without_one, targets);
     }
 
     #[test]
