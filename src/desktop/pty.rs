@@ -241,6 +241,7 @@ fn descriptor_limit() -> libc::c_int {
 }
 
 /// Keeps a descriptor out of every other child the process starts.
+#[cfg(target_os = "macos")]
 fn close_on_exec(file: &File) -> Result<()> {
     // SAFETY: F_SETFD on a descriptor this process owns changes only its flags.
     let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
