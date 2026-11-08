@@ -155,34 +155,74 @@ export function grantFields(grant: AddonGrant): ProFields {
   };
 }
 
+/** Polar's subscription statuses, the only ones a grant may hold. */
+const SUBSCRIPTION_STATUSES = new Set([
+  "trialing",
+  "active",
+  "past_due",
+  "canceled",
+  "unpaid",
+  "paused",
+  "incomplete",
+  "incomplete_expired",
+]);
+/** The largest Unix millisecond time a `Date` can hold. */
+const MAX_TIME_MS = 8.64e15;
+
+/** A time as grants store it: null, or a whole number of milliseconds a `Date` can hold. */
+function isTime(value: unknown): value is number | null {
+  return (
+    value === null || (Number.isSafeInteger(value) && Math.abs(value as number) <= MAX_TIME_MS)
+  );
+}
+
+/** A complete, valid grant, or null: every field present and of its type. */
+function readGrant(value: unknown): AddonGrant | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const grant = value as Record<string, unknown>;
+  const valid =
+    typeof grant.id === "string" &&
+    (grant.kind === "machine" || grant.kind === "urls") &&
+    Number.isInteger(grant.units) &&
+    (grant.units as number) >= 1 &&
+    (grant.units as number) <= MAX_ADDON_UNITS &&
+    typeof grant.status === "string" &&
+    SUBSCRIPTION_STATUSES.has(grant.status) &&
+    typeof grant.cancel_at_period_end === "boolean" &&
+    isTime(grant.current_period_end) &&
+    isTime(grant.trial_end) &&
+    isTime(grant.ends_at) &&
+    isTime(grant.ended_at) &&
+    isTime(grant.past_due_at);
+  return valid ? (grant as AddonGrant) : null;
+}
+
 /**
  * The add-on units that count right now: each grant the lifecycle table
  * makes entitled at `now`, summed per kind, at most `MAX_ADDON_UNITS` each.
- * Unreadable JSON counts as none.
+ * Unreadable JSON, a value that is not an array, and any grant that is not
+ * complete and valid count as none; nothing here throws, so one bad row
+ * never stops a serving read or the sweep.
  */
 export function addonsOf(grantsJson: string | null, now: number): Account["plan"]["addons"] {
-  let grants: unknown;
-  try {
-    grants = JSON.parse(grantsJson ?? "[]");
-  } catch {
-    grants = [];
-  }
   const units = { machine: 0, urls: 0 };
-  for (const grant of Array.isArray(grants) ? (grants as AddonGrant[]) : []) {
-    if (
-      (grant?.kind === "machine" || grant?.kind === "urls") &&
-      Number.isInteger(grant.units) &&
-      grant.units > 0 &&
-      proPlan(grantFields(grant), now).entitled
-    ) {
-      units[grant.kind] += grant.units;
+  try {
+    const grants: unknown = JSON.parse(grantsJson ?? "[]");
+    for (const value of Array.isArray(grants) ? grants : []) {
+      const grant = readGrant(value);
+      if (grant !== null && proPlan(grantFields(grant), now).entitled)
+        units[grant.kind] += grant.units;
     }
+  } catch (error) {
+    console.error("Add-on grants that cannot be read count as none", error);
+    return { machines: 0, urlPacks: 0 };
   }
   return {
     machines: Math.min(units.machine, MAX_ADDON_UNITS),
     urlPacks: Math.min(units.urls, MAX_ADDON_UNITS),
   };
 }
+
 /** A `past_due` plan stays entitled this long after Polar's `past_due_at`. */
 export const PAST_DUE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 

@@ -7,10 +7,11 @@
 // kept an hour per currency in the Cache API and in the isolate, and served
 // stale for up to 7 days when it cannot be read again; with nothing kept, it
 // is a 503. The public traffic shares Polar's rate limit with billing, so
-// whatever the traffic, a location asks Polar at most once a minute, and
-// after a failure waits 5 minutes or what `Retry-After` asks: a refresh
-// marker in the Cache API and in the isolate, and the `PRICING_LIMITER`
-// binding before any call.
+// whatever the traffic, a location asks Polar approximately once a minute at
+// most, and after a failure waits 5 minutes or what `Retry-After` asks: a
+// refresh marker in the Cache API and in the isolate, and the
+// `PRICING_LIMITER` binding before any call. Both are per location and
+// approximate, so this is no strict global bound.
 
 import { setting } from "./config";
 import { PRO, URLS_PER_PACK } from "./entitlement";
@@ -22,7 +23,7 @@ const HOUR = 60 * MINUTE;
 const FRESH_MS = HOUR;
 /** The longest a price is served, stale, when it cannot be read again. */
 const STALE_MS = 7 * 24 * HOUR;
-/** At most one Polar call per location in this time, for both currencies. */
+/** Approximately one Polar call per location in this time at most, for both currencies. */
 const REFRESH_INTERVAL_MS = MINUTE;
 /** After a failed call, the next one waits this long, or what `Retry-After` asks. */
 const FAILURE_BACKOFF_MS = 5 * MINUTE;

@@ -24,6 +24,7 @@ import {
   ACCOUNT_SQL,
   addonsOf,
   loadAccount,
+  MAX_ADDON_UNITS,
   proLapsed,
   proPlan,
   type AccountRow,
@@ -66,8 +67,6 @@ const MAX_PAGES_PER_USER = 5;
 const REFRESH_ATTEMPTS = 3;
 /** A failed revocation or add-on cancellation waits this long, doubling up to a day. */
 const POLAR_WRITE_RETRY_BASE_MS = 5 * MINUTE;
-/** Canceled add-ons are kept on record this long. */
-const CANCELLATION_RETENTION_MS = 30 * DAY;
 
 /** An open checkout is reused while it expires more than this from now. */
 const CHECKOUT_REUSE_MARGIN_MS = 5 * MINUTE;
@@ -93,9 +92,9 @@ const OWED_PER_RUN = 10;
 const REVOCATIONS_PER_RUN = 10;
 /** Add-on cancellations a run attempts, after the refreshes, on the run's budgets. */
 const CANCELLATIONS_PER_RUN = 10;
-/** The most one cancellation makes: its reads and writes, and a restoration after it. */
-const CANCELLATION_QUERIES = 6;
-const CANCELLATION_CALLS = 2;
+/** The most one cancellation makes: the snapshot's read, then one write or batch, and its call. */
+const CANCELLATION_QUERIES = 2;
+const CANCELLATION_CALLS = 1;
 /** What the refreshes leave the cancellations: two of them, and their listing. */
 const CANCELLATION_RESERVE_QUERIES = 1 + 2 * CANCELLATION_QUERIES;
 const CANCELLATION_RESERVE_CALLS = 2 * CANCELLATION_CALLS;
@@ -395,7 +394,8 @@ function snapshotOf(
       (s): AddonGrant => ({
         id: s.id,
         kind: s.productId === machine ? "machine" : "urls",
-        units: s.units ?? 1,
+        // No more than counts: a grant holds 1 to 20 units.
+        units: Math.min(s.units ?? 1, MAX_ADDON_UNITS),
         status: s.status,
         cancel_at_period_end: s.cancelAtPeriodEnd,
         current_period_end: s.currentPeriodEnd,
@@ -446,7 +446,8 @@ const MAY_WRITE = `?2 > COALESCE((SELECT revision FROM billing WHERE user_id = ?
 
 /**
  * Commits the snapshot in one batch: the serving reconcile owed when the
- * snapshot changes, the duplicates found, the add-ons of a lapsed plan, and
+ * snapshot changes, the duplicates found, the add-ons of a lapsed plan (the
+ * records it settles dropped, the ones still to cancel recorded), and
  * the snapshot itself, each under `MAY_WRITE`; then, while the revision
  * holds, the trial history and the end of the user's turn in the
  * reconciliation queue. Once committed,
@@ -474,7 +475,7 @@ async function commit(
     pro.past_due_at,
     JSON.stringify(snapshot.addonGrants),
   ];
-  const [, duplicates, , , , , held, owed] = await env.DB.batch<Record<string, unknown>>([
+  const [, duplicates, , , , , , held, owed] = await env.DB.batch<Record<string, unknown>>([
     // Any change of the snapshot may change what serves.
     env.DB.prepare(
       `UPDATE billing_revisions SET serving_due_at = COALESCE(serving_due_at, ?5)
@@ -492,6 +493,14 @@ async function commit(
        ON CONFLICT (subscription_id) DO NOTHING
        RETURNING subscription_id`,
     ).bind(...decides, now),
+    // A record whose subscription this refresh read and does not list as
+    // lapsed is settled: canceled, ended, or kept because Pro is back. Its
+    // state is now known, so it goes. Add-ons are never resumed.
+    env.DB.prepare(
+      `DELETE FROM addon_cancellations
+       WHERE user_id = ?1 AND subscription_id NOT IN (SELECT value FROM json_each(?5))
+         AND ${MAY_WRITE}`,
+    ).bind(...decides, JSON.stringify(snapshot.lapsedAddons)),
     // At this snapshot's revision: the 5-minute job cancels them at period
     // end only while `billing` still holds it. One canceled before that
     // renews again, set back in the portal while Pro is still lapsed: it is
@@ -812,7 +821,6 @@ type CancellationRow = {
   subscription_id: string;
   user_id: string;
   revision: number;
-  state: "pending" | "restoring";
   attempts: number;
 };
 
@@ -833,11 +841,10 @@ async function billingState(env: Env, userId: string): Promise<BillingState | nu
  * Cancels at period end the add-ons a refresh found renewing while their
  * Pro plan had lapsed, after the run's refreshes and within its budgets,
  * without a refund: an add-on needs Pro, so it stops charging for nothing.
- * Each is fenced by the snapshot's revision (`cancelAddon`), and one
- * canceled while the plan came back is set to renew again
- * (`restoreAddon`). Those never tried go first, then the others by their
- * next attempt; one that fails waits like a failed revocation. Polar's rate
- * limit ends them.
+ * Nothing here ever sets an add-on to renew again: if Pro comes back, the
+ * user resumes it in the portal. Those never tried go first, then the
+ * others by their next attempt; one that fails waits like a failed
+ * revocation. Polar's rate limit ends them.
  */
 async function cancelLapsedAddons(
   env: Env,
@@ -849,8 +856,8 @@ async function cancelLapsedAddons(
   if (!queries.has(1 + CANCELLATION_QUERIES + OWED_QUERIES + 1)) return;
   if (!calls.has(CANCELLATION_CALLS)) return;
   const { results } = await env.DB.prepare(
-    `SELECT subscription_id, user_id, revision, state, attempts FROM addon_cancellations
-     WHERE state != 'canceled' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
+    `SELECT subscription_id, user_id, revision, attempts FROM addon_cancellations
+     WHERE state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
      ORDER BY next_attempt_at IS NOT NULL, next_attempt_at, created_at, subscription_id
      LIMIT ?2`,
   )
@@ -860,8 +867,7 @@ async function cancelLapsedAddons(
     if (!queries.has(CANCELLATION_QUERIES + OWED_QUERIES + 1)) return;
     if (!calls.has(CANCELLATION_CALLS)) return;
     try {
-      if (row.state === "pending") await cancelAddon(env, row, api, now);
-      else await restoreAddon(env, row, api, now);
+      await cancelAddon(env, row, api, now);
     } catch (error) {
       if (error instanceof ConfigError) throw error;
       if (isRateLimited(error)) {
@@ -881,7 +887,7 @@ async function cancelLapsedAddons(
         .bind(row.subscription_id, attempts, retryAt(now, attempts))
         .run();
       console.error(
-        `Canceling or restoring add-on subscription ${row.subscription_id} of user ${row.user_id} failed; it is retried`,
+        `Canceling add-on subscription ${row.subscription_id} of user ${row.user_id} failed; it is retried`,
         error,
       );
     }
@@ -890,12 +896,13 @@ async function cancelLapsedAddons(
 
 /**
  * Cancels one add-on, fenced by the revision of the refresh that recorded
- * it. Right before the call, D1 must still hold that revision with the plan
- * lapsed; otherwise a newer refresh overtook it, and the record goes (a
- * newer refresh that still finds the plan lapsed records it again, at its
- * own revision). After the call, it is marked canceled only while that
- * still holds. If a refresh committed while Polar answered: still lapsed,
- * the cancellation stands; Pro back, the add-on is set to renew again.
+ * it: right before the call, D1 must still hold that revision with the plan
+ * lapsed. Otherwise nothing is called, and the record waits for a refresh,
+ * queued here, to settle it: dropped once it shows the subscription's
+ * state, or recorded again at its revision when the plan is still lapsed.
+ * A cancellation whose answer was lost, after which Pro came back, may have
+ * applied: it stands, and that refresh drops its record. Once Polar
+ * answers, the cancellation stands whatever happened meanwhile.
  */
 async function cancelAddon(
   env: Env,
@@ -905,81 +912,28 @@ async function cancelAddon(
 ): Promise<void> {
   const before = await billingState(env, row.user_id);
   if (before?.revision !== row.revision || !proLapsed(before, now)) {
-    await env.DB.prepare(
-      `DELETE FROM addon_cancellations
-       WHERE subscription_id = ?1 AND state = 'pending' AND revision = ?2`,
-    )
-      .bind(row.subscription_id, row.revision)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE addon_cancellations SET next_attempt_at = ?2 WHERE subscription_id = ?1`,
+      ).bind(row.subscription_id, now + POLAR_WRITE_RETRY_BASE_MS),
+      env.DB.prepare(
+        `INSERT INTO billing_revisions (user_id, last, check_due_at) VALUES (?1, 0, ?2)
+         ON CONFLICT (user_id) DO UPDATE SET
+           check_due_at = COALESCE(billing_revisions.check_due_at, excluded.check_due_at)`,
+      ).bind(row.user_id, now),
+    ]);
     return;
   }
-  await api().setCancelAtPeriodEnd(row.subscription_id, true);
-  const fenced = await env.DB.prepare(
-    `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?3, attempts = 0,
-       next_attempt_at = NULL
-     WHERE subscription_id = ?1 AND revision = ?2
-       AND EXISTS (SELECT 1 FROM billing WHERE user_id = ?4 AND revision = ?2)`,
-  )
-    .bind(row.subscription_id, row.revision, now, row.user_id)
-    .run();
-  if (fenced.meta.changes > 0) {
-    console.warn(
-      `Add-on subscription ${row.subscription_id} of user ${row.user_id} ends with its period: its Pro plan lapsed`,
-    );
-    return;
-  }
-  const after = await billingState(env, row.user_id);
-  if (after !== null && proLapsed(after, now)) {
-    await env.DB.prepare(
-      `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?3, revision = ?2,
-         attempts = 0, next_attempt_at = NULL
-       WHERE subscription_id = ?1`,
-    )
-      .bind(row.subscription_id, after.revision, now)
-      .run();
-    return;
-  }
-  // Pro came back while the cancellation was on its way.
+  await api().cancelAtPeriodEnd(row.subscription_id);
   await env.DB.prepare(
-    `UPDATE addon_cancellations SET state = 'restoring', revision = ?2, attempts = 0,
+    `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?2, attempts = 0,
        next_attempt_at = NULL
      WHERE subscription_id = ?1`,
   )
-    .bind(row.subscription_id, after?.revision ?? row.revision)
-    .run();
-  await restoreAddon(env, { ...row, state: "restoring" }, api, now);
-}
-
-/**
- * Sets an add-on canceled while its plan came back to renew again, then
- * forgets it. A plan lapsed again since keeps the cancellation instead.
- * Setting it twice is harmless, so a retry is too.
- */
-async function restoreAddon(
-  env: Env,
-  row: CancellationRow,
-  api: () => PolarApi,
-  now: number,
-): Promise<void> {
-  const state = await billingState(env, row.user_id);
-  if (state !== null && proLapsed(state, now)) {
-    await env.DB.prepare(
-      `UPDATE addon_cancellations SET state = 'canceled', canceled_at = ?3, revision = ?2,
-         attempts = 0, next_attempt_at = NULL
-       WHERE subscription_id = ?1 AND state = 'restoring'`,
-    )
-      .bind(row.subscription_id, state.revision, now)
-      .run();
-    return;
-  }
-  await api().setCancelAtPeriodEnd(row.subscription_id, false);
-  await env.DB.prepare(
-    `DELETE FROM addon_cancellations WHERE subscription_id = ?1 AND state = 'restoring'`,
-  )
-    .bind(row.subscription_id)
+    .bind(row.subscription_id, now)
     .run();
   console.warn(
-    `Add-on subscription ${row.subscription_id} of user ${row.user_id} renews again: its Pro plan came back`,
+    `Add-on subscription ${row.subscription_id} of user ${row.user_id} ends with its period: its Pro plan lapsed`,
   );
 }
 
@@ -991,8 +945,7 @@ async function restoreAddon(
  * came costs at most a day. The listing reads `DAILY_PAGES` pages: the
  * newest one, then a window that moves each day, so every page is read
  * within a few days however many there are. The 5-minute job does the
- * refreshes. Processed events older than 30 days go, and so do add-ons
- * canceled more than 30 days ago.
+ * refreshes. Processed events older than 30 days go.
  */
 export async function reconcileBilling(env: Env, now = Date.now()): Promise<void> {
   await env.DB.prepare(
@@ -1035,11 +988,6 @@ export async function reconcileBilling(env: Env, now = Date.now()): Promise<void
     `DELETE FROM webhook_events WHERE processed_at IS NOT NULL AND processed_at < ?1`,
   )
     .bind(now - EVENT_RETENTION_MS)
-    .run();
-  await env.DB.prepare(
-    `DELETE FROM addon_cancellations WHERE state = 'canceled' AND canceled_at < ?1`,
-  )
-    .bind(now - CANCELLATION_RETENTION_MS)
     .run();
 }
 

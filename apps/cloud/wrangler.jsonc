@@ -58,8 +58,8 @@
       "namespace_id": "1005",
       "simple": { "limit": 6, "period": 60 }
     },
-    // /v1/pricing's calls to Polar, one key for all: at most one a minute
-    // per location, whatever the public traffic, since billing shares
+    // /v1/pricing's calls to Polar, one key for all: approximately one a
+    // minute per location, whatever the public traffic, since billing shares
     // Polar's rate limit (docs/public-urls.md, "Pricing").
     {
       "name": "PRICING_LIMITER",

@@ -277,17 +277,63 @@ describe("the lifecycle table", () => {
     );
   });
 
-  it("counts at most 20 units of each add-on, whatever Polar holds", async () => {
+  it("counts at most 20 units of each add-on, across its grants", async () => {
+    const machines = JSON.parse(grants(15, 15)) as Record<string, unknown>[];
+    const twice = JSON.stringify([
+      ...machines,
+      ...machines.map((g) => ({ ...g, id: `${g.id}-2` })),
+    ]);
     const { entitlement, plan } = await account({
-      billing: { pro_status: "active", addon_grants: grants(25, 30) },
+      billing: { pro_status: "active", addon_grants: twice },
     });
     expect(plan.addons).toEqual({ machines: 20, urlPacks: 20 });
     expect(entitlement).toEqual({ servingMachines: 22, publicUrls: 210, remoteAccess: true });
   });
 
-  it("counts unreadable grants as none", async () => {
-    const { plan } = await account({ billing: { pro_status: "active", addon_grants: "{" } });
-    expect(plan.addons).toEqual({ machines: 0, urlPacks: 0 });
+  it("ignores every grant that is not complete and valid, and never throws", async () => {
+    const valid = JSON.parse(grants(1, 0))[0] as Record<string, unknown>;
+    const { current_period_end: _, ...missing } = valid;
+    const invalid: unknown[] = [
+      { ...valid, current_period_end: "not-a-date" },
+      { ...valid, current_period_end: 1e20 },
+      { ...valid, ends_at: -1e17 },
+      { ...valid, past_due_at: 1.5 },
+      missing,
+      { id: valid.id, kind: "machine", units: 1 },
+      { ...valid, units: 21 },
+      { ...valid, units: 0 },
+      { ...valid, units: 1.5 },
+      { ...valid, kind: "seat" },
+      { ...valid, status: "lifetime" },
+      { ...valid, cancel_at_period_end: "false" },
+      { ...valid, id: 7 },
+      null,
+      "grant",
+      [valid],
+    ];
+    for (const grant of invalid) {
+      const { entitlement, plan } = await account({
+        billing: { pro_status: "active", addon_grants: JSON.stringify([grant]) },
+      });
+      expect(plan.addons, JSON.stringify(grant)).toEqual({ machines: 0, urlPacks: 0 });
+      // The Pro plan itself is untouched.
+      expect(entitlement).toEqual(PRO);
+    }
+    // A valid grant beside them still counts.
+    const mixed = JSON.stringify([...invalid, valid]);
+    expect(
+      (await account({ billing: { pro_status: "active", addon_grants: mixed } })).plan.addons,
+    ).toEqual({ machines: 1, urlPacks: 0 });
+  });
+
+  it("counts unreadable JSON, and JSON that is not an array, as no add-on", async () => {
+    for (const json of ["{", '{"a":1}', '"x"', "null", "5", "true"]) {
+      const { entitlement, plan } = await account({
+        billing: { pro_status: "active", addon_grants: json },
+      });
+      expect(plan.addons, json).toEqual({ machines: 0, urlPacks: 0 });
+      expect(entitlement).toEqual(PRO);
+    }
   });
 });
 

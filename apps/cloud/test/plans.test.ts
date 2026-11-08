@@ -766,6 +766,34 @@ describe("add-ons that end by time alone", () => {
   });
 });
 
+describe("malformed add-on grants", () => {
+  it("cost their owner the add-on, never a serving read or the sweep", async () => {
+    const bad = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    setBilling(bad.userId, {
+      pro_status: "active",
+      addon_grants: addonGrants(0, 1, { current_period_end: 1e20 }),
+    });
+    const other = await signIn(context, "other", 2, "desk");
+    const mine = await createUrl(bad.token, "journal.localify");
+    const theirs = await createUrl(other.token, "notes.localify");
+    setOverride(other.userId, 5, 0);
+
+    expect((await me(bad.token)).body.plan).toMatchObject({
+      limits: { servingMachines: 2, publicUrls: 10 },
+      addons: { machines: 0, urlPacks: 0 },
+    });
+    expect((await serve(context, bad.token)).status).toBe(200);
+    await runSweep(context.env, Date.now());
+    expect(await states(bad.token)).toEqual({ [mine.body.publicUrl.slug]: "serving" });
+    // The sweep went on to the next owner.
+    expect(
+      context.sqlite
+        .prepare("SELECT suspended_at FROM public_urls WHERE id = ?")
+        .get(theirs.body.publicUrl.id),
+    ).not.toEqual({ suspended_at: null });
+  });
+});
+
 describe("signed-in machines", () => {
   it("make room for every serving machine a plan pays for, and 8 more", async () => {
     const first = await signIn(context, "teo-goulois", 1, "machine-0", { entitled: false });

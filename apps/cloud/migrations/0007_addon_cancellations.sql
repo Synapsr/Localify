@@ -15,14 +15,14 @@ ALTER TABLE billing ADD COLUMN addon_grants TEXT NOT NULL DEFAULT '[]';
 -- lapsed. Recorded by the refresh that finds it, in the commit of its
 -- snapshot, at that snapshot's `revision`; the 5-minute job cancels it only
 -- while `billing` still holds that revision and the plan is still lapsed.
--- `state`: `pending`, to cancel; `canceled`, done; `restoring`, canceled
--- while the plan came back, so the job sets it to renew again. Rows
--- canceled more than 30 days ago are purged by the daily job.
+-- `state`: `pending`, to cancel; `canceled`, done. A later refresh that
+-- reads the subscription and no longer lists it drops the row. Add-ons are
+-- never resumed automatically.
 CREATE TABLE addon_cancellations (
   subscription_id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
   revision INTEGER NOT NULL,
-  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'canceled', 'restoring')),
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'canceled')),
   canceled_at INTEGER,
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER,
@@ -30,4 +30,4 @@ CREATE TABLE addon_cancellations (
 );
 
 CREATE INDEX pending_addon_cancellations ON addon_cancellations (next_attempt_at)
-  WHERE state != 'canceled';
+  WHERE state = 'pending';
