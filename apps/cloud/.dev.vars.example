@@ -11,4 +11,5 @@ CLOUDFLARE_API_TOKEN=
 # Override vars from wrangler.jsonc, for example a test OAuth App, or your own
 # GitHub id while the allowlist does not hold it.
 # GITHUB_CLIENT_ID=
+# SIGNUP=open
 # ALLOWED_GITHUB_IDS=

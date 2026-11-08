@@ -289,9 +289,15 @@ export async function revokeStuckSignIns(env: Env, now: number): Promise<void> {
     .run();
 }
 
-/** Removes URL rows deleted more than 30 days ago, freeing their slugs. */
+/**
+ * Removes URL rows deleted more than 30 days ago, freeing their slugs. A
+ * taken-down URL keeps its row, so its slug is never given out again.
+ */
 export async function purgeDeletedUrls(env: Env, now = Date.now()): Promise<void> {
-  await env.DB.prepare(`DELETE FROM public_urls WHERE deleted_at IS NOT NULL AND deleted_at < ?1`)
+  await env.DB.prepare(
+    `DELETE FROM public_urls
+     WHERE deleted_at IS NOT NULL AND deleted_at < ?1 AND taken_down_at IS NULL`,
+  )
     .bind(now - DELETED_URL_RETENTION_MS)
     .run();
 }

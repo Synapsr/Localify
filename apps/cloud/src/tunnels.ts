@@ -20,7 +20,7 @@ import {
 } from "./cloudflare";
 import { maxTunnels, setting } from "./config";
 import { urlsOfMachine, type PublicUrl } from "./db";
-import { entitlementOf, type Entitlement } from "./entitlement";
+import { entitlementOf, isEntitled, servingUrlLimit, type Entitlement } from "./entitlement";
 import {
   cleanUpRevokedMachines,
   ingressSecret,
@@ -66,7 +66,6 @@ export type MachineRuntime = {
 
 type RuntimeCaller = {
   userId: string;
-  githubId: number;
   machineId: string;
 };
 
@@ -91,13 +90,13 @@ export async function machineRuntime(
   daemonGeneration: number | null,
   now = Date.now(),
 ): Promise<MachineRuntime> {
-  const entitlement = await entitlementOf(env, { id: caller.userId, githubId: caller.githubId });
+  const entitlement = await entitlementOf(env, caller.userId, now);
   const publicUrls = await urlsOfMachine(
     env.DB,
     setting(env, "PUBLIC_BASE_DOMAIN"),
     caller.userId,
     caller.machineId,
-    entitlement.publicUrls,
+    servingUrlLimit(entitlement),
   );
   await adoptUntrackedTunnels(env, now, caller.machineId);
   let row = await tunnelRow(env, caller.machineId);
@@ -173,11 +172,7 @@ export async function machineRuntime(
 
 /** A machine wants a tunnel when its owner may serve and one of its URLs serves. */
 function wantsTunnel(entitlement: Entitlement, publicUrls: PublicUrl[]): boolean {
-  return entitlement.servingMachines > 0 && publicUrls.some((url) => url.state === "serving");
-}
-
-function isEntitled(entitlement: Entitlement): boolean {
-  return entitlement.servingMachines > 0 && entitlement.publicUrls > 0;
+  return isEntitled(entitlement) && publicUrls.some((url) => url.state === "serving");
 }
 
 function isStale(opAt: number | null, now: number): boolean {
@@ -451,28 +446,19 @@ async function releaseTunnel(
 export async function releaseIfUnwanted(env: Env, machineId: string): Promise<void> {
   try {
     const machine = await env.DB.prepare(
-      `SELECT m.user_id, u.github_id, m.tunnel_state, m.tunnel_generation
-       FROM machines m JOIN users u ON u.id = m.user_id
-       WHERE m.id = ?1 AND m.status = 'active'`,
+      `SELECT user_id, tunnel_state, tunnel_generation FROM machines
+       WHERE id = ?1 AND status = 'active'`,
     )
       .bind(machineId)
-      .first<{
-        user_id: string;
-        github_id: number;
-        tunnel_state: string;
-        tunnel_generation: number;
-      }>();
+      .first<{ user_id: string; tunnel_state: string; tunnel_generation: number }>();
     if (!machine || machine.tunnel_state === "none") return;
-    const entitlement = await entitlementOf(env, {
-      id: machine.user_id,
-      githubId: machine.github_id,
-    });
+    const entitlement = await entitlementOf(env, machine.user_id);
     const publicUrls = await urlsOfMachine(
       env.DB,
       setting(env, "PUBLIC_BASE_DOMAIN"),
       machine.user_id,
       machineId,
-      entitlement.publicUrls,
+      servingUrlLimit(entitlement),
     );
     if (!wantsTunnel(entitlement, publicUrls)) {
       await releaseTunnel(env, machineId, machine.tunnel_generation);
@@ -494,7 +480,6 @@ export function background(ctx: ExecutionContext, work: Promise<unknown>): void 
 type SlotRow = {
   id: string;
   user_id: string;
-  github_id: number;
   tunnel_state: "provisioning" | "ready" | "releasing";
   tunnel_generation: number;
   tunnel_op_at: number | null;
@@ -519,19 +504,15 @@ export async function runSweep(env: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
   await adoptUntrackedTunnels(env, now, null);
   const { results: slots } = await env.DB.prepare(
-    `SELECT m.id, m.user_id, u.github_id, m.tunnel_state, m.tunnel_generation, m.tunnel_op_at,
-            m.tunnel_id, m.tunnel_ready_at, m.down_seen_at, m.rotate_requested_at, m.dns_record_id,
-            m.cleanup_attempts, m.next_cleanup_at
-     FROM machines m JOIN users u ON u.id = m.user_id
-     WHERE m.status = 'active' AND m.tunnel_state != 'none'`,
+    `SELECT id, user_id, tunnel_state, tunnel_generation, tunnel_op_at, tunnel_id,
+            tunnel_ready_at, down_seen_at, rotate_requested_at, dns_record_id, cleanup_attempts,
+            next_cleanup_at
+     FROM machines WHERE status = 'active' AND tunnel_state != 'none'`,
   ).all<SlotRow>();
   const entitlements = new Map<string, Entitlement>();
   for (const slot of slots) {
     if (!entitlements.has(slot.user_id)) {
-      entitlements.set(
-        slot.user_id,
-        await entitlementOf(env, { id: slot.user_id, githubId: slot.github_id }),
-      );
+      entitlements.set(slot.user_id, await entitlementOf(env, slot.user_id, now));
     }
   }
   const done = new Set<string>();
@@ -699,7 +680,8 @@ function revocations(slots: SlotRow[], entitlements: Map<string, Entitlement>): 
     byOwner.set(slot.user_id, [...(byOwner.get(slot.user_id) ?? []), slot]);
   }
   for (const [owner, held] of byOwner) {
-    const allowed = entitlements.get(owner)?.servingMachines ?? 0;
+    const entitlement = entitlements.get(owner);
+    const allowed = entitlement && isEntitled(entitlement) ? entitlement.servingMachines : 0;
     if (allowed === 0) {
       beyond.push(...held);
       continue;
@@ -768,12 +750,7 @@ async function machinesWithServingUrls(
   const serving = new Set<string>();
   for (const url of results) {
     const entitlement = entitlements.get(url.user_id);
-    if (
-      url.machine_id !== null &&
-      entitlement &&
-      entitlement.servingMachines > 0 &&
-      url.live_rank <= entitlement.publicUrls
-    ) {
+    if (url.machine_id !== null && entitlement && url.live_rank <= servingUrlLimit(entitlement)) {
       serving.add(url.machine_id);
     }
   }

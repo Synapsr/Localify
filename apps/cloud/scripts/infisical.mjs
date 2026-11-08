@@ -20,8 +20,8 @@ export function readCloudValues() {
   return Object.fromEntries(exported.map((secret) => [secret.key, secret.value]));
 }
 
-/** Runs `wrangler <args>` with the deploy identity; returns its exit status. */
-export function runWrangler(values, args) {
+/** The environment wrangler runs with: the deploy identity, never the Worker's token. */
+function wranglerEnv(values) {
   const env = { ...process.env };
   delete env.CLOUDFLARE_API_TOKEN;
   delete env.CLOUDFLARE_ACCOUNT_ID;
@@ -29,8 +29,31 @@ export function runWrangler(values, args) {
     env.CLOUDFLARE_API_TOKEN = values.CLOUDFLARE_DEPLOY_TOKEN;
     env.CLOUDFLARE_ACCOUNT_ID = values.CLOUDFLARE_ACCOUNT_ID;
   }
-  const result = spawnSync("wrangler", args, { stdio: "inherit", env });
+  return env;
+}
+
+/** Runs `wrangler <args>` with the deploy identity; returns its exit status. */
+export function runWrangler(values, args) {
+  const result = spawnSync("wrangler", args, { stdio: "inherit", env: wranglerEnv(values) });
   return result.status ?? 1;
+}
+
+/**
+ * Runs `wrangler <args>` with the deploy identity and returns what it printed
+ * on stdout. Its stderr goes to the terminal; a failure throws.
+ */
+export function wranglerOutput(values, args) {
+  const result = spawnSync("wrangler", args, {
+    stdio: ["ignore", "pipe", "inherit"],
+    env: wranglerEnv(values),
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`wrangler ${args[0] ?? ""} failed:\n${result.stdout ?? ""}`);
+  }
+  return result.stdout;
 }
 
 // `node scripts/infisical.mjs <wrangler args>`, for the migration scripts.

@@ -32,12 +32,13 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/api.ts` | The API routes |
 | `src/machines.ts` | Sign-in, sign-out, replacing a machine, the cleanup of revoked machines, and the purge of deleted URLs |
 | `src/tunnels.ts` | Serving slots, provisioning and releasing tunnels, the machine runtime, and the 5-minute sweep |
-| `src/entitlement.ts` | What an account may use; for now, the allowlist with the team's limits |
+| `src/entitlement.ts` | What an account may use: its ban, its override, or its Pro plan from the `billing` snapshot; and which URLs lose their right after a change |
 | `src/public.ts`, `src/sites.ts` | The public traffic path |
 | `src/github.ts`, `src/cloudflare.ts` | The GitHub and Cloudflare API calls |
 | `src/names.ts` | Slugs, labels, public hosts, and the origin rule |
 | `src/cookie.ts`, `src/headers.ts`, `src/crypto.ts` | Access and notice cookies, forwarded headers, hashing |
 | `src/pages.ts`, `src/passwords.ts` | The HTML pages (warning, password, errors) and generated passwords |
+| `scripts/admin.ts` | `pnpm cloud:admin`: bans, takedowns, overrides |
 
 ## Run locally
 
@@ -52,7 +53,7 @@ pnpm cloud:dev
 LOCALIFY_CLOUD_API=http://127.0.0.1:8787 localify login
 ```
 
-Sign-in reaches the real GitHub and makes no Cloudflare call. Once the machine has a URL to serve, its next runtime fetch creates a real tunnel and DNS record when `.dev.vars` has a `CLOUDFLARE_API_TOKEN`; without one, the runtime stays `provisioning` and the Worker logs that the token is not set. `localify logout` removes what the machine created.
+Sign-in reaches the real GitHub and makes no Cloudflare call. Serving takes an entitlement, so give your account one: `pnpm cloud:admin --local override <github-login> 5 10 dev`. Once the machine has a URL to serve, its next runtime fetch creates a real tunnel and DNS record when `.dev.vars` has a `CLOUDFLARE_API_TOKEN`; without one, the runtime stays `provisioning` and the Worker logs that the token is not set. `localify logout` removes what the machine created.
 
 To try the public path, send the public host in the `Host` header. The `dev` script passes `--infer-origin-from-routes=false` so the Worker sees that host instead of its first route's.
 
@@ -88,7 +89,7 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05; step 5 comes with the p
    - `COOKIE_KEY`, `INGRESS_KEY` and `EDGE_KEY`: `openssl rand -hex 32` each.
    - `POLAR_ACCESS_TOKEN`: an organization access token; `dev` holds the sandbox one.
    - `POLAR_WEBHOOK_SECRET`.
-   - `CLOUDFLARE_DEPLOY_TOKEN`, `prod` only: wrangler's identity for `pnpm cloud:deploy` and `pnpm cloud:migrate`, so nobody's `wrangler login` is needed. Account: Workers Scripts Edit, D1 Edit, Account Settings Read; zones `localify.dev` and `localify.fyi`: Workers Routes Edit, Zone Read; User Details Read.
+   - `CLOUDFLARE_DEPLOY_TOKEN`, `prod` only: wrangler's identity for `pnpm cloud:deploy`, `pnpm cloud:migrate` and `pnpm cloud:admin`, so nobody's `wrangler login` is needed. Account: Workers Scripts Edit, D1 Edit, Account Settings Read; zones `localify.dev` and `localify.fyi`: Workers Routes Edit, Zone Read; User Details Read.
    - `CLOUDFLARE_OPS_TOKEN`, `prod` only: an operator's token for the zone rules below (Zone WAF Edit, Transform Rules Edit, Zone Read on both zones). Neither script reads it, and it never reaches the Worker.
    - `CLOUDFLARE_ACCOUNT_ID`: read by the scripts with `CLOUDFLARE_DEPLOY_TOKEN`. For reference only: `GITHUB_CLIENT_ID` and `D1_DATABASE_ID`.
 
@@ -170,4 +171,10 @@ curl -s https://api.github.com/users/<login> | jq .id
 
 The allowlist only gates sign-in. Serving takes an entitlement in both modes: a plan, or an override. Removing an id from the allowlist does not stop an account that is already signed in.
 
-Overrides, bans and takedowns go through `pnpm cloud:admin` (docs/public-urls.md, "Moderation"). Each one writes D1 with your own wrangler login, reaches the public path within 10 seconds, and closes the affected streams at the next sweep.
+Overrides, bans and takedowns go through `pnpm cloud:admin` (docs/public-urls.md, "Moderation"), and `pnpm cloud:admin --help` lists them. Each one writes the production D1 as `CLOUDFLARE_DEPLOY_TOKEN` from Infisical, or with your own `wrangler login` when that key is missing, and prints what it changed. It reaches the public path within 10 seconds and closes the affected streams at the next sweep. `--local` runs it on the D1 of `pnpm cloud:dev`.
+
+```bash
+pnpm cloud:admin show teo-goulois
+pnpm cloud:admin takedown journal-a8f3 "phishing page"
+pnpm cloud:admin override teo-goulois 5 10 team --expires 2027-06-30
+```

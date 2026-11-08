@@ -100,9 +100,9 @@ describe("finding the URL", () => {
     expect(await response.text()).toContain("offline");
   });
 
-  it("answers 404 once the owner's GitHub id leaves the allowlist", async () => {
+  it("keeps serving once the owner's GitHub id leaves the allowlist: it only gates sign-in", async () => {
     context.env.ALLOWED_GITHUB_IDS = "2";
-    expect((await visit(context, `https://${host()}/`)).status).toBe(404);
+    expect((await visit(context, `https://${host()}/`)).status).toBe(401);
   });
 
   it("answers 404 for a deleted URL", async () => {

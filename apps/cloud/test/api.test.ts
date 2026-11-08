@@ -265,7 +265,7 @@ describe("signing in", () => {
     ]);
 
     const me = await api(context, "GET", "/v1/me", { token });
-    expect(await me.json()).toEqual({
+    expect(await me.json()).toMatchObject({
       user: { login: "Teo-Goulois" },
       machine: { id: machineId, name: "laptop" },
     });
@@ -349,12 +349,11 @@ describe("signing in", () => {
     ]);
   });
 
-  it("stops accepting a token once its GitHub id leaves the allowlist", async () => {
+  it("keeps accepting a token once its GitHub id leaves the allowlist: it only gates sign-in", async () => {
     const { token } = await signIn(context);
     context.env.ALLOWED_GITHUB_IDS = "2";
-    const response = await api(context, "GET", "/v1/me", { token });
-    expect(response.status).toBe(403);
-    expect(await errorCode(response)).toBe("not_allowed");
+    expect((await api(context, "GET", "/v1/me", { token })).status).toBe(200);
+    expect((await createUrl(token, { localDomain: "journal.localify" })).response.status).toBe(201);
   });
 });
 

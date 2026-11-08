@@ -42,7 +42,7 @@ const SELECT_URLS = `
          p.password_version, p.created_at, p.taken_down_at, r.live_rank
   FROM public_urls p LEFT JOIN machines m ON m.id = p.machine_id LEFT JOIN ranked r ON r.id = p.id`;
 
-/** The user's public URLs, oldest first. `servingLimit` is the owner's `publicUrls`. */
+/** The user's public URLs, oldest first. `servingLimit` is `servingUrlLimit` of the owner's entitlement. */
 export async function urlsOfUser(
   db: D1Database,
   baseDomain: string,

@@ -8,8 +8,10 @@
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["src", "test", "worker-configuration.d.ts", "vitest.config.ts"]
+  "include": ["src", "test", "scripts/admin.ts", "worker-configuration.d.ts", "vitest.config.ts"]
 }

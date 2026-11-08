@@ -402,12 +402,15 @@ Losing to a newer revision is not a failure: the newer refresh read Polar later.
 
 ### Moderation
 
-`pnpm cloud:admin <command>` in `apps/cloud` runs the operator's actions against the production D1 with the operator's own wrangler login. Each command writes D1 only. New requests feel it within the public path's 10-second cache. A takedown also sets `rotate_requested_at` on the URL's machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 60 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
+`pnpm cloud:admin <command>` runs the operator's actions against the production D1, through wrangler with `CLOUDFLARE_DEPLOY_TOKEN` from Infisical, or the operator's own wrangler login when that key is missing; `pnpm cloud:admin --local <command>` runs them against the local D1 of `pnpm cloud:dev`. Each command writes D1 only, binds every value as a quoted literal (wrangler takes no parameters), and prints what it changed. New requests feel it within the public path's 10-second cache. Every command that changes an account or a URL sets `rotate_requested_at` on each machine that served a URL which no longer serves, and a takedown also on the URL's own machine. The next sweep releases or rotates the affected tunnels, which closes open streams within 5 minutes while Cloudflare answers and fewer than 60 revocations are queued (see "The sweep"; ADR 0027). There is no admin route on the Worker to protect.
 
+- `show <github-login>`: the ban, the override, the billing snapshot, the entitlement and each URL's state;
 - `ban <github-login> <reason>` and `unban <github-login>`;
-- `takedown <slug> <reason>`;
+- `takedown <slug> <reason>` and `restore <slug>`, which undoes a takedown;
 - `override <github-login> <serving-machines> <urls> <reason> [--expires <date>]` and `override --remove <github-login>`;
-- `refresh <github-login>`, which refreshes billing now.
+- `refresh <github-login>`, which sets `check_due_at` so the next 5-minute run refreshes billing.
+
+A login is the one GitHub gave at the last sign-in, so two accounts can share one; `id:<github-id>` names either of them.
 
 Reports arrive at `abuse@localify.dev`, linked from every page the Worker serves.
 

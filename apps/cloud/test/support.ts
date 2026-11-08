@@ -148,6 +148,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     DEVICE_LIMITER: { limit: async () => ({ success: deviceLimiter.allowed }) },
     OWNER_LIMITER: countingLimiter(ownerLimiter),
     GITHUB_CLIENT_ID: "client-123",
+    SIGNUP: "allowlist",
     ALLOWED_GITHUB_IDS: "1, 2",
     PUBLIC_BASE_DOMAIN: "localify.fyi",
     MACHINE_DOMAIN: "localify.dev",
@@ -245,12 +246,17 @@ export function fakeSignIn(
   context.routes.set(`DELETE ${CF}/`, () => cloudflareOk(null));
 }
 
+/**
+ * Signs `login` in on a machine. Unless `entitled` is false, the account
+ * holds the override the old allowlist got (5 serving machines, 10 URLs).
+ */
 export async function signIn(
   context: TestContext,
   login = "teo-goulois",
   githubId = 1,
   machineName = "laptop",
-): Promise<{ token: string; machineId: string }> {
+  { entitled = true }: { entitled?: boolean } = {},
+): Promise<{ token: string; machineId: string; userId: string }> {
   fakeSignIn(context, login, githubId, `tunnel-${machineName}`);
   const response = await api(context, "POST", "/v1/auth/device/token", {
     body: { deviceCode: "device-1", machineName, ingressPort: 7381 },
@@ -258,7 +264,18 @@ export async function signIn(
   if (response.status !== 200)
     throw new Error(`Sign-in failed: ${response.status} ${await response.text()}`);
   const body = (await response.json()) as { token: string; machine: { id: string } };
-  return { token: body.token, machineId: body.machine.id };
+  const { id: userId } = context.sqlite
+    .prepare("SELECT id FROM users WHERE github_id = ?")
+    .get(githubId) as { id: string };
+  if (entitled) {
+    context.sqlite
+      .prepare(
+        `INSERT OR IGNORE INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
+         VALUES (?, 5, 10, 'team', 1)`,
+      )
+      .run(userId);
+  }
+  return { token: body.token, machineId: body.machine.id, userId };
 }
 
 export async function api(

@@ -33,6 +33,8 @@ import {
   notFoundPage,
   offlinePage,
   passwordPage,
+  pausedPage,
+  removedPage,
   RETRY_AFTER_SECONDS,
   tooManyRequestsPage,
   unavailablePage,
@@ -72,6 +74,8 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   if (!site || (target.label !== null && !site.wildcard)) return notFoundPage(method);
   const localHost = localHostFor(site.localDomain, target.label);
   if (!localHost) return notFoundPage(method);
+  if (site.state === "removed") return removedPage(method);
+  if (site.state === "suspended") return pausedPage(method);
   if (site.machineId === null || site.ingressSecret === null) return offlinePage(method);
 
   // 2. The owner's traffic limit, across all their URLs.

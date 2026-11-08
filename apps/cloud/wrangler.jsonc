@@ -55,8 +55,12 @@
     // The GitHub OAuth App's client ID, with Device Flow enabled. It is public;
     // the app needs no client secret.
     "GITHUB_CLIENT_ID": "Ov23lil8Qd3w1uo0w4qT",
-    // Who can sign in: numeric GitHub user ids, comma-separated. Ids, not
-    // logins, because a login can be renamed and taken by someone else.
+    // Who may finish a new sign-in: `allowlist` (the ids below) or `open`
+    // (anyone). Serving takes an entitlement in both modes.
+    "SIGNUP": "allowlist",
+    // Under SIGNUP=allowlist, who can sign in: numeric GitHub user ids,
+    // comma-separated. Ids, not logins, because a login can be renamed and
+    // taken by someone else.
     "ALLOWED_GITHUB_IDS": "77238381,61839831,23056644,88707023,261605370",
     "PUBLIC_BASE_DOMAIN": "localify.fyi",
     "MACHINE_DOMAIN": "localify.dev",

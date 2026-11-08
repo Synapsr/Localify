@@ -250,6 +250,28 @@ export function notFoundPage(method?: string): Response {
   );
 }
 
+/** A URL taken down for abuse, or one whose owner is banned. */
+export function removedPage(method?: string): Response {
+  return page(
+    410,
+    "Removed",
+    `<h1>This public URL was removed</h1>
+<p>It was taken offline for breaking the Localify terms. To report abuse, or if you think this is a mistake, write to <a href="mailto:abuse@localify.dev">abuse@localify.dev</a>.</p>`,
+    method,
+  );
+}
+
+/** A URL its owner's plan does not cover right now (docs/public-urls.md, "Downgrades"). */
+export function pausedPage(method?: string): Response {
+  return page(
+    402,
+    "Paused",
+    `<h1>This public URL is paused</h1>
+<p>Its owner's Localify Cloud plan does not cover it right now. Ask them to check their plan, then reload this page.</p>`,
+    method,
+  );
+}
+
 export function offlinePage(method?: string): Response {
   return page(
     503,

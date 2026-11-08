@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { hmacHex } from "../src/crypto";
-import { machineRuntime, runSweep } from "../src/tunnels";
+import { runSweep } from "../src/tunnels";
 import {
   api,
   applyMigrations,
@@ -305,26 +305,18 @@ describe("runtime v2", () => {
   });
 
   it("is blocked with subscription_required without an entitlement, and releases the tunnel", async () => {
-    const { machineId } = await servingMachine();
-    const userId = (
-      context.sqlite.prepare("SELECT user_id FROM machines WHERE id = ?").get(machineId) as {
-        user_id: string;
-      }
-    ).user_id;
-    // An account off the allowlist: the API refuses it before, so call the runtime itself.
-    const runtime = await machineRuntime(
-      context.env,
-      context.ctx,
-      { userId, githubId: 9, machineId },
-      1,
-    );
+    const { token, machineId, userId } = await servingMachine();
+    update("DELETE FROM plan_overrides WHERE user_id = ?", userId);
+    const { status, body: runtime } = await serve(context, token, 1);
+    expect(status).toBe(200);
     expect(runtime).toMatchObject({
       state: "blocked",
       blocked: { reason: "subscription_required" },
       retryAfter: null,
     });
-    expect(runtime.publicUrls.map((url) => url.state)).toEqual(["suspended"]);
-    await settle(context);
+    expect((runtime.publicUrls as { state: string }[]).map((url) => url.state)).toEqual([
+      "suspended",
+    ]);
     expect(row(machineId)).toMatchObject({ tunnel_state: "none", tunnel_id: null });
   });
 
@@ -623,8 +615,8 @@ describe("the sweep", () => {
   });
 
   it("releases every slot of an owner who lost the entitlement", async () => {
-    const { machineId } = await servingMachine();
-    context.env.ALLOWED_GITHUB_IDS = "2";
+    const { machineId, userId } = await servingMachine();
+    update("DELETE FROM plan_overrides WHERE user_id = ?", userId);
     await runSweep(context.env);
     expect(row(machineId).tunnel_state).toBe("none");
   });
@@ -843,9 +835,9 @@ describe("revocations that fail", () => {
   });
 
   it("are retried every run for an owner who lost the entitlement", async () => {
-    const { machineId } = await servingMachine();
+    const { machineId, userId } = await servingMachine();
     vi.spyOn(console, "error").mockImplementation(() => {});
-    context.env.ALLOWED_GITHUB_IDS = "2";
+    update("DELETE FROM plan_overrides WHERE user_id = ?", userId);
     failDeletes();
     const start = Date.now();
     for (let run = 0; run < 3; run++) {
@@ -879,9 +871,12 @@ describe("removing a tunnel", () => {
 describe("the sweep's budget", () => {
   it("counts every Cloudflare request, fallbacks included", async () => {
     const githubIds = Array.from({ length: 20 }, (_, i) => 100 + i);
-    context = createContext({ ALLOWED_GITHUB_IDS: githubIds.join(",") } as Partial<Env>);
     const insertUser = context.sqlite.prepare(
       "INSERT INTO users (id, github_id, login, created_at) VALUES (?, ?, ?, 1)",
+    );
+    const insertOverride = context.sqlite.prepare(
+      `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
+       VALUES (?, 5, 10, 'team', 1)`,
     );
     const insertMachine = context.sqlite.prepare(
       `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, tunnel_state,
@@ -897,6 +892,7 @@ describe("the sweep's budget", () => {
     const tunnels = [];
     for (const [u, githubId] of githubIds.entries()) {
       insertUser.run(`u-${u}`, githubId, `user-${u}`);
+      insertOverride.run(`u-${u}`);
       for (let m = 0; m < 5; m++) {
         const id = `m-${u}-${m}`;
         insertMachine.run(id, `u-${u}`, id, `t-${id}`);
@@ -950,7 +946,9 @@ describe("second review", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     context.sqlite.exec(`
       INSERT INTO users (id, github_id, login, created_at)
-      VALUES ('rotated', 1, 'rotated', 1), ('keeper', 2, 'keeper', 1), ('gone', 9, 'gone', 1);`);
+      VALUES ('rotated', 1, 'rotated', 1), ('keeper', 2, 'keeper', 1), ('gone', 9, 'gone', 1);
+      INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
+      VALUES ('rotated', 5, 10, 'team', 1), ('keeper', 5, 10, 'team', 1);`);
     const insert = context.sqlite.prepare(
       `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at, tunnel_state,
                              tunnel_generation, tunnel_id, tunnel_ready_at, rotate_requested_at,
