@@ -8,12 +8,15 @@ EDGE_KEY=local-edge-key-change-me
 # Cloudflare account. Leave this empty unless you test serving end to end;
 # `localify logout` removes what the machine created.
 CLOUDFLARE_API_TOKEN=
-# Polar's sandbox and its Pro products, with the sandbox token from Infisical
-# (localify, /cloud, dev). With the token empty, checkouts fail and the
-# 5-minute job logs that Polar is not set up.
+# Polar's sandbox, its Pro and add-on products, add-ons on sale, with the
+# sandbox token from Infisical (localify, /cloud, dev). With the token empty,
+# checkouts fail and the 5-minute job logs that Polar is not set up.
 POLAR_API_BASE=https://sandbox-api.polar.sh
 POLAR_PRODUCT_PRO_MONTHLY=aaf5080e-3a2c-44d4-ad49-442107637d67
 POLAR_PRODUCT_PRO_YEARLY=abe09656-c2ad-4942-b779-ed7ca4cc9b6e
+POLAR_PRODUCT_ADDON_MACHINE=65ac9781-c8c3-4573-b9d2-0e8b6923a695
+POLAR_PRODUCT_ADDON_URLS=6dd4a1de-e3be-42dd-96a7-fb661d33fe00
+ADDONS=on
 POLAR_ACCESS_TOKEN=
 # The secret of a sandbox webhook endpoint that reaches this Worker, if any.
 # Without it, webhooks answer 503.

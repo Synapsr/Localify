@@ -45,8 +45,8 @@ export type AccountRow = {
   ends_at: number | null;
   ended_at: number | null;
   past_due_at: number | null;
-  addon_machines: number | null;
-  addon_url_packs: number | null;
+  /** `billing.addon_grants`: a JSON array of `AddonGrant`. */
+  addon_grants: string | null;
 };
 
 const SELECT_ACCOUNTS = `
@@ -54,7 +54,7 @@ const SELECT_ACCOUNTS = `
          o.serving_machines AS override_machines, o.public_urls AS override_urls,
          o.expires_at AS override_expires_at, o.remote_access AS override_remote_access,
          b.pro_status, b.pro_interval, b.cancel_at_period_end, b.current_period_end, b.trial_end,
-         b.ends_at, b.ended_at, b.past_due_at, b.addon_machines, b.addon_url_packs
+         b.ends_at, b.ended_at, b.past_due_at, b.addon_grants
   FROM users u
     LEFT JOIN plan_overrides o ON o.user_id = u.id
     LEFT JOIN billing b ON b.user_id = u.id`;
@@ -103,6 +103,126 @@ export const PRO: Entitlement = { servingMachines: 2, publicUrls: 10, remoteAcce
 export const MAX_LINKED_MACHINES = 10;
 /** Public URLs per URL add-on unit. */
 export const URLS_PER_PACK = 10;
+/**
+ * The most units of each add-on: what a checkout sells at once, and what
+ * counts, whatever quantity Polar holds.
+ */
+export const MAX_ADDON_UNITS = 20;
+/** Signed-in machines that need no serving slot, beyond the serving ones. */
+const NON_SERVING_MACHINES = 8;
+/** The fewest signed-in machines any account may have, plan or not. */
+const MIN_SIGNED_IN_MACHINES = 10;
+
+/**
+ * How many machines an account may have signed in: 10, or its serving
+ * machines plus 8 when that is more, so every serving slot it pays for can
+ * be used. Remote access stays capped at `MAX_LINKED_MACHINES` whatever this
+ * is.
+ */
+export function signedInMachineCap(entitlement: Entitlement): number {
+  return Math.max(MIN_SIGNED_IN_MACHINES, entitlement.servingMachines + NON_SERVING_MACHINES);
+}
+
+/**
+ * One add-on subscription, as `billing.addon_grants` keeps it: its own
+ * lifecycle, read through the same table as Pro when the entitlement is
+ * read, so one that ends stops counting on time, without a refresh.
+ */
+export type AddonGrant = {
+  id: string;
+  kind: "machine" | "urls";
+  units: number;
+  status: string;
+  cancel_at_period_end: boolean;
+  current_period_end: number | null;
+  trial_end: number | null;
+  ends_at: number | null;
+  ended_at: number | null;
+  past_due_at: number | null;
+};
+
+/** A grant's fields as the lifecycle table reads them. */
+export function grantFields(grant: AddonGrant): ProFields {
+  return {
+    pro_status: grant.status,
+    pro_interval: null,
+    cancel_at_period_end: grant.cancel_at_period_end ? 1 : 0,
+    current_period_end: grant.current_period_end,
+    trial_end: grant.trial_end,
+    ends_at: grant.ends_at,
+    ended_at: grant.ended_at,
+    past_due_at: grant.past_due_at,
+  };
+}
+
+/** Polar's subscription statuses, the only ones a grant may hold. */
+const SUBSCRIPTION_STATUSES = new Set([
+  "trialing",
+  "active",
+  "past_due",
+  "canceled",
+  "unpaid",
+  "paused",
+  "incomplete",
+  "incomplete_expired",
+]);
+/** The largest Unix millisecond time a `Date` can hold. */
+const MAX_TIME_MS = 8.64e15;
+
+/** A time as grants store it: null, or a whole number of milliseconds a `Date` can hold. */
+function isTime(value: unknown): value is number | null {
+  return (
+    value === null || (Number.isSafeInteger(value) && Math.abs(value as number) <= MAX_TIME_MS)
+  );
+}
+
+/** A complete, valid grant, or null: every field present and of its type. */
+function readGrant(value: unknown): AddonGrant | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const grant = value as Record<string, unknown>;
+  const valid =
+    typeof grant.id === "string" &&
+    (grant.kind === "machine" || grant.kind === "urls") &&
+    Number.isInteger(grant.units) &&
+    (grant.units as number) >= 1 &&
+    (grant.units as number) <= MAX_ADDON_UNITS &&
+    typeof grant.status === "string" &&
+    SUBSCRIPTION_STATUSES.has(grant.status) &&
+    typeof grant.cancel_at_period_end === "boolean" &&
+    isTime(grant.current_period_end) &&
+    isTime(grant.trial_end) &&
+    isTime(grant.ends_at) &&
+    isTime(grant.ended_at) &&
+    isTime(grant.past_due_at);
+  return valid ? (grant as AddonGrant) : null;
+}
+
+/**
+ * The add-on units that count right now: each grant the lifecycle table
+ * makes entitled at `now`, summed per kind, at most `MAX_ADDON_UNITS` each.
+ * Unreadable JSON, a value that is not an array, and any grant that is not
+ * complete and valid count as none; nothing here throws, so one bad row
+ * never stops a serving read or the sweep.
+ */
+export function addonsOf(grantsJson: string | null, now: number): Account["plan"]["addons"] {
+  const units = { machine: 0, urls: 0 };
+  try {
+    const grants: unknown = JSON.parse(grantsJson ?? "[]");
+    for (const value of Array.isArray(grants) ? grants : []) {
+      const grant = readGrant(value);
+      if (grant !== null && proPlan(grantFields(grant), now).entitled)
+        units[grant.kind] += grant.units;
+    }
+  } catch (error) {
+    console.error("Add-on grants that cannot be read count as none", error);
+    return { machines: 0, urlPacks: 0 };
+  }
+  return {
+    machines: Math.min(units.machine, MAX_ADDON_UNITS),
+    urlPacks: Math.min(units.urls, MAX_ADDON_UNITS),
+  };
+}
+
 /** A `past_due` plan stays entitled this long after Polar's `past_due_at`. */
 export const PAST_DUE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -112,7 +232,7 @@ export const PAST_DUE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
  * entitled, plus the add-ons; otherwise nothing.
  */
 export function accountOf(row: AccountRow, now: number): Account {
-  const addons = { machines: row.addon_machines ?? 0, urlPacks: row.addon_url_packs ?? 0 };
+  const addons = addonsOf(row.addon_grants, now);
   const trialAvailable = row.trial_used_at === null;
   const pro = proPlan(row, now);
 
@@ -227,6 +347,15 @@ export function proPlan(row: ProFields, now: number): ProPlan {
       // unpaid, paused, incomplete, incomplete_expired, or no subscription.
       return none;
   }
+}
+
+/**
+ * Whether a Pro plan has stopped for good: not entitled, and not `past_due`
+ * either, since Polar may still recover the card after the grace. Its
+ * add-ons are then canceled at the end of their period.
+ */
+export function proLapsed(row: ProFields, now: number): boolean {
+  return !proPlan(row, now).entitled && row.pro_status !== "past_due";
 }
 
 /** Whether `end` is still ahead; a missing end bounds nothing. */

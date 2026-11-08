@@ -57,6 +57,14 @@
       "name": "REMOTE_CONNECT_LIMITER",
       "namespace_id": "1005",
       "simple": { "limit": 6, "period": 60 }
+    },
+    // /v1/pricing's calls to Polar, one key for all: approximately one a
+    // minute per location, whatever the public traffic, since billing shares
+    // Polar's rate limit (docs/public-urls.md, "Pricing").
+    {
+      "name": "PRICING_LIMITER",
+      "namespace_id": "1006",
+      "simple": { "limit": 1, "period": 60 }
     }
   ],
   // The relay between an account's machines, one object per account, named
@@ -102,15 +110,87 @@
     // The Pro products, each with a USD and an EUR price and a 7-day trial.
     "POLAR_PRODUCT_PRO_MONTHLY": "80a898d5-cdc8-4145-a01a-441f63921639",
     "POLAR_PRODUCT_PRO_YEARLY": "b1ac6731-b6b9-4a5a-88c8-5c1fe27b3955",
-    // Empty until add-ons ship.
-    "POLAR_PRODUCT_ADDON_MACHINE": "",
-    "POLAR_PRODUCT_ADDON_URLS": ""
+    // The add-on products, monthly, each with a unit-based USD and EUR
+    // price: one serving machine per unit, ten public URLs per unit.
+    "POLAR_PRODUCT_ADDON_MACHINE": "55653a9a-228d-4f23-8c66-266ec950ae7c",
+    "POLAR_PRODUCT_ADDON_URLS": "6385e584-ea00-4ac6-a838-7a5e0f3346c4",
+    // Whether add-ons are on sale: `on` or `off`. Off answers add-on
+    // checkouts with 409 addons_unavailable; an add-on subscription that
+    // exists still counts, and still ends with its Pro plan. Turn it on once
+    // the organization allows multiple subscriptions per customer.
+    "ADDONS": "off"
   },
   // Set with `wrangler secret put <NAME>`; locally, in .dev.vars. Deploys
   // refuse to run while one is missing. POLAR_WEBHOOK_SECRET is optional: it
   // exists once the webhook endpoint does, and webhooks answer 503 without it.
   "secrets": {
     "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY", "EDGE_KEY", "POLAR_ACCESS_TOKEN"]
+  },
+  // The sandbox: Polar's sandbox, its own D1 and workers.dev only, for end-
+  // to-end billing tests (apps/cloud/README.md, "Sandbox"). Bindings and vars
+  // are not inherited, so each one is repeated here. It never serves: with
+  // MAX_TUNNELS at 0 no slot is reserved and the sweep makes no Cloudflare
+  // call, and it gets no CLOUDFLARE_API_TOKEN, so it cannot touch the
+  // account's tunnels or DNS records, which belong to production.
+  "env": {
+    "sandbox": {
+      "name": "localify-cloud-sandbox",
+      "workers_dev": true,
+      "preview_urls": false,
+      // Inherited otherwise: the sandbox must never take production's routes.
+      "routes": [],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "localify-cloud-sandbox",
+          // From `wrangler d1 create localify-cloud-sandbox --location weur`.
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "migrations"
+        }
+      ],
+      // Namespaces of their own, so sandbox traffic never counts against
+      // production's limits.
+      "ratelimits": [
+        { "name": "PASSWORD_LIMITER", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
+        { "name": "DEVICE_LIMITER", "namespace_id": "2002", "simple": { "limit": 60, "period": 60 } },
+        { "name": "OWNER_LIMITER", "namespace_id": "2003", "simple": { "limit": 2000, "period": 60 } },
+        { "name": "REMOTE_IP_LIMITER", "namespace_id": "2004", "simple": { "limit": 30, "period": 60 } },
+        { "name": "REMOTE_CONNECT_LIMITER", "namespace_id": "2005", "simple": { "limit": 6, "period": 60 } },
+        { "name": "PRICING_LIMITER", "namespace_id": "2006", "simple": { "limit": 1, "period": 60 } }
+      ],
+      "durable_objects": {
+        "bindings": [{ "name": "RELAY", "class_name": "RemoteRelay" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RemoteRelay"] }],
+      "vars": {
+        "GITHUB_CLIENT_ID": "Ov23lil8Qd3w1uo0w4qT",
+        "SIGNUP": "allowlist",
+        // The founder only.
+        "ALLOWED_GITHUB_IDS": "77238381",
+        // No team override, so the sandbox account's plan is the one Polar's
+        // sandbox gives it.
+        "TEAM_GITHUB_IDS": "",
+        // Reserved names that never resolve: no URL, CNAME or public host of
+        // the sandbox can collide with production's.
+        "PUBLIC_BASE_DOMAIN": "localify-sandbox.invalid",
+        "MACHINE_DOMAIN": "localify-sandbox.invalid",
+        "CLOUDFLARE_ACCOUNT_ID": "",
+        "MACHINE_ZONE_ID": "",
+        // Serving off: no tunnel, no DNS record, no Cloudflare call.
+        "MAX_TUNNELS": 0,
+        "POLAR_API_BASE": "https://sandbox-api.polar.sh",
+        "POLAR_PRODUCT_PRO_MONTHLY": "aaf5080e-3a2c-44d4-ad49-442107637d67",
+        "POLAR_PRODUCT_PRO_YEARLY": "abe09656-c2ad-4942-b779-ed7ca4cc9b6e",
+        "POLAR_PRODUCT_ADDON_MACHINE": "65ac9781-c8c3-4573-b9d2-0e8b6923a695",
+        "POLAR_PRODUCT_ADDON_URLS": "6dd4a1de-e3be-42dd-96a7-fb661d33fe00",
+        "ADDONS": "on"
+      },
+      // No CLOUDFLARE_API_TOKEN: `pnpm cloud:deploy --env sandbox` never
+      // passes it.
+      "secrets": {
+        "required": ["COOKIE_KEY", "INGRESS_KEY", "EDGE_KEY", "POLAR_ACCESS_TOKEN"]
+      }
+    }
   },
   // Error logs only: invocation logs would keep the URL of every request to a
   // public URL, and Localify keeps nothing about that traffic.

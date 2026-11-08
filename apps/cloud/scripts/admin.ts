@@ -203,7 +203,7 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
     ),
     statement(
       `SELECT pro_status, pro_interval, cancel_at_period_end, current_period_end, ends_at,
-              past_due_at, addon_machines, addon_url_packs, refreshed_at
+              past_due_at, refreshed_at
        FROM billing WHERE user_id = ?1`,
       user.id,
     ),
@@ -236,7 +236,7 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
     billing
       ? `Billing snapshot of ${date(Number(billing.refreshed_at))}: Pro ${billing.pro_status ?? "none"}${
           billing.pro_interval ? ` (${billing.pro_interval})` : ""
-        }, add-ons: ${billing.addon_machines} machines, ${billing.addon_url_packs} URL packs.`
+        }, add-ons counting now: ${account.plan.addons.machines} machines, ${account.plan.addons.urlPacks} URL packs.`
       : "No billing snapshot.",
   );
   lines.push(

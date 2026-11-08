@@ -315,6 +315,7 @@ export type TestContext = {
   ownerLimiter: CountingLimiter;
   remoteIpLimiter: CountingLimiter;
   remoteConnectLimiter: CountingLimiter;
+  pricingLimiter: CountingLimiter;
   relays: RelayHarness;
 };
 
@@ -331,6 +332,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     limit: rateLimit("REMOTE_CONNECT_LIMITER").limit,
     counts: new Map(),
   };
+  const pricingLimiter = { limit: rateLimit("PRICING_LIMITER").limit, counts: new Map() };
   const relays = new RelayHarness(() => env);
   const env = {
     DB: db,
@@ -339,6 +341,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     OWNER_LIMITER: countingLimiter(ownerLimiter),
     REMOTE_IP_LIMITER: countingLimiter(remoteIpLimiter),
     REMOTE_CONNECT_LIMITER: countingLimiter(remoteConnectLimiter),
+    PRICING_LIMITER: countingLimiter(pricingLimiter),
     RELAY: relays.namespace(),
     GITHUB_CLIENT_ID: "client-123",
     SIGNUP: "allowlist",
@@ -359,6 +362,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     POLAR_PRODUCT_PRO_YEARLY: "prod-yearly",
     POLAR_PRODUCT_ADDON_MACHINE: "",
     POLAR_PRODUCT_ADDON_URLS: "",
+    ADDONS: "off",
     ...overrides,
   } as unknown as Env;
   const background: Promise<unknown>[] = [];
@@ -379,6 +383,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     ownerLimiter,
     remoteIpLimiter,
     remoteConnectLimiter,
+    pricingLimiter,
     relays,
   };
   vi.stubGlobal("Response", WorkerResponse);

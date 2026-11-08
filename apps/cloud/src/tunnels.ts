@@ -27,6 +27,7 @@ import {
   ALL_OWNED_URLS_SQL,
   entitlementOf,
   isEntitled,
+  loadAccount,
   NO_ENTITLEMENT,
   OWNED_URLS_SQL,
   reconcileStatements,
@@ -35,6 +36,7 @@ import {
   D1_NOW_MS,
   SLOW_STAMP_MS,
   STAMP_STOP,
+  type Account,
   type AccountRow,
   type Entitlement,
   type OwnedUrl,
@@ -50,6 +52,7 @@ import {
 } from "./machines";
 import { meteredDb } from "./queries";
 import { SITE_CACHE_TTL_MS } from "./sites";
+import { addonUpgrade, PRO_UPGRADE, type Upgrade } from "./upgrade";
 
 /**
  * No new tunnel generation of an owner starts until this long after their
@@ -140,6 +143,8 @@ export type MachineRuntime = {
   blocked: {
     reason: "subscription_required" | "serving_slots_full" | "capacity";
     message: string;
+    /** What lifts the block, when something the account can buy does. */
+    upgrade?: Upgrade;
   } | null;
   tunnel: { generation: number; token: string | null } | null;
   ingressSecret: string | null;
@@ -173,7 +178,8 @@ export async function machineRuntime(
   daemonGeneration: number | null,
   now = Date.now(),
 ): Promise<MachineRuntime> {
-  const entitlement = await entitlementOf(env, caller.userId, now);
+  const account = await loadAccount(env.DB, caller.userId, now);
+  const entitlement = account?.entitlement ?? NO_ENTITLEMENT;
   const publicUrls = await urlsOfMachine(
     env.DB,
     setting(env, "PUBLIC_BASE_DOMAIN"),
@@ -202,6 +208,7 @@ export async function machineRuntime(
           reason: "subscription_required",
           message:
             "Public URLs need Localify Cloud Pro. Start a 7-day trial with `localify subscribe`.",
+          upgrade: PRO_UPGRADE,
         },
       };
     }
@@ -221,7 +228,7 @@ export async function machineRuntime(
       // A stop that landed since the check above.
       const late = await quietLeft(env, caller.userId);
       if (late > 0) return { ...provisioning, retryAfter: Math.ceil(late / 1000) };
-      return blockedRuntime(env, caller, entitlement, base);
+      return blockedRuntime(env, caller, account, entitlement, base);
     }
   }
 
@@ -273,6 +280,7 @@ function isStale(opAt: number | null, now: number): boolean {
 async function blockedRuntime(
   env: Env,
   caller: RuntimeCaller,
+  account: Account | null,
   entitlement: Entitlement,
   base: Omit<MachineRuntime, "state">,
 ): Promise<MachineRuntime> {
@@ -283,10 +291,12 @@ async function blockedRuntime(
     .all<{ name: string }>();
   if (holders.length >= entitlement.servingMachines) {
     const count = entitlement.servingMachines;
+    const upgrade = addonUpgrade(env, account, "addon_machine");
     return {
       ...base,
       state: "blocked",
       blocked: {
+        ...(upgrade === null ? {} : { upgrade }),
         reason: "serving_slots_full",
         message: `Your plan serves public URLs from ${count} ${count === 1 ? "machine" : "machines"} at a time, and ${holders
           .map((holder) => holder.name)
@@ -751,6 +761,10 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   } catch (error) {
     console.error("Reconciling the serving URLs failed; the next sweep retries it", error);
   }
+  // Serving is off (the sandbox): no slot is ever reserved, so there is no
+  // tunnel of ours to sweep, and the account's tunnels and records belong to
+  // another environment. Nothing below may list or delete them.
+  if (maxTunnels(env) === 0) return;
   const { results: slots } = await env.DB.prepare(
     `SELECT id, user_id, tunnel_state, tunnel_generation, tunnel_op_at, tunnel_id,
             tunnel_ready_at, down_seen_at, rotate_requested_at, dns_record_id, cleanup_attempts,

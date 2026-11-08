@@ -7,7 +7,8 @@ One Worker, routed by host:
 - **`api.localify.dev`**: the JSON API the CLI, the daemon and the desktop app call, and Polar's webhooks.
   - Sign-in runs GitHub's device flow with the OAuth App's client ID alone, refuses banned accounts (and, under `SIGNUP=allowlist`, ids outside the allowlist), and registers the machine without any Cloudflare call.
   - A machine gets a named Cloudflare Tunnel `localify-<machine-id>-<generation>` only when it has a public URL to serve and its owner is entitled. Its ingress goes to the daemon on `127.0.0.1:<ingressPort>`, behind the proxied CNAME `m-<machine-id>.localify.dev`, which outlives the tunnels.
-  - The API manages the user's public URLs, their password, which machine serves them, and the plan: a Polar checkout, the customer portal, and a snapshot of the subscriptions that webhooks refresh.
+  - The API manages the user's public URLs, their password, which machine serves them, and the plan: a Polar checkout for Pro or an add-on, the customer portal, and a snapshot of the subscriptions that webhooks refresh.
+  - `GET /v1/pricing`, public, gives the website the live prices of Pro and its add-ons, read from Polar and cached an hour.
   - Remote machines ([docs/remote-machines.md](../../docs/remote-machines.md), ADRs 0028 and 0032): the roster, each machine's remote key, removing a machine, authorization leases, and `/v1/remote/connect`, which hands each daemon's WebSocket to its account's `RemoteRelay` Durable Object. The relay routes end-to-end encrypted frames between the account's machines, stores nothing, and hibernates while idle, so an account nobody watches costs nothing.
 - **`*.localify.fyi`**: public traffic. The Worker:
   - finds the URL by slug, and checks its owner's ban and entitlement;
@@ -18,7 +19,7 @@ One Worker, routed by host:
   - forwards to `https://m-<machine-id>.localify.dev` with the `X-Localify-*` headers the daemon checks.
 
   It removes `Domain` from the app's `Set-Cookie` headers on the way back.
-- **Every 5 minutes**: rotates the machines of URLs that stopped serving since the last run (a plan change, an expiry, a ban or a takedown), reaps tunnels that have been down for 15 minutes, and releases machines with nothing left to serve. It corrects CNAMEs, retries failed webhook refreshes, and removes what a sign-out could not remove.
+- **Every 5 minutes**: rotates the machines of URLs that stopped serving since the last run (a plan change, an expiry, a ban or a takedown), reaps tunnels that have been down for 15 minutes, and releases machines with nothing left to serve. It corrects CNAMEs, retries failed webhook refreshes, cancels the add-ons of lapsed plans at period end, and removes what a sign-out could not remove.
 - **Every day**: reconciles every plan with Polar, and purges URLs deleted more than 30 days ago.
 
 Data lives in D1 (`localify-cloud`, schema in [`migrations/`](migrations/)). Tokens are stored as SHA-256 hashes, passwords as PBKDF2-SHA-256 with 100,000 iterations.
@@ -34,7 +35,9 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/machines.ts` | Sign-in, sign-out, replacing a machine, the cleanup of revoked machines, and the purge of deleted URLs |
 | `src/tunnels.ts` | Serving slots, provisioning and releasing tunnels, the machine runtime, the serving reconcile, and the 5-minute sweep |
 | `src/queries.ts` | The D1 query budget of a scheduled run |
-| `src/billing.ts` | The checkout, the portal, Polar's webhooks, the refresh of the `billing` snapshot, duplicate subscriptions, and the daily reconciliation |
+| `src/billing.ts` | The Pro and add-on checkouts, the portal, Polar's webhooks, the refresh of the `billing` snapshot, duplicate subscriptions, the add-ons of lapsed plans, and the daily reconciliation |
+| `src/pricing.ts` | `GET /v1/pricing`: live prices from Polar, the currency, the Cache API, CORS |
+| `src/upgrade.ts` | The `upgrade` hint of `402 subscription_required`, `403 quota_exceeded` and a blocked runtime |
 | `src/entitlement.ts` | What an account may use: its ban, its override, or its Pro plan from the `billing` snapshot, remote access included; and which URLs lose their right after a change |
 | `src/relay.ts` | The `RemoteRelay` Durable Object, one per account, and the Worker's revocation pushes to it |
 | `src/public.ts`, `src/sites.ts` | The public traffic path |
@@ -59,7 +62,7 @@ LOCALIFY_CLOUD_API=http://127.0.0.1:8787 localify login
 
 Sign-in reaches the real GitHub and makes no Cloudflare call. Serving takes an entitlement, so give your account one: `pnpm cloud:admin --local override <github-login> 5 10 dev`. Once the machine has a URL to serve, its next runtime fetch creates a real tunnel and DNS record when `.dev.vars` has a `CLOUDFLARE_API_TOKEN`; without one, the runtime stays `provisioning` and the Worker logs that the token is not set. `localify logout` removes what the machine created.
 
-`.dev.vars.example` points billing at Polar's sandbox. With the sandbox `POLAR_ACCESS_TOKEN` from Infisical (`dev`), `localify subscribe` opens a sandbox checkout (test card `4242 4242 4242 4242`). Without a sandbox webhook reaching your Worker, run `pnpm cloud:admin --local refresh <github-login>` and trigger the 5-minute job to see the plan.
+`.dev.vars.example` points billing at Polar's sandbox, with add-ons on sale. With the sandbox `POLAR_ACCESS_TOKEN` from Infisical (`dev`), `localify subscribe` opens a sandbox checkout (test card `4242 4242 4242 4242`). Without a sandbox webhook reaching your Worker, run `pnpm cloud:admin --local refresh <github-login>` and trigger the 5-minute job to see the plan.
 
 To try the public path, send the public host in the `Host` header. The `dev` script passes `--infer-origin-from-routes=false` so the Worker sees that host instead of its first route's.
 
@@ -93,7 +96,7 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05. Step 5 was done on 2026
 2. **Infisical**, project `localify`, folder `/cloud`, same keys in `dev` and `prod`, with values that differ between them:
    - `CLOUDFLARE_API_TOKEN`: a token with Cloudflare Tunnel Edit and DNS Edit on `localify.dev` and `localify.fyi`, used by the Worker to manage tunnels; it cannot deploy.
    - `COOKIE_KEY`, `INGRESS_KEY` and `EDGE_KEY`: `openssl rand -hex 32` each.
-   - `POLAR_ACCESS_TOKEN`: an organization access token; `dev` holds the sandbox one.
+   - `POLAR_ACCESS_TOKEN`: an organization access token; `dev` holds the sandbox one, which the sandbox Worker also uses.
    - `POLAR_WEBHOOK_SECRET`: the `whsec_…` secret Polar shows when the webhook endpoint is created. The deploy runs without it, and the Worker then answers webhooks with 503.
    - `CLOUDFLARE_DEPLOY_TOKEN`, `prod` only: wrangler's identity for `pnpm cloud:deploy`, `pnpm cloud:migrate` and `pnpm cloud:admin`, so nobody's `wrangler login` is needed. Account: Workers Scripts Edit, D1 Edit, Account Settings Read; zones `localify.dev` and `localify.fyi`: Workers Routes Edit, Zone Read; User Details Read.
    - `CLOUDFLARE_OPS_TOKEN`, `prod` only: an operator's token for the zone rules below (Zone WAF Edit, Transform Rules Edit, Zone Read on both zones). Neither script reads it, and it never reaches the Worker.
@@ -108,11 +111,12 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05. Step 5 was done on 2026
    - "Prevent trial abuse" turned on (Settings → Subscriptions);
    - "Enable subscription plan changes" turned on in the customer portal settings, so a subscriber can switch between monthly and yearly there;
    - a webhook endpoint at `https://api.localify.dev/v1/webhooks/polar` (the sandbox points at a dev deployment), with `api_version` `2026-10`, subscribed to every `subscription.*` event and `customer.state_changed`; its `whsec_…` secret goes in Infisical as `POLAR_WEBHOOK_SECRET`, then `pnpm cloud:deploy` again;
-   - an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write` and `orders:read`. Refunds are made in the dashboard, so it needs no refund scope.
+   - two add-on products, monthly, without trial, each with a unit-based USD and EUR price, volume tiering with a single tier: one serving machine at $3 / €3 a unit, and ten public URLs at $2 / €2 a unit. The Worker counts at most 20 units of each; give the tier a bound of 20 so nobody can buy units that would not count. Their ids go in `POLAR_PRODUCT_ADDON_MACHINE` and `POLAR_PRODUCT_ADDON_URLS`, production's at the top of `wrangler.jsonc` and the sandbox's in `env.sandbox` and `.dev.vars.example`;
+   - "Enable subscription unit changes" turned on in the customer portal settings, so a subscriber changes an add-on's quantity there;
+   - "Allow multiple subscriptions" turned on for the organization before `ADDONS` is set to `on`: an add-on is a second subscription next to Pro, and Polar refuses it otherwise. Production keeps `ADDONS` at `off` until then;
+   - an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write`, `orders:read` and `products:read`, the last one for `/v1/pricing`. Refunds are made in the dashboard, so it needs no refund scope.
 
    The Worker sends `Polar-Version: 2026-10` on every call. Polar removes that version in April 2027: move the Worker and the webhook endpoint to the next version together before then.
-
-   The add-on products and "Enable subscription unit changes" come when add-ons ship.
 
 The `localify.fyi` zone needs a proxied `*` AAAA record (`100::`) so every label reaches the Worker route, and a rate-limiting rule per client IP (docs/public-urls.md, "Public traffic"). The rule runs before the Worker, so a flood from one address costs no Worker requests.
 
@@ -159,15 +163,39 @@ The `localify.dev` zone needs two rules, so that nobody holding a tunnel token c
 | `SIGNUP` | var | `allowlist` while invite-only, `open` once anyone may sign in |
 | `ALLOWED_GITHUB_IDS` | var | under `SIGNUP=allowlist`, who may sign in |
 | `TEAM_GITHUB_IDS` | var | who gets the `team` override at sign-in; stays once sign-up opens |
-| `MAX_TUNNELS` | var | `950`; the sweep logs an error above 800 |
+| `MAX_TUNNELS` | var | `950`; the sweep logs an error above 800. `0`, in the sandbox only, turns serving off |
 | `POLAR_API_BASE` | var | `https://api.polar.sh`, or `https://sandbox-api.polar.sh` in `.dev.vars` |
 | `POLAR_PRODUCT_PRO_MONTHLY`, `POLAR_PRODUCT_PRO_YEARLY` | var | Pro product ids, each with a USD and an EUR price |
-| `POLAR_PRODUCT_ADDON_MACHINE`, `POLAR_PRODUCT_ADDON_URLS` | var | add-on product ids, empty until add-ons ship |
+| `POLAR_PRODUCT_ADDON_MACHINE`, `POLAR_PRODUCT_ADDON_URLS` | var | add-on product ids, each with a unit-based USD and EUR price |
+| `ADDONS` | var | `off` until the organization allows multiple subscriptions, then `on`. Off refuses add-on checkouts (`409 addons_unavailable`); add-on subscriptions that exist still count |
 | `POLAR_ACCESS_TOKEN` | secret | from Infisical; `dev` holds the sandbox one |
 | `POLAR_WEBHOOK_SECRET` | secret | from Infisical, once the webhook endpoint exists; webhooks answer 503 without it |
 | `EDGE_KEY` | secret | from Infisical; must match the `localify.dev` WAF rule |
 
 The full table, with the Cloudflare and GitHub settings, is in [docs/public-urls.md](../../docs/public-urls.md), "Configuration".
+
+## Sandbox
+
+`env.sandbox` in `wrangler.jsonc` is a second Worker, `localify-cloud-sandbox`, for end-to-end billing tests against Polar's sandbox. It runs on `workers.dev` only, with its own D1 database (`localify-cloud-sandbox`), the sandbox products, `ADDONS=on`, and `SIGNUP=allowlist` with the founder's GitHub id alone. `TEAM_GITHUB_IDS` is empty there, so the account's plan is the one Polar's sandbox gives it.
+
+It never serves. It shares the Cloudflare account with production, so a sweep that listed tunnels would find production's and delete them as orphans. Two things keep it away from them:
+
+- `MAX_TUNNELS` is `0`: no slot is ever reserved (a machine with a URL gets `blocked` with `capacity`), and the sweep stops after the serving reconcile, before any Cloudflare call;
+- it has no `CLOUDFLARE_API_TOKEN`: `pnpm cloud:deploy --env sandbox` never passes one, so any Cloudflare call would fail before it left the Worker.
+
+Its public and machine domains are `localify-sandbox.invalid`, a name that never resolves, and `MACHINE_ZONE_ID` and `CLOUDFLARE_ACCOUNT_ID` are empty. Public URLs can be created and listed there, but not visited.
+
+Both scripts take `--env sandbox`. The deploy passes the Worker secrets of Infisical's `dev` (`COOKIE_KEY`, `INGRESS_KEY`, `EDGE_KEY`, the sandbox `POLAR_ACCESS_TOKEN`, and `POLAR_WEBHOOK_SECRET` once it exists); both run wrangler as `prod`'s `CLOUDFLARE_DEPLOY_TOKEN`, since the sandbox lives in the same account.
+
+```bash
+# Once: create its D1, then put the printed id in env.sandbox.d1_databases[0].database_id.
+cd apps/cloud && node scripts/infisical.mjs d1 create localify-cloud-sandbox --location weur
+
+pnpm cloud:migrate --env sandbox
+pnpm cloud:deploy --env sandbox     # prints https://localify-cloud-sandbox.<subdomain>.workers.dev
+```
+
+Then, in Polar's sandbox, create a webhook endpoint at `https://localify-cloud-sandbox.<subdomain>.workers.dev/v1/webhooks/polar` with `api_version` `2026-10`, subscribed to every `subscription.*` event and `customer.state_changed`. Put its `whsec_…` secret in Infisical `dev` as `POLAR_WEBHOOK_SECRET` (local development shares it, so a local Worker then needs that endpoint's deliveries, or `pnpm cloud:admin --local refresh`), and deploy again. Sign in with `LOCALIFY_CLOUD_API=https://localify-cloud-sandbox.<subdomain>.workers.dev localify login`.
 
 ## Sign-up, overrides and moderation
 

@@ -47,7 +47,7 @@ Not covered here: typing into a service from another machine, attaching to a ter
 - **Launch:** a request to start a run, from a **dispatcher** (the app, the daemon, `dev --detach`). The dispatcher picks a launch id, which becomes the run id, and an expiry after which the launch can no longer start. What happened to it is decided once, in its launch record.
 - **Run PTY:** the pseudo-terminal the desktop app creates for one run, with `localify dev` as its only child. A service tab shows a run PTY; a shell tab shows an ordinary shell.
 - **Owner:** who holds a run: a run PTY of the desktop app (`app`), a detached executor (`background`), a terminal Localify does not own (`terminal`), or a process listening on the port with no run record (`unknown`).
-- **Linked machine:** an active machine that has uploaded a remote key. An account has at most 10, the same limit as signed-in machines.
+- **Linked machine:** an active machine that has uploaded a remote key. An account has at most 10, whatever its serving capacity: machine add-ons raise the signed-in machines (docs/public-urls.md, "Plans"), never this.
 
 ## Target settings
 
@@ -685,7 +685,7 @@ New configuration: two rate-limit bindings, `REMOTE_IP_LIMITER` (30 per 60 secon
 - **Override:** an override replaces the plan entirely, so it carries `plan_overrides.remote_access`. `cloud:admin override` sets it to 1 unless given `--no-remote-access`, and `show` prints it.
 - **Ban:** none. **No plan:** none.
 - **`/v1/me`:** `plan.limits` becomes `{servingMachines, publicUrls, remoteAccess}`. `plan.entitled` keeps its meaning (serving), so the public URL paywall does not move. PR 2 updates public-urls.md's `Plan` and "Plans" with it.
-- **Linked machines:** at most 10 per account, which the 10 signed-in machines already bound.
+- **Linked machines:** at most 10 per account. An account with machine add-ons may sign in more than 10 machines, but no more than 10 of them link: serving capacity never raises the remote cap.
 
 **Leases.** An endpoint holds a lease while it has a session open, as viewer or target, and renews it every 45 seconds with up to 5 seconds of jitter. A lease lasts `ttl` seconds from the moment its request was sent, measured on the monotonic clock; the endpoint never compares a time from the cloud with its wall clock. The monotonic clock may not count sleep (`Instant` on macOS does not), so a detected wake (the wall clock moved more than a minute past the monotonic one) expires the lease at once. Sessions then end until a renewal succeeds. A refused renewal, a lease that has run out, or a peer missing from the lease's `machines` ends the session with `bye` `lease_expired`.
 

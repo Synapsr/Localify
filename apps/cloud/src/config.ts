@@ -19,7 +19,9 @@ type Setting =
   | "POLAR_API_BASE"
   | "POLAR_ACCESS_TOKEN"
   | "POLAR_PRODUCT_PRO_MONTHLY"
-  | "POLAR_PRODUCT_PRO_YEARLY";
+  | "POLAR_PRODUCT_PRO_YEARLY"
+  | "POLAR_PRODUCT_ADDON_MACHINE"
+  | "POLAR_PRODUCT_ADDON_URLS";
 
 /** A setting's value, or a ConfigError when it is empty: nothing runs on a default. */
 export function setting(env: Env, name: Setting): string {
@@ -28,10 +30,15 @@ export function setting(env: Env, name: Setting): string {
   return value.trim();
 }
 
-/** `MAX_TUNNELS`: the most serving slots the whole Cloudflare account holds. */
+/**
+ * `MAX_TUNNELS`: the most serving slots the whole Cloudflare account holds.
+ * 0 turns serving off: no slot is ever reserved, and the sweep touches no
+ * Cloudflare API. Only the sandbox runs with it, so that it never creates,
+ * lists or deletes a tunnel of the account it shares with production.
+ */
 export function maxTunnels(env: Env): number {
   const value = Number(env.MAX_TUNNELS);
-  if (!Number.isInteger(value) || value < 1) throw new ConfigError("MAX_TUNNELS");
+  if (!Number.isInteger(value) || value < 0) throw new ConfigError("MAX_TUNNELS");
   return value;
 }
 
@@ -74,6 +81,26 @@ export function proProducts(env: Env): { month: string; year: string } {
     month: setting(env, "POLAR_PRODUCT_PRO_MONTHLY"),
     year: setting(env, "POLAR_PRODUCT_PRO_YEARLY"),
   };
+}
+
+/** The add-ons a checkout can sell, by kind. */
+export type AddonKind = "addon_machine" | "addon_urls";
+
+/** The product id of an add-on: the only product an add-on checkout offers. */
+export function addonProduct(env: Env, kind: AddonKind): string {
+  return setting(
+    env,
+    kind === "addon_machine" ? "POLAR_PRODUCT_ADDON_MACHINE" : "POLAR_PRODUCT_ADDON_URLS",
+  );
+}
+
+/**
+ * `ADDONS`: whether add-ons are on sale. Anything but `on` keeps them off,
+ * which only stops new add-on checkouts: an add-on subscription that exists
+ * still counts, and still ends with its Pro plan.
+ */
+export function addonsOnSale(env: Env): boolean {
+  return env.ADDONS === "on";
 }
 
 /**
