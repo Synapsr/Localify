@@ -671,6 +671,10 @@ mod tests {
         fn boot_id(&self) -> Option<String> {
             Some("this boot".into())
         }
+
+        fn now(&self) -> u64 {
+            crate::infrastructure::process::monotonic_now()
+        }
     }
 
     #[test]

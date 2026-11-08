@@ -216,6 +216,8 @@ pub trait ProcessTable {
     fn process(&self, pid: u32) -> Option<ProcessInfo>;
     fn signal(&self, pid: u32, signal: Signal);
     fn boot_id(&self) -> Option<String>;
+    /// Now, in the time domain of [`ProcessInfo::start`].
+    fn now(&self) -> u64;
 }
 
 /// The kernel's process table.
@@ -236,6 +238,10 @@ impl ProcessTable for NativeProcesses {
 
     fn boot_id(&self) -> Option<String> {
         boot_id()
+    }
+
+    fn now(&self) -> u64 {
+        monotonic_now()
     }
 }
 

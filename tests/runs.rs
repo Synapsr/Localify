@@ -524,6 +524,8 @@ struct FakeTable {
     after_scan: RefCell<Option<Vec<(ProcessInfo, bool)>>>,
     /// A process `pid` starts when it gets SIGTERM.
     fork_on_term: RefCell<Option<(u32, (ProcessInfo, bool))>>,
+    /// A process `pid` started, which no scan saw until `pid` got SIGKILL.
+    fork_on_kill: RefCell<Option<(u32, (ProcessInfo, bool))>>,
 }
 
 impl FakeTable {
@@ -535,6 +537,7 @@ impl FakeTable {
             first_lookup: None.into(),
             after_scan: None.into(),
             fork_on_term: None.into(),
+            fork_on_kill: None.into(),
         }
     }
 
@@ -575,6 +578,14 @@ impl ProcessTable for FakeTable {
             self.fork_on_term.borrow_mut().take();
             self.processes.borrow_mut().push(child);
         }
+        let missed = self
+            .fork_on_kill
+            .borrow()
+            .filter(|(parent, _)| *parent == pid && signal == Signal::Kill);
+        if let Some((_, child)) = missed {
+            self.fork_on_kill.borrow_mut().take();
+            self.processes.borrow_mut().push(child);
+        }
         self.processes
             .borrow_mut()
             .retain(|(process, ignores_term)| {
@@ -584,6 +595,11 @@ impl ProcessTable for FakeTable {
 
     fn boot_id(&self) -> Option<String> {
         Some(self.boot_id.clone())
+    }
+
+    /// Later than every start these tests make up.
+    fn now(&self) -> u64 {
+        1_000_000
     }
 }
 
@@ -843,6 +859,28 @@ fn a_worker_forked_by_an_escaped_descendant_during_shutdown_is_ended_too() {
     assert!(table.signals.borrow().contains(&(5001, Signal::Kill)));
 }
 
+#[test]
+fn a_child_first_seen_after_its_parent_died_is_still_ended() {
+    let dir = run_folder();
+    // A proven member that ignores SIGTERM, with a child it started while it
+    // was proven alive, which every scan missed until the member was killed.
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), true)]);
+    *table.fork_on_kill.borrow_mut() = Some((4243, (fake_process(4246, 4242, 1_500), true)));
+
+    let finish = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert_eq!(finish, Finish::Finalized(EndReason::Interrupted));
+    assert!(table.current().is_empty(), "{:?}", table.current());
+    assert!(table.signals.borrow().contains(&(4246, Signal::Kill)));
+}
+
 /// A process of the run's executor that left its session.
 fn escaped(pid: u32, ppid: u32, start: u64) -> ProcessInfo {
     ProcessInfo {
@@ -885,6 +923,10 @@ impl ProcessTable for SharedTable {
 
     fn boot_id(&self) -> Option<String> {
         Some("boot-a".into())
+    }
+
+    fn now(&self) -> u64 {
+        1_000_000
     }
 }
 

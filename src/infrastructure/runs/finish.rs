@@ -330,20 +330,27 @@ impl Finisher<'_> {
     ) -> Result<Ended> {
         let mut known = members;
         let mut retained = tree;
+        // The session is proven unbroken up to this time, in the processes' time.
+        let mut horizon = session.last_alive_at;
         let mut signalled: HashSet<Identity> = HashSet::new();
         let started = Instant::now();
         loop {
             let killing = started.elapsed() >= grace;
             for (process, member) in targets(&known, &retained, exclude) {
-                if killing {
-                    self.signal_checked(session, process, member, Signal::Kill);
-                } else if signalled.insert(process) {
-                    self.signal_checked(session, process, member, Signal::Terminate);
+                let signal = match killing {
+                    true => Signal::Kill,
+                    false if signalled.insert(process) => Signal::Terminate,
+                    false => continue,
+                };
+                let before_reading = self.table.now();
+                if self.signal_checked(session, process, member, signal) && member {
+                    // A member read alive just now proves the session until then.
+                    horizon = horizon.max(before_reading);
                 }
             }
             thread::sleep(POLL);
             let scan = self.table.processes();
-            known = self.still_members(session, &known, &scan);
+            known = self.still_members(session, &known, &scan, &mut horizon);
             retained = still_retained(session, &retained, &scan);
             let left = targets(&known, &retained, exclude);
             if left.is_empty() {
@@ -366,14 +373,19 @@ impl Finisher<'_> {
         }
     }
 
-    /// The session's members in `scan`, when a known member is still one of
-    /// them after the scan, read again. Otherwise the session may have broken
-    /// during the scan, and no member is adopted.
+    /// The session's members in `scan` that belong to the run: those already
+    /// known, by identity, and those started no later than `horizon`. When a
+    /// known member is read again after the scan, unchanged, the session was
+    /// unbroken at least until just before that read, which moves `horizon`:
+    /// a process that started by then carried the session while it was the
+    /// run's, and carries it still. A scan whose members all vanished moves
+    /// nothing, so a replacement session is never adopted.
     fn still_members(
         &self,
         session: &RunSession,
         known: &[ProcessInfo],
         scan: &[ProcessInfo],
+        horizon: &mut u64,
     ) -> Vec<ProcessInfo> {
         let current: Vec<ProcessInfo> = scan
             .iter()
@@ -386,21 +398,29 @@ impl Finisher<'_> {
                 .iter()
                 .any(|old| Identity::of(old) == Identity::of(process))
         };
-        let unbroken = current
+        let before_reading = self.table.now();
+        if current
             .iter()
-            .any(|process| is_known(process) && session.still_member(self.table, process));
-        if unbroken { current } else { Vec::new() }
+            .any(|process| is_known(process) && session.still_member(self.table, process))
+        {
+            *horizon = (*horizon).max(before_reading);
+        }
+        current
+            .into_iter()
+            .filter(|process| is_known(process) || process.start <= *horizon)
+            .collect()
     }
 
     /// Signals a process only while it is the one seen: same start, and for a
     /// session member, still in the session.
+    /// Returns whether it was still that process.
     fn signal_checked(
         &self,
         session: &RunSession,
         process: Identity,
         member: bool,
         signal: Signal,
-    ) {
+    ) -> bool {
         let unchanged = self
             .table
             .process(process.pid)
@@ -408,6 +428,7 @@ impl Finisher<'_> {
         if unchanged {
             self.table.signal(process.pid, signal);
         }
+        unchanged
     }
 }
 
