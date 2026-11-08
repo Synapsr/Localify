@@ -10,7 +10,7 @@ use crate::application::ports::{
 use crate::domain::{
     DomainPattern, DomainRegistration, PathPrefix, ProxyTarget, Route, RouteTarget,
 };
-use crate::infrastructure::cloud::types::PublicStatus;
+use crate::infrastructure::cloud::types::{PublicStatus, PublicUrl};
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
 
 /// What the daemon should do after it stops serving.
@@ -121,6 +121,17 @@ impl MgmtSocketClient {
         let response = self.send_command(r#"{"cmd":"public_status"}"#)?;
         serde_json::from_value(response["data"].clone())
             .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
+    }
+
+    /// The public URLs the daemon last learned from Localify Cloud, and this
+    /// machine's id. Empty while signed out or before Localify Cloud first
+    /// answered; the daemon answers at once, without calling the network.
+    pub fn public_urls(&self) -> Result<(Vec<PublicUrl>, Option<String>), DaemonConnectionError> {
+        let mut response = self.send_command(r#"{"cmd":"public_urls"}"#)?;
+        let urls = serde_json::from_value(response["data"]["urls"].take())
+            .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))?;
+        let machine_id = response["data"]["machineId"].as_str().map(str::to_string);
+        Ok((urls, machine_id))
     }
 
     /// This machine's inventory snapshot (docs/remote-machines.md,

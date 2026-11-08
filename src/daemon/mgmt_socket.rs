@@ -43,6 +43,10 @@ enum MgmtCommand {
     /// Fetch this machine's public URLs again, in the background.
     #[serde(rename = "public_refresh")]
     PublicRefresh,
+    /// The public URLs the daemon last learned from Localify Cloud, and this
+    /// machine's id: what `localify dev` trusts without calling the network.
+    #[serde(rename = "public_urls")]
+    PublicUrls,
     /// This machine's inventory (`docs/remote-machines.md`, "Inventory"), or
     /// `unchanged` when `have` names its current revision.
     #[serde(rename = "inventory")]
@@ -102,6 +106,7 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "restart" => Some(MgmtCommand::Restart),
         "public_status" => Some(MgmtCommand::PublicStatus),
         "public_refresh" => Some(MgmtCommand::PublicRefresh),
+        "public_urls" => Some(MgmtCommand::PublicUrls),
         "inventory" => Some(MgmtCommand::Inventory { have: None }),
         _ => None,
     }
@@ -246,6 +251,12 @@ pub async fn serve(
                 Some(MgmtCommand::PublicRefresh) => {
                     tunnel.refresh();
                     MgmtResponse::success(serde_json::json!({ "refreshing": true }))
+                }
+                Some(MgmtCommand::PublicUrls) => {
+                    let (urls, machine_id) = tunnel.known_urls();
+                    MgmtResponse::success(
+                        serde_json::json!({ "urls": urls, "machineId": machine_id }),
+                    )
                 }
                 Some(MgmtCommand::Inventory { have }) => {
                     inventory_answer(&inventory, &tunnel, have).await

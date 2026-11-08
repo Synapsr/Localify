@@ -153,7 +153,8 @@ impl PublicTunnel {
     }
 
     /// The URLs of the last `ready` runtime, and this machine's id, for the
-    /// inventory. Empty while signed out or before the first answer.
+    /// inventory and `public_urls`. Empty while signed out or before the
+    /// first answer.
     pub fn known_urls(&self) -> (Vec<PublicUrl>, Option<String>) {
         let parts = self.parts();
         (parts.known_urls.clone(), parts.machine_id.clone())
