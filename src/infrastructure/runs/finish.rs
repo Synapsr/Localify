@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::output::{self, EndReason, FinalizeLock, RunEnd};
+use super::output::{self, Acquired, EndReason, FinalizeLock, RunEnd};
 use crate::infrastructure::process::{
     Identity, NativeProcesses, ProcessInfo, ProcessTable, Signal, track_tree,
 };
@@ -36,6 +36,12 @@ use crate::infrastructure::process::{
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
 /// How long a finisher keeps sending SIGKILL before it gives up.
 pub const KILL_WAIT: Duration = Duration::from_secs(5);
+/// How long a launcher, which holds its service's lock, waits for another
+/// finisher of the previous run. A finisher signals for at most STOP_GRACE
+/// plus KILL_WAIT under the run's lock; twice that leaves room for its scans.
+/// A finisher still holding it after that is stuck or suspended.
+pub const CLEANUP_WAIT: Duration =
+    Duration::from_secs(2 * (STOP_GRACE.as_secs() + KILL_WAIT.as_secs()));
 /// How many scans a finisher tries before it gives up proving a session whose
 /// witnesses keep vanishing.
 const PROOF_ATTEMPTS: usize = 5;
@@ -173,6 +179,9 @@ pub enum Finish {
     Finalized(EndReason),
     /// The executor still runs, so the run is not over.
     ExecutorAlive,
+    /// Another finisher still held the run's lock when the wait ran out
+    /// ([`Finisher::finish_within`] only).
+    Busy,
     /// The run's folder is gone: nothing is left to finalize.
     Gone,
 }
@@ -342,9 +351,36 @@ impl Finisher<'_> {
         session: &RunSession,
         captured_by_executor: bool,
     ) -> Result<Finish> {
-        let Some(_lock) = FinalizeLock::acquire(dir)? else {
-            return Ok(Finish::Gone);
-        };
+        match FinalizeLock::acquire(dir)? {
+            Some(lock) => self.finish_locked(&lock, dir, session, captured_by_executor),
+            None => Ok(Finish::Gone),
+        }
+    }
+
+    /// `finish`, for a launcher, which holds its service's lock meanwhile: it
+    /// waits at most `limit` for another finisher of the run, so a stuck or
+    /// suspended one never holds the service forever.
+    pub fn finish_within(
+        &self,
+        dir: &Path,
+        session: &RunSession,
+        captured_by_executor: bool,
+        limit: Duration,
+    ) -> Result<Finish> {
+        match FinalizeLock::acquire_within(dir, limit)? {
+            Acquired::Locked(lock) => self.finish_locked(&lock, dir, session, captured_by_executor),
+            Acquired::Gone => Ok(Finish::Gone),
+            Acquired::Busy => Ok(Finish::Busy),
+        }
+    }
+
+    fn finish_locked(
+        &self,
+        _lock: &FinalizeLock,
+        dir: &Path,
+        session: &RunSession,
+        captured_by_executor: bool,
+    ) -> Result<Finish> {
         let finalized = output::read_end(dir)?.is_some();
         // Another boot ended every process of the run: nothing it saved is
         // trusted, nothing is signalled.
@@ -474,6 +510,9 @@ impl Finisher<'_> {
         let mut horizon = session.last_alive_at;
         let mut signalled: HashSet<Identity> = HashSet::new();
         let started = Instant::now();
+        // Counted from the first SIGKILL, so a finisher suspended past the
+        // grace period still sends it before giving up.
+        let mut killing_since: Option<Instant> = None;
         loop {
             if scope != Scope::SavedOnly {
                 // A member read alive now proves the session until then.
@@ -487,6 +526,9 @@ impl Finisher<'_> {
             }
             journal.record(horizon, &known, &retained)?;
             let killing = started.elapsed() >= self.grace;
+            if killing && killing_since.is_none() {
+                killing_since = Some(Instant::now());
+            }
             for (process, member) in targets(&known, &retained) {
                 let signal = match killing {
                     true => Signal::Kill,
@@ -517,7 +559,7 @@ impl Finisher<'_> {
                 journal.record(horizon, &known, &retained)?;
                 return Ok(Ended::ExecutorGone);
             }
-            if started.elapsed() >= self.grace + KILL_WAIT {
+            if killing_since.is_some_and(|since| since.elapsed() >= KILL_WAIT) {
                 let left: Vec<String> = left
                     .iter()
                     .map(|(process, _)| process.pid.to_string())

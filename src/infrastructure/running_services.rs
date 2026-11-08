@@ -24,7 +24,9 @@ use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::process::{
     self, Identity, NativeProcesses, Signal, process_info, signal_identities, track_tree,
 };
-use crate::infrastructure::runs::finish::{Finish, Finisher, Membership, RunSession, membership};
+use crate::infrastructure::runs::finish::{
+    CLEANUP_WAIT, Finish, Finisher, Membership, RunSession, membership,
+};
 use crate::infrastructure::runs::output::{self, plain_lines};
 use crate::infrastructure::runs::{RunId, run_dir};
 
@@ -324,7 +326,8 @@ impl RunningServiceStore {
     /// runs, the service is running. Otherwise the previous run is ended
     /// here if it was not: what is proven to be left of it is stopped, as
     /// `stop` would, and it is finalized. Nothing unproven is signalled, and a
-    /// proof that cannot be made is an error that says to try again.
+    /// proof that cannot be made is an error that says to try again, as is
+    /// another finisher of that run still busy after [`CLEANUP_WAIT`].
     pub fn lock(&self, key: &ServiceKey) -> Result<Admission> {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("Failed to create '{}'", self.dir.display()))?;
@@ -365,12 +368,23 @@ impl RunningServiceStore {
             return Ok(previous.legacy_state() == RunState::Running);
         };
         let dir = self.run_dir(&run.run_id);
-        let finish = Finisher::native().finish(&dir, &session, previous.has_stream())?;
-        if finish == Finish::ExecutorAlive {
-            return Ok(true);
+        let finish = Finisher::native().finish_within(
+            &dir,
+            &session,
+            previous.has_stream(),
+            CLEANUP_WAIT,
+        )?;
+        match finish {
+            Finish::ExecutorAlive => Ok(true),
+            Finish::Busy => bail!(
+                "another cleanup of '{}' is still running; try again in a moment.",
+                previous.key.service_id
+            ),
+            Finish::AlreadyFinalized | Finish::Finalized(_) | Finish::Gone => {
+                self.mark_ended(previous)?;
+                Ok(false)
+            }
         }
-        self.mark_ended(previous)?;
-        Ok(false)
     }
 
     /// Records that the current process runs this service, under its lock, and

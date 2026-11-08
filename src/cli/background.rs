@@ -59,9 +59,12 @@ pub fn start_detached(
     ctx: &AppContext,
 ) -> Result<i32> {
     let store = RunningServiceStore::new_default()?;
-    // The executor has no terminal: a person at this one is asked here.
-    let replace = detached.replace == Replace::Ask
-        && ask_before_detaching(&store, detached.target, config_path, ctx)?;
+    // The executor has no terminal: a person at this one is asked here, and
+    // the executor stops only the run they were asked about.
+    let approved = match detached.replace {
+        Replace::Ask => ask_before_detaching(&store, detached.target, config_path, ctx)?,
+        _ => None,
+    };
     let (launch_id, chosen) = match launch_id {
         Some(id) => (RunId::parse(id)?, false),
         None => (RunId::generate()?, true),
@@ -79,7 +82,7 @@ pub fn start_detached(
         .args(foreground_args(
             std::env::args_os().skip(1),
             chosen.then_some(&launch_id),
-            replace,
+            approved.as_ref(),
         ))
         .env(SERVICE_ORIGIN_ENV, ServiceOrigin::Background.as_env())
         .stdin(Stdio::null())
@@ -101,7 +104,7 @@ pub fn start_detached(
     wait_for_child(&mut child, &store, &launch_id, &launch_log)
 }
 
-/// Whether a person agrees to stop the service before it starts in the
+/// The run a person agrees to stop before the service starts in the
 /// background. Nothing running, or a run of an older version, which the
 /// executor refuses itself, asks nothing.
 fn ask_before_detaching(
@@ -109,27 +112,27 @@ fn ask_before_detaching(
     target: RunTarget<'_>,
     config_path: &Path,
     ctx: &AppContext,
-) -> Result<bool> {
+) -> Result<Option<RunId>> {
     let launch = resolve_launch_target(target, config_path, ctx)?;
     let Some(running) = store
         .get(&launch.key)?
         .filter(|run| run.run_id().is_some() && run.executor_runs())
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if !Replace::Ask.stops(&running)? {
         bail!("{}", already_running(&running));
     }
-    Ok(true)
+    Ok(running.run_id().cloned())
 }
 
 /// The arguments of this command without `--detach`, with the launch id this
-/// dispatcher chose, and `--replace` when a person agreed to it. What follows
-/// `--` is the service's own command and stays as it is.
+/// dispatcher chose, and `--replace=<runId>` for the run a person agreed to
+/// stop. What follows `--` is the service's own command and stays as it is.
 fn foreground_args(
     args: impl Iterator<Item = OsString>,
     launch_id: Option<&RunId>,
-    replace: bool,
+    replace: Option<&RunId>,
 ) -> Vec<OsString> {
     let mut foreground = Vec::new();
     let mut in_service_command = false;
@@ -148,14 +151,18 @@ fn foreground_args(
     foreground
 }
 
-/// The launch id in one argument: an id may start with `-`, which would read
+/// Each run id in one argument: an id may start with `-`, which would read
 /// as a flag.
-fn push_dispatcher_args(args: &mut Vec<OsString>, launch_id: Option<&RunId>, replace: bool) {
+fn push_dispatcher_args(
+    args: &mut Vec<OsString>,
+    launch_id: Option<&RunId>,
+    replace: Option<&RunId>,
+) {
     if let Some(launch_id) = launch_id {
         args.push(format!("--launch-id={launch_id}").into());
     }
-    if replace && !args.iter().any(|arg| arg == "--replace") {
-        args.push("--replace".into());
+    if let Some(replace) = replace {
+        args.push(format!("--replace={replace}").into());
     }
 }
 
@@ -827,23 +834,24 @@ mod tests {
     }
 
     #[test]
-    fn a_yes_given_before_detaching_reaches_the_executor_once() {
+    fn a_yes_given_before_detaching_names_the_run_it_was_about() {
+        let shown = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
         let result = foreground_args(
             args(&["dev", "web", "--detach", "--", "pnpm", "dev"]).into_iter(),
             None,
-            true,
+            Some(&shown),
         );
         assert_eq!(
             result,
-            args(&["dev", "web", "--replace", "--", "pnpm", "dev"])
+            args(&[
+                "dev",
+                "web",
+                "--replace=-qAAAAAAAAAAAAAAAAAAAA",
+                "--",
+                "pnpm",
+                "dev"
+            ])
         );
-
-        let already = foreground_args(
-            args(&["dev", "web", "--replace", "--detach"]).into_iter(),
-            None,
-            true,
-        );
-        assert_eq!(already, args(&["dev", "web", "--replace"]));
     }
 
     #[test]
@@ -853,7 +861,7 @@ mod tests {
         let result = foreground_args(
             args(&["dev", "web", "--detach"]).into_iter(),
             Some(&launch_id),
-            false,
+            None,
         );
 
         assert_eq!(
@@ -871,7 +879,7 @@ mod tests {
             ])
             .into_iter(),
             Some(&launch_id),
-            false,
+            None,
         );
 
         assert_eq!(
@@ -902,7 +910,7 @@ mod tests {
             ])
             .into_iter(),
             None,
-            false,
+            None,
         );
 
         assert_eq!(

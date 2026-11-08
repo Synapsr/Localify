@@ -20,8 +20,9 @@ use localify::branding::BRANDING;
 use localify::infrastructure::process::{self, ProcessInfo, ProcessTable, Signal};
 use localify::infrastructure::running_services::{RunningService, RunningServiceStore};
 use localify::infrastructure::runs::RunId;
-use localify::infrastructure::runs::finish::{Finish, Finisher, RunSession};
+use localify::infrastructure::runs::finish::{CLEANUP_WAIT, Finish, Finisher, RunSession};
 use localify::infrastructure::runs::output::{self, EndReason, FinalizeLock};
+use localify::infrastructure::test_pause::PAUSE_DIR_ENV;
 
 /// Children that ignore SIGINT and SIGTERM, and never listen on their port.
 const STUBBORN: &str = r#"echo started
@@ -88,8 +89,12 @@ impl Sandbox {
     /// An executor started as a dispatcher starts it: in its own session, as
     /// a background run, its own messages in a file.
     fn spawn_background(&self, script: &str) -> Child {
+        self.spawn_executor(self.dev(script))
+    }
+
+    /// `command`, started as [`Sandbox::spawn_background`] starts an executor.
+    fn spawn_executor(&self, mut command: Command) -> Child {
         let log = fs::File::create(self.root.join("executor.log")).unwrap();
-        let mut command = self.dev(script);
         command
             .env("LOCALIFY_SERVICE_ORIGIN", "background")
             .stdout(log.try_clone().unwrap())
@@ -224,6 +229,12 @@ fn wait_for_proof(sandbox: &Sandbox, sid: u32, members: usize) -> RunningService
 fn kill_executor(executor: &mut Child) {
     assert!(process::send_signal(executor.id(), Signal::Kill));
     executor.wait().unwrap();
+}
+
+/// Sends a signal Localify itself never sends, such as SIGSTOP.
+fn signal_raw(child: &Child, signal: libc::c_int) {
+    // SAFETY: kill only signals; the PID is a child this test has not reaped.
+    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, signal) }, 0);
 }
 
 fn stderr(output: &Output) -> String {
@@ -1385,6 +1396,50 @@ fn dev_with(sandbox: &Sandbox, args: &[&str], script: &str) -> Command {
     sandbox.localify(&all)
 }
 
+/// The pause points of one `localify` process (src/infrastructure/test_pause.rs):
+/// a barrier that holds it at a point until the test lets it go.
+struct Pauses {
+    dir: PathBuf,
+}
+
+impl Pauses {
+    fn new(sandbox: &Sandbox, name: &str) -> Self {
+        let dir = sandbox.root.join(format!("pauses-{name}"));
+        fs::create_dir_all(&dir).unwrap();
+        Self { dir }
+    }
+
+    /// `command`, held at each of `points` it reaches.
+    fn hold(&self, mut command: Command, points: &[&str]) -> Command {
+        for point in points {
+            fs::write(self.dir.join(point), "").unwrap();
+        }
+        command.env(PAUSE_DIR_ENV, &self.dir);
+        command
+    }
+
+    fn wait_reached(&self, point: &str) {
+        let reached = wait_until(Duration::from_secs(30), || {
+            self.dir
+                .join(format!("{point}.reached"))
+                .exists()
+                .then_some(())
+        });
+        assert!(reached.is_some(), "never reached '{point}'");
+    }
+
+    fn release(&self, point: &str) {
+        fs::remove_file(self.dir.join(point)).unwrap();
+    }
+}
+
+impl Drop for Pauses {
+    /// A failed test lets its processes go on rather than hang.
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 #[test]
 fn a_launch_without_a_terminal_leaves_a_running_service_alone() {
     let sandbox = Sandbox::new();
@@ -1426,10 +1481,16 @@ fn replace_stops_the_running_service_then_starts_it() {
 #[test]
 fn two_replacing_launches_never_both_start() {
     let sandbox = Sandbox::new();
-    let (mut executor, _) = a_running_service(&sandbox);
-    let mut launches: Vec<Child> = (0..2)
-        .map(|_| {
-            dev_with(&sandbox, &["--replace"], "sleep 30")
+    let (mut executor, record) = a_running_service(&sandbox);
+    let pauses = [Pauses::new(&sandbox, "a"), Pauses::new(&sandbox, "b")];
+    let mut launches: Vec<Child> = pauses
+        .iter()
+        .map(|pauses| {
+            pauses
+                .hold(
+                    dev_with(&sandbox, &["--replace"], "sleep 30"),
+                    &["replace-chosen"],
+                )
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -1437,35 +1498,185 @@ fn two_replacing_launches_never_both_start() {
         })
         .collect();
 
+    // Both chose to replace the same run before either stops it.
+    for pauses in &pauses {
+        pauses.wait_reached("replace-chosen");
+    }
+    for pauses in &pauses {
+        pauses.release("replace-chosen");
+    }
+
     let refused = wait_until(Duration::from_secs(30), || {
         launches
             .iter_mut()
             .position(|launch| launch.try_wait().unwrap().is_some())
     })
     .expect("both replacing launches kept running");
-    thread::sleep(Duration::from_secs(1));
-
     let refused = launches.remove(refused).wait_with_output().unwrap();
+    let mut started = launches.remove(0);
+    let current = sandbox.record().unwrap();
+    let started_alive = started.try_wait().unwrap().is_none();
+    let stop = sandbox.run(&["stop", "web", "--project", "app"]);
+    started.wait().unwrap();
+    executor.wait().unwrap();
+
     assert!(!refused.status.success());
     // It refused; it was not started, then stopped by the other launch.
     let said = stderr(&refused);
+    assert!(said.contains("restarted by someone else"), "{said}");
+    assert!(started_alive, "neither started");
+    assert_eq!(current.pid, started.id());
+    assert_ne!(current.run_id(), record.run_id());
+    assert!(stop.status.success(), "{}", stderr(&stop));
+}
+
+#[test]
+fn a_replacing_launch_whose_run_was_restarted_meanwhile_starts_nothing() {
+    let sandbox = Sandbox::new();
+    let (mut executor, record) = a_running_service(&sandbox);
+    let marker = sandbox.root.join("second-start");
+    let pauses = Pauses::new(&sandbox, "late");
+    let late = pauses
+        .hold(
+            dev_with(
+                &sandbox,
+                &["--replace"],
+                &format!("touch '{}'", marker.display()),
+            ),
+            &["replace-chosen"],
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    pauses.wait_reached("replace-chosen");
+
+    // Another launch replaces the same run, and its run exits at once.
+    let first = dev_with(&sandbox, &["--replace"], "exit 0")
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+    executor.wait().unwrap();
+    let restarted = sandbox.record().unwrap();
+    assert_ne!(restarted.run_id(), record.run_id());
+    pauses.release("replace-chosen");
+
+    let late = late.wait_with_output().unwrap();
+    assert!(!late.status.success(), "it started a second time");
+    let said = stderr(&late);
+    assert!(said.contains("restarted by someone else"), "{said}");
     assert!(
-        said.contains("meanwhile") || said.contains("already running"),
+        said.contains(&restarted.run_id().unwrap().to_string()),
         "{said}"
     );
-    let mut started = launches.remove(0);
-    assert!(started.try_wait().unwrap().is_none(), "neither started");
-    assert_eq!(sandbox.record().unwrap().pid, started.id());
+    assert!(!marker.exists(), "it started a second time");
+    assert_eq!(sandbox.record().unwrap().run_id(), restarted.run_id());
+}
+
+#[test]
+fn a_launch_gives_up_on_a_suspended_cleanup_of_the_previous_run() {
+    let sandbox = Sandbox::new();
+    let mut executor = sandbox.spawn_background(STUBBORN);
+    let sid = executor.id();
+    let record = wait_for_proof(&sandbox, sid, 5);
+    kill_executor(&mut executor);
+    // A stop that holds the run's finalization lock, suspended while it waits
+    // for leftovers that ignore SIGTERM.
+    let mut stop = sandbox
+        .localify(&["stop", "web", "--project", "app"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let lock = fs::File::open(sandbox.run_dir(&record).join("finalize.lock"));
+    let held = wait_until(Duration::from_secs(30), || {
+        let lock = lock.as_ref().ok()?;
+        match lock.try_lock() {
+            Err(fs::TryLockError::WouldBlock) => Some(()),
+            _ => {
+                let _ = lock.unlock();
+                None
+            }
+        }
+    });
+    assert!(held.is_some(), "the stop never took the run's lock");
+    signal_raw(&stop, libc::SIGSTOP);
+
+    let started = Instant::now();
+    let mut launch = sandbox
+        .dev("exit 0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let exited = wait_until(CLEANUP_WAIT + Duration::from_secs(10), || {
+        launch.try_wait().unwrap()
+    });
+    let took = started.elapsed();
+    if exited.is_none() {
+        let _ = launch.kill();
+    }
+    signal_raw(&stop, libc::SIGCONT);
+    stop.wait().unwrap();
+    let launch = launch.wait_with_output().unwrap();
+
+    assert!(
+        exited.is_some(),
+        "the launch waited for the cleanup forever"
+    );
+    assert!(took >= CLEANUP_WAIT, "{took:?}");
+    assert!(!launch.status.success());
+    let said = stderr(&launch);
+    assert!(
+        said.contains("another cleanup of 'web' is still running") && said.contains("try again"),
+        "{said}"
+    );
+    assert!(session_members(sid).is_empty());
+}
+
+#[test]
+fn a_sigterm_before_the_service_is_known_still_reaches_it() {
+    let sandbox = Sandbox::new();
+    let ready = sandbox.root.join("trapped");
+    let got = sandbox.root.join("got-term");
+    let script = format!(
+        "trap \"touch '{}'; exit 0\" TERM; touch '{}'; while :; do sleep 0.1; done",
+        got.display(),
+        ready.display()
+    );
+    let pauses = Pauses::new(&sandbox, "executor");
+    let mut executor = sandbox.spawn_executor(pauses.hold(
+        sandbox.dev(&script),
+        &["before-identity", "terminate-handled"],
+    ));
+    pauses.wait_reached("before-identity");
+    let trapped = wait_until(Duration::from_secs(30), || ready.exists().then_some(()));
+    assert!(trapped.is_some(), "the service never trapped SIGTERM");
+
+    // Handled while the executor does not know its service yet.
+    assert!(process::send_signal(executor.id(), Signal::Terminate));
+    pauses.wait_reached("terminate-handled");
+    pauses.release("terminate-handled");
+    pauses.release("before-identity");
+
     executor.wait().unwrap();
-    let stop = sandbox.run(&["stop", "web", "--project", "app"]);
-    assert!(stop.status.success(), "{}", stderr(&stop));
-    started.wait().unwrap();
+    assert!(got.exists(), "the service never got the SIGTERM");
 }
 
 /// Runs `command` as the leader of a new session on a fresh PTY, answers
 /// `answer` once it asks whether to replace the running service, and returns
 /// how it exited and what the terminal showed.
-fn answering_on_a_terminal(mut command: Command, answer: &[u8]) -> (Option<i32>, String) {
+fn answering_on_a_terminal(command: Command, answer: &[u8]) -> (Option<i32>, String) {
+    answering_on_a_terminal_after(command, || {}, answer)
+}
+
+/// `answering_on_a_terminal`, running `meanwhile` between the question and
+/// the answer.
+fn answering_on_a_terminal_after(
+    mut command: Command,
+    meanwhile: impl FnOnce(),
+    answer: &[u8],
+) -> (Option<i32>, String) {
     let (mut master, slave) = open_pty();
     command
         .stdin(slave.try_clone().unwrap())
@@ -1502,6 +1713,7 @@ fn answering_on_a_terminal(mut command: Command, answer: &[u8]) -> (Option<i32>,
     });
     assert!(asked.is_some(), "never asked:\n{}", text());
 
+    meanwhile();
     io::Write::write_all(&mut master, answer).unwrap();
 
     let code = child.wait().unwrap().code();
@@ -1534,4 +1746,37 @@ fn at_a_terminal_no_leaves_the_running_service() {
     assert_eq!(sandbox.record().unwrap().run_id(), record.run_id());
     sandbox.store().stop(&record).unwrap();
     executor.wait().unwrap();
+}
+
+#[test]
+fn a_yes_given_before_detaching_stops_only_the_run_it_was_asked_about() {
+    let sandbox = Sandbox::new();
+    let (mut shown_run, record) = a_running_service(&sandbox);
+    let mut replacing = None;
+
+    let (code, shown) = answering_on_a_terminal_after(
+        dev_with(&sandbox, &["--detach"], "sleep 30"),
+        || {
+            // Another launch replaces the run that was shown, before the yes.
+            let executor = sandbox.spawn_executor(dev_with(&sandbox, &["--replace"], "sleep 30"));
+            let pid = executor.id();
+            sandbox.wait_for_record(|run| run.pid == pid);
+            replacing = Some(executor);
+        },
+        b"y\r",
+    );
+
+    let mut replacing = replacing.unwrap();
+    let still_runs = replacing.try_wait().unwrap().is_none();
+    let current = sandbox.record().unwrap();
+    let stop = sandbox.run(&["stop", "web", "--project", "app"]);
+    replacing.wait().unwrap();
+    shown_run.wait().unwrap();
+
+    assert!(shown.contains(&format!("pid {}", record.pid)), "{shown}");
+    assert_ne!(code, Some(0), "{shown}");
+    assert!(shown.contains("restarted by someone else"), "{shown}");
+    assert!(still_runs, "the run nobody was asked about was stopped");
+    assert_eq!(current.pid, replacing.id());
+    assert!(stop.status.success(), "{}", stderr(&stop));
 }

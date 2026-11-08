@@ -265,9 +265,9 @@ enum Commands {
         #[arg(long)]
         detach: bool,
 
-        /// If the service is already running, stop it first, then start it again. Without it, a terminal asks, and anything else (an agent, a script) leaves it running.
-        #[arg(long)]
-        replace: bool,
+        /// If the service is already running, stop it first, then start it again; with a run id, only if that run is the one running. Without it, a terminal asks, and anything else (an agent, a script) leaves it running.
+        #[arg(long, num_args = 0..=1, require_equals = true, value_name = "RUN_ID")]
+        replace: Option<Option<String>>,
 
         /// For dispatchers: the run id this launch gets, 16 random bytes in base64url (docs/remote-machines.md).
         #[arg(long, hide = true, value_name = "ID")]
@@ -1132,7 +1132,7 @@ fn main() -> Result<()> {
                 override_command: command,
                 launch_profile: launch_profile.into_args(),
                 launch_id: None,
-                replace: cli::services::Replace::for_launch(false),
+                replace: cli::services::Replace::for_launch(None)?,
             },
             config_path,
             localify::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
@@ -1158,7 +1158,9 @@ fn main() -> Result<()> {
                     environment: env.as_deref(),
                     init_domain: None,
                 },
-                replace: cli::services::Replace::for_launch(replace),
+                replace: cli::services::Replace::for_launch(
+                    replace.as_ref().map(|id| id.as_deref()),
+                )?,
             },
             config_path,
             &ctx,
@@ -1193,7 +1195,7 @@ fn main() -> Result<()> {
                     init_domain: domain.as_deref(),
                 },
                 launch_profile.profile.as_deref(),
-                cli::services::Replace::for_launch(replace),
+                cli::services::Replace::for_launch(replace.as_ref().map(|id| id.as_deref()))?,
                 config_path,
                 &ctx,
             )
@@ -1218,7 +1220,9 @@ fn main() -> Result<()> {
                 override_command: command,
                 launch_profile: launch_profile.into_args(),
                 launch_id,
-                replace: cli::services::Replace::for_launch(replace),
+                replace: cli::services::Replace::for_launch(
+                    replace.as_ref().map(|id| id.as_deref()),
+                )?,
             },
             config_path,
             localify::project_init::LocalAppUpdatePolicy::runtime_only(),

@@ -6,11 +6,11 @@
 //! stay readable. Offsets are logical bytes from the start of the run and are
 //! never reused. Reads are bounded: they never read a segment to its end.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,38 @@ impl FinalizeLock {
             .with_context(|| format!("Failed to lock '{}'", dir.join(LOCK_FILE).display()))?;
         Ok(dir.is_dir().then_some(Self { _file: file }))
     }
+
+    /// `acquire`, giving up once `limit` passed while another holds it.
+    pub fn acquire_within(dir: &Path, limit: Duration) -> Result<Acquired> {
+        let Some(file) = open_lock_file(dir)? else {
+            return Ok(Acquired::Gone);
+        };
+        let deadline = Instant::now() + limit;
+        loop {
+            match file.try_lock() {
+                Ok(()) if dir.is_dir() => return Ok(Acquired::Locked(Self { _file: file })),
+                Ok(()) => return Ok(Acquired::Gone),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(TryLockError::WouldBlock) => return Ok(Acquired::Busy),
+                Err(TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to lock '{}'", dir.join(LOCK_FILE).display())
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// What [`FinalizeLock::acquire_within`] got.
+pub enum Acquired {
+    Locked(FinalizeLock),
+    /// The run's folder is gone: nothing is left to finalize.
+    Gone,
+    /// Another finisher still held it when the wait ran out.
+    Busy,
 }
 
 fn open_lock_file(dir: &Path) -> Result<Option<File>> {
@@ -142,7 +174,9 @@ fn open_lock_file(dir: &Path) -> Result<Option<File>> {
         .open(dir.join(LOCK_FILE))
     {
         Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        // A folder deleted while it opens, as the next run's registration
+        // does, fails with ENOENT, or EINVAL on macOS.
+        Err(error) if error.kind() == io::ErrorKind::NotFound || !dir.is_dir() => Ok(None),
         Err(error) => Err(error)
             .with_context(|| format!("Failed to open '{}'", dir.join(LOCK_FILE).display())),
     }
@@ -801,18 +835,23 @@ mod tests {
         let run = dir.path().join("run");
         create_run_dir(&run).unwrap();
 
-        let other = File::open(run.join(LOCK_FILE)).unwrap();
         let held = FinalizeLock::acquire(&run).unwrap().unwrap();
         assert!(matches!(
-            other.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
+            FinalizeLock::acquire_within(&run, Duration::from_millis(100)).unwrap(),
+            Acquired::Busy
         ));
         drop(held);
-        assert!(other.try_lock().is_ok());
-        drop(other);
+        assert!(matches!(
+            FinalizeLock::acquire_within(&run, Duration::ZERO).unwrap(),
+            Acquired::Locked(_)
+        ));
 
         fs::remove_dir_all(&run).unwrap();
         assert!(FinalizeLock::acquire(&run).unwrap().is_none());
+        assert!(matches!(
+            FinalizeLock::acquire_within(&run, Duration::ZERO).unwrap(),
+            Acquired::Gone
+        ));
         assert!(!run.exists());
     }
 

@@ -672,33 +672,36 @@ fn service_key(
 }
 
 /// What a launch does when the service already runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Replace {
     /// Ask the person at the terminal.
     Ask,
-    /// Stop it and start again (`--replace`).
+    /// Stop whatever runs, and start again (`--replace`).
     Yes,
+    /// Stop that run only, which a person agreed to stop (`--replace=<runId>`).
+    Approved(RunId),
     /// Leave it running, and start nothing.
     No,
 }
 
 impl Replace {
-    /// `--replace` stops it. Otherwise a person at a terminal is asked, and
-    /// anything else (an agent, a script, CI, `< /dev/null`) leaves it.
-    pub fn for_launch(flag: bool) -> Self {
-        if flag {
-            Self::Yes
-        } else if io::stdin().is_terminal() && io::stderr().is_terminal() {
-            Self::Ask
-        } else {
-            Self::No
-        }
+    /// `--replace` stops it, `--replace=<runId>` only that run. Otherwise a
+    /// person at a terminal is asked, and anything else (an agent, a script,
+    /// CI, `< /dev/null`) leaves it.
+    pub fn for_launch(flag: Option<Option<&str>>) -> Result<Self> {
+        Ok(match flag {
+            Some(Some(run_id)) => Self::Approved(RunId::parse(run_id)?),
+            Some(None) => Self::Yes,
+            None if io::stdin().is_terminal() && io::stderr().is_terminal() => Self::Ask,
+            None => Self::No,
+        })
     }
 
     /// Whether to stop `running`, asking on the terminal when it should.
-    pub(crate) fn stops(self, running: &RunningService) -> Result<bool> {
+    pub(crate) fn stops(&self, running: &RunningService) -> Result<bool> {
         match self {
             Self::Yes => Ok(true),
+            Self::Approved(run_id) => Ok(running.run_id() == Some(run_id)),
             Self::No => Ok(false),
             Self::Ask => confirm_replace(running, &mut io::stdin().lock(), &mut io::stderr()),
         }
@@ -710,19 +713,35 @@ impl Replace {
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Takes the service's lock for this launch. A run that is already going is
-/// stopped, as `stop` would, and finalized first when `replace` says so;
-/// only that one: a run another launch started meanwhile is left running, so
-/// two replacing launches never start twice. A run of an older version is
-/// never stopped here.
+/// stopped, as `stop` would, and finalized first when `replace` says so. Only
+/// the run chosen is replaced, the one a person agreed to stop or else the
+/// one seen first: when the service holds another run once the lock is
+/// free, someone else restarted it, and this launch starts nothing, so two
+/// replacing launches never both start. A run of an older version is never
+/// stopped here.
 pub(crate) fn admit(
     store: &RunningServiceStore,
     key: &ServiceKey,
     replace: Replace,
 ) -> Result<RunLock> {
-    let mut replaced: Option<(RunId, Instant)> = None;
+    let mut chosen = match &replace {
+        Replace::Approved(run_id) => Some(run_id.clone()),
+        _ => None,
+    };
+    let mut stopped_at: Option<Instant> = None;
     loop {
         let running = match store.lock(key)? {
-            Admission::Admitted(lock) => return Ok(lock),
+            Admission::Admitted(lock) => {
+                // The record only changes under this lock now.
+                let current = store.get(key)?;
+                let current = current.as_ref().and_then(RunningService::run_id);
+                if let (Some(chosen), Some(current)) = (&chosen, current)
+                    && current != chosen
+                {
+                    bail!("{}", restarted_by_someone_else(key, current));
+                }
+                return Ok(lock);
+            }
             Admission::Running(running) => running,
         };
         let Some(running) = running else {
@@ -735,36 +754,42 @@ pub(crate) fn admit(
         let Some(run_id) = running.run_id().cloned() else {
             bail!("{}", older_version_running(&running));
         };
-        match &replaced {
+        if let Some(chosen) = &chosen
+            && *chosen != run_id
+        {
+            bail!("{}", restarted_by_someone_else(key, &run_id));
+        }
+        if let Some(since) = stopped_at {
             // The run just stopped is letting go of the lock.
-            Some((stopped, since)) if *stopped == run_id => {
-                if since.elapsed() >= RELEASE_TIMEOUT {
-                    bail!(
-                        "'{}' was stopped, but it still holds the service's lock (PID {}).",
-                        key.service_id,
-                        running.pid
-                    );
-                }
-                thread::sleep(Duration::from_millis(100));
-                continue;
+            if since.elapsed() >= RELEASE_TIMEOUT {
+                bail!(
+                    "'{}' was stopped, but it still holds the service's lock (PID {}).",
+                    key.service_id,
+                    running.pid
+                );
             }
-            Some(_) => bail!(
-                "'{}' was started again meanwhile by another launch (PID {}), and is left running.",
-                key.service_id,
-                running.pid
-            ),
-            None => {}
+            thread::sleep(Duration::from_millis(100));
+            continue;
         }
         if !replace.stops(&running)? {
             bail!("{}", already_running(&running));
         }
+        crate::infrastructure::test_pause::pause_at("replace-chosen");
         eprintln!(
             "Stopping '{}' (PID {}) to start it again...",
             key.service_id, running.pid
         );
         store.stop(&running)?;
-        replaced = Some((run_id, Instant::now()));
+        chosen = Some(run_id);
+        stopped_at = Some(Instant::now());
     }
+}
+
+fn restarted_by_someone_else(key: &ServiceKey, run_id: &RunId) -> String {
+    format!(
+        "'{}' was restarted by someone else (run {run_id}), and is left as it is; nothing was started.",
+        key.service_id
+    )
 }
 
 /// A run with no run id, from before Localify could prove what is its own.
