@@ -151,6 +151,8 @@ pub enum Command {
     LeaseRenewed {
         result: Result<(), LeaseError>,
     },
+    /// A lease asked for outside the actor found the token revoked.
+    Revoked,
 }
 
 /// What this connection is for.
@@ -547,7 +549,7 @@ impl Actor {
             machine = machine_id,
             "A machine was removed from the account; dropping its pin"
         );
-        if let Err(error) = self.shared.store.update_pins(|pins| {
+        if let Err(error) = self.shared.store.update_pins(&self.ctx.self_id, |pins| {
             pins.remove(machine_id);
         }) {
             warn!(error = %format!("{error:#}"), "Could not delete a revoked machine's pin");
@@ -1325,7 +1327,7 @@ impl Actor {
             name: name.clone(),
             paired_at: now_rfc3339(),
         };
-        if let Err(error) = self.shared.store.update_pins(|pins| {
+        if let Err(error) = self.shared.store.update_pins(&self.ctx.self_id, |pins| {
             pins.insert(key.0.clone(), pin);
         }) {
             let message = format!("The pin could not be saved: {error:#}");
@@ -1363,11 +1365,9 @@ impl Actor {
 
     fn forget_pin(&mut self, peer: &str) {
         let mut removed = false;
-        if let Err(error) = self
-            .shared
-            .store
-            .update_pins(|pins| removed = pins.remove(peer).is_some())
-        {
+        if let Err(error) = self.shared.store.update_pins(&self.ctx.self_id, |pins| {
+            removed = pins.remove(peer).is_some()
+        }) {
             warn!(error = %format!("{error:#}"), "Could not delete an unpaired machine's pin");
         }
         self.view().settings.remove(peer);
@@ -1424,6 +1424,7 @@ impl Actor {
                 }
             }
             Command::LeaseReady { result } => self.on_lease_ready(result),
+            Command::Revoked => self.failed = Some(Ending::Revoked),
             Command::LeaseRenewed { result } => {
                 self.renewing = false;
                 if result.as_ref().is_err_and(LeaseError::is_revoked) {

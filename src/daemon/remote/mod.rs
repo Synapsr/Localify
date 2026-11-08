@@ -36,12 +36,14 @@ use tracing::{info, warn};
 use self::actor::{Command, Failure};
 pub use self::actor::{Event, PairEvent};
 use self::backoff::{Backoff, Ending, Next, Stop, up_to};
-use self::lease::LeaseKeeper;
+use self::lease::{LeaseError, LeaseKeeper};
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
-use crate::infrastructure::cloud::http::{CloudError, CloudHttp};
+use crate::infrastructure::cloud::http::{
+    CloudError, CloudHttp, DEFAULT_API_BASE, api_base_override,
+};
 use crate::infrastructure::cloud::passwords::PasswordStore;
 use crate::infrastructure::cloud::types::RosterMachine;
 use crate::infrastructure::remote::noise::{StaticKeys, decode_key, fingerprint};
@@ -65,6 +67,42 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A signed-out machine looks again this often, in case a sign-in did not
 /// say so.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(5 * 60);
+
+/// The code of the `401` the Worker answers for an unknown or revoked
+/// token (`apps/cloud/src/api.ts`, `signedOut`).
+const REVOKED_CODE: &str = "unauthorized";
+const UNREACHABLE: &str =
+    "Can't reach Localify Cloud right now. Remote access comes back on its own.";
+
+/// Whether a `401` revokes this machine's sign-in. Only one from the API
+/// base the machine signed in with, when that is `https://api.localify.dev`
+/// or the explicit `LOCALIFY_CLOUD_API` override, with the Worker's JSON
+/// error and its revocation code. Any other `401` (an HTML page, an empty
+/// body, another JSON) is something in between: retried, state kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Revocation {
+    trusted: bool,
+}
+
+impl Revocation {
+    fn for_api_base(shared: &Shared, api_base: &str) -> Self {
+        let trusted = api_base == DEFAULT_API_BASE
+            || api_base_override().as_deref() == Some(api_base)
+            || shared.trusts_for_tests(api_base);
+        Self { trusted }
+    }
+
+    pub fn revokes(&self, error: &CloudError) -> bool {
+        self.trusted
+            && matches!(error, CloudError::Api { status: 401, code, .. } if code == REVOKED_CODE)
+    }
+
+    /// A refused upgrade: the same rules, on the body `socket` parsed.
+    fn revokes_upgrade(&self, ending: &Ending) -> bool {
+        self.trusted
+            && matches!(ending, Ending::Refused { status: 401, code: Some(code), .. } if code == REVOKED_CODE)
+    }
+}
 
 /// Every delay of the link. Tests shorten them; the defaults are the
 /// contract's.
@@ -212,6 +250,9 @@ struct Shared {
     refresh: Notify,
     #[cfg(test)]
     wake: std::sync::atomic::AtomicBool,
+    /// The fake cloud's base, trusted for revocation as the override is.
+    #[cfg(test)]
+    trusted_base: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -254,6 +295,30 @@ impl Shared {
         if relay != RelayState::Connected {
             view.presence.clear();
             view.sessions.clear();
+        }
+    }
+
+    #[cfg(test)]
+    fn trusts_for_tests(&self, api_base: &str) -> bool {
+        self.trusted_base
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(api_base)
+    }
+
+    #[cfg(not(test))]
+    fn trusts_for_tests(&self, _: &str) -> bool {
+        false
+    }
+
+    /// The machine id of the sign-in `cloud.json` holds now.
+    fn signed_in_as(&self) -> Result<String> {
+        match self.credentials.load()? {
+            Some(credentials) => Ok(credentials.machine_id),
+            None => bail!(
+                "This machine is not signed in to Localify Cloud. Sign in with: localify login"
+            ),
         }
     }
 
@@ -306,6 +371,8 @@ impl RemoteLink {
                 refresh: Notify::new(),
                 #[cfg(test)]
                 wake: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                trusted_base: Mutex::new(None),
             }),
         }
     }
@@ -335,7 +402,18 @@ impl RemoteLink {
     }
 
     pub fn change_settings(&self, change: SettingsChange) -> Result<TargetSettings> {
-        self.shared.store.update_settings(change)
+        let machine_id = self.shared.signed_in_as()?;
+        self.shared.store.update_settings(&machine_id, change)
+    }
+
+    /// Lets the fake cloud's `401`s revoke, as `LOCALIFY_CLOUD_API` would.
+    #[cfg(test)]
+    pub fn trust_api_base(&self, api_base: &str) {
+        *self
+            .shared
+            .trusted_base
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(api_base.to_string());
     }
 
     /// The roster with each machine's state. With `probe`, first opens a
@@ -407,9 +485,13 @@ impl RemoteLink {
         let conn = self
             .connected()
             .map_err(|error| Failure::new("unavailable", error.to_string()))?;
-        conn.lease.ensure().await.map_err(|_| {
-            Failure::new("unauthorized", "Remote access is not available right now.")
-        })?;
+        if let Err(error) = conn.lease.ensure().await {
+            revoked_lease(&conn, &error);
+            return Err(Failure::new(
+                "unauthorized",
+                "Remote access is not available right now.",
+            ));
+        }
         let (reply, answer) = oneshot::channel();
         let command = Command::Open {
             peer: peer.to_string(),
@@ -439,9 +521,10 @@ impl RemoteLink {
         if !online {
             bail!("{name} is offline. Open Localify on it, then try again.");
         }
-        conn.lease.ensure().await.map_err(|_| {
-            anyhow!("Remote access is not available right now. Try again in a moment.")
-        })?;
+        if let Err(error) = conn.lease.ensure().await {
+            revoked_lease(&conn, &error);
+            bail!("Remote access is not available right now. Try again in a moment.");
+        }
         let (events, receiver) = mpsc::channel(16);
         conn.commands
             .send(Command::Pair {
@@ -474,7 +557,8 @@ impl RemoteLink {
     /// Deletes the pin, and tells the peer when a session is open.
     pub fn unpair(&self, peer: &str) -> Result<bool> {
         let mut removed = false;
-        self.shared.store.update_pins(|pins| {
+        let machine_id = self.shared.signed_in_as()?;
+        self.shared.store.update_pins(&machine_id, |pins| {
             removed = pins.remove(peer).is_some();
         })?;
         self.shared.view().failures.remove(peer);
@@ -496,6 +580,14 @@ impl RemoteLink {
     }
 }
 
+/// A lease the cloud refused because the token is revoked: the connection
+/// ends, and the machine signs out, as for a renewal.
+fn revoked_lease(conn: &Conn, error: &LeaseError) {
+    if error.is_revoked() {
+        let _ = conn.commands.send(Command::Revoked);
+    }
+}
+
 /// Starts the connection loop; it stops with `cancel`.
 pub fn spawn(link: RemoteLink, cancel: CancellationToken) {
     tokio::spawn(run(link.shared, cancel));
@@ -504,6 +596,9 @@ pub fn spawn(link: RemoteLink, cancel: CancellationToken) {
 /// What the link waits for before it tries again.
 enum Wait {
     Retry(Duration),
+    /// A retry after Localify Cloud could not be reached, or answered in a
+    /// way that is not its own: said so in the status.
+    Unreachable(Duration),
     /// `public_refresh`, or at most this long.
     Refresh(Option<Duration>),
     /// Remote access lapsed: after this long, ask for a lease, and connect
@@ -534,14 +629,26 @@ async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                 };
                 shared.set_relay(relay, None, None);
                 let token = ready.credentials.token.clone();
+                let revocation = Revocation::for_api_base(&shared, &ready.credentials.api_base);
                 let (ending, up_for) = connect_and_serve(&shared, ready, &cancel).await;
                 ever_connected |= up_for > Duration::ZERO;
                 if cancel.is_cancelled() {
                     return;
                 }
-                let next = backoff.next(&ending, up_for, &shared.timings);
                 info!(?ending, up_for = ?up_for, "The relay connection ended");
-                plan(&shared, &mut uploaded_for, next, &token)
+                // A `401` on the upgrade that is not the cloud's revocation
+                // is something in between: retried.
+                let ending = match ending {
+                    Ending::Refused { status: 401, .. } if !revocation.revokes_upgrade(&ending) => {
+                        Ending::Unreachable
+                    }
+                    other => other,
+                };
+                let next = backoff.next(&ending, up_for, &shared.timings);
+                match (ending, next) {
+                    (Ending::Unreachable, Next::Retry(wait)) => Wait::Unreachable(wait),
+                    (_, next) => plan(&shared, &mut uploaded_for, next, &token),
+                }
             }
             Err(wait) => wait,
         };
@@ -580,7 +687,7 @@ async fn prepare(
                 Some(shared.timings.lapsed_recheck),
             ));
         }
-        Err(error) => return Err(cloud_refusal(shared, backoff, &error, &credentials.token)),
+        Err(error) => return Err(cloud_refusal(shared, backoff, &error, &credentials)),
     };
     if !account.remote_access {
         return Err(lapsed(shared, shared.timings.lapsed_recheck));
@@ -623,7 +730,7 @@ async fn prepare(
             }) => {
                 return Err(block(shared, &code, &message, None));
             }
-            Err(error) => return Err(cloud_refusal(shared, backoff, &error, &credentials.token)),
+            Err(error) => return Err(cloud_refusal(shared, backoff, &error, &credentials)),
         }
     }
     Ok(Ready {
@@ -656,12 +763,11 @@ fn lapsed(shared: &Shared, first: Duration) -> Wait {
 /// Localify Cloud no longer accepts the token: this machine signs out here,
 /// as `logout` does, unless `cloud.json` already holds another sign-in.
 fn signed_out_by_cloud(shared: &Shared, token: &str) -> Wait {
-    match shared.credentials.load() {
-        Ok(Some(credentials)) if credentials.token == token => {
-            info!("Localify Cloud revoked this machine's token; signing out here");
-            if let Err(error) = shared.credentials.delete() {
-                warn!(error = %format!("{error:#}"), "Could not delete this machine's sign-in");
-            }
+    // Compared and deleted under the sign-in lock `login` takes: a newer
+    // sign-in is never taken with the revoked one.
+    match shared.credentials.delete_if_token(token) {
+        Ok(true) => {
+            info!("Localify Cloud revoked this machine's token; signed out here");
             let data_dir = shared.credentials.data_dir();
             if let Err(error) = PasswordStore::in_data_dir(&data_dir).update(|saved| saved.clear())
             {
@@ -669,23 +775,34 @@ fn signed_out_by_cloud(shared: &Shared, token: &str) -> Wait {
             }
         }
         // A new sign-in, or none: nothing of this one is left.
-        _ => return Wait::Retry(Duration::ZERO),
+        Ok(false) => return Wait::Retry(Duration::ZERO),
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "Could not delete this machine's sign-in");
+        }
     }
     block(shared, "signed_out", SIGNED_OUT, None)
 }
 
-fn cloud_refusal(shared: &Shared, backoff: &mut Backoff, error: &CloudError, token: &str) -> Wait {
+fn cloud_refusal(
+    shared: &Shared,
+    backoff: &mut Backoff,
+    error: &CloudError,
+    credentials: &CloudCredentials,
+) -> Wait {
+    if Revocation::for_api_base(shared, &credentials.api_base).revokes(error) {
+        return signed_out_by_cloud(shared, &credentials.token);
+    }
     match error {
-        CloudError::Api { status: 401, .. } => signed_out_by_cloud(shared, token),
         CloudError::Api {
             status: 403, code, ..
         } if code == "banned" => block(shared, "banned", BANNED, None),
         CloudError::Api { status: 402, .. } => lapsed(shared, shared.timings.lapsed_recheck),
+        // Unreachable, a 5xx, or a 401 that is not the cloud's revocation.
         _ => {
             let next = backoff.next(&Ending::Unreachable, Duration::ZERO, &shared.timings);
             match next {
-                Next::Retry(wait) | Next::UploadKey(wait) => Wait::Retry(wait),
-                Next::Stop(_) => Wait::Retry(shared.timings.backoff_cap),
+                Next::Retry(wait) | Next::UploadKey(wait) => Wait::Unreachable(wait),
+                Next::Stop(_) => Wait::Unreachable(shared.timings.backoff_cap),
             }
         }
     }
@@ -711,6 +828,7 @@ async fn connect_and_serve(
     let lease = Arc::new(LeaseKeeper::new(
         CloudClient::new(ready.http.clone()),
         shared.timings,
+        Revocation::for_api_base(shared, &ready.credentials.api_base),
     ));
     let conn = Conn {
         commands: commands.clone(),
@@ -766,37 +884,49 @@ fn plan(shared: &Shared, uploaded_for: &mut Option<String>, next: Next, token: &
 /// Waits as `wait` says. A wake from sleep cuts a retry short, to one
 /// attempt within `wake_jitter`. `false` on shutdown.
 async fn wait_before_next(shared: &Shared, wait: Wait, cancel: &CancellationToken) -> bool {
-    match wait {
-        Wait::Retry(delay) => {
-            let retry_at = time::OffsetDateTime::now_utc() + delay;
-            let retry_at = retry_at.replace_nanosecond(0).ok().and_then(|at| {
-                at.format(&time::format_description::well_known::Rfc3339)
-                    .ok()
-            });
-            let relay = shared.view().relay;
-            let relay = match relay {
-                RelayState::Connecting | RelayState::Blocked | RelayState::Off => {
-                    RelayState::Reconnecting
-                }
-                other => other,
-            };
-            shared.set_relay(relay, None, retry_at);
-            let mut deadline = Instant::now() + delay;
-            loop {
-                let clocks = Clocks::now();
-                tokio::select! {
-                    _ = cancel.cancelled() => return false,
-                    _ = shared.refresh.notified() => return true,
-                    _ = tokio::time::sleep_until(deadline) => return true,
-                    _ = tokio::time::sleep(shared.timings.clock_check) => {
-                        if shared.woke(&clocks) {
-                            info!("This machine woke from sleep; reconnecting to the relay");
-                            deadline = deadline.min(Instant::now() + up_to(shared.timings.wake_jitter));
-                        }
-                    }
+    let (delay, blocked) = match wait {
+        Wait::Retry(delay) => (delay, None),
+        Wait::Unreachable(delay) => (
+            delay,
+            Some(Blocked {
+                code: "unreachable".into(),
+                message: UNREACHABLE.into(),
+            }),
+        ),
+        other => return wait_for_change(shared, other, cancel).await,
+    };
+    let retry_at = time::OffsetDateTime::now_utc() + delay;
+    let retry_at = retry_at.replace_nanosecond(0).ok().and_then(|at| {
+        at.format(&time::format_description::well_known::Rfc3339)
+            .ok()
+    });
+    let relay = shared.view().relay;
+    let relay = match relay {
+        RelayState::Connecting | RelayState::Blocked | RelayState::Off => RelayState::Reconnecting,
+        other => other,
+    };
+    shared.set_relay(relay, blocked, retry_at);
+    let mut deadline = Instant::now() + delay;
+    loop {
+        let clocks = Clocks::now();
+        tokio::select! {
+            _ = cancel.cancelled() => return false,
+            _ = shared.refresh.notified() => return true,
+            _ = tokio::time::sleep_until(deadline) => return true,
+            _ = tokio::time::sleep(shared.timings.clock_check) => {
+                if shared.woke(&clocks) {
+                    info!("This machine woke from sleep; reconnecting to the relay");
+                    deadline = deadline.min(Instant::now() + up_to(shared.timings.wake_jitter));
                 }
             }
         }
+    }
+}
+
+/// Waits for `public_refresh`, or as long as `wait` says.
+async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken) -> bool {
+    match wait {
+        Wait::Retry(_) | Wait::Unreachable(_) => true,
         Wait::Refresh(limit) => {
             let limit = limit.unwrap_or(Duration::from_secs(365 * 24 * 3600));
             tokio::select! {
@@ -813,29 +943,46 @@ async fn wait_before_next(shared: &Shared, wait: Wait, cancel: &CancellationToke
                     _ = shared.refresh.notified() => return true,
                     _ = tokio::time::sleep(delay) => {}
                 }
-                if lease_granted(shared).await {
-                    return true;
+                match lease_granted(shared).await {
+                    Granted::Yes => return true,
+                    Granted::No => delay = shared.timings.lapsed_recheck,
+                    // Revoked meanwhile: signed out, until a new sign-in.
+                    Granted::Revoked(token) => {
+                        let wait = signed_out_by_cloud(shared, &token);
+                        return Box::pin(wait_for_change(shared, wait, cancel)).await;
+                    }
                 }
-                delay = shared.timings.lapsed_recheck;
             }
         }
     }
 }
 
+enum Granted {
+    Yes,
+    No,
+    /// The token is revoked; the token it was.
+    Revoked(String),
+}
+
 /// Whether Localify Cloud grants a lease again. Without credentials there is
 /// nothing to wait for: the next pass says the machine is signed out.
-async fn lease_granted(shared: &Shared) -> bool {
+async fn lease_granted(shared: &Shared) -> Granted {
     let Ok(Some(credentials)) = shared.credentials.load() else {
-        return true;
+        return Granted::Yes;
     };
-    let Ok(http) = CloudHttp::new(credentials.api_base, Some(credentials.token)) else {
-        return true;
+    let revocation = Revocation::for_api_base(shared, &credentials.api_base);
+    let Ok(http) = CloudHttp::new(
+        credentials.api_base.clone(),
+        Some(credentials.token.clone()),
+    ) else {
+        return Granted::Yes;
     };
     match CloudClient::new(http).remote_lease().await {
-        Ok(_) => true,
+        Ok(_) => Granted::Yes,
+        Err(error) if revocation.revokes(&error) => Granted::Revoked(credentials.token.clone()),
         Err(error) => {
             info!(error = %error, "Remote access is still lapsed");
-            false
+            Granted::No
         }
     }
 }

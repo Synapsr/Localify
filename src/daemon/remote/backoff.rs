@@ -134,7 +134,10 @@ impl Backoff {
         timings: &Timings,
     ) -> Next {
         match (status, code) {
-            (401, _) => Next::Stop(Stop::SignedOut),
+            // Only the cloud's own revocation; the caller has checked where
+            // it came from.
+            (401, Some("unauthorized")) => Next::Stop(Stop::SignedOut),
+            (401, _) => Next::Retry(self.backoff(retry_after, timings)),
             (402, _) => Next::Stop(Stop::Lapsed),
             (403, _) => Next::Stop(Stop::Banned),
             (426, _) => Next::Stop(Stop::Outdated),
@@ -251,8 +254,16 @@ mod tests {
                 Next::Stop(stop)
             );
         }
+        let revoked = Ending::Refused {
+            status: 401,
+            code: Some("unauthorized".into()),
+            retry_after: None,
+        };
+        assert_eq!(
+            backoff.next(&revoked, Duration::ZERO, &timings()),
+            Next::Stop(Stop::SignedOut)
+        );
         for (status, stop) in [
-            (401, Stop::SignedOut),
             (402, Stop::Lapsed),
             (403, Stop::Banned),
             (426, Stop::Outdated),

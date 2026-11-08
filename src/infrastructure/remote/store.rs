@@ -1,8 +1,9 @@
 //! `<data dir>/remote/`: this machine's key, its pins and its target
 //! settings (`docs/remote-machines.md`, "Keys"). Every file is 0600 and
-//! written through a temporary file renamed over it, under a lock on the
-//! folder, so the daemon, the app and the CLI never undo each other's
-//! change. Signing out deletes the folder.
+//! written through a temporary file renamed over it, under the sign-in lock,
+//! so the daemon, the app and the CLI never undo each other's change, and
+//! nothing outlives the sign-in it belongs to. Signing out deletes the
+//! folder.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,9 +15,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::noise::{StaticKeys, decode_key, encode_key};
+use super::noise::{StaticKeys, decode_key, decode_private_key, encode_key};
 use super::wire::TargetSettings;
-use crate::infrastructure::cloud::credentials::FILE_NAME as CREDENTIALS_FILE;
+use crate::infrastructure::cloud::credentials::{CredentialsStore, sign_in_lock};
 use crate::infrastructure::file_security::write_private_file;
 use crate::infrastructure::launch_rev::random_bytes;
 
@@ -24,6 +25,8 @@ const DIR_NAME: &str = "remote";
 const IDENTITY_FILE: &str = "identity.json";
 const PEERS_FILE: &str = "peers.json";
 const SETTINGS_FILE: &str = "settings.json";
+/// The sign-in the folder belongs to: `{"machineId"}`.
+const OWNER_FILE: &str = "owner.json";
 
 /// This machine's remote key, for the machine id it was made for. The
 /// encoded private key is wiped from memory when it is dropped.
@@ -62,12 +65,9 @@ impl Identity {
                 "The {half} key in {DIR_NAME}/{IDENTITY_FILE} is invalid. Sign out and sign in again, then pair this machine again."
             )
         };
-        let private = decode_key(&self.private_key).map_err(|_| invalid("private"))?;
+        let private = decode_private_key(&self.private_key).map_err(|_| invalid("private"))?;
         let public = decode_key(&self.public_key).map_err(|_| invalid("public"))?;
-        Ok(StaticKeys {
-            private: Zeroizing::new(private),
-            public,
-        })
+        Ok(StaticKeys { private, public })
     }
 }
 
@@ -140,32 +140,42 @@ pub const DEFAULT_SETTINGS: TargetSettings = TargetSettings {
     background_starts: false,
 };
 
-/// Writes refuse once this machine is signed out: a pairing that ends
-/// after `logout` never brings the folder back.
+/// Every write is bound to one sign-in, by its machine id, and checked
+/// under the sign-in lock that `login` and sign-out take too
+/// ([`sign_in_lock`]): an actor of an earlier sign-in never writes into a
+/// newer one, and nothing is written once the machine is signed out.
+/// `owner.json` names the sign-in the folder belongs to; files of any other
+/// are cleared before a write and ignored by reads.
 #[derive(Debug, Clone)]
 pub struct RemoteStore {
     dir: PathBuf,
-    credentials: PathBuf,
+    data_dir: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Owner {
+    machine_id: String,
 }
 
 impl RemoteStore {
     pub fn in_data_dir(data_dir: &Path) -> Self {
         Self {
             dir: data_dir.join(DIR_NAME),
-            credentials: data_dir.join(CREDENTIALS_FILE),
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
-    /// The key for this sign-in, made on first need. An identity made for
-    /// another machine id belongs to an earlier sign-in: the whole folder
-    /// goes with it, pins and settings included.
+    /// The key for this sign-in, made on first need. Files of an earlier
+    /// sign-in are cleared first, pins and settings included.
     pub fn identity_for(&self, machine_id: &str) -> Result<Identity> {
-        let _lock = self.lock()?;
-        if let Some(identity) = self.load_identity()? {
-            if identity.machine_id == machine_id {
-                return Ok(identity);
-            }
-            self.clear_contents()?;
+        let _lock = self.lock_for(machine_id)?;
+        match self.load_identity()? {
+            Some(identity) if identity.machine_id == machine_id => return Ok(identity),
+            // A key of another sign-in: nothing next to it is this one's.
+            Some(_) => self.clear(&[IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE])?,
+            // Settings this sign-in chose before its first connection stay.
+            None => {}
         }
         let keys = StaticKeys::generate()?;
         let identity = Identity {
@@ -184,22 +194,29 @@ impl RemoteStore {
         self.read(IDENTITY_FILE)
     }
 
-    /// Empty when nothing is paired.
+    /// Empty when nothing is paired, or the folder is not this sign-in's.
     pub fn pins(&self) -> Result<Pins> {
+        if !self.owned_by_current()? {
+            return Ok(Pins::new());
+        }
         Ok(self.read(PEERS_FILE)?.unwrap_or_default())
     }
 
-    /// Changes the pins under the folder's lock and returns them as saved.
-    pub fn update_pins(&self, change: impl FnOnce(&mut Pins)) -> Result<Pins> {
-        let _lock = self.lock()?;
+    /// Changes the pins of sign-in `machine_id` and returns them as saved.
+    pub fn update_pins(&self, machine_id: &str, change: impl FnOnce(&mut Pins)) -> Result<Pins> {
+        let _lock = self.lock_for(machine_id)?;
         let mut pins = self.pins()?;
         change(&mut pins);
         self.write(PEERS_FILE, &pins)?;
         Ok(pins)
     }
 
-    /// Every switch off when the file does not exist.
+    /// Every switch off when the file does not exist, or is not this
+    /// sign-in's.
     pub fn settings(&self) -> Result<TargetSettings> {
+        if !self.owned_by_current()? {
+            return Ok(DEFAULT_SETTINGS);
+        }
         let settings = self.read(SETTINGS_FILE)?.unwrap_or(DEFAULT_SETTINGS);
         // A file edited by hand still never holds a switch without the one
         // it needs.
@@ -210,29 +227,20 @@ impl RemoteStore {
         })
     }
 
-    pub fn update_settings(&self, change: SettingsChange) -> Result<TargetSettings> {
-        let _lock = self.lock()?;
+    pub fn update_settings(
+        &self,
+        machine_id: &str,
+        change: SettingsChange,
+    ) -> Result<TargetSettings> {
+        let _lock = self.lock_for(machine_id)?;
         let next = apply_change(self.settings()?, change)?;
         self.write(SETTINGS_FILE, &next)?;
         Ok(next)
     }
 
-    /// Signing out: a new sign-in starts with a new key, no pins and every
-    /// switch off. It waits for a write in progress, which then finds the
-    /// machine signed out. Deleting what is already gone is not an error.
-    pub fn delete_all(&self) -> Result<()> {
-        let _lock = match File::open(&self.dir) {
-            Ok(lock) => {
-                lock.lock()
-                    .with_context(|| format!("Could not lock {}", self.dir.display()))?;
-                Some(lock)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("Could not open {}", self.dir.display()));
-            }
-        };
+    /// Deletes the folder; the caller holds the sign-in lock, as
+    /// `CredentialsStore::delete` does. What is already gone is no error.
+    pub(crate) fn remove_locked(&self) -> Result<()> {
         match fs::remove_dir_all(&self.dir) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -242,9 +250,46 @@ impl RemoteStore {
         }
     }
 
-    /// Empties the folder but keeps it, so the lock held on it stays valid.
-    fn clear_contents(&self) -> Result<()> {
-        for name in [IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE] {
+    /// The sign-in lock, once `cloud.json` names `machine_id`; the folder
+    /// then belongs to that sign-in, and any other's files are cleared.
+    fn lock_for(&self, machine_id: &str) -> Result<File> {
+        let lock = sign_in_lock(&self.data_dir)?;
+        if self.current_machine()?.as_deref() != Some(machine_id) {
+            bail!(
+                "This machine is no longer signed in as {machine_id}, so its remote state is not written."
+            );
+        }
+        create_private_dir(&self.dir)?;
+        let owner: Option<Owner> = self.read(OWNER_FILE)?;
+        if owner.as_ref().map(|owner| owner.machine_id.as_str()) != Some(machine_id) {
+            self.clear(&[IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE])?;
+            self.write(
+                OWNER_FILE,
+                &Owner {
+                    machine_id: machine_id.to_string(),
+                },
+            )?;
+        }
+        Ok(lock)
+    }
+
+    /// The machine id `cloud.json` holds now; `None` when signed out.
+    fn current_machine(&self) -> Result<Option<String>> {
+        Ok(CredentialsStore::in_data_dir(&self.data_dir)
+            .load()?
+            .map(|credentials| credentials.machine_id.clone()))
+    }
+
+    fn owned_by_current(&self) -> Result<bool> {
+        let owner: Option<Owner> = self.read(OWNER_FILE)?;
+        Ok(match (owner, self.current_machine()?) {
+            (Some(owner), Some(current)) => owner.machine_id == current,
+            _ => false,
+        })
+    }
+
+    fn clear(&self, names: &[&str]) -> Result<()> {
+        for name in names {
             let path = self.dir.join(name);
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -256,26 +301,6 @@ impl RemoteStore {
             }
         }
         Ok(())
-    }
-
-    /// The folder's lock, for a write. Checked again under the lock: a
-    /// signed-out machine writes nothing.
-    fn lock(&self) -> Result<File> {
-        self.require_signed_in()?;
-        create_private_dir(&self.dir)?;
-        let lock = File::open(&self.dir)
-            .with_context(|| format!("Could not open {}", self.dir.display()))?;
-        lock.lock()
-            .with_context(|| format!("Could not lock {}", self.dir.display()))?;
-        self.require_signed_in()?;
-        Ok(lock)
-    }
-
-    fn require_signed_in(&self) -> Result<()> {
-        if self.credentials.exists() {
-            return Ok(());
-        }
-        bail!("This machine is not signed in to Localify Cloud, so it keeps no remote state.")
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
@@ -336,31 +361,106 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::cloud::credentials::CloudCredentials;
     use std::os::unix::fs::PermissionsExt;
 
-    /// A data dir with a `cloud.json`, as a signed-in machine has.
+    fn sign_in(dir: &Path, machine_id: &str) {
+        CredentialsStore::in_data_dir(dir)
+            .save(&CloudCredentials {
+                api_base: "https://api.localify.dev".into(),
+                token: format!("lfy_{machine_id}"),
+                login: "teo".into(),
+                machine_id: machine_id.into(),
+                machine_name: "laptop".into(),
+            })
+            .unwrap();
+    }
+
+    /// A data dir signed in as `m1`.
     fn signed_in() -> (tempfile::TempDir, RemoteStore) {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(CREDENTIALS_FILE), "{}").unwrap();
+        sign_in(dir.path(), "m1");
         let store = RemoteStore::in_data_dir(dir.path());
         (dir, store)
+    }
+
+    fn share_on() -> SettingsChange {
+        SettingsChange {
+            share: Some(true),
+            ..SettingsChange::default()
+        }
     }
 
     #[test]
     fn a_signed_out_machine_writes_no_remote_state() {
         let (dir, store) = signed_in();
         store.identity_for("m1").unwrap();
-        fs::remove_file(dir.path().join(CREDENTIALS_FILE)).unwrap();
-        store.delete_all().unwrap();
+        CredentialsStore::in_data_dir(dir.path()).delete().unwrap();
+        assert!(!dir.path().join("remote").exists());
 
         // A pairing that ends after the sign-out pins nothing.
-        let refused = store.update_pins(|pins| {
+        let refused = store.update_pins("m1", |pins| {
             pins.insert("m2".into(), pin("k"));
         });
-        assert!(refused.unwrap_err().to_string().contains("not signed in"));
-        assert!(store.update_settings(SettingsChange::default()).is_err());
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("no longer signed in")
+        );
+        assert!(store.update_settings("m1", share_on()).is_err());
         assert!(store.identity_for("m1").is_err());
         assert!(!dir.path().join("remote").exists());
+    }
+
+    /// An actor of the sign-in before writes nothing into the one after:
+    /// logout, then login as a new machine id, then a late pin.
+    #[test]
+    fn a_write_for_an_earlier_sign_in_never_lands_in_a_newer_one() {
+        let (dir, store) = signed_in();
+        store.identity_for("m1").unwrap();
+        CredentialsStore::in_data_dir(dir.path()).delete().unwrap();
+        sign_in(dir.path(), "m2");
+        store.update_settings("m2", share_on()).unwrap();
+
+        assert!(
+            store
+                .update_pins("m1", |pins| {
+                    pins.insert("peer".into(), pin("k"));
+                })
+                .is_err()
+        );
+        assert!(
+            store
+                .update_settings("m1", SettingsChange::default())
+                .is_err()
+        );
+        assert!(store.pins().unwrap().is_empty());
+        assert!(!dir.path().join("remote/peers.json").exists());
+        assert!(store.settings().unwrap().share);
+    }
+
+    /// Files left by another sign-in (a crash between the two deletions of
+    /// a sign-out) are ignored by reads and cleared by the first write.
+    #[test]
+    fn files_of_another_sign_in_are_ignored_then_cleared() {
+        let (dir, store) = signed_in();
+        store.identity_for("m1").unwrap();
+        store.update_settings("m1", share_on()).unwrap();
+        store
+            .update_pins("m1", |pins| {
+                pins.insert("peer".into(), pin("k"));
+            })
+            .unwrap();
+        // cloud.json replaced as by a login, remote/ left behind.
+        sign_in(dir.path(), "m2");
+
+        assert!(store.pins().unwrap().is_empty());
+        assert_eq!(store.settings().unwrap(), DEFAULT_SETTINGS);
+        let new = store.identity_for("m2").unwrap();
+        assert_eq!(new.machine_id, "m2");
+        assert!(!dir.path().join("remote/peers.json").exists());
+        assert!(!dir.path().join("remote/settings.json").exists());
     }
 
     #[test]
@@ -413,26 +513,33 @@ mod tests {
         assert_eq!(store.identity_for("m1").unwrap(), first);
         assert_eq!(mode(&dir.path().join("remote/identity.json")), 0o600);
         assert_eq!(mode(&dir.path().join("remote")), 0o700);
+        assert_eq!(mode(&dir.path().join("cloud.lock")), 0o600);
         first.keys().unwrap();
         assert!(!format!("{first:?}").contains(&first.private_key));
     }
 
+    /// Switches turned on before the first relay connection belong to the
+    /// sign-in, and stay when its key is made.
     #[test]
-    fn an_identity_of_an_earlier_sign_in_takes_its_pins_and_settings_with_it() {
+    fn settings_chosen_before_the_key_is_made_stay() {
         let (_dir, store) = signed_in();
+        store.update_settings("m1", share_on()).unwrap();
+        store.identity_for("m1").unwrap();
+        assert!(store.settings().unwrap().share);
+    }
+
+    #[test]
+    fn a_new_sign_in_starts_with_a_new_key_no_pins_and_switches_off() {
+        let (dir, store) = signed_in();
         let old = store.identity_for("m1").unwrap();
         store
-            .update_pins(|pins| {
+            .update_pins("m1", |pins| {
                 pins.insert("m2".into(), pin("k"));
             })
             .unwrap();
-        store
-            .update_settings(SettingsChange {
-                share: Some(true),
-                ..SettingsChange::default()
-            })
-            .unwrap();
+        store.update_settings("m1", share_on()).unwrap();
 
+        sign_in(dir.path(), "m9");
         let new = store.identity_for("m9").unwrap();
 
         assert_ne!(new.public_key, old.public_key);
@@ -453,7 +560,7 @@ mod tests {
         let (dir, store) = signed_in();
         assert!(store.pins().unwrap().is_empty());
         store
-            .update_pins(|pins| {
+            .update_pins("m1", |pins| {
                 pins.insert("m2".into(), pin("k2"));
             })
             .unwrap();
@@ -481,24 +588,30 @@ mod tests {
             control: Some(true),
             background_starts: Some(true),
         };
-        let all = store.update_settings(on).unwrap();
+        let all = store.update_settings("m1", on).unwrap();
         assert!(all.share && all.control && all.background_starts);
         let saved = fs::read_to_string(dir.path().join("remote/settings.json")).unwrap();
         assert!(saved.contains("\"backgroundStarts\": true"), "{saved}");
         assert_eq!(mode(&dir.path().join("remote/settings.json")), 0o600);
 
         let off = store
-            .update_settings(SettingsChange {
-                share: Some(false),
-                ..SettingsChange::default()
-            })
+            .update_settings(
+                "m1",
+                SettingsChange {
+                    share: Some(false),
+                    ..SettingsChange::default()
+                },
+            )
             .unwrap();
         assert_eq!(off, DEFAULT_SETTINGS);
 
-        let refused = store.update_settings(SettingsChange {
-            control: Some(true),
-            ..SettingsChange::default()
-        });
+        let refused = store.update_settings(
+            "m1",
+            SettingsChange {
+                control: Some(true),
+                ..SettingsChange::default()
+            },
+        );
         assert!(refused.unwrap_err().to_string().contains("--share on"));
         assert_eq!(store.settings().unwrap(), DEFAULT_SETTINGS);
     }
@@ -506,7 +619,9 @@ mod tests {
     #[test]
     fn a_hand_edited_file_never_holds_a_switch_without_its_dependency() {
         let (dir, store) = signed_in();
-        fs::create_dir_all(dir.path().join("remote")).unwrap();
+        store
+            .update_settings("m1", SettingsChange::default())
+            .unwrap();
         fs::write(
             dir.path().join("remote/settings.json"),
             r#"{"share": false, "control": true, "backgroundStarts": true}"#,
@@ -516,11 +631,12 @@ mod tests {
     }
 
     #[test]
-    fn deleting_everything_twice_is_fine() {
+    fn signing_out_twice_is_fine() {
         let (dir, store) = signed_in();
         store.identity_for("m1").unwrap();
-        store.delete_all().unwrap();
-        store.delete_all().unwrap();
+        let credentials = CredentialsStore::in_data_dir(dir.path());
+        credentials.delete().unwrap();
+        credentials.delete().unwrap();
         assert!(!dir.path().join("remote").exists());
     }
 }

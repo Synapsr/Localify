@@ -61,6 +61,9 @@ struct State {
     budgets: HashMap<String, RelayBudget>,
     refusals: u32,
     lease_requests: u32,
+    /// Routes that answer `401` with this raw body instead: `me`, `key`,
+    /// `lease` or `connect`.
+    unauthorized: HashMap<&'static str, String>,
     held: HashMap<String, Value>,
     /// Every frame a daemon sent, with its sender.
     log: Vec<(String, Send)>,
@@ -141,6 +144,16 @@ impl FakeCloud {
 
     pub fn upgrades(&self) -> Vec<(String, Instant)> {
         self.state().upgrades.clone()
+    }
+
+    /// Answers `route` (`me`, `key`, `lease`, `connect`) with a `401` and
+    /// this raw body, as a proxy or a captive portal could; `None` stops.
+    pub fn set_unauthorized(&self, route: &'static str, body: Option<&str>) {
+        let mut state = self.state();
+        match body {
+            Some(body) => state.unauthorized.insert(route, body.to_string()),
+            None => state.unauthorized.remove(route),
+        };
     }
 
     /// Whether the machine holds a socket now.
@@ -253,6 +266,25 @@ impl FakeCloud {
             .find(|m| m.token == token)
             .cloned();
         let mut stream = reader.into_inner();
+        let route = match request_line.split_whitespace().nth(1).unwrap_or_default() {
+            "/v1/me" => "me",
+            "/v1/machines/self/remote-key" => "key",
+            "/v1/remote/lease" => "lease",
+            "/v1/remote/connect" => "connect",
+            _ => "",
+        };
+        let unauthorized = self.state().unauthorized.get(route).cloned();
+        if let Some(body) = unauthorized {
+            if route == "lease" {
+                self.state().lease_requests += 1;
+            }
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            return;
+        }
         if request_line.starts_with("GET /v1/remote/connect") {
             let speaks = header("sec-websocket-protocol").as_deref() == Some("localify-remote.1")
                 && header("x-localify-proto").as_deref() == Some("1-1")

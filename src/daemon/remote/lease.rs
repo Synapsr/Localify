@@ -12,8 +12,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tracing::info;
 
-use super::Timings;
 use super::backoff::{random_fraction, up_to};
+use super::{Revocation, Timings};
 use crate::infrastructure::cloud::api::CloudClient;
 use crate::infrastructure::cloud::http::CloudError;
 use crate::infrastructure::cloud::types::LeaseGrant;
@@ -88,6 +88,9 @@ struct Renewal {
 pub struct LeaseKeeper {
     cloud: CloudClient,
     timings: Timings,
+    /// Whether a `401` from this API base can revoke the token (see
+    /// `super::Revocation`); any other `401` is a passing failure.
+    revocation: Revocation,
     lease: Mutex<Option<Lease>>,
     /// After a failed renewal, the next one waits; the lease keeps its own
     /// expiry meanwhile.
@@ -97,10 +100,11 @@ pub struct LeaseKeeper {
 }
 
 impl LeaseKeeper {
-    pub fn new(cloud: CloudClient, timings: Timings) -> Self {
+    pub fn new(cloud: CloudClient, timings: Timings, revocation: Revocation) -> Self {
         Self {
             cloud,
             timings,
+            revocation,
             lease: Mutex::new(None),
             renewal: Mutex::new(Renewal::default()),
             fetching: tokio::sync::Mutex::new(()),
@@ -159,8 +163,16 @@ impl LeaseKeeper {
                 *self.lease() = Some(Lease::new(grant, sent, &self.timings));
                 Ok(())
             }
+            Err(error) if self.revocation.revokes(&error) => {
+                info!("Localify Cloud revoked this machine's token");
+                *self.lease() = None;
+                Err(LeaseError::Refused {
+                    status: 401,
+                    code: super::REVOKED_CODE.to_string(),
+                })
+            }
             Err(CloudError::Api {
-                status: status @ 401..=403,
+                status: status @ (402 | 403),
                 code,
                 ..
             }) => {

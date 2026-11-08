@@ -113,6 +113,8 @@ fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) ->
         })
         .unwrap();
     let link = RemoteLink::with_timings(dir.path(), fast());
+    // As `LOCALIFY_CLOUD_API` makes a `wrangler dev` trusted.
+    link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
     spawn(link.clone(), cancel.clone());
     Daemon {
@@ -222,9 +224,10 @@ impl futures_util::Sink<tokio_tungstenite::tungstenite::Message> for RelayModel 
         let now = Instant::now();
         let size = message.len();
         self.handling.retain(|(done, _)| *done > now);
-        // The first frame in the relay is being handled; the rest wait.
-        let waiting = self.handling.len().saturating_sub(1);
-        let waiting_bytes: usize = self.handling.iter().skip(1).map(|(_, size)| size).sum();
+        // As relay.ts counts it: every frame not done yet, the one being
+        // handled included.
+        let waiting = self.handling.len();
+        let waiting_bytes: usize = self.handling.iter().map(|(_, size)| size).sum();
         match self.budget.admit(size, waiting, waiting_bytes, now) {
             Admit::Forward => {
                 let start = self
@@ -370,6 +373,7 @@ async fn a_socket_that_stops_taking_frames_ends_the_connection() {
         lease: std::sync::Arc::new(super::lease::LeaseKeeper::new(
             crate::infrastructure::cloud::api::CloudClient::new(http),
             fast(),
+            super::Revocation { trusted: false },
         )),
         cloud,
     };
@@ -605,7 +609,7 @@ async fn an_unpaired_machine_cannot_open_a_session() {
         .public_key
         .clone();
     a.store()
-        .update_pins(|pins| {
+        .update_pins("mA", |pins| {
             pins.insert(
                 "mB".into(),
                 crate::infrastructure::remote::store::Pin {
@@ -641,7 +645,7 @@ async fn a_key_other_than_the_pin_never_opens_a_session() {
     // Roster and pin agree on a key B does not hold: only the handshake can
     // tell, and A stops before it sends its own key.
     a.store()
-        .update_pins(|pins| {
+        .update_pins("mA", |pins| {
             if let Some(pin) = pins.get_mut("mB") {
                 pin.public_key = other.clone();
             }
@@ -1147,6 +1151,271 @@ async fn signing_out_while_connected_closes_the_link_and_pins_nothing() {
     assert_eq!(cloud.connections(), connections);
 }
 
+/// Logout, then a new login as another machine id, while the old
+/// connection still runs (no refresh reached it): the old pairing's late
+/// confirmation writes nothing into the new sign-in.
+#[tokio::test]
+async fn a_stale_pairing_writes_nothing_into_a_newer_sign_in() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let mut subscription = b.link.subscribe();
+    let (mut events, id_a, _, id_b, _) = to_codes(&a, &b, &mut subscription.events).await;
+    a.link.answer(&id_a, true).await.unwrap();
+
+    let credentials = CredentialsStore::in_data_dir(a.dir.path());
+    credentials.delete().unwrap();
+    let token = cloud.add_machine("mA2", "laptop");
+    credentials
+        .save(&CloudCredentials {
+            api_base: cloud.base.clone(),
+            token,
+            login: "teo".into(),
+            machine_id: "mA2".into(),
+            machine_name: "laptop".into(),
+        })
+        .unwrap();
+    // B confirms: A's old actor gets the confirmation and tries to pin.
+    b.link.answer(&id_b, true).await.unwrap();
+    let PairEvent::Cancelled { message, .. } = next_pair_event(&mut events).await else {
+        panic!("A's pairing should not complete");
+    };
+    assert!(message.contains("pin could not be saved"), "{message}");
+    let store = a.store();
+    assert!(store.pins().unwrap().is_empty());
+    assert!(!a.dir.path().join("remote/peers.json").exists());
+    assert_eq!(credentials.load().unwrap().unwrap().machine_id, "mA2");
+}
+
+/// The bodies of a `401` that does not come from the cloud's own check: a
+/// proxy's page, nothing, a JSON of something else, or of another code.
+const NOT_REVOCATIONS: [&str; 4] = [
+    "<html><body>401 Authorization Required</body></html>",
+    "",
+    r#"{"status": 401}"#,
+    r#"{"error": "token_expired", "message": "Log in again."}"#,
+];
+
+/// `settings.json` with share on, so a wipe would show.
+fn share_on(daemon: &Daemon) {
+    daemon
+        .link
+        .change_settings(crate::infrastructure::remote::store::SettingsChange {
+            share: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn kept(daemon: &Daemon) {
+    let data = daemon.dir.path();
+    assert!(data.join("cloud.json").exists(), "cloud.json is gone");
+    assert!(
+        daemon.store().settings().unwrap().share,
+        "the settings are gone"
+    );
+    assert_ne!(
+        daemon.link.status().blocked.map(|blocked| blocked.code),
+        Some("signed_out".to_string())
+    );
+}
+
+/// `/v1/me` and the key upload answering a `401` that is not the cloud's:
+/// retried, "can't reach Localify Cloud", and nothing deleted.
+#[tokio::test]
+async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_me_and_key() {
+    let cloud = FakeCloud::start().await;
+    for route in ["me", "key"] {
+        for body in NOT_REVOCATIONS {
+            let id = format!("m-{route}-{}", body.len());
+            let token = cloud.add_machine(&id, "laptop");
+            cloud.set_unauthorized(route, Some(body));
+            let daemon = launch(&cloud, &id, "laptop", &token, tempfile::tempdir().unwrap());
+            share_on(&daemon);
+            wait_until("it says it can't reach the cloud", || {
+                daemon
+                    .link
+                    .status()
+                    .blocked
+                    .is_some_and(|blocked| blocked.code == "unreachable")
+            })
+            .await;
+            assert_eq!(daemon.link.status().relay, RelayState::Reconnecting);
+            kept(&daemon);
+            cloud.set_unauthorized(route, None);
+            daemon.link.refresh();
+            wait_until("it connects", || {
+                daemon.link.status().relay == RelayState::Connected
+            })
+            .await;
+            kept(&daemon);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_the_upgrade() {
+    let cloud = FakeCloud::start().await;
+    for body in NOT_REVOCATIONS {
+        let id = format!("m-connect-{}", body.len());
+        let token = cloud.add_machine(&id, "laptop");
+        cloud.set_unauthorized("connect", Some(body));
+        let daemon = launch(&cloud, &id, "laptop", &token, tempfile::tempdir().unwrap());
+        share_on(&daemon);
+        let upgrades = cloud.upgrades().len();
+        wait_until("it says it can't reach the cloud", || {
+            daemon
+                .link
+                .status()
+                .blocked
+                .is_some_and(|blocked| blocked.code == "unreachable")
+        })
+        .await;
+        kept(&daemon);
+        assert!(
+            daemon.store().load_identity().unwrap().is_some(),
+            "the key is gone"
+        );
+        cloud.set_unauthorized("connect", None);
+        wait_until("it connects", || {
+            daemon.link.status().relay == RelayState::Connected
+        })
+        .await;
+        assert!(cloud.upgrades().len() > upgrades);
+        kept(&daemon);
+    }
+}
+
+/// A lease answered by a `401` that is not the cloud's, on every path that
+/// asks for one: the renewal of an open session, a viewer's `open`, and
+/// the polling after `4402`. The sign-in stays.
+#[tokio::test]
+async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_leases() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    pair(&a, &b).await;
+    share_on(&a);
+    a.link.open("mB", true).await.unwrap();
+    for body in NOT_REVOCATIONS {
+        cloud.set_unauthorized("lease", Some(body));
+        let requests = cloud.lease_requests();
+        wait_until("a renewal is refused", || {
+            cloud.lease_requests() > requests + 1
+        })
+        .await;
+        kept(&a);
+    }
+    // A viewer's open, with no lease left after a wake.
+    a.link
+        .shared
+        .wake
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_until("the session ends", || a.session("mB").is_none()).await;
+    assert_eq!(
+        a.link.open("mB", true).await.unwrap_err().code,
+        "unauthorized"
+    );
+    kept(&a);
+    // The polling after a lapse.
+    let requests = cloud.lease_requests();
+    cloud.close("mA", 4402, "remote access lapsed");
+    wait_until("it asked for a lease", || cloud.lease_requests() > requests).await;
+    wait_until("it asked again", || cloud.lease_requests() > requests + 1).await;
+    kept(&a);
+}
+
+/// The cloud's own revocation on a lease a viewer asks for, and on the
+/// polling after a lapse, signs the machine out as a renewal's does.
+#[tokio::test]
+async fn a_revoked_lease_signs_out_from_open_and_from_the_lapse_polling() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    pair(&a, &b).await;
+    cloud.set_lease(401, 60);
+    a.link
+        .shared
+        .wake
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_until("A's lease expired", || {
+        !a.link
+            .shared
+            .conn()
+            .is_some_and(|conn| conn.lease.is_valid(Instant::now()))
+    })
+    .await;
+    assert_eq!(
+        a.link.open("mB", true).await.unwrap_err().code,
+        "unauthorized"
+    );
+    wait_until("A is signed out", || {
+        a.link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "signed_out")
+    })
+    .await;
+    assert_signed_out(&a);
+
+    cloud.set_lease(402, 60);
+    cloud.close("mB", 4402, "remote access lapsed");
+    wait_until("B is lapsed", || {
+        b.link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "subscription_required")
+    })
+    .await;
+    cloud.set_lease(401, 60);
+    wait_until("B is signed out", || {
+        b.link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "signed_out")
+    })
+    .await;
+    assert_signed_out(&b);
+}
+
+/// The cloud's revocation code from an API base that is neither
+/// `https://api.localify.dev` nor the explicit override: not trusted.
+#[tokio::test]
+async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
+    let cloud = FakeCloud::start().await;
+    let token = cloud.add_machine("mU", "laptop");
+    let dir = tempfile::tempdir().unwrap();
+    CredentialsStore::in_data_dir(dir.path())
+        .save(&CloudCredentials {
+            api_base: cloud.base.clone(),
+            token,
+            login: "teo".into(),
+            machine_id: "mU".into(),
+            machine_name: "laptop".into(),
+        })
+        .unwrap();
+    let link = RemoteLink::with_timings(dir.path(), fast());
+    let cancel = CancellationToken::new();
+    spawn(link.clone(), cancel.clone());
+    let daemon = Daemon {
+        dir,
+        link,
+        cancel,
+        id: "mU".into(),
+    };
+    share_on(&daemon);
+    cloud.set_unauthorized(
+        "me",
+        Some(r#"{"error": "unauthorized", "message": "Signed out."}"#),
+    );
+    wait_until("it says it can't reach the cloud", || {
+        daemon
+            .link
+            .status()
+            .blocked
+            .is_some_and(|blocked| blocked.code == "unreachable")
+    })
+    .await;
+    kept(&daemon);
+}
+
 /// The pairing limit lives in the link: a new connection keeps the count.
 #[tokio::test]
 async fn reconnecting_does_not_reset_the_pairing_limit() {
@@ -1325,6 +1594,11 @@ async fn an_invalid_private_key_is_never_shown() {
     let dir = tempfile::tempdir().unwrap();
     let secret = "c2VjcmV0LXByaXZhdGUta2V5LXRoYXQtaXMtYnJva2VuIQ";
     std::fs::create_dir_all(dir.path().join("remote")).unwrap();
+    std::fs::write(
+        dir.path().join("remote/owner.json"),
+        r#"{"machineId": "mA"}"#,
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("remote/identity.json"),
         json!({"machineId": "mA", "publicKey": encode_key(&StaticKeys::generate().unwrap().public),

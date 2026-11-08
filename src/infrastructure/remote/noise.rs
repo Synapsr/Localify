@@ -160,6 +160,23 @@ pub fn decode_key(text: &str) -> Result<[u8; KEY_LEN]> {
         .map_err(|_| anyhow!("not {KEY_LEN} bytes of base64url without padding"))
 }
 
+/// Decodes a private key straight into memory that is wiped when dropped,
+/// on failure too: no copy of it is left in an ordinary buffer.
+pub fn decode_private_key(text: &str) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    // 43 characters decode to 32 bytes; the slack lets `decode_slice`
+    // accept its own estimate of the length.
+    let mut buffer = Zeroizing::new([0_u8; KEY_LEN + 4]);
+    let length = URL_SAFE_NO_PAD
+        .decode_slice(text, buffer.as_mut_slice())
+        .map_err(|_| anyhow!("not {KEY_LEN} bytes of base64url without padding"))?;
+    if length != KEY_LEN {
+        bail!("not {KEY_LEN} bytes of base64url without padding");
+    }
+    let mut key = Zeroizing::new([0_u8; KEY_LEN]);
+    key.copy_from_slice(&buffer[..KEY_LEN]);
+    Ok(key)
+}
+
 /// The first 8 bytes of SHA-256 of the key, as `1a2b 3c4d 5e6f 7a8b`.
 pub fn fingerprint(key: &[u8; KEY_LEN]) -> String {
     let digest = Sha256::digest(key);
@@ -460,6 +477,16 @@ pub mod tests {
         let secret = encode_key(&keys.private);
         let error = format!("{:#}", decode_key(&format!("{secret}!")).unwrap_err());
         assert!(!error.contains(&secret[..8]), "{error}");
+        assert_eq!(*decode_private_key(&secret).unwrap(), *keys.private);
+        for bad in [
+            format!("{secret}!"),
+            format!("{secret}AAAA"),
+            secret[..40].to_string(),
+            String::new(),
+        ] {
+            let error = format!("{:#}", decode_private_key(&bad).unwrap_err());
+            assert!(!error.contains(&secret[..8]), "{error}");
+        }
     }
 
     #[test]
