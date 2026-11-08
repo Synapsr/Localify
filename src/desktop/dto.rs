@@ -537,7 +537,7 @@ impl ServiceRunDto {
                 .or_else(|| primary.map(str::to_string)),
             service_id: record.key.service_id.clone(),
             run_id: record.run_id().map(|id| id.to_string()),
-            legacy: record.run.is_none(),
+            legacy: record.is_legacy(),
             state,
             origin: record.origin,
             pid: record.pid,

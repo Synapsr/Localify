@@ -175,13 +175,19 @@ impl RunningService {
         self.run.as_ref().and_then(|run| run.output)
     }
 
+    /// Started from a shell tab by an app from before run PTYs: a record with
+    /// no run id, or an app run with no stream, whose output was the shell's.
+    pub fn is_legacy(&self) -> bool {
+        self.run.is_none() || (self.origin == ServiceOrigin::App && !self.has_stream())
+    }
+
     /// Where the run's output can be read, if anywhere.
     #[allow(dead_code)] // Used by the desktop app through the library crate.
     pub fn output_availability(&self) -> OutputAvailability {
         match (&self.run, self.output()) {
-            (None, _) => OutputAvailability::LegacyRun,
+            _ if self.is_legacy() => OutputAvailability::LegacyRun,
             (Some(run), Some(_)) => OutputAvailability::Available(run.run_id.clone()),
-            (Some(_), None) => OutputAvailability::Terminal,
+            _ => OutputAvailability::Terminal,
         }
     }
 
@@ -1151,6 +1157,18 @@ mod tests {
 
         assert_eq!(record.output_availability(), OutputAvailability::LegacyRun);
         assert!(!record.has_stream());
+
+        // Typed into a shell tab after run ids, before run PTYs: no stream.
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let lock = store.lock(&key("web")).unwrap().admitted();
+        let mut shell_tab = store.register(&lock, run("web")).unwrap();
+        shell_tab.origin = ServiceOrigin::App;
+        assert!(shell_tab.is_legacy());
+        assert_eq!(
+            shell_tab.output_availability(),
+            OutputAvailability::LegacyRun
+        );
     }
 
     #[test]
