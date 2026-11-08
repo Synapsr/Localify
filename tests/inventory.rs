@@ -86,21 +86,33 @@ impl Sandbox {
             )
             .unwrap();
             drop(ports);
-            let mut daemon = self
-                .localify(&["start", "--foreground"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            let started = wait_for("the daemon", || {
-                if daemon.try_wait().unwrap().is_some() {
-                    return Some(false);
+            // Owned by the sandbox at once, so its drop ends it on every path,
+            // a panic included.
+            self.daemon = Some(
+                self.localify(&["start", "--foreground"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let exited = self
+                    .daemon
+                    .as_mut()
+                    .is_some_and(|daemon| daemon.try_wait().unwrap().is_some());
+                if exited {
+                    self.daemon = None;
+                    break;
                 }
-                self.try_inventory(None).map(|_| true)
-            });
-            if started {
-                self.daemon = Some(daemon);
-                return;
+                if self.try_inventory(None).is_some() {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the daemon"
+                );
+                thread::sleep(Duration::from_millis(100));
             }
         }
         panic!("the daemon did not start in {DAEMON_ATTEMPTS} attempts");
