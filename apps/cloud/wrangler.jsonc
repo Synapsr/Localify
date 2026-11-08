@@ -86,7 +86,7 @@
     "GITHUB_CLIENT_ID": "Ov23lil8Qd3w1uo0w4qT",
     // Who may finish a new sign-in: `allowlist` (the ids below) or `open`
     // (anyone). Serving takes an entitlement in both modes.
-    "SIGNUP": "allowlist",
+    "SIGNUP": "open",
     // Under SIGNUP=allowlist, who can sign in: numeric GitHub user ids,
     // comma-separated. Ids, not logins, because a login can be renamed and
     // taken by someone else.
@@ -144,7 +144,7 @@
           "binding": "DB",
           "database_name": "localify-cloud-sandbox",
           // From `wrangler d1 create localify-cloud-sandbox --location weur`.
-          "database_id": "00000000-0000-0000-0000-000000000000",
+          "database_id": "800a3277-ac94-4e79-966f-e7312f51a722",
           "migrations_dir": "migrations"
         }
       ],
