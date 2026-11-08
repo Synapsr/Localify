@@ -96,14 +96,17 @@ fn run_with_profile(
         workdir: current_dir,
         environment,
         mask_patterns: profile.mask_patterns(),
+        stream: None,
         max_duration: profile.max_duration(),
         session,
+        heartbeat: &|| {},
+        leads_session: false,
     });
     if dangerous_name.is_some() {
         launch_profile::reset_title();
     }
 
-    Ok(match outcome? {
+    Ok(match outcome?.outcome {
         LaunchOutcome::Exited(status) => exit_code(status),
         LaunchOutcome::Interrupted => 130,
         LaunchOutcome::Expired(duration) => {

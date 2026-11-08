@@ -1,13 +1,14 @@
 //! Services that run without the caller's terminal, and the commands that act
 //! on any service `localify dev` started: `status`, `logs`, `stop`, `restart`.
 //! `dev --in-app` starts a service in the desktop app's terminal, as its launch
-//! button does; `dev --detach` starts one in the background. Both write the
-//! service's output to a file that `logs` reads, so a person in the app and an
+//! button does; `dev --detach` starts one in the background, where its output
+//! goes to the run's stream. `logs` reads either, so a person in the app and an
 //! agent read the same lines.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -23,63 +24,118 @@ use super::services::{RunTarget, resolve_launch_target, resolve_service_key};
 use crate::branding::BRANDING;
 use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::running_services::{
-    self, OutputChunk, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
-    ServiceKey, ServiceOrigin, service_selector,
+    self, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey, ServiceOrigin,
+    service_selector,
 };
+use crate::infrastructure::runs::RunId;
+use crate::infrastructure::runs::output::{self, StreamLine, StreamRead};
 
 /// A first `next dev` can take this long before it listens.
 const START_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FAILURE_OUTPUT_LINES: usize = 40;
+/// How much of a run's stream one `logs` call reads at most.
+const LOGS_WINDOW: u64 = 1024 * 1024;
+/// How much one read of a stream takes.
+const READ_CHUNK: usize = 64 * 1024;
 
-/// Runs the same `dev` command again in the background, with its output in a
-/// file, and returns once the service listens, stopped, or is still starting.
-pub fn start_detached() -> Result<()> {
+/// Runs the same `dev` command again in the background, in its own session
+/// and with its output in the run's stream, and returns once the service
+/// listens, stopped, or is still starting.
+pub fn start_detached(launch_id: Option<&str>) -> Result<()> {
     let store = RunningServiceStore::new_default()?;
-    let log_path = store.new_log_file(&format!("background-{}", std::process::id()))?;
+    let (launch_id, chosen) = match launch_id {
+        Some(id) => (RunId::parse(id)?, false),
+        None => (RunId::generate()?, true),
+    };
+    // The executor's own messages, such as why it refused to start.
+    let launch_log = store.launch_log(&launch_id)?;
     let log = File::options()
+        .create(true)
         .append(true)
-        .open(&log_path)
-        .with_context(|| format!("Failed to open '{}'", log_path.display()))?;
+        .open(&launch_log)
+        .with_context(|| format!("Failed to open '{}'", launch_log.display()))?;
 
     let mut command = Command::new(current_exe()?);
     command
-        .args(foreground_args(std::env::args_os().skip(1)))
-        .env(SERVICE_OUTPUT_ENV, &log_path)
+        .args(foreground_args(
+            std::env::args_os().skip(1),
+            chosen.then_some(&launch_id),
+        ))
         .env(SERVICE_ORIGIN_ENV, ServiceOrigin::Background.as_env())
         .stdin(Stdio::null())
-        .stdout(log.try_clone().context("Failed to share the output file")?)
-        .stderr(log)
-        // Its own process group: closing the terminal or the agent's shell leaves it running.
-        .process_group(0);
+        .stdout(log.try_clone().context("Failed to share the launch log")?)
+        .stderr(log);
+    // Its own session: closing the terminal or the agent's shell leaves it
+    // running, and the run's session and process group are the executor's PID.
+    // SAFETY: the closure runs in the child between fork and exec and only calls
+    // setsid, which is async-signal-safe and touches no memory.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let mut child = command.spawn().context("Failed to start the service")?;
-    wait_for_child(&mut child, &store, &log_path)
+    wait_for_child(&mut child, &store, &launch_id, &launch_log)
 }
 
-/// The arguments of this command without `--detach`. What follows `--` is the
-/// service's own command and stays as it is.
-fn foreground_args(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
+/// The arguments of this command without `--detach`, with the launch id this
+/// dispatcher chose. What follows `--` is the service's own command and stays
+/// as it is.
+fn foreground_args(
+    args: impl Iterator<Item = OsString>,
+    launch_id: Option<&RunId>,
+) -> Vec<OsString> {
+    let mut foreground = Vec::new();
     let mut in_service_command = false;
-    args.filter(|arg| {
-        if in_service_command {
-            return true;
-        }
-        if arg == "--" {
+    for arg in args {
+        if !in_service_command && arg == "--" {
             in_service_command = true;
+            push_launch_id(&mut foreground, launch_id);
         }
-        arg != "--detach"
-    })
-    .collect()
+        if in_service_command || arg != "--detach" {
+            foreground.push(arg);
+        }
+    }
+    if !in_service_command {
+        push_launch_id(&mut foreground, launch_id);
+    }
+    foreground
 }
 
-fn wait_for_child(child: &mut Child, store: &RunningServiceStore, log_path: &Path) -> Result<()> {
+fn push_launch_id(args: &mut Vec<OsString>, launch_id: Option<&RunId>) {
+    if let Some(launch_id) = launch_id {
+        args.push("--launch-id".into());
+        args.push(launch_id.as_str().into());
+    }
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    store: &RunningServiceStore,
+    launch_id: &RunId,
+    launch_log: &Path,
+) -> Result<()> {
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        let run = store.list()?.into_iter().find(|run| run.pid == child.id());
+        let run = store
+            .list()?
+            .into_iter()
+            .find(|run| run.run_id() == Some(launch_id));
         if let Some(status) = child.try_wait().context("Failed to watch the service")? {
-            let output = last_lines(log_path);
+            let output = match &run {
+                Some(run) => last_lines(store, run),
+                None => String::new(),
+            };
+            let output = match output.is_empty() {
+                true => last_file_lines(launch_log),
+                false => output,
+            };
             if run.is_none() {
-                let _ = fs::remove_file(log_path);
+                let _ = fs::remove_file(launch_log);
             }
             bail!("The service stopped while starting ({status}). Its last output:\n\n{output}");
         }
@@ -96,7 +152,7 @@ fn wait_for_child(child: &mut Child, store: &RunningServiceStore, log_path: &Pat
                     "{} is still preparing the service in the background (PID {}).\n  output: {}",
                     BRANDING.app_name,
                     child.id(),
-                    log_path.display()
+                    launch_log.display()
                 ),
             }
             return Ok(());
@@ -123,7 +179,7 @@ pub fn start_in_app(
     };
     let store = RunningServiceStore::new_default()?;
     let previous = store.get(&launch.key)?;
-    if let Some(run) = previous.as_ref().filter(|run| run.is_running()) {
+    if let Some(run) = previous.as_ref().filter(|run| store.is_running(run)) {
         println!(
             "'{}' is already running (PID {}, {}), not started again.\n  url: {}",
             run.key.service_id,
@@ -209,7 +265,7 @@ fn wait_for_app_run(store: &RunningServiceStore, key: &ServiceKey, since: u64) -
                     "'{}' stopped while starting ({}). Its last output:\n\n{}",
                     key.service_id,
                     describe_exit_code(exit.code),
-                    run.log_file.as_deref().map(last_lines).unwrap_or_default()
+                    last_lines(store, run)
                 );
             }
             if listens(run.port) {
@@ -265,7 +321,20 @@ fn describe_exit_code(code: Option<i32>) -> String {
     }
 }
 
-fn last_lines(path: &Path) -> String {
+/// The last lines of a run's output, from its stream or the app's file.
+fn last_lines(store: &RunningServiceStore, run: &RunningService) -> String {
+    if let Some(run_id) = run.run_id().filter(|_| run.has_stream()) {
+        return stream_tail(&store.run_dir(run_id), FAILURE_OUTPUT_LINES)
+            .map(|(lines, _)| join_lines(&lines))
+            .unwrap_or_default();
+    }
+    run.log_file
+        .as_deref()
+        .map(last_file_lines)
+        .unwrap_or_default()
+}
+
+fn last_file_lines(path: &Path) -> String {
     running_services::tail(path, FAILURE_OUTPUT_LINES)
         .map(|chunk| chunk.lines.join("\n"))
         .unwrap_or_default()
@@ -278,9 +347,9 @@ pub fn stop(
     ctx: &AppContext,
 ) -> Result<()> {
     let key = resolve_service_key(service, project, environment, ctx)?;
-    let run = RunningServiceStore::new_default()?.get(&key)?;
-    match run {
-        Some(run) if running_services::stop(&run)? => {
+    let store = RunningServiceStore::new_default()?;
+    match store.get(&key)? {
+        Some(run) if store.stop(&run)? => {
             println!("Stopped '{}' (PID {}).", key.service_id, run.pid);
         }
         _ => println!("'{}' is not running.", key.service_id),
@@ -298,7 +367,8 @@ pub fn restart(
     ctx: &AppContext,
 ) -> Result<()> {
     let key = resolve_service_key(service, project, environment, ctx)?;
-    let Some(run) = RunningServiceStore::new_default()?.get(&key)? else {
+    let store = RunningServiceStore::new_default()?;
+    let Some(run) = store.get(&key)? else {
         bail!(
             "'{}' was never started by {}. Start it with: {} dev {} --in-app",
             key.service_id,
@@ -307,7 +377,7 @@ pub fn restart(
             service_selector(&key)
         );
     };
-    if running_services::stop(&run)? {
+    if store.stop(&run)? {
         println!("Stopped '{}' (PID {}).", key.service_id, run.pid);
     }
 
@@ -341,14 +411,40 @@ pub struct LogsArgs<'a> {
     pub environment: Option<&'a str>,
     pub lines: usize,
     pub follow: bool,
-    pub cursor: Option<u64>,
+    pub cursor: Option<&'a str>,
 }
 
-/// Prints a service's output as the app's terminal shows it, without colors.
-/// With a cursor, only what came after it. A reader that is not a terminal also
-/// gets the cursor to pass next time.
+/// Where `logs` reads on from: `<runId>:<offset>` in a run's stream, or a byte
+/// offset in an app run's output file.
+#[derive(Debug, PartialEq, Eq)]
+enum Cursor {
+    Stream { run_id: RunId, offset: u64 },
+    File(u64),
+}
+
+impl Cursor {
+    fn parse(value: &str) -> Result<Self> {
+        let invalid = || {
+            format!(
+                "'{value}' is not a cursor. Pass back the one the previous `logs` call printed."
+            )
+        };
+        match value.split_once(':') {
+            Some((run_id, offset)) => Ok(Self::Stream {
+                run_id: RunId::parse(run_id).with_context(invalid)?,
+                offset: offset.parse().with_context(invalid)?,
+            }),
+            None => Ok(Self::File(value.parse().with_context(invalid)?)),
+        }
+    }
+}
+
+/// Prints a service's output without colors: a background run's stream, or
+/// what the app's terminal shows. With a cursor, only what came after it. A
+/// reader that is not a terminal also gets the cursor to pass next time.
 pub fn logs(args: LogsArgs<'_>, ctx: &AppContext) -> Result<()> {
     let key = resolve_service_key(args.service, args.project, args.environment, ctx)?;
+    let cursor = args.cursor.map(Cursor::parse).transpose()?;
     let store = RunningServiceStore::new_default()?;
     let Some(run) = store.get(&key)? else {
         bail!(
@@ -358,6 +454,10 @@ pub fn logs(args: LogsArgs<'_>, ctx: &AppContext) -> Result<()> {
             service_selector(&key)
         );
     };
+    eprintln!("{}\n", describe_run(&store, &run));
+    if let Some(run_id) = run.run_id().filter(|_| run.has_stream()) {
+        return stream_logs(&store, &run, run_id, cursor, &args);
+    }
     let Some(log_file) = run.log_file.clone() else {
         bail!(
             "'{}' was started in a terminal {} does not own, and its output is only there. Start it with --in-app or --detach to read it here.",
@@ -365,49 +465,183 @@ pub fn logs(args: LogsArgs<'_>, ctx: &AppContext) -> Result<()> {
             BRANDING.app_name
         );
     };
-    eprintln!("{}\n", describe_run(&run));
-
-    let mut chunk = match args.cursor {
-        Some(cursor) => running_services::read_from(&log_file, cursor)?,
-        None => running_services::tail(&log_file, args.lines)?,
+    let cursor = match cursor {
+        Some(Cursor::File(offset)) => Some(offset),
+        Some(Cursor::Stream { .. }) | None => None,
     };
-    print_lines(&chunk);
+    file_logs(&store, &key, &log_file, cursor, &args)
+}
+
+fn stream_logs(
+    store: &RunningServiceStore,
+    run: &RunningService,
+    run_id: &RunId,
+    cursor: Option<Cursor>,
+    args: &LogsArgs<'_>,
+) -> Result<()> {
+    let dir = store.run_dir(run_id);
+    let mut offset = match cursor {
+        None => {
+            let (lines, next) = stream_tail(&dir, args.lines)?;
+            print_stream_lines(&lines);
+            next
+        }
+        Some(Cursor::Stream {
+            run_id: ref asked,
+            offset,
+        }) if asked == run_id => offset,
+        Some(_) => {
+            eprintln!(
+                "'{}' restarted since that cursor: reading its current run from the start.",
+                run.key.service_id
+            );
+            0
+        }
+    };
+    if args.cursor.is_some() {
+        offset = read_span(&dir, offset, LOGS_WINDOW, print_stream_chunk)?.next;
+    }
     if args.follow {
-        follow(&store, &key, &log_file, &mut chunk)?;
+        offset = follow_stream(store, run, &dir, offset)?;
     }
     if args.cursor.is_some() || !std::io::stdout().is_terminal() {
+        eprintln!("\nNext cursor: {run_id}:{offset}");
+    }
+    Ok(())
+}
+
+/// The last `count` lines of a run's stream, from at most its last
+/// [`LOGS_WINDOW`] bytes, and the offset after them.
+fn stream_tail(dir: &Path, count: usize) -> Result<(Vec<StreamLine>, u64)> {
+    let (first, total) = output::extent(dir)?;
+    let start = first.max(total.saturating_sub(LOGS_WINDOW));
+    // Reading from the middle of the stream starts inside a line: drop it.
+    let mut skipping = start > 0;
+    let mut lines = VecDeque::new();
+    let last = read_span(dir, start, LOGS_WINDOW, |chunk| {
+        for line in &chunk.lines {
+            if skipping {
+                skipping = line.cut;
+                continue;
+            }
+            lines.push_back(line.clone());
+            if lines.len() > count {
+                lines.pop_front();
+            }
+        }
+    })?;
+    Ok((lines.into(), last.next))
+}
+
+/// Reads from `offset` until caught up or `budget` bytes were read, one
+/// bounded read at a time, and returns the last read.
+fn read_span(
+    dir: &Path,
+    mut offset: u64,
+    budget: u64,
+    mut each: impl FnMut(&StreamRead),
+) -> Result<StreamRead> {
+    let started = offset;
+    loop {
+        let chunk = output::read(dir, offset, READ_CHUNK)?;
+        each(&chunk);
+        if chunk.next == offset || chunk.next - started >= budget {
+            return Ok(chunk);
+        }
+        offset = chunk.next;
+    }
+}
+
+/// Prints new lines as they come, until the run ends.
+fn follow_stream(
+    store: &RunningServiceStore,
+    run: &RunningService,
+    dir: &Path,
+    mut offset: u64,
+) -> Result<u64> {
+    loop {
+        let chunk = read_span(dir, offset, LOGS_WINDOW, print_stream_chunk)?;
+        let caught_up = chunk.next == offset;
+        offset = chunk.next;
+        if chunk.ended || (caught_up && !store.is_running(run)) {
+            return Ok(offset);
+        }
+        if caught_up {
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
+fn print_stream_chunk(chunk: &StreamRead) {
+    if let Some(first) = chunk.rotated {
+        eprintln!("Earlier output was dropped: it starts at offset {first}.");
+    }
+    print_stream_lines(&chunk.lines);
+    if chunk.interrupted {
+        eprintln!("Output was cut off when {} stopped.", BRANDING.app_name);
+    }
+}
+
+fn print_stream_lines(lines: &[StreamLine]) {
+    for line in lines {
+        if line.cut {
+            print!("{}", line.text);
+        } else {
+            println!("{}", line.text);
+        }
+    }
+}
+
+fn join_lines(lines: &[StreamLine]) -> String {
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.text);
+        if !line.cut {
+            text.push('\n');
+        }
+    }
+    text.trim_end().to_string()
+}
+
+/// An app run's output, from the file the app's terminal writes.
+fn file_logs(
+    store: &RunningServiceStore,
+    key: &ServiceKey,
+    log_file: &Path,
+    cursor: Option<u64>,
+    args: &LogsArgs<'_>,
+) -> Result<()> {
+    let mut chunk = match cursor {
+        Some(cursor) => running_services::read_from(log_file, cursor, LOGS_WINDOW)?,
+        None => running_services::tail(log_file, args.lines)?,
+    };
+    print_file_lines(&chunk.lines);
+    if args.follow {
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            let running = store.get(key)?.is_some_and(|run| store.is_running(&run));
+            chunk = running_services::read_from(log_file, chunk.cursor, LOGS_WINDOW)?;
+            print_file_lines(&chunk.lines);
+            if !running {
+                break;
+            }
+        }
+    }
+    if cursor.is_some() || !std::io::stdout().is_terminal() {
         eprintln!("\nNext cursor: {}", chunk.cursor);
     }
     Ok(())
 }
 
-/// Prints new lines as they come, until the run ends.
-fn follow(
-    store: &RunningServiceStore,
-    key: &ServiceKey,
-    log_file: &Path,
-    chunk: &mut OutputChunk,
-) -> Result<()> {
-    loop {
-        thread::sleep(Duration::from_millis(500));
-        let running = store.get(key)?.is_some_and(|run| run.is_running());
-        *chunk = running_services::read_from(log_file, chunk.cursor)?;
-        print_lines(chunk);
-        if !running {
-            return Ok(());
-        }
-    }
-}
-
-fn print_lines(chunk: &OutputChunk) {
-    for line in &chunk.lines {
+fn print_file_lines(lines: &[String]) {
+    for line in lines {
         println!("{line}");
     }
 }
 
-fn describe_run(run: &RunningService) -> String {
+fn describe_run(store: &RunningServiceStore, run: &RunningService) -> String {
     let started = elapsed(run.started_at);
-    if run.is_running() {
+    if store.is_running(run) {
         return format!(
             "'{}' is running {} (PID {}), started {started} ago.",
             run.key.service_id,
@@ -447,13 +681,14 @@ struct StatusOutput<'a> {
 
 /// Every service Localify started, running or stopped, in every environment.
 pub fn status(json: bool) -> Result<()> {
-    let services = RunningServiceStore::new_default()?.list()?;
+    let store = RunningServiceStore::new_default()?;
+    let services = store.list()?;
     if json {
         let output = services
             .iter()
             .map(|service| StatusOutput {
                 service,
-                running: service.is_running(),
+                running: store.is_running(service),
             })
             .collect::<Vec<_>>();
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -465,7 +700,7 @@ pub fn status(json: bool) -> Result<()> {
     }
     for service in services {
         println!("{}", service_selector(&service.key));
-        println!("  {}", describe_run(&service));
+        println!("  {}", describe_run(&store, &service));
         println!("  url: {}  port: {}", service.url, service.port);
     }
     Ok(())
@@ -490,19 +725,64 @@ mod tests {
 
     #[test]
     fn the_background_run_drops_only_localify_s_detach_flag() {
+        let launch_id = RunId::parse("AAAAAAAAAAAAAAAAAAAAAA").unwrap();
         let result = foreground_args(
             args(&[
                 "dev", "web", "--detach", "--env", "feat", "--", "pnpm", "dev", "--detach",
             ])
             .into_iter(),
+            Some(&launch_id),
         );
 
         assert_eq!(
             result,
             args(&[
-                "dev", "web", "--env", "feat", "--", "pnpm", "dev", "--detach"
+                "dev",
+                "web",
+                "--env",
+                "feat",
+                "--launch-id",
+                "AAAAAAAAAAAAAAAAAAAAAA",
+                "--",
+                "pnpm",
+                "dev",
+                "--detach"
             ])
         );
+    }
+
+    #[test]
+    fn a_launch_id_given_by_the_caller_is_not_added_twice() {
+        let result = foreground_args(
+            args(&[
+                "dev",
+                "web",
+                "--launch-id",
+                "AAAAAAAAAAAAAAAAAAAAAA",
+                "--detach",
+            ])
+            .into_iter(),
+            None,
+        );
+
+        assert_eq!(
+            result,
+            args(&["dev", "web", "--launch-id", "AAAAAAAAAAAAAAAAAAAAAA"])
+        );
+    }
+
+    #[test]
+    fn cursors_name_a_run_and_an_offset_or_a_file_offset() {
+        assert_eq!(
+            Cursor::parse("AAAAAAAAAAAAAAAAAAAAAA:42").unwrap(),
+            Cursor::Stream {
+                run_id: RunId::parse("AAAAAAAAAAAAAAAAAAAAAA").unwrap(),
+                offset: 42
+            }
+        );
+        assert_eq!(Cursor::parse("17").unwrap(), Cursor::File(17));
+        assert!(Cursor::parse("../x:1").is_err());
+        assert!(Cursor::parse("abc").is_err());
     }
 
     #[test]

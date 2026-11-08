@@ -4,7 +4,6 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Select, theme::ColorfulTheme};
@@ -16,7 +15,7 @@ use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::project_env::{current_worktree_environment, ensure_implicit_worktree_environment};
-use super::service_supervisor::{self, LaunchOutcome, SessionReporter, SupervisedLaunch};
+use super::service_supervisor::{self, LaunchEnd, LaunchOutcome, SupervisedLaunch};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
 use crate::domain::DomainRegistration;
@@ -34,8 +33,12 @@ use crate::infrastructure::project_marker::{
     ensure_marker_is_excluded, read_project_marker, write_project_marker,
 };
 use crate::infrastructure::running_services::{
-    NewRun, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
+    NewRun, RunOutput, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
     ServiceKey, ServiceOrigin,
+};
+use crate::infrastructure::runs::RunId;
+use crate::infrastructure::runs::output::{
+    self as run_output, EndReason, FinalizeLock, RunEnd, StreamSink, StreamWriter,
 };
 use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
@@ -95,6 +98,8 @@ pub struct RunArgs {
     pub init_domain: Option<String>,
     pub override_command: Vec<String>,
     pub launch_profile: LaunchProfileArgs,
+    /// The run id a dispatcher chose (`--launch-id`); `None` picks one.
+    pub launch_id: Option<String>,
 }
 
 pub fn list(ctx: &AppContext, json: bool) -> Result<()> {
@@ -219,7 +224,12 @@ pub fn run(
         init_domain,
         override_command,
         launch_profile,
+        launch_id,
     } = args;
+    let run_id = match launch_id.as_deref() {
+        Some(id) => RunId::parse(id)?,
+        None => RunId::generate()?,
+    };
     if init_domain.is_some()
         && (service_name.is_some() || project.is_some() || environment.is_some())
     {
@@ -273,7 +283,9 @@ pub fn run(
 
     let port = proxy_target.port().value();
     let key = service_key(&service, effective_environment, ctx);
-    refuse_second_run(&key)?;
+    // Before anything runs, profile sources included: one executor per service.
+    let store = RunningServiceStore::new_default()?;
+    let lock = store.lock(&key)?;
     ensure_port_available(port, &service)?;
 
     let workdir = service_workdir(&service)?;
@@ -321,48 +333,149 @@ pub fn run(
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
-    let profile_name = profile
-        .as_ref()
-        .and_then(|profile| profile.name())
-        .map(str::to_string);
-    record_running_service(&key, &url, port, profile_name);
-
-    let Some(profile) = profile else {
-        let status = run_plain(&command, &workdir, &environment);
-        record_exit(&key, status.as_ref().ok().and_then(|status| status.code()));
-        let status = status?;
-        if !status.success() {
-            bail!("Service '{}' exited with {}", service.id, status);
-        }
-        return Ok(());
-    };
-    let session = launch_profile::start_launch_session(
-        &profile,
-        SessionTarget {
-            project_id: service.project_id.clone(),
-            environment_slug: key.environment.clone(),
-            service_id: service.id.clone(),
-            target_port: port,
-            browser_indicator: profile.resolved.browser_indicator,
+    let origin = ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref());
+    let background = origin == ServiceOrigin::Background;
+    let record = store.register(
+        &lock,
+        NewRun {
+            key: key.clone(),
+            run_id: run_id.clone(),
+            url,
+            port,
+            origin,
+            profile: profile
+                .as_ref()
+                .and_then(|profile| profile.name())
+                .map(str::to_string),
+            log_file: env::var_os(SERVICE_OUTPUT_ENV)
+                .filter(|_| !background)
+                .map(PathBuf::from),
+            output: background.then_some(RunOutput::Pipe),
         },
-        &paths.socket_path,
     )?;
-    let outcome = run_with_profile(
-        &profile,
-        &service,
-        &command,
-        &workdir,
-        &environment,
+
+    let stream = background
+        .then(|| StreamWriter::create(&store.run_dir(&run_id)).map(StreamSink::new))
+        .transpose();
+    let run = RegisteredRun {
+        store: &store,
+        record: &record,
+        stream: stream.as_ref().ok().cloned().flatten(),
+    };
+    let end = stream.and_then(|stream| {
+        supervise(Supervised {
+            profile: profile.as_ref(),
+            service: &service,
+            key: &key,
+            command: &command,
+            workdir: &workdir,
+            environment: &environment,
+            stream,
+            run: &run,
+            socket_path: &paths.socket_path,
+        })
+    });
+    run.finish(end.as_ref().ok())?;
+    drop(lock);
+    launch_outcome(profile.as_ref(), &service, end?.outcome)
+}
+
+/// A run whose record is written: whatever happens next, it is finalized
+/// before `localify dev` exits.
+struct RegisteredRun<'a> {
+    store: &'a RunningServiceStore,
+    record: &'a RunningService,
+    stream: Option<StreamSink>,
+}
+
+impl RegisteredRun<'_> {
+    fn heartbeat(&self) {
+        if let Some(run_id) = self.record.run_id() {
+            let _ = self.store.heartbeat(&self.record.key, run_id);
+        }
+    }
+
+    /// The executor's own end of its run: the stream finalized, `complete`
+    /// unless some output could not be read, then the exit recorded.
+    fn finish(&self, end: Option<&LaunchEnd>) -> Result<()> {
+        let Some(run_id) = self.record.run_id() else {
+            return Ok(());
+        };
+        let dir = self.store.run_dir(run_id);
+        if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
+            let offset = self.stream.as_ref().map_or(0, StreamSink::close);
+            let reason = match end {
+                Some(end) if !end.output_complete => EndReason::Interrupted,
+                _ => EndReason::Complete,
+            };
+            if run_output::read_end(&dir)?.is_none() {
+                run_output::publish_end(&dir, &RunEnd::now(reason, offset))?;
+            }
+        }
+        let code = end.and_then(|end| end.outcome.code());
+        self.store.mark_exited(&self.record.key, run_id, code)
+    }
+}
+
+struct Supervised<'a> {
+    profile: Option<&'a PreparedProfile>,
+    service: &'a ConfiguredService,
+    key: &'a ServiceKey,
+    command: &'a [String],
+    workdir: &'a Path,
+    environment: &'a LaunchEnvironment,
+    stream: Option<StreamSink>,
+    run: &'a RegisteredRun<'a>,
+    socket_path: &'a Path,
+}
+
+/// Runs the service under the supervisor, with or without a launch profile.
+fn supervise(launch: Supervised<'_>) -> Result<LaunchEnd> {
+    let session = match launch.profile {
+        Some(profile) => launch_profile::start_launch_session(
+            profile,
+            SessionTarget {
+                project_id: launch.service.project_id.clone(),
+                environment_slug: launch.key.environment.clone(),
+                service_id: launch.service.id.clone(),
+                target_port: launch.run.record.port,
+                browser_indicator: profile.resolved.browser_indicator,
+            },
+            launch.socket_path,
+        )?,
+        None => None,
+    };
+    let dangerous_name = launch
+        .profile
+        .filter(|profile| profile.is_dangerous())
+        .and_then(|profile| profile.name().map(|name| (profile, name)));
+    if let Some((profile, name)) = dangerous_name {
+        let service_label = format!("{} ({})", launch.service.id, launch.service.project_name);
+        launch_profile::print_danger_banner(profile, &service_label);
+        launch_profile::set_danger_title(name, &launch.service.id);
+    }
+
+    let heartbeat = || launch.run.heartbeat();
+    let end = service_supervisor::run(SupervisedLaunch {
+        command: launch.command,
+        workdir: launch.workdir,
+        environment: launch.environment,
+        mask_patterns: launch.profile.and_then(PreparedProfile::mask_patterns),
+        stream: launch.stream,
+        max_duration: launch.profile.and_then(PreparedProfile::max_duration),
         session,
-    );
-    record_exit(
-        &key,
-        match &outcome {
-            Ok(LaunchOutcome::Exited(status)) => status.code(),
-            _ => None,
-        },
-    );
-    profile_outcome(&profile, &service, outcome?)
+        heartbeat: &heartbeat,
+        leads_session: launch
+            .run
+            .record
+            .run
+            .as_ref()
+            .is_some_and(|run| run.sid.is_some()),
+    });
+    if dangerous_name.is_some() {
+        launch_profile::reset_title();
+    }
+    end
 }
 
 /// What `dev` was asked to run, before resolution.
@@ -532,54 +645,6 @@ fn service_key(
     }
 }
 
-/// A service runs once per environment: a second start would only fight the
-/// first one for its port.
-fn refuse_second_run(key: &ServiceKey) -> Result<()> {
-    let Some(previous) = RunningServiceStore::new_default()
-        .ok()
-        .and_then(|store| store.get(key).ok().flatten())
-        .filter(RunningService::is_running)
-    else {
-        return Ok(());
-    };
-    bail!(
-        "'{}' is already running (PID {}) at {}. Stop it first with: {} stop {}",
-        key.service_id,
-        previous.pid,
-        previous.url,
-        BRANDING.cli_command(),
-        crate::infrastructure::running_services::service_selector(key)
-    )
-}
-
-/// Lets `status`, `logs` and `stop` find this run. A failure only costs those
-/// commands, so the service starts anyway.
-fn record_running_service(key: &ServiceKey, url: &str, port: u16, profile: Option<String>) {
-    let recorded = RunningServiceStore::new_default().and_then(|store| {
-        store.register(NewRun {
-            key: key.clone(),
-            url: url.to_string(),
-            port,
-            origin: ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref()),
-            profile,
-            log_file: env::var_os(SERVICE_OUTPUT_ENV).map(PathBuf::from),
-        })
-    });
-    if let Err(error) = recorded {
-        eprintln!(
-            "Warning: '{} stop {}' will not find this run: {error:#}",
-            BRANDING.cli_command(),
-            key.service_id
-        );
-    }
-}
-
-fn record_exit(key: &ServiceKey, code: Option<i32>) {
-    if let Ok(store) = RunningServiceStore::new_default() {
-        let _ = store.mark_exited(key, code);
-    }
-}
-
 /// Which run of a service `stop`, `restart` and `logs` act on. Inside a
 /// worktree, the service of that worktree's environment, like `dev`.
 pub(crate) fn resolve_service_key(
@@ -599,59 +664,8 @@ pub(crate) fn resolve_service_key(
     Ok(service_key(&service, environment, ctx))
 }
 
-fn run_plain(
-    command: &[String],
-    workdir: &Path,
-    environment: &LaunchEnvironment,
-) -> Result<std::process::ExitStatus> {
-    let mut child = Command::new(&command[0]);
-    child
-        .args(&command[1..])
-        .current_dir(workdir)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    for key in &environment.unset {
-        child.env_remove(key);
-    }
-    child.envs(environment.set.iter().map(|(key, value)| (key, value)));
-
-    child
-        .status()
-        .with_context(|| format!("Failed to start command '{}'", command[0]))
-}
-
-fn run_with_profile(
-    profile: &PreparedProfile,
-    service: &ConfiguredService,
-    command: &[String],
-    workdir: &Path,
-    environment: &LaunchEnvironment,
-    session: Option<SessionReporter>,
-) -> Result<LaunchOutcome> {
-    let dangerous_name = profile.name().filter(|_| profile.is_dangerous());
-    if let Some(name) = dangerous_name {
-        let service_label = format!("{} ({})", service.id, service.project_name);
-        launch_profile::print_danger_banner(profile, &service_label);
-        launch_profile::set_danger_title(name, &service.id);
-    }
-
-    let outcome = service_supervisor::run(SupervisedLaunch {
-        command,
-        workdir,
-        environment,
-        mask_patterns: profile.mask_patterns(),
-        max_duration: profile.max_duration(),
-        session,
-    });
-    if dangerous_name.is_some() {
-        launch_profile::reset_title();
-    }
-    outcome
-}
-
-fn profile_outcome(
-    profile: &PreparedProfile,
+fn launch_outcome(
+    profile: Option<&PreparedProfile>,
     service: &ConfiguredService,
     outcome: LaunchOutcome,
 ) -> Result<()> {
@@ -662,7 +676,7 @@ fn profile_outcome(
         LaunchOutcome::Expired(duration) => bail!(
             "Service '{}' was stopped: launch profile '{}' reached its max_duration of {}.",
             service.id,
-            profile.name().unwrap_or_default(),
+            profile.and_then(PreparedProfile::name).unwrap_or_default(),
             humantime::format_duration(duration)
         ),
         LaunchOutcome::Exited(_) | LaunchOutcome::Interrupted => Ok(()),

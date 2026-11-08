@@ -6,23 +6,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::mgmt_client::{MgmtSocketClient, ShutdownKind};
-use super::process::PlatformProcessControl;
-use super::process::ProcessControl;
-use super::process::get_process_control;
+use super::process::process_exists;
 use crate::application::ports::{DaemonConnectionError, DaemonControl};
 use crate::config::LocalifyPaths;
 
 pub struct PidFile {
     path: PathBuf,
-    process: PlatformProcessControl,
 }
 
 impl PidFile {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            process: get_process_control(),
-        }
+        Self { path }
     }
 
     /// Write current process PID to file
@@ -48,7 +42,7 @@ impl PidFile {
     /// Check if process with stored PID is running
     pub fn is_running(&self) -> Result<bool> {
         match self.read()? {
-            Some(pid) => Ok(self.process.process_exists(pid)),
+            Some(pid) => Ok(process_exists(pid)),
             None => Ok(false),
         }
     }
@@ -64,7 +58,7 @@ impl PidFile {
     /// Get stored PID if daemon is running
     pub fn get_running_pid(&self) -> Result<Option<u32>> {
         match self.read()? {
-            Some(pid) if self.process.process_exists(pid) => Ok(Some(pid)),
+            Some(pid) if process_exists(pid) => Ok(Some(pid)),
             _ => Ok(None),
         }
     }
@@ -104,7 +98,7 @@ impl DaemonHandle {
         }
 
         let deadline = Instant::now() + timeout;
-        while self.pid_file.process.process_exists(pid) {
+        while process_exists(pid) {
             if Instant::now() >= deadline {
                 bail!(
                     "The daemon (PID {pid}) did not stop within {} seconds.\n\

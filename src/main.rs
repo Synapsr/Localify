@@ -265,6 +265,10 @@ enum Commands {
         #[arg(long)]
         detach: bool,
 
+        /// For dispatchers: the run id this launch gets, 16 random bytes in base64url (docs/remote-machines.md).
+        #[arg(long, hide = true, value_name = "ID")]
+        launch_id: Option<String>,
+
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
@@ -328,7 +332,7 @@ enum Commands {
 
         /// Print only the output after this cursor, as the previous `logs` call gave it
         #[arg(long, requires = "service", conflicts_with = "follow")]
-        cursor: Option<u64>,
+        cursor: Option<String>,
 
         /// Clear the daemon logs
         #[arg(long, conflicts_with = "service")]
@@ -1114,6 +1118,7 @@ fn main() -> Result<()> {
                 init_domain: None,
                 override_command: command,
                 launch_profile: launch_profile.into_args(),
+                launch_id: None,
             },
             config_path,
             localify::project_init::LocalAppUpdatePolicy::from_dev_script_preference(
@@ -1122,7 +1127,11 @@ fn main() -> Result<()> {
             &ctx,
             &paths,
         ),
-        Commands::Dev { detach: true, .. } => cli::background::start_detached(),
+        Commands::Dev {
+            detach: true,
+            launch_id,
+            ..
+        } => cli::background::start_detached(launch_id.as_deref()),
         Commands::Dev {
             in_app: true,
             service,
@@ -1131,9 +1140,11 @@ fn main() -> Result<()> {
             env,
             launch_profile,
             command,
+            launch_id,
             ..
         } => {
             if !command.is_empty()
+                || launch_id.is_some()
                 || !launch_profile.env_file.is_empty()
                 || launch_profile.confirm_profile.is_some()
                 || launch_profile.no_masking
@@ -1161,6 +1172,7 @@ fn main() -> Result<()> {
             env,
             launch_profile,
             command,
+            launch_id,
             ..
         } => cli::services::run(
             cli::services::RunArgs {
@@ -1171,6 +1183,7 @@ fn main() -> Result<()> {
                 init_domain: domain,
                 override_command: command,
                 launch_profile: launch_profile.into_args(),
+                launch_id,
             },
             config_path,
             localify::project_init::LocalAppUpdatePolicy::runtime_only(),
@@ -1238,7 +1251,7 @@ fn main() -> Result<()> {
                     environment: service.env.as_deref(),
                     lines,
                     follow,
-                    cursor,
+                    cursor: cursor.as_deref(),
                 },
                 &ctx,
             ),

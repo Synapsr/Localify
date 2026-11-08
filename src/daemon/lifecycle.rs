@@ -19,6 +19,8 @@ use crate::infrastructure::docker::DockerProvider;
 use crate::infrastructure::macos_system::RESTART_EXIT_CODE;
 use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::pid::PidFile;
+use crate::infrastructure::process::is_root;
+use crate::infrastructure::running_services::RunningServiceStore;
 use crate::infrastructure::tracing::{TracingOutput, init_tracing};
 
 /// How long open connections get to finish once the daemon is shutting down.
@@ -29,6 +31,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const FAILED_START_DELAY: Duration = Duration::from_secs(5);
 /// How often the daemon checks whether an update replaced its binary.
 const BINARY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the daemon ends background runs whose `localify dev` died.
+const RUN_FINISH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Stops the daemon from the inside, and remembers whether a restart was asked for.
 #[derive(Clone, Default)]
@@ -196,6 +200,7 @@ async fn serve(
     if managed {
         tokio::spawn(restart_when_binary_is_replaced(shutdown.clone()));
     }
+    tokio::spawn(finish_background_runs(cancel.clone()));
 
     // Open connections get a moment to finish, then the process exits regardless.
     let cancel_deadline = cancel.clone();
@@ -247,6 +252,37 @@ async fn serve(
 
     let _ = pid_file.remove();
     result
+}
+
+/// The daemon is a finisher of background runs (docs/remote-machines.md, "The end
+/// of a run"): a run whose executor died has its remaining processes ended and
+/// its stream finalized, so the service is free again. A daemon running as root
+/// reads another home and never signals a user's processes.
+async fn finish_background_runs(cancel: CancellationToken) {
+    if is_root() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(RUN_FINISH_INTERVAL) => {}
+        }
+        let pass = tokio::task::spawn_blocking(|| {
+            RunningServiceStore::new_default()?.finish_background_runs()
+        });
+        match pass.await {
+            Ok(Ok(finished)) => {
+                for (key, finish) in finished {
+                    info!(
+                        "Ended the background run of {} ({}): {finish:?}",
+                        key.service_id, key.project_id
+                    );
+                }
+            }
+            Ok(Err(error)) => warn!("Could not end background runs: {error:#}"),
+            Err(error) => warn!("Could not end background runs: {error}"),
+        }
+    }
 }
 
 /// An update replaces the binary while this process keeps running the old code.

@@ -766,7 +766,7 @@ async fn ready_connections(metrics_port: u16) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::process::{ProcessControl, get_process_control};
+    use crate::infrastructure::process::process_exists;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1432,7 +1432,7 @@ exec sleep 30
             .unwrap();
 
         desired.send_replace(None);
-        wait_until(|| !get_process_control().process_exists(pid)).await;
+        wait_until(|| !process_exists(pid)).await;
         wait_until(|| tunnel.parts().process == Process::Stopped).await;
 
         cancel.cancel();
@@ -1462,7 +1462,7 @@ exec sleep 30
         cancel.cancel();
         task.await.unwrap();
 
-        assert!(!get_process_control().process_exists(pid));
+        assert!(!process_exists(pid));
         assert_eq!(tunnel.parts().process, Process::Stopped);
         drop(desired);
     }
@@ -1543,7 +1543,7 @@ exec sleep 30
             std::fs::read_to_string(bin.join("token")).is_ok_and(|token| token == "tok-2")
         })
         .await;
-        wait_until(|| !get_process_control().process_exists(first)).await;
+        wait_until(|| !process_exists(first)).await;
         wait_until(|| pid_of().is_some_and(|pid| pid != first)).await;
         cancel.cancel();
         task.await.unwrap();
