@@ -167,12 +167,40 @@ impl RunningService {
         })
     }
 
-    /// A legacy run is its executor, alive while its PID belongs to a process
-    /// that started no later than the record was written: a process that took
-    /// the PID over started after the writer ended.
-    fn legacy_alive(&self) -> bool {
-        process_info(self.pid).is_some_and(|process| process.started_wall <= self.started_at + 1)
+    /// A legacy run is its executor, known by the start time `ps` printed. Its
+    /// PID is that process only when the native start reads the same, to the
+    /// second, unambiguously, and this boot began before the record was
+    /// written. Anything less is `Unknown`, and is never signalled.
+    fn legacy_state(&self) -> RunState {
+        let Some(process) = process_info(self.pid) else {
+            return RunState::Stopped;
+        };
+        let Some(saved) = self.process_started_at.as_deref().map(str::trim) else {
+            return RunState::Unknown;
+        };
+        let reads_as_saved =
+            |seconds: u64| process::lstart_label(seconds).as_deref() == Some(saved);
+        // A local time a clock change repeats names two starts an hour apart.
+        let ambiguous = reads_as_saved(process.started_wall.saturating_sub(3600))
+            || reads_as_saved(process.started_wall + 3600);
+        let booted_before = process::boot_time().is_some_and(|boot| boot < self.started_at);
+        if reads_as_saved(process.started_wall) && !ambiguous && booted_before {
+            RunState::Running
+        } else {
+            RunState::Unknown
+        }
     }
+}
+
+/// Whether a run is going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunState {
+    Running,
+    Stopped,
+    /// Recorded by an older version, and its PID now belongs to a process
+    /// Localify cannot prove is the service: it is never signalled.
+    Unknown,
 }
 
 /// A run about to start, as `register` records it.
@@ -196,6 +224,9 @@ pub struct RunLock {
 
 pub struct RunningServiceStore {
     dir: PathBuf,
+    /// Runs between reading a record and writing it back, to replay races.
+    #[cfg(test)]
+    before_write: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl RunningServiceStore {
@@ -207,7 +238,11 @@ impl RunningServiceStore {
     }
 
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            #[cfg(test)]
+            before_write: None,
+        }
     }
 
     /// A new, empty output file for a service the app starts in its terminal,
@@ -292,7 +327,9 @@ impl RunningServiceStore {
     fn admit_after(&self, previous: &RunningService) -> Result<()> {
         let key = &previous.key;
         let (Some(run), Some(session)) = (&previous.run, previous.session()) else {
-            if previous.legacy_alive() {
+            // An unverifiable PID is not proof of a run: the port check still
+            // refuses a service that listens.
+            if previous.legacy_state() == RunState::Running {
                 return Err(self.already_running(key));
             }
             return Ok(());
@@ -334,6 +371,7 @@ impl RunningServiceStore {
                 run.key.service_id
             );
         }
+        let _record = self.lock_record(&run.key)?;
         let previous = self.get(&run.key)?;
         let run_dir = self.run_dir(&run.run_id);
         output::create_run_dir(&run_dir)?;
@@ -377,30 +415,67 @@ impl RunningServiceStore {
     /// Refreshes `lastAliveAt` in the current process's record. Does nothing
     /// once another run has taken the record over.
     pub fn heartbeat(&self, key: &ServiceKey, run_id: &RunId) -> Result<()> {
-        let Some(mut record) = self.get(key)? else {
-            return Ok(());
-        };
-        let Some(run) = record.run.as_mut().filter(|run| &run.run_id == run_id) else {
-            return Ok(());
-        };
-        run.last_alive_at = process::monotonic_now();
-        self.write(&record)
+        self.update(key, run_id, |record| {
+            if let Some(run) = record.run.as_mut() {
+                run.last_alive_at = process::monotonic_now();
+            }
+            true
+        })
     }
 
     /// Records how a run ended. Does nothing when another run has taken the
     /// record over since, or when its end is already recorded.
     pub fn mark_exited(&self, key: &ServiceKey, run_id: &RunId, code: Option<i32>) -> Result<()> {
+        self.update(key, run_id, |record| {
+            if record.exit.is_some() {
+                return false;
+            }
+            record.exit = Some(ServiceExit {
+                at: unix_now(),
+                code,
+            });
+            true
+        })
+    }
+
+    /// Changes the record of `run_id`, under the service's record lock, so no
+    /// two writers interleave a read and a write. Nothing changes once another
+    /// run owns the record, or when `change` says so.
+    fn update(
+        &self,
+        key: &ServiceKey,
+        run_id: &RunId,
+        change: impl FnOnce(&mut RunningService) -> bool,
+    ) -> Result<()> {
+        let _record = self.lock_record(key)?;
         let Some(mut record) = self.get(key)? else {
             return Ok(());
         };
-        if record.run_id() != Some(run_id) || record.exit.is_some() {
+        if record.run_id() != Some(run_id) || !change(&mut record) {
             return Ok(());
         }
-        record.exit = Some(ServiceExit {
-            at: unix_now(),
-            code,
-        });
+        #[cfg(test)]
+        if let Some(pause) = &self.before_write {
+            pause();
+        }
         self.write(&record)
+    }
+
+    /// An exclusive `flock` held for one read-modify-write of a service's
+    /// record. The `@` keeps its name apart from any record or run lock, since
+    /// record names never hold one.
+    fn lock_record(&self, key: &ServiceKey) -> Result<File> {
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("Failed to create '{}'", self.dir.display()))?;
+        let path = self.dir.join(format!("{}@record.lock", record_name(key)));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("Failed to open '{}'", path.display()))?;
+        file.lock()
+            .with_context(|| format!("Failed to lock '{}'", path.display()))?;
+        Ok(file)
     }
 
     fn mark_ended(&self, record: &RunningService) -> Result<()> {
@@ -451,31 +526,44 @@ impl RunningServiceStore {
 
     /// Whether the run is still going: its executor runs, or it is not
     /// finalized and a process proven to belong to it is alive.
-    pub fn is_running(&self, service: &RunningService) -> bool {
+    pub fn state(&self, service: &RunningService) -> RunState {
         let (Some(run), Some(session)) = (&service.run, service.session()) else {
-            return service.legacy_alive();
+            return service.legacy_state();
         };
         if session.executor_alive(&NativeProcesses) {
-            return true;
+            return RunState::Running;
         }
         let finalized = output::read_end(&self.run_dir(&run.run_id))
             .map(|end| end.is_some())
             .unwrap_or(false);
-        !finalized
-            && matches!(
-                membership(&NativeProcesses, &session),
-                Membership::Proven(_)
-            )
+        let proven = matches!(
+            membership(&NativeProcesses, &session),
+            Membership::Proven(_)
+        );
+        if !finalized && proven {
+            RunState::Running
+        } else {
+            RunState::Stopped
+        }
+    }
+
+    /// Whether [`RunningServiceStore::state`] is `Running`.
+    pub fn is_running(&self, service: &RunningService) -> bool {
+        self.state(service) == RunState::Running
     }
 
     /// Ends the run: every process of it, then its finalization. A run already
     /// over is still finalized if it was not, so the next launch is admitted.
-    /// Returns whether a process was stopped.
+    /// Returns whether a process was stopped. A legacy run Localify cannot
+    /// verify is refused, never signalled.
     pub fn stop(&self, service: &RunningService) -> Result<bool> {
-        let running = self.is_running(service);
+        let state = self.state(service);
+        let running = state == RunState::Running;
         let (Some(run), Some(session)) = (&service.run, service.session()) else {
-            if running {
-                stop_tree(&service.key.service_id, service.pid)?;
+            match state {
+                RunState::Running => stop_tree(&service.key.service_id, service.pid)?,
+                RunState::Stopped => {}
+                RunState::Unknown => bail!("{}", unverified_legacy_run(service)),
             }
             return Ok(running);
         };
@@ -529,8 +617,13 @@ impl RunningServiceStore {
         let Some(service) = self.get(key)? else {
             return Ok(false);
         };
-        let stopped = self.stop(&service)?;
+        // A PID Localify cannot verify is left alone, and only forgotten.
+        let stopped = match self.state(&service) {
+            RunState::Unknown => false,
+            RunState::Running | RunState::Stopped => self.stop(&service)?,
+        };
         self.remove_output(&service, None);
+        let _record = self.lock_record(key)?;
         let path = self.record_path(key);
         if path.exists() {
             fs::remove_file(&path)
@@ -575,6 +668,14 @@ impl RunningServiceStore {
     fn record_path(&self, key: &ServiceKey) -> PathBuf {
         self.dir.join(format!("{}.json", record_name(key)))
     }
+}
+
+/// Why a legacy run is neither shown as running nor stopped.
+pub fn unverified_legacy_run(service: &RunningService) -> String {
+    format!(
+        "'{}' was started by an older version of {}, and PID {} may now be another process. {} does not signal it. If it is still the service, stop it by hand: kill {}",
+        service.key.service_id, BRANDING.app_name, service.pid, BRANDING.app_name, service.pid
+    )
 }
 
 /// The arguments that name a service run exactly, from any folder.
@@ -818,34 +919,109 @@ mod tests {
         assert!(store.lock(&key("web")).is_ok());
     }
 
-    #[test]
-    fn a_legacy_run_that_still_runs_is_not_replaced() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let mut other = Command::new("sleep").arg("5").spawn().unwrap();
-        store
-            .write(&legacy_record(other.id(), unix_now() + 1, None))
+    /// What an older version recorded for `pid`: the start `ps` printed.
+    fn recorded_by_ps(pid: u32, started_at: u64) -> RunningService {
+        let printed = Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .output()
             .unwrap();
+        RunningService {
+            process_started_at: Some(String::from_utf8_lossy(&printed.stdout).trim().into()),
+            ..legacy_record(pid, started_at, None)
+        }
+    }
 
-        let error = store.lock(&key("web")).err().unwrap();
-
-        assert!(error.to_string().contains("already running"), "{error}");
-        other.kill().unwrap();
-        other.wait().unwrap();
+    fn sleeper() -> std::process::Child {
+        Command::new("sleep").arg("30").spawn().unwrap()
     }
 
     #[test]
-    fn a_legacy_record_whose_pid_was_reused_is_not_running() {
+    fn a_legacy_run_whose_start_matches_runs_and_stops() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let mut later = Command::new("sleep").arg("5").spawn().unwrap();
+        let mut service = sleeper();
+        let record = recorded_by_ps(service.id(), unix_now());
+        store.write(&record).unwrap();
 
-        // Written a minute before this process started: another process wrote it.
-        let record = legacy_record(later.id(), unix_now() - 60, None);
+        assert_eq!(store.state(&record), RunState::Running);
+        let error = store.lock(&key("web")).err().unwrap();
+        assert!(error.to_string().contains("already running"), "{error}");
 
-        assert!(!store.is_running(&record));
-        later.kill().unwrap();
-        later.wait().unwrap();
+        assert!(store.stop(&record).unwrap());
+        service.wait().unwrap();
+    }
+
+    #[test]
+    fn a_legacy_pid_with_another_start_is_unknown_and_never_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let mut unrelated = sleeper();
+        // The clock moved back: the record looks written after this start.
+        let record = RunningService {
+            process_started_at: Some("Thu Nov  5 10:00:00 2026".into()),
+            ..legacy_record(unrelated.id(), unix_now() + 3600, None)
+        };
+
+        assert_eq!(store.state(&record), RunState::Unknown);
+        let error = store.stop(&record).unwrap_err();
+        assert!(error.to_string().contains("stop it by hand"), "{error}");
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(unrelated.try_wait().unwrap().is_none(), "it was signalled");
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+
+    #[test]
+    fn a_legacy_record_without_a_start_or_from_before_this_boot_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let mut unrelated = sleeper();
+        let without_start = RunningService {
+            process_started_at: None,
+            ..legacy_record(unrelated.id(), unix_now(), None)
+        };
+        // A matching start, but the record predates this boot.
+        let before_boot = recorded_by_ps(unrelated.id(), 1);
+
+        assert_eq!(store.state(&without_start), RunState::Unknown);
+        assert_eq!(store.state(&before_boot), RunState::Unknown);
+        assert!(store.stop(&before_boot).is_err());
+        assert!(unrelated.try_wait().unwrap().is_none(), "it was signalled");
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+
+    #[test]
+    fn a_delayed_finisher_never_overwrites_the_next_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paused, wait_paused) = std::sync::mpsc::channel();
+        let (resume, wait_resume) = std::sync::mpsc::channel::<()>();
+        let wait_resume = std::sync::Mutex::new(wait_resume);
+        let mut late = RunningServiceStore::new(dir.path().to_path_buf());
+        late.before_write = Some(Box::new(move || {
+            let _ = paused.send(());
+            let _ = wait_resume.lock().unwrap().recv();
+        }));
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let lock = store.lock(&key("web")).unwrap();
+        let first = store.register(&lock, run("web", None)).unwrap();
+
+        let second = thread::scope(|scope| {
+            let finisher =
+                scope.spawn(|| late.mark_exited(&key("web"), first.run_id().unwrap(), Some(1)));
+            wait_paused.recv().unwrap();
+            let registering = scope.spawn(|| store.register(&lock, run("web", None)));
+            thread::sleep(Duration::from_millis(300));
+            resume.send(()).unwrap();
+            finisher.join().unwrap().unwrap();
+            registering.join().unwrap().unwrap()
+        });
+
+        let current = store.get(&key("web")).unwrap().unwrap();
+        assert_eq!(current.run_id(), second.run_id());
+        assert!(current.exit.is_none(), "{:?}", current.exit);
     }
 
     #[test]

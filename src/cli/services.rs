@@ -37,6 +37,7 @@ use crate::infrastructure::running_services::{
     ServiceKey, ServiceOrigin,
 };
 use crate::infrastructure::runs::RunId;
+use crate::infrastructure::runs::finish::Finisher;
 use crate::infrastructure::runs::output::{
     self as run_output, EndReason, FinalizeLock, RunEnd, StreamSink, StreamWriter,
 };
@@ -215,7 +216,7 @@ pub fn run(
     policy: LocalAppUpdatePolicy,
     ctx: &AppContext,
     paths: &LocalifyPaths,
-) -> Result<()> {
+) -> Result<i32> {
     let RunArgs {
         mode,
         service_name,
@@ -397,10 +398,18 @@ impl RegisteredRun<'_> {
 
     /// The executor's own end of its run: the stream finalized, `complete`
     /// unless some output could not be read, then the exit recorded.
+    /// A run whose processes outlived the cleanup stays unfinalized, so its
+    /// next launch is refused as for a live run.
     fn finish(&self, end: Option<&LaunchEnd>) -> Result<()> {
         let Some(run_id) = self.record.run_id() else {
             return Ok(());
         };
+        if let Some(Err(error)) = end.map(|end| &end.cleanup) {
+            bail!(
+                "'{}' stopped, but {error:#}\nIts run stays open, and it cannot start again until they are gone.",
+                self.record.key.service_id
+            );
+        }
         let dir = self.store.run_dir(run_id);
         if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
             let offset = self.stream.as_ref().map_or(0, StreamSink::close);
@@ -465,6 +474,8 @@ fn supervise(launch: Supervised<'_>) -> Result<LaunchEnd> {
         max_duration: launch.profile.and_then(PreparedProfile::max_duration),
         session,
         heartbeat: &heartbeat,
+        heartbeat_every: service_supervisor::RUN_HEARTBEAT,
+        finisher: &Finisher::native(),
         leads_session: launch
             .run
             .record
@@ -668,10 +679,11 @@ fn launch_outcome(
     profile: Option<&PreparedProfile>,
     service: &ConfiguredService,
     outcome: LaunchOutcome,
-) -> Result<()> {
+) -> Result<i32> {
     match outcome {
         LaunchOutcome::Exited(status) if !status.success() => {
-            bail!("Service '{}' exited with {}", service.id, status)
+            eprintln!("Service '{}' exited with {status}", service.id);
+            Ok(outcome.exit_code())
         }
         LaunchOutcome::Expired(duration) => bail!(
             "Service '{}' was stopped: launch profile '{}' reached its max_duration of {}.",
@@ -679,7 +691,7 @@ fn launch_outcome(
             profile.and_then(PreparedProfile::name).unwrap_or_default(),
             humantime::format_duration(duration)
         ),
-        LaunchOutcome::Exited(_) | LaunchOutcome::Interrupted => Ok(()),
+        LaunchOutcome::Exited(_) | LaunchOutcome::Interrupted => Ok(outcome.exit_code()),
     }
 }
 

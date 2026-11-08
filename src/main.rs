@@ -819,6 +819,15 @@ fn ensure_rustls_crypto_provider() -> Result<()> {
     }
 }
 
+/// Ends this process with a service's exit code, so `localify dev web && next`
+/// stops where the service failed or was interrupted (130).
+fn exit_with(code: i32) -> Result<()> {
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
 /// Files created as root would land in the user's folder, and nothing needs it: the
 /// commands that do ask for their own approval. Root on Linux stays allowed without
 /// sudo, and with no systemd, because a container may have no other user.
@@ -1109,7 +1118,7 @@ fn main() -> Result<()> {
             env,
             launch_profile,
             command,
-        } => cli::services::run(
+        } => exit_with(cli::services::run(
             cli::services::RunArgs {
                 mode: cli::services::RunMode::Run,
                 service_name: service,
@@ -1126,7 +1135,7 @@ fn main() -> Result<()> {
             ),
             &ctx,
             &paths,
-        ),
+        )?),
         Commands::Dev {
             detach: true,
             launch_id,
@@ -1174,7 +1183,7 @@ fn main() -> Result<()> {
             command,
             launch_id,
             ..
-        } => cli::services::run(
+        } => exit_with(cli::services::run(
             cli::services::RunArgs {
                 mode: cli::services::RunMode::Dev,
                 service_name: service,
@@ -1189,7 +1198,7 @@ fn main() -> Result<()> {
             localify::project_init::LocalAppUpdatePolicy::runtime_only(),
             &ctx,
             &paths,
-        ),
+        )?),
         Commands::Exec {
             launch_profile,
             command,

@@ -317,7 +317,8 @@ pub fn extent(dir: &Path) -> Result<(u64, u64)> {
 }
 
 fn read_with(dir: &Path, offset: u64, max_bytes: usize, segment_size: u64) -> Result<StreamRead> {
-    let max_bytes = max_bytes.clamp(1, MAX_READ) as u64;
+    // Room for one whole UTF-8 character, so every read can make progress.
+    let max_bytes = max_bytes.clamp(4, MAX_READ) as u64;
     // The writer may drop a segment between the listing and the read.
     for _ in 0..3 {
         let end = read_end(dir)?;
@@ -426,17 +427,20 @@ fn to_lines(start: u64, bytes: &[u8], total: u64, end: Option<&RunEnd>) -> Strea
             // The run is over: its last unfinished line is sent as it is.
             push_line(&mut lines, rest);
             consumed += rest.len();
-        } else if consumed == 0 && !reached_total {
-            // The read stopped inside a line longer than it: send what was read.
-            push_cut(&mut lines, rest);
-            consumed += rest.len();
         } else {
-            // Only whole 8 KiB pieces of a line still being written.
+            // A line still being written goes out only in whole 8 KiB pieces.
             while rest.len() >= MAX_LINE {
                 let cut = char_boundary(rest, MAX_LINE);
                 push_cut(&mut lines, &rest[..cut]);
                 consumed += cut;
                 rest = &rest[cut..];
+            }
+            // Unless the read stopped inside a line longer than it: then what
+            // was read goes too, but never half a character.
+            let whole = rest.len() - incomplete_char_tail(rest);
+            if consumed == 0 && !reached_total && whole > 0 {
+                push_cut(&mut lines, &rest[..whole]);
+                consumed += whole;
             }
         }
     }
@@ -470,6 +474,25 @@ fn push_cut(lines: &mut Vec<StreamLine>, piece: &[u8]) {
         text: plain_line(&String::from_utf8_lossy(piece)),
         cut: true,
     });
+}
+
+/// How many bytes at the end of `bytes` start a UTF-8 character that is not
+/// complete yet.
+fn incomplete_char_tail(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            continue;
+        }
+        let length = match byte {
+            0b1100_0000..=0b1101_1111 => 2,
+            0b1110_0000..=0b1110_1111 => 3,
+            0b1111_0000..=0b1111_0111 => 4,
+            _ => 1,
+        };
+        return if length > back { back } else { 0 };
+    }
+    0
 }
 
 /// Where to cut `bytes` at most `limit` bytes in, without splitting a UTF-8
@@ -655,6 +678,43 @@ mod tests {
 
         assert_eq!(chunk.next, 40);
         assert!(chunk.lines[0].cut);
+    }
+
+    #[test]
+    fn a_character_across_the_read_boundary_waits_for_the_next_read() {
+        let (dir, mut writer) = stream(SEGMENT_SIZE);
+        writer.append("abcé and more".as_bytes()).unwrap();
+
+        // 4 bytes stop in the middle of "é", 2 bytes in UTF-8.
+        let first = read(dir.path(), 0, 4).unwrap();
+        assert_eq!(texts(&first), ["abc"]);
+        assert_eq!(first.next, 3);
+
+        let second = read(dir.path(), first.next, 4).unwrap();
+        assert_eq!(texts(&second)[0], "é a");
+        assert!(
+            second
+                .lines
+                .iter()
+                .all(|line| !line.text.contains('\u{FFFD}'))
+        );
+    }
+
+    #[test]
+    fn a_megabyte_line_without_a_newline_comes_in_8_kib_pieces() {
+        let (dir, mut writer) = stream(SEGMENT_SIZE);
+        writer.append(&vec![b'z'; MAX_READ + 10]).unwrap();
+
+        let chunk = read(dir.path(), 0, MAX_READ).unwrap();
+
+        assert_eq!(chunk.next, MAX_READ as u64);
+        assert_eq!(chunk.lines.len(), MAX_READ / MAX_LINE);
+        assert!(
+            chunk
+                .lines
+                .iter()
+                .all(|line| line.cut && line.text.len() <= MAX_LINE)
+        );
     }
 
     #[test]

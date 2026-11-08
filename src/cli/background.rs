@@ -24,8 +24,8 @@ use super::services::{RunTarget, resolve_launch_target, resolve_service_key};
 use crate::branding::BRANDING;
 use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::running_services::{
-    self, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey, ServiceOrigin,
-    service_selector,
+    self, RunState, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
+    ServiceOrigin, service_selector,
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::output::{self, StreamLine, StreamRead};
@@ -641,7 +641,11 @@ fn print_file_lines(lines: &[String]) {
 
 fn describe_run(store: &RunningServiceStore, run: &RunningService) -> String {
     let started = elapsed(run.started_at);
-    if store.is_running(run) {
+    let state = store.state(run);
+    if state == RunState::Unknown {
+        return running_services::unverified_legacy_run(run);
+    }
+    if state == RunState::Running {
         return format!(
             "'{}' is running {} (PID {}), started {started} ago.",
             run.key.service_id,
@@ -677,6 +681,8 @@ struct StatusOutput<'a> {
     #[serde(flatten)]
     service: &'a RunningService,
     running: bool,
+    /// `unknown` for a run an older version recorded that Localify cannot verify.
+    state: RunState,
 }
 
 /// Every service Localify started, running or stopped, in every environment.
@@ -689,6 +695,7 @@ pub fn status(json: bool) -> Result<()> {
             .map(|service| StatusOutput {
                 service,
                 running: store.is_running(service),
+                state: store.state(service),
             })
             .collect::<Vec<_>>();
         println!("{}", serde_json::to_string_pretty(&output)?);

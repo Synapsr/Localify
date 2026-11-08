@@ -200,7 +200,14 @@ async fn serve(
     if managed {
         tokio::spawn(restart_when_binary_is_replaced(shutdown.clone()));
     }
-    tokio::spawn(finish_background_runs(cancel.clone()));
+    tokio::spawn(finish_background_runs(
+        RunFinisher {
+            every: RUN_FINISH_INTERVAL,
+            as_root: is_root(),
+            store: Arc::new(RunningServiceStore::new_default),
+        },
+        cancel.clone(),
+    ));
 
     // Open connections get a moment to finish, then the process exits regardless.
     let cancel_deadline = cancel.clone();
@@ -254,22 +261,29 @@ async fn serve(
     result
 }
 
+/// How the daemon's pass over background runs is scheduled.
+struct RunFinisher {
+    every: Duration,
+    /// Whether the daemon runs as root: then it never runs a pass.
+    as_root: bool,
+    store: Arc<dyn Fn() -> Result<RunningServiceStore> + Send + Sync>,
+}
+
 /// The daemon is a finisher of background runs (docs/remote-machines.md, "The end
 /// of a run"): a run whose executor died has its remaining processes ended and
 /// its stream finalized, so the service is free again. A daemon running as root
 /// reads another home and never signals a user's processes.
-async fn finish_background_runs(cancel: CancellationToken) {
-    if is_root() {
+async fn finish_background_runs(finisher: RunFinisher, cancel: CancellationToken) {
+    if finisher.as_root {
         return;
     }
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(RUN_FINISH_INTERVAL) => {}
+            _ = tokio::time::sleep(finisher.every) => {}
         }
-        let pass = tokio::task::spawn_blocking(|| {
-            RunningServiceStore::new_default()?.finish_background_runs()
-        });
+        let store = Arc::clone(&finisher.store);
+        let pass = tokio::task::spawn_blocking(move || store()?.finish_background_runs());
         match pass.await {
             Ok(Ok(finished)) => {
                 for (key, finish) in finished {
@@ -345,7 +359,102 @@ async fn wait_for_shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::infrastructure::process;
+    use crate::infrastructure::running_services::{
+        RunIdentity, RunOutput, RunningService, ServiceKey, ServiceOrigin,
+    };
+    use crate::infrastructure::runs::RunId;
+    use crate::infrastructure::runs::output::{self, EndReason};
+
+    /// A background run whose executor died, with nothing of it left alive.
+    fn abandoned_run(dir: &Path) -> PathBuf {
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        let run_id = RunId::generate().unwrap();
+        let store = RunningServiceStore::new(dir.to_path_buf());
+        let run_dir = store.run_dir(&run_id);
+        output::create_run_dir(&run_dir).unwrap();
+        let record = RunningService {
+            key: ServiceKey {
+                project_id: "app".into(),
+                environment: None,
+                service_id: "web".into(),
+            },
+            pid: gone.id(),
+            run: Some(RunIdentity {
+                run_id,
+                start: 1,
+                sid: Some(gone.id()),
+                pgid: Some(gone.id()),
+                boot_id: process::boot_id().unwrap(),
+                last_alive_at: 1,
+                output: Some(RunOutput::Pipe),
+            }),
+            process_started_at: None,
+            url: "https://web.localify".into(),
+            port: 3000,
+            origin: ServiceOrigin::Background,
+            profile: None,
+            started_at: 0,
+            log_file: None,
+            exit: None,
+        };
+        std::fs::write(dir.join("web.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        run_dir
+    }
+
+    fn scheduled(dir: &Path, as_root: bool) -> RunFinisher {
+        let dir = dir.to_path_buf();
+        RunFinisher {
+            every: Duration::from_millis(20),
+            as_root,
+            store: Arc::new(move || Ok(RunningServiceStore::new(dir.clone()))),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_scheduled_pass_finalizes_an_abandoned_background_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = abandoned_run(dir.path());
+        let cancel = CancellationToken::new();
+        let pass = tokio::spawn(finish_background_runs(
+            scheduled(dir.path(), false),
+            cancel.clone(),
+        ));
+
+        let mut end = None;
+        for _ in 0..100 {
+            end = output::read_end(&run_dir).unwrap();
+            if end.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        cancel.cancel();
+        pass.await.unwrap();
+
+        assert_eq!(end.map(|end| end.reason), Some(EndReason::Interrupted));
+    }
+
+    #[tokio::test]
+    async fn a_daemon_running_as_root_never_runs_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = abandoned_run(dir.path());
+        let cancel = CancellationToken::new();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            finish_background_runs(scheduled(dir.path(), true), cancel),
+        )
+        .await
+        .expect("the root guard did not return at once");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(output::read_end(&run_dir).unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn replacing_the_binary_asks_for_a_restart() {

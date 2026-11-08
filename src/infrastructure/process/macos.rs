@@ -101,6 +101,32 @@ pub fn monotonic_now() -> u64 {
     }
 }
 
+/// `kern.boottime`, in Unix seconds.
+pub fn boot_time() -> Option<u64> {
+    let mut boot = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut length = size_of::<libc::timeval>();
+    // SAFETY: the name is a NUL-terminated C string, `boot` is a writable timeval
+    // and `length` its exact size. No new value is set.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            (&mut boot as *mut libc::timeval).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || length != size_of::<libc::timeval>() {
+        return None;
+    }
+    u64::try_from(boot.tv_sec)
+        .ok()
+        .filter(|seconds| *seconds > 0)
+}
+
 /// `kern.bootsessionuuid`: a new UUID at every boot.
 pub fn boot_id() -> Option<String> {
     let mut buffer = [0_u8; 64];

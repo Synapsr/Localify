@@ -100,7 +100,9 @@ fn run_with_profile(
         max_duration: profile.max_duration(),
         session,
         heartbeat: &|| {},
+        heartbeat_every: service_supervisor::RUN_HEARTBEAT,
         leads_session: false,
+        finisher: &crate::infrastructure::runs::finish::Finisher::native(),
     });
     if dangerous_name.is_some() {
         launch_profile::reset_title();

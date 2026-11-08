@@ -75,6 +75,38 @@ pub fn boot_id() -> Option<String> {
     native::boot_id()
 }
 
+/// When this boot started, in Unix seconds on the wall clock.
+pub fn boot_time() -> Option<u64> {
+    native::boot_time()
+}
+
+/// A start time as `ps -o lstart` printed it in the C locale, in local time:
+/// `Thu Nov  5 10:00:00 2026`. Records written before run ids saved that.
+pub fn lstart_label(unix_seconds: u64) -> Option<String> {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let time = libc::time_t::try_from(unix_seconds).ok()?;
+    // SAFETY: tm holds integers and a zone pointer, for which zero (null) is valid.
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the call, and localtime_r writes only
+    // into `local`.
+    if unsafe { libc::localtime_r(&time, &mut local) }.is_null() {
+        return None;
+    }
+    Some(format!(
+        "{} {} {:>2} {:02}:{:02}:{:02} {}",
+        DAYS.get(usize::try_from(local.tm_wday).ok()?)?,
+        MONTHS.get(usize::try_from(local.tm_mon).ok()?)?,
+        local.tm_mday,
+        local.tm_hour,
+        local.tm_min,
+        local.tm_sec,
+        local.tm_year + 1900
+    ))
+}
+
 /// Whether a process with this PID exists, whoever owns it: a daemon started
 /// as root by an older install still counts. Says nothing about which process
 /// it is; [`process_info`] does.
@@ -212,6 +244,25 @@ mod tests {
         child.wait().unwrap();
         thread::sleep(Duration::from_millis(50));
         assert!(process_info(child.id()).is_none());
+    }
+
+    #[test]
+    fn the_start_label_is_what_ps_printed_and_the_boot_came_first() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let printed = Command::new("ps")
+            .args(["-o", "lstart=", "-p", &child.id().to_string()])
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        let info = process_info(child.id()).unwrap();
+
+        assert_eq!(
+            lstart_label(info.started_wall).as_deref(),
+            Some(String::from_utf8_lossy(&printed.stdout).trim())
+        );
+        assert!(boot_time().is_some_and(|boot| boot <= info.started_wall));
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

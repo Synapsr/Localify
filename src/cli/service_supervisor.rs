@@ -27,7 +27,7 @@ use localify::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
-use crate::infrastructure::process::{NativeProcesses, Signal, process_info, signal_process_tree};
+use crate::infrastructure::process::{Signal, signal_process_tree};
 use crate::infrastructure::runs::finish::{Finisher, RunSession};
 use crate::infrastructure::runs::output::StreamSink;
 
@@ -48,11 +48,14 @@ pub struct SupervisedLaunch<'a> {
     pub stream: Option<StreamSink>,
     pub max_duration: Option<Duration>,
     pub session: Option<SessionReporter>,
-    /// Called right after the service starts, then every [`RUN_HEARTBEAT`].
+    /// Called right after the service starts, then every `heartbeat_every`
+    /// ([`RUN_HEARTBEAT`] for a run).
     pub heartbeat: &'a dyn Fn(),
+    pub heartbeat_every: Duration,
     /// `localify dev` leads the run's session: what the service leaves in it
-    /// is ended before the run returns.
+    /// is ended before the run returns, by `finisher`.
     pub leads_session: bool,
+    pub finisher: &'a Finisher<'a>,
 }
 
 pub enum LaunchOutcome {
@@ -81,14 +84,29 @@ impl LaunchOutcome {
             Self::Interrupted | Self::Expired(_) => None,
         }
     }
+
+    /// What `localify dev` exits with, as a shell reports a job: the service's
+    /// own code, 128 + N for signal N, and 130 after Ctrl+C.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Exited(status) => status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+            Self::Interrupted => 130,
+            Self::Expired(_) => 1,
+        }
+    }
 }
 
 /// How the run ended, once its output is all in.
 pub struct LaunchEnd {
     pub outcome: LaunchOutcome,
     /// Every copy of the output reached its end: nothing the service wrote is
-    /// left unread.
+    /// left unread. Says nothing about the run's processes.
     pub output_complete: bool,
+    /// Why processes of the run's session are still alive. The run must then
+    /// stay unfinalized, so its next launch is refused.
+    pub cleanup: Result<()>,
 }
 
 /// Starts the service and waits for it, returning why it stopped.
@@ -100,9 +118,10 @@ pub fn run(launch: SupervisedLaunch<'_>) -> Result<LaunchEnd> {
     let output_done = copy_output(&mut child, &launch);
 
     let outcome = wait(&mut child, &launch, &interrupted);
-    if launch.leads_session {
-        end_own_session();
-    }
+    let cleanup = match launch.leads_session {
+        true => end_own_session(launch.finisher),
+        false => Ok(()),
+    };
     let output_complete = drain_output(output_done);
 
     let outcome = outcome?;
@@ -114,6 +133,7 @@ pub fn run(launch: SupervisedLaunch<'_>) -> Result<LaunchEnd> {
     Ok(LaunchEnd {
         outcome,
         output_complete,
+        cleanup,
     })
 }
 
@@ -186,12 +206,13 @@ fn drain_output(done: Option<mpsc::Receiver<()>>) -> bool {
 
 /// Ends what the service left in the session `localify dev` leads: SIGTERM,
 /// then SIGKILL after the grace period. The executor is alive, so its session
-/// is the run's without any further proof.
-fn end_own_session() {
+/// is the run's without any further proof. Fails while a member is left.
+fn end_own_session(finisher: &Finisher<'_>) -> Result<()> {
     let pid = std::process::id();
-    let Some(me) = process_info(pid) else {
-        return;
-    };
+    let me = finisher
+        .table
+        .process(pid)
+        .context("Failed to read this process's identity from the kernel")?;
     let session = RunSession {
         executor_pid: pid,
         executor_start: me.start,
@@ -200,14 +221,8 @@ fn end_own_session() {
         boot_id: String::new(),
         last_alive_at: me.start,
     };
-    let finisher = Finisher {
-        table: &NativeProcesses,
-        grace: STOP_GRACE_PERIOD,
-    };
-    let members = session.members(&NativeProcesses);
-    if let Err(error) = finisher.end_members(&session, members, STOP_GRACE_PERIOD, Some(pid)) {
-        eprintln!("Warning: {error:#}");
-    }
+    let members = session.members(finisher.table);
+    finisher.end_members(&session, members, Vec::new(), finisher.grace, Some(pid))
 }
 
 fn wait(
@@ -217,7 +232,7 @@ fn wait(
 ) -> Result<LaunchOutcome> {
     let started = Instant::now();
     let mut next_session_heartbeat = started + LAUNCH_SESSION_HEARTBEAT;
-    let mut next_run_heartbeat = started + RUN_HEARTBEAT;
+    let mut next_run_heartbeat = started + launch.heartbeat_every;
     let mut stopping_since: Option<Instant> = None;
 
     loop {
@@ -248,7 +263,7 @@ fn wait(
 
         if now >= next_run_heartbeat {
             (launch.heartbeat)();
-            next_run_heartbeat = now + RUN_HEARTBEAT;
+            next_run_heartbeat = now + launch.heartbeat_every;
         }
         if now >= next_session_heartbeat {
             if let Some(session) = &launch.session {
@@ -375,7 +390,9 @@ mod tests {
             max_duration: None,
             session: None,
             heartbeat,
+            heartbeat_every: RUN_HEARTBEAT,
             leads_session: false,
+            finisher: Box::leak(Box::new(Finisher::native())),
         }
     }
 
@@ -445,6 +462,102 @@ mod tests {
         let mut lines: Vec<String> = read.lines.into_iter().map(|line| line.text).collect();
         lines.sort();
         assert_eq!(lines, ["err-line-***", "out-line"]);
+    }
+
+    #[test]
+    fn the_heartbeat_is_refreshed_while_the_service_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = shell("sleep 1");
+        let environment = LaunchEnvironment::default();
+        let beats = Cell::new(0);
+        let heartbeat = || beats.set(beats.get() + 1);
+        let mut request = launch(&command, &environment, dir.path(), &heartbeat);
+        request.heartbeat_every = Duration::from_millis(100);
+
+        run(request).unwrap();
+
+        assert!(beats.get() >= 5, "{} heartbeats in a second", beats.get());
+    }
+
+    /// This process as the executor leading its session, with a member that no
+    /// signal ever reaches.
+    struct Unkillable {
+        me: crate::infrastructure::process::ProcessInfo,
+        member: crate::infrastructure::process::ProcessInfo,
+    }
+
+    impl Unkillable {
+        fn new() -> Self {
+            let pid = std::process::id();
+            let me = crate::infrastructure::process::process_info(pid).unwrap();
+            let me = crate::infrastructure::process::ProcessInfo {
+                sid: Some(pid),
+                ..me
+            };
+            let member = crate::infrastructure::process::ProcessInfo {
+                pid: u32::MAX - 7,
+                ppid: pid,
+                pgid: pid,
+                sid: Some(pid),
+                start: me.start + 1,
+                started_wall: me.started_wall,
+            };
+            Self { me, member }
+        }
+    }
+
+    impl crate::infrastructure::process::ProcessTable for Unkillable {
+        fn processes(&self) -> Vec<crate::infrastructure::process::ProcessInfo> {
+            vec![self.me, self.member]
+        }
+
+        fn process(&self, pid: u32) -> Option<crate::infrastructure::process::ProcessInfo> {
+            self.processes()
+                .into_iter()
+                .find(|process| process.pid == pid)
+        }
+
+        fn signal(&self, _pid: u32, _signal: Signal) {}
+
+        fn boot_id(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_member_left_alive_fails_the_cleanup_instead_of_ending_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = shell("exit 0");
+        let environment = LaunchEnvironment::default();
+        let table = Unkillable::new();
+        let finisher = Finisher {
+            table: &table,
+            grace: Duration::from_millis(50),
+        };
+        let mut request = launch(&command, &environment, dir.path(), &|| {});
+        request.leads_session = true;
+        request.finisher = &finisher;
+
+        let end = run(request).unwrap();
+
+        assert!(end.output_complete);
+        let error = end.cleanup.unwrap_err().to_string();
+        assert!(error.contains(&(u32::MAX - 7).to_string()), "{error}");
+    }
+
+    #[test]
+    fn a_run_exits_as_a_shell_reports_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let environment = LaunchEnvironment::default();
+        let exit = |script: &str| {
+            let command = shell(script);
+            let end = run(launch(&command, &environment, dir.path(), &|| {})).unwrap();
+            end.outcome.exit_code()
+        };
+
+        assert_eq!(exit("exit 3"), 3);
+        assert_eq!(exit("kill -TERM $$"), 143);
+        assert_eq!(LaunchOutcome::Interrupted.exit_code(), 130);
     }
 
     #[test]

@@ -19,6 +19,10 @@ const PUBLIC_KEY_PREFIXES: &[&str] = &["NEXT_PUBLIC_", "VITE_", "PUBLIC_", "EXPO
 
 /// How long a partial match may be held back before it is printed.
 const IDLE_FLUSH: Duration = Duration::from_millis(150);
+/// The most one read of a service's output takes.
+pub const CHUNK: usize = 64 * 1024;
+/// How many read chunks may wait for the writer.
+pub const QUEUED_CHUNKS: usize = 2;
 
 /// Picks the byte patterns to mask from secret variables. Multi-line values
 /// are also masked line by line, since services often log one line of them.
@@ -99,14 +103,19 @@ impl Masker {
 
 /// Copies `reader` to `writer` through a `Masker` on a background thread.
 /// Held-back bytes are printed after a short pause so prompts and progress
-/// output are not delayed.
+/// output are not delayed. At most [`QUEUED_CHUNKS`] chunks of [`CHUNK`] bytes
+/// wait between the reader and the writer, so a slow writer slows the service
+/// down instead of filling memory. Without patterns, bytes are copied as read.
 pub fn spawn_masked_copy<R, W>(reader: R, mut writer: W, patterns: Vec<Vec<u8>>) -> JoinHandle<()>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
+    if patterns.is_empty() {
+        return thread::spawn(move || copy_directly(reader, writer));
+    }
     thread::spawn(move || {
-        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(QUEUED_CHUNKS);
         let reader_thread = thread::spawn(move || read_chunks(reader, sender));
         let mut masker = Masker::new(patterns);
 
@@ -127,8 +136,24 @@ where
     })
 }
 
-fn read_chunks<R: Read>(mut reader: R, sender: mpsc::Sender<Vec<u8>>) {
-    let mut buffer = [0_u8; 8192];
+fn copy_directly<R: Read, W: Write>(mut reader: R, mut writer: W) {
+    let mut buffer = vec![0_u8; CHUNK];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(count) => {
+                if write_all(&mut writer, &buffer[..count]).is_err() {
+                    return;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+fn read_chunks<R: Read>(mut reader: R, sender: mpsc::SyncSender<Vec<u8>>) {
+    let mut buffer = vec![0_u8; CHUNK];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => return,
@@ -153,7 +178,92 @@ fn write_all<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
     use super::*;
+
+    /// How far the reader got, how far the writer got, and the widest gap seen.
+    #[derive(Default)]
+    struct Progress {
+        produced: AtomicUsize,
+        written: AtomicUsize,
+        widest: AtomicUsize,
+    }
+
+    /// A service flooding its output: `left` bytes, as fast as they are read.
+    struct Flood {
+        left: usize,
+        progress: Arc<Progress>,
+    }
+
+    impl Read for Flood {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = buffer.len().min(self.left);
+            buffer[..count].fill(b'a');
+            self.left -= count;
+            let produced = self.progress.produced.fetch_add(count, Ordering::SeqCst) + count;
+            let gap = produced - self.progress.written.load(Ordering::SeqCst);
+            self.progress.widest.fetch_max(gap, Ordering::SeqCst);
+            Ok(count)
+        }
+    }
+
+    /// A sink much slower than the service.
+    struct SlowSink(Arc<Progress>);
+
+    impl Write for SlowSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            thread::sleep(Duration::from_millis(1));
+            self.0.written.fetch_add(bytes.len(), Ordering::SeqCst);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn flood_both_outputs(patterns: Vec<Vec<u8>>) -> Arc<Progress> {
+        let progress = Arc::new(Progress::default());
+        let total = 8 * 1024 * 1024;
+        let copies: Vec<_> = (0..2)
+            .map(|_| {
+                let flood = Flood {
+                    left: total,
+                    progress: Arc::clone(&progress),
+                };
+                spawn_masked_copy(flood, SlowSink(Arc::clone(&progress)), patterns.clone())
+            })
+            .collect();
+        let started = Instant::now();
+        for copy in copies {
+            copy.join().unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "too slow");
+        assert_eq!(progress.written.load(Ordering::SeqCst), 2 * total);
+        progress
+    }
+
+    #[test]
+    fn a_slow_writer_holds_back_a_flooding_service_with_masking() {
+        let progress = flood_both_outputs(vec![b"supersecret".to_vec()]);
+
+        // Per copy: the queue, the reader's buffer, the masker and the write.
+        let bound = 2 * (QUEUED_CHUNKS + 4) * CHUNK;
+        let widest = progress.widest.load(Ordering::SeqCst);
+        assert!(widest <= bound, "{widest} bytes queued, more than {bound}");
+    }
+
+    #[test]
+    fn a_slow_writer_holds_back_a_flooding_service_without_masking() {
+        let progress = flood_both_outputs(Vec::new());
+
+        let bound = 2 * 2 * CHUNK;
+        let widest = progress.widest.load(Ordering::SeqCst);
+        assert!(widest <= bound, "{widest} bytes queued, more than {bound}");
+    }
 
     fn masker(secrets: &[(&str, &str)]) -> Masker {
         Masker::new(secret_patterns(secrets.iter().copied()))

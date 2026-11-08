@@ -22,16 +22,32 @@ pub fn process_info(pid: u32) -> Option<ProcessInfo> {
     if fields.state == 'Z' {
         return None;
     }
-    let ticks = ticks_per_second();
-    let age_seconds = monotonic_now().saturating_sub(fields.start) / ticks;
+    // As `ps` computes it, so a start time `ps` printed matches to the second.
+    let started_wall = match boot_time() {
+        Some(boot) => boot + fields.start / ticks_per_second(),
+        None => {
+            let age = monotonic_now().saturating_sub(fields.start) / ticks_per_second();
+            wall_now().saturating_sub(age)
+        }
+    };
     Some(ProcessInfo {
         pid,
         ppid: fields.ppid,
         pgid: fields.pgid,
         sid: Some(fields.sid),
         start: fields.start,
-        started_wall: wall_now().saturating_sub(age_seconds),
+        started_wall,
     })
+}
+
+/// `btime` in `/proc/stat`: when this boot started, in Unix seconds.
+pub fn boot_time() -> Option<u64> {
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    stat.lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The fields of `/proc/<pid>/stat` Localify reads.

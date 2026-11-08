@@ -47,6 +47,10 @@ impl RunSession {
             || self.pgid.is_some_and(|pgid| process.pgid == pgid)
     }
 
+    fn is_executor(&self, process: &ProcessInfo) -> bool {
+        process.pid == self.executor_pid && process.start == self.executor_start
+    }
+
     fn same_boot(&self, table: &dyn ProcessTable) -> bool {
         table.boot_id().as_deref() == Some(self.boot_id.as_str())
     }
@@ -85,15 +89,45 @@ pub fn membership(table: &dyn ProcessTable, session: &RunSession) -> Membership 
     if !session.same_boot(table) {
         return Membership::OtherBoot;
     }
-    let members = session.members(table);
-    if members
+    membership_in(&table.processes(), session)
+}
+
+/// Proves membership on the very scan whose members are adopted: it holds the
+/// executor itself (same PID and start), or a member that started at or
+/// before the last heartbeat.
+fn membership_in(scan: &[ProcessInfo], session: &RunSession) -> Membership {
+    let members: Vec<ProcessInfo> = scan
         .iter()
-        .any(|process| process.start <= session.last_alive_at)
-    {
+        .filter(|process| session.contains(process))
+        .copied()
+        .collect();
+    let proven = members
+        .iter()
+        .any(|process| session.is_executor(process) || process.start <= session.last_alive_at);
+    if proven {
         Membership::Proven(members)
     } else {
         Membership::Unproven
     }
+}
+
+/// Every descendant of the executor in `scan`, by parent PID, including those
+/// that left its session.
+fn executor_tree(scan: &[ProcessInfo], session: &RunSession) -> Vec<ProcessInfo> {
+    if !scan.iter().any(|process| session.is_executor(process)) {
+        return Vec::new();
+    }
+    let mut tree = Vec::new();
+    let mut parents = vec![session.executor_pid];
+    while let Some(parent) = parents.pop() {
+        for child in scan.iter().filter(|process| process.ppid == parent) {
+            if child.pid != session.executor_pid && !tree.contains(child) {
+                tree.push(*child);
+                parents.push(child.pid);
+            }
+        }
+    }
+    tree
 }
 
 /// What a finisher did.
@@ -172,7 +206,7 @@ impl Finisher<'_> {
                     members.iter().map(|process| process.pid).collect(),
                 ));
             }
-            self.end_members(session, members, self.grace, None)?;
+            self.end_members(session, members, Vec::new(), self.grace, None)?;
         }
         let reason = if captured_by_executor {
             EndReason::Interrupted
@@ -185,53 +219,67 @@ impl Finisher<'_> {
     }
 
     /// Stops a run: every process of its session, the executor included, then
-    /// finishes it. A live executor proves the session by itself, and gets a
-    /// moment to end its own session and finalize its stream first.
+    /// finishes it. The executor is looked for in the one scan whose members
+    /// are signalled, never in an earlier look. While it lives, no other
+    /// finisher acts, its process tree is ended too (a descendant that left
+    /// the session included), and it gets a moment to end its own session and
+    /// finalize first. Once it is gone, the run is ended under its lock.
     pub fn stop(
         &self,
         dir: &Path,
         session: &RunSession,
         captured_by_executor: bool,
     ) -> Result<Finish> {
-        if session.executor_alive(self.table) {
-            let members = session.members(self.table);
-            self.end_members(session, members, self.grace + EXECUTOR_MARGIN, None)?;
+        if session.same_boot(self.table) {
+            let scan = self.table.processes();
+            if scan.iter().any(|process| session.is_executor(process))
+                && let Membership::Proven(members) = membership_in(&scan, session)
+            {
+                let tree = executor_tree(&scan, session);
+                let grace = self.grace + EXECUTOR_MARGIN;
+                self.end_members(session, members, tree, grace, None)?;
+            }
         }
         self.finish(dir, session, captured_by_executor, FinishMode::End)
     }
 
-    /// Signals SIGTERM to `members`, SIGKILL to those left after `grace`, and
-    /// scans again until none is left. Each process's start is checked before
-    /// each signal. A process that joined the session is adopted only while a
-    /// member already known is still alive, which keeps the proof unbroken.
-    /// `exclude` (the executor ending its own session) is never signalled, but
-    /// still counts as a known member.
+    /// Signals SIGTERM to `members` and `tree`, SIGKILL to those left after
+    /// `grace`, and scans again until none is left. Each process's start is
+    /// checked before each signal. A process that joined the session is
+    /// adopted only while a member already known is still alive, which keeps
+    /// the proof unbroken. `tree` holds the executor's descendants by
+    /// identity, so one that left the session is still ended; the executor's
+    /// new descendants join it while the executor lives. `exclude` (the
+    /// executor ending its own session) is never signalled, but still counts
+    /// as a known member.
     pub fn end_members(
         &self,
         session: &RunSession,
         members: Vec<ProcessInfo>,
+        tree: Vec<ProcessInfo>,
         grace: Duration,
         exclude: Option<u32>,
     ) -> Result<()> {
         let mut known = members;
+        let mut retained = tree;
         let mut signalled: HashSet<(u32, u64)> = HashSet::new();
         let started = Instant::now();
         loop {
             let killing = started.elapsed() >= grace;
-            let targets = known.iter().filter(|process| Some(process.pid) != exclude);
-            for process in targets {
+            for (process, escaped) in targets(&known, &retained, exclude) {
                 if killing {
-                    self.signal_checked(session, process, Signal::Kill);
+                    self.signal_checked(session, &process, escaped, Signal::Kill);
                 } else if signalled.insert((process.pid, process.start)) {
-                    self.signal_checked(session, process, Signal::Terminate);
+                    self.signal_checked(session, &process, escaped, Signal::Terminate);
                 }
             }
             thread::sleep(POLL);
-            known = self.still_members(session, &known);
-            let left: Vec<String> = known
+            let scan = self.table.processes();
+            known = still_members(session, &known, &scan);
+            retained = still_retained(session, &retained, &scan);
+            let left: Vec<String> = targets(&known, &retained, exclude)
                 .iter()
-                .filter(|process| Some(process.pid) != exclude)
-                .map(|process| process.pid.to_string())
+                .map(|(process, _)| process.pid.to_string())
                 .collect();
             if left.is_empty() {
                 return Ok(());
@@ -245,27 +293,84 @@ impl Finisher<'_> {
         }
     }
 
-    fn still_members(&self, session: &RunSession, known: &[ProcessInfo]) -> Vec<ProcessInfo> {
-        let current = session.members(self.table);
-        let is_known = |process: &ProcessInfo| {
-            known
-                .iter()
-                .any(|old| old.pid == process.pid && old.start == process.start)
-        };
-        if current.iter().any(is_known) {
-            current
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn signal_checked(&self, session: &RunSession, process: &ProcessInfo, signal: Signal) {
+    /// Signals a process only while it is the one seen: same start, and still
+    /// in the session unless it was retained from the executor's tree.
+    fn signal_checked(
+        &self,
+        session: &RunSession,
+        process: &ProcessInfo,
+        escaped: bool,
+        signal: Signal,
+    ) {
         let unchanged = self
             .table
             .process(process.pid)
-            .is_some_and(|now| now.start == process.start && session.contains(&now));
+            .is_some_and(|now| now.start == process.start && (escaped || session.contains(&now)));
         if unchanged {
             self.table.signal(process.pid, signal);
         }
     }
+}
+
+/// The processes to signal, each once: session members, then retained
+/// descendants that are not members (`true`).
+fn targets(
+    known: &[ProcessInfo],
+    retained: &[ProcessInfo],
+    exclude: Option<u32>,
+) -> Vec<(ProcessInfo, bool)> {
+    let members = known.iter().map(|process| (*process, false));
+    let escaped = retained
+        .iter()
+        .filter(|process| !known.contains(process))
+        .map(|process| (*process, true));
+    members
+        .chain(escaped)
+        .filter(|(process, _)| Some(process.pid) != exclude)
+        .collect()
+}
+
+fn still_members(
+    session: &RunSession,
+    known: &[ProcessInfo],
+    scan: &[ProcessInfo],
+) -> Vec<ProcessInfo> {
+    let current: Vec<ProcessInfo> = scan
+        .iter()
+        .filter(|process| session.contains(process))
+        .copied()
+        .collect();
+    let is_known = |process: &ProcessInfo| {
+        known
+            .iter()
+            .any(|old| old.pid == process.pid && old.start == process.start)
+    };
+    if current.iter().any(is_known) {
+        current
+    } else {
+        Vec::new()
+    }
+}
+
+/// Retained descendants still alive as themselves, plus the descendants a
+/// live executor started since.
+fn still_retained(
+    session: &RunSession,
+    retained: &[ProcessInfo],
+    scan: &[ProcessInfo],
+) -> Vec<ProcessInfo> {
+    let alive = |old: &ProcessInfo| {
+        scan.iter()
+            .any(|process| process.pid == old.pid && process.start == old.start)
+    };
+    let mut still: Vec<ProcessInfo> = retained.iter().filter(|old| alive(old)).copied().collect();
+    for process in executor_tree(scan, session) {
+        if !still
+            .iter()
+            .any(|old| old.pid == process.pid && old.start == process.start)
+        {
+            still.push(process);
+        }
+    }
+    still
 }

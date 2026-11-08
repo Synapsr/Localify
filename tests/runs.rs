@@ -487,11 +487,7 @@ fn identity_and_heartbeats_are_native_and_spawn_no_ps() {
     sandbox.path = format!("{}:/usr/bin:/bin", fake_bin.display());
 
     let mut executor = sandbox.spawn_background("sleep 30");
-    let record = sandbox.wait_for_record(|run| {
-        run.run
-            .as_ref()
-            .is_some_and(|identity| identity.last_alive_at > identity.start)
-    });
+    let record = sandbox.wait_for_record(|run| run.run_id().is_some());
     let identity = record.run.clone().unwrap();
     assert_eq!(
         Some(identity.start),
@@ -519,6 +515,9 @@ struct FakeTable {
     boot_id: String,
     processes: RefCell<Vec<(ProcessInfo, bool)>>,
     signals: RefCell<Vec<(u32, Signal)>>,
+    /// What the first lookup of one process sees, before the session was
+    /// replaced by `processes`.
+    first_lookup: RefCell<Option<Vec<ProcessInfo>>>,
 }
 
 impl FakeTable {
@@ -527,6 +526,7 @@ impl FakeTable {
             boot_id: boot_id.into(),
             processes: processes.into(),
             signals: Vec::new().into(),
+            first_lookup: None.into(),
         }
     }
 }
@@ -541,6 +541,9 @@ impl ProcessTable for FakeTable {
     }
 
     fn process(&self, pid: u32) -> Option<ProcessInfo> {
+        if let Some(before) = self.first_lookup.borrow_mut().take() {
+            return before.into_iter().find(|process| process.pid == pid);
+        }
         self.processes()
             .into_iter()
             .find(|process| process.pid == pid)
@@ -671,4 +674,94 @@ fn proven_members_are_ended_but_the_next_launcher_only_refuses() {
     assert!(signals.contains(&(4243, Signal::Terminate)));
     assert!(signals.contains(&(4243, Signal::Kill)));
     assert!(signals.contains(&(4250, Signal::Terminate)));
+}
+
+#[test]
+fn a_session_replaced_right_after_the_executor_was_seen_is_never_signalled() {
+    let dir = run_folder();
+    // Alive when first looked up...
+    let executor = fake_process(4242, 4242, 100);
+    // ...then gone, its PID and session id carried by unrelated processes.
+    let table = FakeTable::new(
+        "boot-a",
+        vec![
+            (fake_process(4242, 4242, 5_000), false),
+            (fake_process(4243, 4242, 5_100), false),
+        ],
+    );
+    *table.first_lookup.borrow_mut() = Some(vec![executor]);
+
+    let _ = finisher(&table).stop(dir.path(), &recorded_session("boot-a"), true);
+
+    assert!(table.signals.borrow().is_empty(), "{:?}", table.signals);
+    assert_eq!(table.processes().len(), 2);
+}
+
+#[test]
+fn stopping_a_run_ends_a_descendant_that_left_its_session_and_ignores_sigterm() {
+    let sandbox = Sandbox::new();
+    let pid_file = sandbox.root.join("escaped.pid");
+    let script = format!(
+        r#"perl -MPOSIX -e 'POSIX::setsid(); $SIG{{TERM}} = "IGNORE"; open(my $f, ">", "{}"); print $f $$; close($f); sleep 300' &
+wait"#,
+        pid_file.display()
+    );
+    let mut executor = sandbox.spawn_background(&script);
+    let escaped: u32 = wait_until(Duration::from_secs(20), || {
+        fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
+    })
+    .expect("the descendant never started");
+    let left_session = process::process_info(escaped).unwrap();
+    assert_eq!(left_session.sid, Some(escaped));
+    let record = sandbox.wait_for_record(|run| run.run_id().is_some());
+
+    assert!(sandbox.store().stop(&record).unwrap());
+
+    executor.wait().unwrap();
+    let survivor = process::process_info(escaped).filter(|now| now.start == left_session.start);
+    assert!(survivor.is_none(), "{survivor:?} survived");
+}
+
+#[test]
+fn a_foreground_run_exits_with_its_service_s_code_or_130_after_ctrl_c() {
+    let sandbox = Sandbox::new();
+
+    let failed = sandbox.dev("exit 3").output().unwrap();
+    assert_eq!(failed.status.code(), Some(3), "{}", stderr(&failed));
+    let killed = sandbox.dev("kill -TERM $$").output().unwrap();
+    assert_eq!(killed.status.code(), Some(143), "{}", stderr(&killed));
+
+    // Ctrl+C in a terminal reaches the whole foreground job.
+    let mut job = sandbox
+        .dev("sleep 30")
+        .process_group(0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    sandbox.wait_for_record(|run| run.pid == job.id());
+    thread::sleep(Duration::from_millis(300));
+    let group = libc::pid_t::try_from(job.id()).unwrap();
+    // SAFETY: a negative PID names the job's own process group, made above.
+    assert_eq!(unsafe { libc::kill(-group, libc::SIGINT) }, 0);
+
+    assert_eq!(job.wait().unwrap().code(), Some(130));
+}
+
+#[test]
+fn last_alive_at_is_refreshed_while_the_run_lives() {
+    let sandbox = Sandbox::new();
+    let mut executor = sandbox.spawn_background("sleep 30");
+    let first = sandbox.wait_for_record(|run| run.run_id().is_some());
+    let first_alive = first.run.as_ref().unwrap().last_alive_at;
+
+    let refreshed = wait_until(Duration::from_secs(15), || {
+        let alive = sandbox.record()?.run?.last_alive_at;
+        (alive > first_alive).then_some(alive)
+    });
+
+    assert!(refreshed.is_some(), "lastAliveAt never moved");
+    assert!(refreshed.unwrap() <= process::monotonic_now());
+    sandbox.store().stop(&first).unwrap();
+    executor.wait().unwrap();
 }
