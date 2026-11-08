@@ -28,6 +28,15 @@ and the desktop app share the same version.
   stopped. `localify dev` now exits with the service's own exit code, and with 130 after
   Ctrl+C, so `localify dev web && …` stops where it should. Ctrl+C also stops a service
   that ignores it, within 20 seconds, and a second Ctrl+C stops it at once.
+- **Better Auth trusts your public URL automatically.** An app opened through its public
+  URL no longer answers `Invalid origin` from Better Auth. `localify dev` sets
+  `BETTER_AUTH_TRUSTED_ORIGINS` to the exact public origins that reach the service, after
+  any value from your shell or launch profile, and sets `LOCALIFY_PUBLIC_URL` unless you
+  did. When an env file already sets `BETTER_AUTH_TRUSTED_ORIGINS`, Localify leaves it
+  alone and prints the origins to add to it. Only your own URLs that this machine serves
+  count, never `*.localify.fyi`. A public URL you create while the service runs takes
+  effect at its next restart.
+  [Apps that check origin](https://github.com/Synapsr/Localify/blob/main/docs/README.md#apps-that-check-origin)
 
 ### Fixed
 
