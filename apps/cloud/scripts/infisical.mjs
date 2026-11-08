@@ -1,5 +1,6 @@
 // Runs wrangler against the production account with the values kept in
-// Infisical (project `localify`, folder `/cloud`, environment `prod`).
+// Infisical (project `localify`, folder `/cloud`, environment `prod`, or
+// `dev` for the sandbox's Worker secrets).
 //
 // wrangler's identity is CLOUDFLARE_DEPLOY_TOKEN when Infisical has one, and
 // the person's own `wrangler login` otherwise. The Worker's own
@@ -8,16 +9,41 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 
-/** The `/cloud` values for `prod`, by key. */
-export function readCloudValues() {
+/** The `/cloud` values for an Infisical environment, `prod` by default, by key. */
+export function readCloudValues(environment = "prod") {
   const exported = JSON.parse(
     execFileSync(
       "infisical",
-      ["export", "--env", "prod", "--path", "/cloud", "--format", "json", "--silent"],
+      ["export", "--env", environment, "--path", "/cloud", "--format", "json", "--silent"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
     ),
   );
   return Object.fromEntries(exported.map((secret) => [secret.key, secret.value]));
+}
+
+/**
+ * Takes `--env sandbox` (or `--env=sandbox`) out of a script's arguments:
+ * the wrangler environment `sandbox` of wrangler.jsonc. Any other `--env`
+ * is refused, so a typo never falls back to production.
+ */
+export function readTarget(args) {
+  const rest = [];
+  let sandbox = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    // pnpm passes a `--` through as it is.
+    if (arg === "--") continue;
+    const value = arg === "--env" ? args[++i] : arg.startsWith("--env=") ? arg.slice(6) : null;
+    if (value === null) {
+      rest.push(arg);
+    } else if (value === "sandbox") {
+      sandbox = true;
+    } else {
+      console.error(`Unknown --env ${value ?? ""}: the only one is --env sandbox.`);
+      process.exit(1);
+    }
+  }
+  return { sandbox, rest };
 }
 
 /** The environment wrangler runs with: the deploy identity, never the Worker's token. */

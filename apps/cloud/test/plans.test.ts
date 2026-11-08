@@ -610,3 +610,95 @@ describe("the quiet period after a stop", () => {
     expect(forwarded()).toBe(1);
   });
 });
+
+describe("upgrade hints", () => {
+  const PRO = { kind: "pro", command: "localify subscribe" };
+
+  async function body(response: Response): Promise<Record<string, unknown>> {
+    return (await response.json()) as Record<string, unknown>;
+  }
+
+  it("point an account without a plan to Pro, on every 402", async () => {
+    const { token, userId } = await signIn(context);
+    await createUrl(token, "journal.localify");
+    removeOverride(userId);
+
+    const created = await createUrl(token, "notes.localify");
+    expect(created.status).toBe(402);
+    expect(created.body).toMatchObject({ error: "subscription_required", upgrade: PRO });
+    const runtime = await serve(context, token);
+    expect(runtime.body.blocked).toMatchObject({ reason: "subscription_required", upgrade: PRO });
+    const lease = await api(context, "GET", "/v1/remote/lease", { token });
+    expect(lease.status).toBe(402);
+    expect(await body(lease)).toMatchObject({ error: "subscription_required", upgrade: PRO });
+  });
+
+  it("point a Pro account at its URL limit to the URL add-on, only while add-ons are on sale", async () => {
+    const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
+      entitled: false,
+    });
+    setBilling(userId, { pro_status: "active" });
+    for (let i = 0; i < 10; i++)
+      expect((await createUrl(token, `u${i}.localify`)).status).toBe(201);
+
+    const off = await createUrl(token, "extra.localify");
+    expect(off.status).toBe(403);
+    expect(off.error).toBe("quota_exceeded");
+    expect(off.body).not.toHaveProperty("upgrade");
+
+    context.env.ADDONS = "on";
+    const on = await createUrl(token, "extra.localify");
+    expect(on.body).toMatchObject({
+      error: "quota_exceeded",
+      upgrade: { kind: "addon_urls", command: "localify billing" },
+    });
+  });
+
+  it("point a claim beyond the URL limit to the URL add-on", async () => {
+    context.env.ADDONS = "on";
+    const laptop = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    const runner = await signIn(context, "teo-goulois", 1, "runner", { entitled: false });
+    setBilling(laptop.userId, { pro_status: "active", addon_url_packs: 1 });
+    let last = "";
+    for (let i = 0; i < 11; i++)
+      last = (await createUrl(laptop.token, `u${i}.localify`)).body.publicUrl.id;
+    sql("UPDATE billing SET addon_url_packs = 0 WHERE user_id = ?", laptop.userId);
+
+    const claim = await api(context, "POST", `/v1/public-urls/${last}/claim`, {
+      token: runner.token,
+    });
+    expect(claim.status).toBe(403);
+    expect(await body(claim)).toMatchObject({
+      error: "quota_exceeded",
+      upgrade: { kind: "addon_urls", command: "localify billing" },
+    });
+  });
+
+  it("give an override no add-on hint: add-ons do not count under it", async () => {
+    context.env.ADDONS = "on";
+    const { token, userId } = await signIn(context);
+    setOverride(userId, 1, 1);
+    await createUrl(token, "a.localify");
+    const refused = await createUrl(token, "b.localify");
+    expect(refused.error).toBe("quota_exceeded");
+    expect(refused.body).not.toHaveProperty("upgrade");
+  });
+
+  it("point a Pro account with every serving slot taken to the machine add-on", async () => {
+    context.env.ADDONS = "on";
+    const first = await signIn(context, "teo-goulois", 1, "one", { entitled: false });
+    setBilling(first.userId, { pro_status: "active" });
+    for (const name of ["one", "two", "three"]) {
+      const machine =
+        name === "one" ? first : await signIn(context, "teo-goulois", 1, name, { entitled: false });
+      await createUrl(machine.token, `${name}.localify`);
+      const runtime = await serve(context, machine.token);
+      if (name === "three") {
+        expect(runtime.body.blocked).toMatchObject({
+          reason: "serving_slots_full",
+          upgrade: { kind: "addon_machine", command: "localify billing" },
+        });
+      }
+    }
+  });
+});

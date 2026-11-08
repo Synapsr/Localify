@@ -3,9 +3,22 @@
 // scoped to that user, and an unknown id and someone else's id both answer
 // 404.
 
-import { handlePolarWebhook, portalUrl, proCheckout } from "./billing";
+import {
+  addonsUnavailable,
+  createCheckout,
+  handlePolarWebhook,
+  portalUrl,
+  type CheckoutProduct,
+} from "./billing";
 import { CloudflareError } from "./cloudflare";
-import { ConfigError, isAllowedGithubId, isTeamGithubId, setting, signup } from "./config";
+import {
+  addonsOnSale,
+  ConfigError,
+  isAllowedGithubId,
+  isTeamGithubId,
+  setting,
+  signup,
+} from "./config";
 import { hashPassword, sha256Hex } from "./crypto";
 import { isUniqueViolation, urlOfUser, urlsOfUser, type PublicUrl } from "./db";
 import {
@@ -14,7 +27,7 @@ import {
   loadAccount,
   MAX_LINKED_MACHINES,
   servingUrlLimit,
-  type Entitlement,
+  type Account,
 } from "./entitlement";
 import { fetchGitHubUser, pollDeviceFlow, startDeviceFlow } from "./github";
 import { ApiError, errorResponse, json, noContent, readJson } from "./http";
@@ -28,13 +41,17 @@ import {
 } from "./names";
 import { generatePassword } from "./passwords";
 import { isRateLimited, PolarError } from "./polar";
+import { handlePricing } from "./pricing";
 import { parseProto, RELAY_HEADER_PREFIX, RELAY_HEADERS, RELAY_PROTOCOL, relayOf } from "./relay";
 import { forgetSite } from "./sites";
 import { background, machineRuntime, reconcileOwner, releaseIfUnwanted } from "./tunnels";
+import { addonUpgrade, PRO_UPGRADE, type Upgrade } from "./upgrade";
 
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_LENGTH = 256;
 const MAX_MACHINE_NAME_LENGTH = 64;
+/** The most units of one add-on a checkout sells at once. */
+const MAX_ADDON_UNITS = 20;
 const SLUG_ATTEMPTS = 5;
 /** GitHub asks for this much more time between polls after `slow_down`. */
 const SLOW_DOWN_SECONDS = 5;
@@ -77,6 +94,9 @@ const ROUTES: Route[] = [
   { method: "GET", pattern: /^\/v1\/me$/, handle: authed(me) },
   { method: "POST", pattern: /^\/v1\/billing\/checkout$/, handle: authed(checkout) },
   { method: "POST", pattern: /^\/v1\/billing\/portal$/, handle: authed(portal) },
+  // Public, for the website: no token, CORS for its origins.
+  { method: "GET", pattern: /^\/v1\/pricing$/, handle: handlePricing },
+  { method: "OPTIONS", pattern: /^\/v1\/pricing$/, handle: handlePricing },
   // Polar signs its deliveries; no Localify token.
   { method: "POST", pattern: /^\/v1\/webhooks\/polar$/, handle: handlePolarWebhook },
   // Signing out is the one route a banned account keeps.
@@ -423,19 +443,47 @@ async function me(_request: Request, env: Env, caller: Caller): Promise<Response
 // --- Billing ---
 
 /**
- * `POST /v1/billing/checkout`: a Pro checkout, or the portal when Pro is
- * already entitled. Products come from the configuration only. Polar picks
- * the currency from `customer_ip_address`, so it gets the caller's address
- * rather than the Worker's.
+ * `POST /v1/billing/checkout`: a Pro or add-on checkout, or the portal when
+ * the caller already has what they ask for. Products come from the
+ * configuration only. Polar picks the currency from `customer_ip_address`,
+ * so it gets the caller's address rather than the Worker's.
  */
 async function checkout(request: Request, env: Env, caller: Caller): Promise<Response> {
-  const { product } = await readJson(request);
-  const interval = product === "pro_monthly" ? "month" : product === "pro_yearly" ? "year" : null;
-  if (interval === null) {
-    throw new ApiError(422, "invalid_product", 'product must be "pro_monthly" or "pro_yearly".');
-  }
+  const body = await readJson(request);
   const clientIp = request.headers.get("cf-connecting-ip")?.trim() || null;
-  return json(await proCheckout(env, caller.userId, interval, clientIp));
+  return json(await createCheckout(env, caller.userId, readProduct(env, body), clientIp));
+}
+
+/** The product asked for. An add-on's units are read only while add-ons are on sale. */
+function readProduct(env: Env, { product, units }: Record<string, unknown>): CheckoutProduct {
+  switch (product) {
+    case "pro_monthly":
+      return { kind: "pro", interval: "month" };
+    case "pro_yearly":
+      return { kind: "pro", interval: "year" };
+    case "addon_machine":
+    case "addon_urls":
+      if (!addonsOnSale(env)) throw addonsUnavailable();
+      if (
+        typeof units !== "number" ||
+        !Number.isInteger(units) ||
+        units < 1 ||
+        units > MAX_ADDON_UNITS
+      ) {
+        throw new ApiError(
+          422,
+          "invalid_units",
+          `units must be a whole number from 1 to ${MAX_ADDON_UNITS}: serving machines, or packs of 10 public URLs.`,
+        );
+      }
+      return { kind: product, units };
+    default:
+      throw new ApiError(
+        422,
+        "invalid_product",
+        'product must be "pro_monthly", "pro_yearly", "addon_machine" or "addon_urls".',
+      );
+  }
 }
 
 /** `POST /v1/billing/portal`: a Polar customer portal session. */
@@ -543,7 +591,8 @@ async function createUrl(
     }
   }
   const protection = readProtection(body.protection ?? { mode: "password" });
-  const entitlement = await requireEntitlement(env, caller);
+  const account = await requireEntitlement(env, caller);
+  const entitlement = account.entitlement;
   const secret = protection.mode === "password" ? await hashPassword(protection.password) : null;
 
   // A live URL is neither deleted nor taken down; suspended ones count.
@@ -589,6 +638,7 @@ async function createUrl(
           403,
           "quota_exceeded",
           `You already have ${entitlement.publicUrls} public URLs, the most your plan allows. Remove one with \`localify public-url remove\`, then try again.`,
+          upgradeDetails(addonUpgrade(env, account, "addon_urls")),
         );
       }
       forgetSite(slug);
@@ -690,7 +740,8 @@ async function claimUrl(
     .first<{ machine_id: string | null; taken_down_at: number | null }>();
   if (!before) throw urlNotFound();
   if (before.taken_down_at !== null) throw takenDown();
-  const entitlement = await requireEntitlement(env, caller);
+  const account = await requireEntitlement(env, caller);
+  const entitlement = account.entitlement;
   // Only a URL that serves moves: live, among the owner's `publicUrls`
   // oldest, and not marked suspended. A URL whose mark a reconcile has yet
   // to clear waits for it, within 5 minutes. A takedown or a deletion
@@ -719,6 +770,7 @@ async function claimUrl(
       403,
       "quota_exceeded",
       `This public URL is not serving: your plan serves your ${entitlement.publicUrls} oldest public URLs, and this one comes after them, or it is waiting to serve again, which takes up to 5 minutes. Remove an older one with \`localify public-url remove\`, or try again in a few minutes.`,
+      upgradeDetails(addonUpgrade(env, account, "addon_urls")),
     );
   }
   forgetSite(claimed.slug);
@@ -973,6 +1025,7 @@ function remoteAccessRequired(): ApiError {
     402,
     "subscription_required",
     "Remote access needs Localify Cloud Pro. Start a 7-day trial with `localify subscribe`.",
+    upgradeDetails(PRO_UPGRADE),
   );
 }
 
@@ -994,17 +1047,23 @@ function baseDomain(env: Env): string {
   return setting(env, "PUBLIC_BASE_DOMAIN");
 }
 
-/** The caller's entitlement, or `402 subscription_required` when it is zero. */
-async function requireEntitlement(env: Env, caller: Caller): Promise<Entitlement> {
-  const entitlement = await entitlementOf(env, caller.userId);
-  if (!isEntitled(entitlement)) {
+/** The caller's account, or `402 subscription_required` when its entitlement is zero. */
+async function requireEntitlement(env: Env, caller: Caller): Promise<Account> {
+  const account = await loadAccount(env.DB, caller.userId);
+  if (!account || !isEntitled(account.entitlement)) {
     throw new ApiError(
       402,
       "subscription_required",
       "Public URLs need Localify Cloud Pro. Start a 7-day trial with `localify subscribe`.",
+      upgradeDetails(PRO_UPGRADE),
     );
   }
-  return entitlement;
+  return account;
+}
+
+/** The `upgrade` field of a refusal, when something raises its limit. */
+function upgradeDetails(upgrade: Upgrade | null): Record<string, unknown> {
+  return upgrade === null ? {} : { upgrade };
 }
 
 function takenDown(): ApiError {

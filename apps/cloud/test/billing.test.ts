@@ -6,7 +6,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { proCheckout, reconcileBilling, refreshBilling, runBillingJobs } from "../src/billing";
+import { createCheckout, reconcileBilling, refreshBilling, runBillingJobs } from "../src/billing";
 import { PolarApi } from "../src/polar";
 import {
   api,
@@ -49,6 +49,8 @@ type FakePolar = {
   /** Answers `POST /v1/checkouts/`. */
   checkout: (body: Raw) => Response | Promise<Response>;
   revoked: string[];
+  /** Subscriptions set to cancel at period end, with the body that asked. */
+  canceled: { id: string; body: Raw }[];
 };
 
 function page(items: Raw[], url: string): Response {
@@ -78,6 +80,7 @@ function fakePolar(context: TestContext): FakePolar {
         201,
       ),
     revoked: [],
+    canceled: [],
   };
   context.routes.set(`GET ${POLAR}/v1/subscriptions/`, (_body, url) => {
     const external = new URL(url).searchParams.get("external_customer_id");
@@ -98,6 +101,20 @@ function fakePolar(context: TestContext): FakePolar {
     }
     fake.revoked.push(id);
     Object.assign(subscription, { status: "canceled", ended_at: iso(Date.now()) });
+    return jsonResponse(subscription);
+  });
+  context.routes.set(`PATCH ${POLAR}/v1/subscriptions/`, (body, url) => {
+    const id = url.slice(`${POLAR}/v1/subscriptions/`.length);
+    const subscription = fake.subscriptions.find((s) => s.id === id);
+    if (!subscription) return jsonResponse({ error: "ResourceNotFound", detail: "Not found" }, 404);
+    if (subscription.ended_at) {
+      return jsonResponse({ error: "InactiveSubscription", detail: "Inactive" }, 403);
+    }
+    if (subscription.cancel_at_period_end) {
+      return jsonResponse({ error: "AlreadyCanceledSubscription", detail: "Already" }, 403);
+    }
+    fake.canceled.push({ id, body: JSON.parse(body ?? "{}") as Raw });
+    subscription.cancel_at_period_end = true;
     return jsonResponse(subscription);
   });
   context.routes.set(`POST ${POLAR}/v1/checkouts/`, (body) =>
@@ -1246,7 +1263,7 @@ describe("checkout", () => {
 
   it("refuses any other product", async () => {
     const { token } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
-    for (const product of ["addon_machine", "prod-monthly", ""]) {
+    for (const product of ["addon_extra", "prod-monthly", ""]) {
       expect((await checkout(token, product)).body.error).toBe("invalid_product");
     }
     expect(polarCalls("POST", "/v1/checkouts/")).toEqual([]);
@@ -1283,10 +1300,16 @@ describe("checkout", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const start = Date.now();
-    const a = proCheckout(context.env, userId, "month", null, start);
+    const a = createCheckout(context.env, userId, { kind: "pro", interval: "month" }, null, start);
     await vi.waitFor(() => expect(held).toHaveLength(1));
     // A's call takes more than 30 seconds: B takes the row over.
-    const b = proCheckout(context.env, userId, "year", null, start + 31_000);
+    const b = createCheckout(
+      context.env,
+      userId,
+      { kind: "pro", interval: "year" },
+      null,
+      start + 31_000,
+    );
     await vi.waitFor(() => expect(held).toHaveLength(2));
 
     held[1]!();
@@ -1309,9 +1332,15 @@ describe("checkout", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const start = Date.now();
-    const a = proCheckout(context.env, userId, "month", null, start);
+    const a = createCheckout(context.env, userId, { kind: "pro", interval: "month" }, null, start);
     await vi.waitFor(() => expect(held).toHaveLength(1));
-    const b = proCheckout(context.env, userId, "month", null, start + 31_000);
+    const b = createCheckout(
+      context.env,
+      userId,
+      { kind: "pro", interval: "month" },
+      null,
+      start + 31_000,
+    );
     await vi.waitFor(() => expect(held).toHaveLength(2));
 
     held[0]!();
@@ -1587,5 +1616,334 @@ describe("cloud:admin refresh", () => {
   it("makes no Polar call when nothing is due", async () => {
     await runBillingJobs(context.env, Date.now());
     expect(context.calls).toEqual([]);
+  });
+});
+
+// --- Add-ons ---
+
+describe("add-ons", () => {
+  const MACHINE = "prod-addon-machine";
+  const URLS = "prod-addon-urls";
+
+  beforeEach(() => {
+    Object.assign(context.env, {
+      ADDONS: "on",
+      POLAR_PRODUCT_ADDON_MACHINE: MACHINE,
+      POLAR_PRODUCT_ADDON_URLS: URLS,
+    });
+  });
+
+  async function buy(
+    token: string,
+    product = "addon_machine",
+    units: unknown = 2,
+    headers: Record<string, string> = {},
+  ) {
+    const response = await api(context, "POST", "/v1/billing/checkout", {
+      token,
+      body: { product, units },
+      headers,
+    });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  }
+
+  /** A monthly add-on subscription of `userId`, active, with `units`. */
+  function addon(userId: string, product: string, units: number, fields: Raw = {}): Raw {
+    return subscription(userId, { product_id: product, units, ...fields });
+  }
+
+  /** A user whose Pro plan is active, refreshed. */
+  async function proUser(githubId = 1) {
+    const user = await signIn(context, `user-${githubId}`, githubId, "laptop", {
+      entitled: false,
+    });
+    subscription(user.userId);
+    await refresh(user.userId);
+    return user;
+  }
+
+  function cancellations(): { subscription_id: string; canceled_at: number | null }[] {
+    return context.sqlite
+      .prepare("SELECT subscription_id, canceled_at FROM addon_cancellations ORDER BY 1")
+      .all() as never;
+  }
+
+  describe("checkout", () => {
+    it("is refused with 409 while ADDONS is off, before asking Polar anything", async () => {
+      const { token } = await proUser();
+      context.env.ADDONS = "off";
+      const before = context.calls.length;
+      for (const product of ["addon_machine", "addon_urls"]) {
+        expect(await buy(token, product)).toMatchObject({
+          status: 409,
+          body: { error: "addons_unavailable" },
+        });
+      }
+      expect(context.calls.length).toBe(before);
+    });
+
+    it("needs an entitled Pro plan: none, an override or a lapsed one answers 402", async () => {
+      context.env.ALLOWED_GITHUB_IDS = "1, 2, 3";
+      const none = await signIn(context, "none", 1, "laptop", { entitled: false });
+      const team = await signIn(context, "team", 2, "laptop");
+      const lapsed = await signIn(context, "lapsed", 3, "laptop", { entitled: false });
+      subscription(lapsed.userId, { status: "canceled", ended_at: iso(Date.now() - DAY) });
+      await refresh(lapsed.userId);
+
+      for (const { token } of [none, team, lapsed]) {
+        expect(await buy(token)).toEqual({
+          status: 402,
+          body: {
+            error: "subscription_required",
+            message: expect.stringContaining("localify subscribe"),
+            upgrade: { kind: "pro", command: "localify subscribe" },
+          },
+        });
+      }
+      expect(polarCalls("POST", "/v1/checkouts/")).toEqual([]);
+    });
+
+    it("sells the quantity asked of the configured product, without a trial", async () => {
+      const { token, userId } = await proUser();
+      const page = await buy(token, "addon_urls", 3, { "cf-connecting-ip": "203.0.113.7" });
+      expect(page).toEqual({ status: 200, body: { kind: "checkout", url: `${POLAR}/checkout/1` } });
+      const [call] = polarCalls("POST", "/v1/checkouts/");
+      expect(JSON.parse(call!.body!)).toEqual({
+        products: [URLS],
+        external_customer_id: userId,
+        allow_trial: false,
+        metadata: { userId },
+        success_url: "https://localify.dev/cloud/subscribed?checkout_id={CHECKOUT_ID}",
+        return_url: "https://localify.dev/pricing",
+        customer_ip_address: "203.0.113.7",
+        units: 3,
+      });
+    });
+
+    it("refuses a quantity that is not a whole number from 1 to 20", async () => {
+      const { token } = await proUser();
+      for (const units of [0, 21, 1.5, "2", null]) {
+        expect((await buy(token, "addon_machine", units)).body.error, String(units)).toBe(
+          "invalid_units",
+        );
+      }
+      expect(polarCalls("POST", "/v1/checkouts/")).toEqual([]);
+    });
+
+    it("reuses the pending checkout for the same quantity, and replaces it for another", async () => {
+      const { token, userId } = await proUser();
+      const first = await buy(token, "addon_machine", 2);
+      expect(await buy(token, "addon_machine", 2)).toEqual(first);
+      expect(polarCalls("POST", "/v1/checkouts/")).toHaveLength(1);
+
+      const other = await buy(token, "addon_machine", 3);
+      expect(other.body.url).toBe(`${POLAR}/checkout/2`);
+      expect(
+        get("SELECT units FROM checkouts WHERE user_id = ? AND kind = 'addon_machine'", userId),
+      ).toEqual({ units: 3 });
+      // Each add-on keeps a row of its own.
+      expect((await buy(token, "addon_urls", 1)).body.url).toBe(`${POLAR}/checkout/3`);
+    });
+
+    it("opens the portal when an add-on of that kind exists, never a second checkout", async () => {
+      const { token, userId } = await proUser();
+      addon(userId, MACHINE, 1);
+      await refresh(userId);
+      expect(await buy(token, "addon_machine", 1)).toEqual({
+        status: 200,
+        body: { kind: "portal", url: `${POLAR}/portal/${userId}` },
+      });
+      // One whose webhook has not arrived yet is found in Polar.
+      addon(userId, URLS, 1);
+      expect(await buy(token, "addon_urls", 2)).toEqual({
+        status: 200,
+        body: { kind: "portal", url: `${POLAR}/portal/${userId}` },
+      });
+      expect(polarCalls("POST", "/v1/checkouts/")).toEqual([]);
+    });
+  });
+
+  describe("entitlement", () => {
+    it("adds each unit while Pro is entitled, and follows a unit change from a webhook", async () => {
+      const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
+        entitled: false,
+      });
+      subscription(userId);
+      const machines = addon(userId, MACHINE, 2);
+      const urls = addon(userId, URLS, 1);
+      await deliver(subscriptionEvent(userId, "subscription.created"));
+      await settle(context);
+      expect(await plan(token)).toMatchObject({
+        limits: { servingMachines: 4, publicUrls: 20, remoteAccess: true },
+        addons: { machines: 2, urlPacks: 1 },
+      });
+
+      machines.units = 3;
+      await deliver(subscriptionEvent(userId));
+      await settle(context);
+      expect(await plan(token)).toMatchObject({
+        limits: { servingMachines: 5, publicUrls: 20 },
+        addons: { machines: 3, urlPacks: 1 },
+      });
+
+      // Set to cancel, it counts until its period ends; ended, it does not.
+      urls.cancel_at_period_end = true;
+      await deliver(subscriptionEvent(userId));
+      await settle(context);
+      expect(await plan(token)).toMatchObject({ limits: { publicUrls: 20 } });
+      Object.assign(urls, { status: "canceled", ended_at: iso(Date.now()) });
+      await deliver(subscriptionEvent(userId));
+      await settle(context);
+      expect(await plan(token)).toMatchObject({
+        limits: { servingMachines: 5, publicUrls: 10 },
+        addons: { machines: 3, urlPacks: 0 },
+      });
+    });
+
+    it("counts add-ons even while they are not on sale", async () => {
+      context.env.ADDONS = "off";
+      const { token, userId } = await proUser();
+      addon(userId, MACHINE, 1);
+      await refresh(userId);
+      expect(await plan(token)).toMatchObject({ limits: { servingMachines: 3 } });
+    });
+
+    it("gives nothing for add-ons without an entitled Pro plan, and ignores them under an override", async () => {
+      const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
+        entitled: false,
+      });
+      subscription(userId, { status: "canceled", ended_at: iso(Date.now() - DAY) });
+      addon(userId, MACHINE, 2);
+      await refresh(userId);
+      expect(await plan(token)).toMatchObject({
+        entitled: false,
+        limits: { servingMachines: 0, publicUrls: 0 },
+      });
+      run(
+        `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, remote_access, reason, created_at)
+         VALUES (?, 5, 10, 1, 'team', 1)`,
+        userId,
+      );
+      expect(await plan(token)).toMatchObject({
+        status: "override",
+        limits: { servingMachines: 5, publicUrls: 10 },
+      });
+    });
+  });
+
+  describe("when Pro lapses", () => {
+    it("are canceled at period end by the 5-minute job, once, never refunded", async () => {
+      const { userId } = await proUser();
+      const pro = polar.subscriptions[0]!;
+      const machine = addon(userId, MACHINE, 2);
+      await refresh(userId);
+      expect(cancellations()).toEqual([]);
+
+      // After the past_due grace too, Polar may still recover the card.
+      Object.assign(pro, { status: "past_due", past_due_at: iso(Date.now() - 8 * DAY) });
+      await refresh(userId);
+      expect(cancellations()).toEqual([]);
+
+      Object.assign(pro, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      expect(cancellations()).toEqual([{ subscription_id: machine.id, canceled_at: null }]);
+      // Recorded by the refresh, canceled by the job.
+      expect(polar.canceled).toEqual([]);
+
+      await runBillingJobs(context.env, Date.now());
+      expect(polar.canceled).toEqual([{ id: machine.id, body: { cancel_at_period_end: true } }]);
+      expect(cancellations()[0]!.canceled_at).not.toBeNull();
+      expect(polar.revoked).toEqual([]);
+
+      // Idempotent: another run, or another refresh, cancels nothing again.
+      await runBillingJobs(context.env, Date.now());
+      await refresh(userId);
+      await runBillingJobs(context.env, Date.now());
+      expect(polar.canceled).toHaveLength(1);
+
+      // A cancellation Polar already applied counts as done.
+      run("UPDATE addon_cancellations SET canceled_at = NULL");
+      await runBillingJobs(context.env, Date.now());
+      expect(polarCalls("PATCH", "/v1/subscriptions/")).toHaveLength(2);
+      expect(cancellations()[0]!.canceled_at).not.toBeNull();
+    });
+
+    it("cancels one set back to renew in the portal while Pro is still lapsed", async () => {
+      const { userId } = await proUser();
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      const urls = addon(userId, URLS, 1);
+      await refresh(userId);
+      await runBillingJobs(context.env, Date.now());
+      urls.cancel_at_period_end = false;
+      await refresh(userId);
+      await runBillingJobs(context.env, Date.now());
+      expect(polar.canceled.map((c) => c.id)).toEqual([urls.id, urls.id]);
+    });
+
+    it("leaves them alone when Pro comes back before the job runs", async () => {
+      const { userId } = await proUser();
+      addon(userId, MACHINE, 1);
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      expect(cancellations()).toHaveLength(1);
+
+      subscription(userId);
+      await refresh(userId);
+      await runBillingJobs(context.env, Date.now());
+      expect(polar.canceled).toEqual([]);
+      expect(cancellations()).toEqual([]);
+    });
+
+    it("retries a failed cancellation after 5 minutes, and waits out the rate limit", async () => {
+      const { userId } = await proUser();
+      addon(userId, MACHINE, 1);
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const key = `PATCH ${POLAR}/v1/subscriptions/`;
+      const answer = context.routes.get(key)!;
+      context.routes.set(key, () => jsonResponse({ error: "Internal" }, 500));
+      const now = Date.now();
+      await runBillingJobs(context.env, now);
+      expect(get("SELECT attempts, next_attempt_at FROM addon_cancellations")).toEqual({
+        attempts: 1,
+        next_attempt_at: now + 5 * 60 * 1000,
+      });
+      await runBillingJobs(context.env, now + 60 * 1000);
+      expect(polarCalls("PATCH", "/v1/subscriptions/")).toHaveLength(1);
+
+      context.routes.set(
+        key,
+        () =>
+          new Response(JSON.stringify({ error: "RateLimited" }), {
+            status: 429,
+            headers: { "retry-after": "120" },
+          }),
+      );
+      await runBillingJobs(context.env, now + 5 * 60 * 1000);
+      expect(get("SELECT attempts, next_attempt_at FROM addon_cancellations")).toEqual({
+        attempts: 1,
+        next_attempt_at: now + 5 * 60 * 1000 + 120 * 1000,
+      });
+
+      context.routes.set(key, answer);
+      await runBillingJobs(context.env, now + 8 * 60 * 1000);
+      expect(polar.canceled).toHaveLength(1);
+    });
+
+    it("are purged 30 days after their cancellation", async () => {
+      const { userId } = await proUser();
+      addon(userId, MACHINE, 1);
+      Object.assign(polar.subscriptions[0]!, { status: "canceled", ended_at: iso(Date.now()) });
+      await refresh(userId);
+      const now = Date.now();
+      await runBillingJobs(context.env, now);
+      await reconcileBilling(context.env, now + 29 * DAY);
+      expect(cancellations()).toHaveLength(1);
+      await reconcileBilling(context.env, now + 31 * DAY);
+      expect(cancellations()).toEqual([]);
+    });
   });
 });

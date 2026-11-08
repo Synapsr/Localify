@@ -1,11 +1,15 @@
 // JSON responses and errors for the API.
 
-/** An error the API answers with `{"error", "message"}`. */
+/**
+ * An error the API answers with `{"error", "message"}`, and `details`'s
+ * fields beside them: extra fields only, so every client keeps parsing it.
+ */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -23,7 +27,7 @@ export function noContent(): Response {
 }
 
 export function errorResponse(error: ApiError): Response {
-  return json({ error: error.code, message: error.message }, error.status);
+  return json({ ...error.details, error: error.code, message: error.message }, error.status);
 }
 
 const MAX_BODY_BYTES = 16 * 1024;

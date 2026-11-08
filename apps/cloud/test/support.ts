@@ -359,6 +359,7 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     POLAR_PRODUCT_PRO_YEARLY: "prod-yearly",
     POLAR_PRODUCT_ADDON_MACHINE: "",
     POLAR_PRODUCT_ADDON_URLS: "",
+    ADDONS: "off",
     ...overrides,
   } as unknown as Env;
   const background: Promise<unknown>[] = [];

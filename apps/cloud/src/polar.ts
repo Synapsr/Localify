@@ -1,7 +1,8 @@
 // The Polar API calls behind the paid plan (docs/public-urls.md, "Billing";
-// ADR 0024): checkouts, customer portal sessions, the subscription list, and
-// the revocation of a duplicate subscription. Never called on the public
-// path. Refunds are an operator's, in Polar's dashboard.
+// ADR 0024): checkouts, customer portal sessions, the subscription list, the
+// revocation of a duplicate subscription, the cancellation of the add-ons of
+// a lapsed plan, and the products behind `/v1/pricing`. Never called on the
+// public path. Refunds are an operator's, in Polar's dashboard.
 
 import type { CallBudget } from "./cloudflare";
 
@@ -67,9 +68,25 @@ export type CheckoutRequest = {
   returnUrl: string;
   /** The buyer's address: Polar picks the currency from it. */
   customerIpAddress: string | null;
+  /** For a unit-priced product, the quantity the page starts with. */
+  units: number | null;
 };
 
 export type Checkout = { id: string; url: string; expiresAt: number };
+
+/**
+ * One price of a product in one currency, in minor units: a fixed price's
+ * amount, or a unit-based price's rate for its first tier.
+ */
+export type PolarPrice = { currency: string; amount: number };
+
+export type PolarProduct = {
+  id: string;
+  trialInterval: string | null;
+  trialIntervalCount: number | null;
+  /** The prices that are not archived, one per currency. */
+  prices: PolarPrice[];
+};
 
 export class PolarApi {
   private readonly base: string;
@@ -105,6 +122,7 @@ export class PolarApi {
       ...(request.customerIpAddress === null
         ? {}
         : { customer_ip_address: request.customerIpAddress }),
+      ...(request.units === null ? {} : { units: request.units }),
     })) as { id?: unknown; url?: unknown; expires_at?: unknown } | null;
     const expiresAt = timeOf(result?.expires_at);
     if (typeof result?.id !== "string" || typeof result.url !== "string" || expiresAt === null) {
@@ -133,6 +151,33 @@ export class PolarApi {
       if (error instanceof PolarError && error.code === "AlreadyCanceledSubscription") return;
       throw error;
     }
+  }
+
+  /**
+   * Sets a subscription to end when its period does, without a refund. One
+   * already canceling, or no longer active, counts as done.
+   */
+  async cancelAtPeriodEnd(id: string): Promise<void> {
+    try {
+      await this.call("PATCH", `/v1/subscriptions/${encodeURIComponent(id)}`, {
+        cancel_at_period_end: true,
+      });
+    } catch (error) {
+      if (
+        error instanceof PolarError &&
+        (error.code === "AlreadyCanceledSubscription" || error.code === "InactiveSubscription")
+      )
+        return;
+      throw error;
+    }
+  }
+
+  /** The products with these ids, in one call. Needs `products:read`. */
+  async listProducts(ids: string[]): Promise<PolarProduct[]> {
+    const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    for (const id of ids) query.append("id", id);
+    const result = await this.call("GET", `/v1/products/?${query}`);
+    return listing(result, "product", toProduct).items;
   }
 
   private async call(method: string, path: string, body?: unknown): Promise<unknown> {
@@ -224,6 +269,42 @@ function toSubscription(item: Record<string, unknown>): PolarSubscription | null
     units: typeof item.units === "number" ? item.units : null,
     externalCustomerId: typeof customer?.external_id === "string" ? customer.external_id : null,
   };
+}
+
+function toProduct(item: Record<string, unknown>): PolarProduct | null {
+  if (typeof item.id !== "string" || !Array.isArray(item.prices)) return null;
+  return {
+    id: item.id,
+    trialInterval: typeof item.trial_interval === "string" ? item.trial_interval : null,
+    trialIntervalCount:
+      typeof item.trial_interval_count === "number" ? item.trial_interval_count : null,
+    prices: item.prices.flatMap((price: unknown) => {
+      const read = typeof price === "object" && price !== null ? toPrice(price as Raw) : null;
+      return read === null ? [] : [read];
+    }),
+  };
+}
+
+type Raw = Record<string, unknown>;
+
+/**
+ * A fixed price's `price_amount`, or a unit-based price's first tier: its
+ * `unit_amount` is a decimal string of cents, rounded here. Other kinds of
+ * price, and archived ones, are left out.
+ */
+function toPrice(price: Raw): PolarPrice | null {
+  if (price.is_archived === true || typeof price.price_currency !== "string") return null;
+  let amount: number | null = null;
+  if (price.amount_type === "fixed" && typeof price.price_amount === "number") {
+    amount = price.price_amount;
+  } else if (price.amount_type === "unit_based") {
+    const tiers = (price.tiers as { tiers?: unknown } | null | undefined)?.tiers;
+    const first = Array.isArray(tiers) ? (tiers[0] as { unit_amount?: unknown } | undefined) : null;
+    const rate = Number(first?.unit_amount);
+    if (typeof first?.unit_amount === "string" && Number.isFinite(rate)) amount = Math.round(rate);
+  }
+  if (amount === null || amount < 0) return null;
+  return { currency: price.price_currency.toUpperCase(), amount };
 }
 
 /** An RFC 3339 time in Unix milliseconds; null when missing or unreadable. */

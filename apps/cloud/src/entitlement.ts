@@ -229,6 +229,15 @@ export function proPlan(row: ProFields, now: number): ProPlan {
   }
 }
 
+/**
+ * Whether a Pro plan has stopped for good: not entitled, and not `past_due`
+ * either, since Polar may still recover the card after the grace. Its
+ * add-ons are then canceled at the end of their period.
+ */
+export function proLapsed(row: ProFields, now: number): boolean {
+  return !proPlan(row, now).entitled && row.pro_status !== "past_due";
+}
+
 /** Whether `end` is still ahead; a missing end bounds nothing. */
 function before(end: number | null, now: number): boolean {
   return end === null || end > now;
