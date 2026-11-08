@@ -53,23 +53,22 @@ export const HowItWorks = async () => {
                 {step.title}
               </h3>
               <p className="text-[14.5px] leading-[1.55] text-pretty text-muted-foreground">{step.body}</p>
-              {index === 0 ? (
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1">
-                  <InstallPromptButton size="default" source="how_it_works" variant="outline" />
-                  <Link
-                    className="text-[13.5px] text-muted-foreground underline decoration-border decoration-[1.5px] underline-offset-4 hover:text-foreground hover:decoration-foreground"
-                    data-umami-event="download_clicked"
-                    data-umami-event-source="how_it_works"
-                    href={MACOS_APP_DOWNLOAD_URL}
-                  >
-                    {t("dashboardLink")}
-                  </Link>
-                </div>
-              ) : null}
             </div>
           </FadeIn>
         ))}
       </div>
+
+      <FadeIn className="mt-10 flex flex-wrap items-center justify-center gap-x-5 gap-y-3" delay={0.2}>
+        <InstallPromptButton size="default" source="how_it_works" />
+        <Link
+          className="text-[14px] text-muted-foreground underline decoration-border decoration-[1.5px] underline-offset-4 hover:text-foreground hover:decoration-foreground"
+          data-umami-event="download_clicked"
+          data-umami-event-source="how_it_works"
+          href={MACOS_APP_DOWNLOAD_URL}
+        >
+          {t("dashboardLink")}
+        </Link>
+      </FadeIn>
 
       <Diagram
         labels={{

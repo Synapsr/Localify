@@ -22,10 +22,20 @@ import { cn } from "@/lib/utils";
 
 /* --- App window (app-layout.tsx): the macOS frame around a screen --- */
 
-export const AppFrame = ({ children, className }: { children: ReactNode; className?: string }) => (
+export const AppFrame = ({
+  children,
+  className,
+  flat = false,
+}: {
+  children: ReactNode;
+  className?: string;
+  /** No drop shadow, for a frame on a plain background. */
+  flat?: boolean;
+}) => (
   <div
     className={cn(
-      "w-full overflow-hidden rounded-xl bg-neutral-50 p-1.5 pt-0 text-left shadow-[0_1px_0_rgba(13,13,13,0.03),0_40px_80px_-30px_rgba(13,13,13,0.45)]",
+      "w-full overflow-hidden rounded-xl bg-neutral-50 p-1.5 pt-0 text-left",
+      flat ? "ring-1 ring-border/70" : "shadow-[0_1px_0_rgba(13,13,13,0.03),0_40px_80px_-30px_rgba(13,13,13,0.45)]",
       className,
     )}
   >
@@ -374,7 +384,7 @@ export const AgentsSettingsCard = ({ state }: { state: AgentsState }) => {
 
 /* Toast shown after connecting (sonner style in the app). */
 export const ConnectedToast = () => (
-  <div className="flex w-full max-w-xs items-start gap-2.5 rounded-xl border border-border bg-background px-3.5 py-3 text-left shadow-lg">
+  <div className="flex w-full max-w-xs items-start gap-2.5 rounded-xl border border-border bg-background px-3.5 py-3 text-left shadow-[0_6px_16px_-10px_rgba(13,13,13,0.2)]">
     <CheckIcon className="mt-0.5 size-4 shrink-0 text-emerald-600" />
     <div className="min-w-0">
       <p className="text-[13px] font-medium text-foreground">Agents connected to Localify</p>
