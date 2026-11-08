@@ -3,6 +3,40 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.4.0 - 2026-11-08
+
+### Improved
+
+- **Each service tab runs the service in its own terminal.** A service you start from
+  the app now gets a terminal of its own, with your shell's `PATH`, `nvm` and other
+  setup, and `localify logs` shows only what the service printed. When it ends, its tab
+  shows the exit code with `Restart` and `Open a terminal here`, and Stop ends the
+  service and everything it started instead of pressing Ctrl+C in the tab. To run a
+  command after a service stops, open a terminal; services already running from an
+  earlier version keep running and show "Started before this update".
+- **Starting a service again stops what it left behind, or asks first.** When a
+  service's `localify dev` died and left processes behind, starting it again now stops
+  them and starts, instead of asking you to run `localify stop`. When the service really
+  is still running, `localify dev` asks in your terminal whether to stop it and start it
+  again; pass `--replace` to do that without asking. Agents and scripts still leave a
+  running service alone unless they ask to replace it.
+- **Background services stop cleanly and keep their own output.** A service started
+  with `localify dev --detach` now stops with everything it started, even processes that
+  ignore Ctrl+C, and a new start waits until the previous one is fully gone instead of
+  fighting it for its port. `localify logs` shows only the service's own output, keeps
+  its last 4 to 8 MiB, and says when output was cut off because Localify itself was
+  stopped. `localify dev` now exits with the service's own exit code, and with 130 after
+  Ctrl+C, so `localify dev web && …` stops where it should. Ctrl+C also stops a service
+  that ignores it, within 20 seconds, and a second Ctrl+C stops it at once.
+
+### Fixed
+
+- Next.js apps with next-intl and `localePrefix: "as-needed"` open their default-locale
+  pages again, instead of failing with a 500 and `Failed to proxy ... EPROTO` because of
+  a Next.js bug ([vercel/next.js#94745](https://github.com/vercel/next.js/issues/94745)).
+  Until Next.js fixes it, Localify starts these apps on every network interface, so other
+  devices on your network can reach their dev port.
+
 ## 1.3.4 - 2026-11-07
 
 ### Improved
