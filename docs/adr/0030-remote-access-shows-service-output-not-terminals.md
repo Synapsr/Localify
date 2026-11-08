@@ -5,12 +5,14 @@ Version 1 of remote access shows a service's output, read-only, and never a term
 Output must be the service's own, for one run, and its provenance has to come from the channel. Today an app-owned service tab is an interactive shell. The app types the command into it and copies every byte of that shell into the service's output file, prompt and later commands included. Attributing bytes after the fact does not fix that. Markers around a run, or watching which process holds the terminal's foreground, cannot separate service bytes from shell bytes once a service is suspended, a command runs and the service resumes before the reader catches up. So each run gets a dedicated PTY, and the whole-shell file is never exported. This amends ADR 0012: a service tab is now the run, not a shell.
 
 - The app spawns `localify dev` directly as the only child of a new PTY, with no interactive shell and nothing typed into an existing one. Every launch, a restart included, gets a fresh PTY.
+- Without a shell, a service would lose what shell init sets up, such as `PATH`, `nvm` or `asdf`. So the app resolves the user's interactive login-shell environment outside any captured PTY, as editors do: once per app session, with a 10-second timeout and a `Reload shell environment` action. Each run starts with it. When resolution fails, runs start with the app's own environment and the app says so.
 - The service tab shows that PTY, interactive and resizable, so the service's colors, prompts, keys and window size behave as before.
-- When the run exits, the tab shows the exit code and offers `Restart` and `Open a terminal here`, which opens a separate, ordinary shell tab.
+- A run ends when every process of its session is gone and its output has reached its end, not when `localify dev` exits. The app finishes it: it kills what remains of the session, drains the output, and only then shows the exit code, with `Restart` and `Open a terminal here`, which opens a separate, ordinary shell tab. A new launch refuses while a previous run still has live processes.
+- Ctrl-Z is disabled in a service tab, since no shell could resume the service.
 - The run's stream is every byte of that PTY and nothing else. Shell tabs are never written to a stream and never exported.
 - A background run's stream is its stdout and stderr, read through pipes.
 - `localify logs` reads the same stream, so agents stop reading shell prompts too.
-- Until a target's app runs services this way, its app runs report their output as unavailable, never the old file.
+- A service already running from a shell tab when the app updates keeps running as a legacy run: no remote output, never the old file, and no remote control until it is relaunched.
 
 The change is visible to everyone who uses the app, remote access or not. Someone who used to type a command into a service tab after the service stopped now opens a shell tab for it. Keystrokes typed into a running service tab are echoed by the terminal into its output, where `localify logs` and paired machines see them. That is accepted and stated: while sharing is on, the tab's footer says that what is typed there appears in the service's output. A nested PTY inside `localify dev` would have kept the old tab, but it would make `localify dev` a terminal multiplexer forwarding resizes, signals and raw input.
 
