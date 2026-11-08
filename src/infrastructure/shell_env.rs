@@ -112,13 +112,9 @@ pub fn resolve_within(localify: &Path, shell: &Path, deadline: Duration) -> Resu
             Ok(())
         });
     }
-    let mut child = {
-        // No PTY is opened, short of close-on-exec, while it forks.
-        let _spawning = crate::infrastructure::process::spawning();
-        command
-            .spawn()
-            .with_context(|| format!("Failed to start {}", program.display()))?
-    };
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("Failed to start {}", program.display()))?;
     let Some(stdout) = child.stdout.take() else {
         kill_group(&mut child);
         bail!("Failed to read the output of {}", program.display());

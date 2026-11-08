@@ -10,7 +10,7 @@ use std::process::{Child, Command};
 
 use anyhow::{Context, Result, bail};
 
-use crate::infrastructure::{process, test_pause};
+use crate::infrastructure::test_pause;
 
 /// The signals a child gets back at their default action, whatever this
 /// process does with them: the app ignores or handles some.
@@ -31,8 +31,9 @@ const RESET_SIGNALS: [libc::c_int; 15] = [
     libc::SIGWINCH,
     libc::SIGURG,
 ];
-/// The most descriptors a child closes, whatever its limit says.
-const MAX_CLOSED_FD: libc::c_int = 65_536;
+/// The most descriptors a child marks close-on-exec one by one, whatever its
+/// limit says.
+const MAX_MARKED_FD: libc::c_int = 65_536;
 
 /// What a terminal's `c_cc` entry holds to turn its character off.
 #[cfg(target_os = "macos")]
@@ -117,13 +118,16 @@ pub fn spawn(
         .stderr(slave);
     let highest = descriptor_limit();
     // SAFETY: the closure runs in the child between fork and exec. It calls
-    // only setsid, ioctl, signal, sigemptyset, sigprocmask and close, all
-    // async-signal-safe, and touches no memory of the parent but `highest`, a
-    // copied integer. Standard input is the PTY by then, so TIOCSCTTY makes it
-    // the new session's controlling terminal. Every descriptor above standard
-    // error goes, the slave's own copy and any another thread opened without
-    // close-on-exec included, and the child starts with every signal at its
-    // default action and none blocked.
+    // only setsid, ioctl, signal, sigemptyset, sigprocmask, fcntl and, on
+    // Linux, close_range, all async-signal-safe, allocates nothing, and
+    // touches no memory of the parent but `highest`, a copied integer.
+    // Standard input is the PTY by then, so TIOCSCTTY makes it the new
+    // session's controlling terminal. Every descriptor above standard error
+    // is marked close-on-exec rather than closed: it goes at exec, as one
+    // another part of the process opened without the flag would, while the
+    // pipe that reports a failed exec to the parent keeps working until
+    // then. The child starts with every signal at its default action and
+    // none blocked.
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
@@ -135,57 +139,65 @@ pub fn spawn(
             let mut empty: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut empty);
             libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
-            for fd in 3..highest {
-                libc::close(fd);
-            }
+            mark_close_on_exec_above_stderr(highest);
             Ok(())
         });
     }
-    let child = {
-        // No PTY is opened, short of close-on-exec, while it forks.
-        let _spawning = process::spawning();
-        command
-            .spawn()
-            .context("Failed to start the terminal's process")?
-    };
+    let child = command
+        .spawn()
+        .context("Failed to start the terminal's process")?;
     // `command` holds the parent's copies of the slave: dropping it here lets
     // the master read EOF once the child's side closes.
     drop(command);
     Ok((PtyMaster { file: master }, child))
 }
 
-/// A new PTY's master and slave, both close-on-exec from the start, so no
-/// child another thread starts meanwhile holds them.
-fn open(size: WindowSize) -> Result<(File, File)> {
-    let (master, slave) = allocate()?;
-    let master = PtyMaster { file: master };
-    master.resize(size)?;
-    Ok((master.file, slave))
+/// Marks every descriptor above standard error close-on-exec, in a child
+/// between fork and exec: at once where the kernel can, else one by one up
+/// to `highest`.
+///
+/// # Safety
+///
+/// Only async-signal-safe calls, for a forked child.
+unsafe fn mark_close_on_exec_above_stderr(highest: libc::c_int) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: close_range only changes flags of this process's descriptors.
+        let marked = unsafe {
+            libc::close_range(
+                3,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC as libc::c_int,
+            )
+        };
+        if marked == 0 {
+            return;
+        }
+    }
+    for fd in 3..highest {
+        // SAFETY: F_SETFD on a descriptor changes only its flags; a closed
+        // one answers EBADF.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
 }
 
-/// Linux opens both ends close-on-exec at once.
-#[cfg(target_os = "linux")]
-fn allocate() -> Result<(File, File)> {
-    // SAFETY: posix_openpt takes flags and returns a new descriptor or -1.
-    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
-    if master == -1 {
-        return Err(io::Error::last_os_error()).context("Failed to open a terminal");
-    }
-    // SAFETY: the descriptor was just opened and nothing else owns it.
-    let master = unsafe { File::from_raw_fd(master) };
-    let mut name = [0 as libc::c_char; 128];
-    // SAFETY: the descriptor is the open master; ptsname_r writes at most
-    // `name.len()` bytes, NUL included, into the buffer.
-    let ready = unsafe {
-        libc::grantpt(master.as_raw_fd()) == 0
-            && libc::unlockpt(master.as_raw_fd()) == 0
-            && libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) == 0
+/// A new PTY's master and slave, both close-on-exec from their creation, so
+/// no child any other thread starts meanwhile can hold them, whether or not
+/// it cooperates.
+fn open(size: WindowSize) -> Result<(File, File)> {
+    let master = open_master()?;
+    // SAFETY: the descriptor is the open master.
+    let unlocked = unsafe {
+        libc::grantpt(master.as_raw_fd()) == 0 && libc::unlockpt(master.as_raw_fd()) == 0
     };
-    if !ready {
+    if !unlocked {
         return Err(io::Error::last_os_error()).context("Failed to open a terminal");
     }
+    let name = slave_name(&master)?;
     test_pause::pause_at("pty-allocated");
-    // SAFETY: `name` is the NUL-terminated path ptsname_r wrote.
+    // SAFETY: `name` is a NUL-terminated path.
     let slave = unsafe {
         libc::open(
             name.as_ptr(),
@@ -196,59 +208,75 @@ fn allocate() -> Result<(File, File)> {
         return Err(io::Error::last_os_error()).context("Failed to open a terminal");
     }
     // SAFETY: the descriptor was just opened and nothing else owns it.
-    Ok((master, unsafe { File::from_raw_fd(slave) }))
+    let slave = unsafe { File::from_raw_fd(slave) };
+    let master = PtyMaster { file: master };
+    master.resize(size)?;
+    Ok((master.file, slave))
 }
 
-/// macOS has no atomic way: the descriptors get close-on-exec while no
-/// terminal or shell resolver can spawn.
-#[cfg(target_os = "macos")]
-fn allocate() -> Result<(File, File)> {
-    let _allocating = process::allocating();
-    let (mut master, mut slave): (RawFd, RawFd) = (0, 0);
-    // SAFETY: openpty writes two descriptors into the integers. A null name,
-    // termios and window size mean the defaults.
-    let opened = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+/// The master, opened close-on-exec.
+fn open_master() -> Result<File> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: posix_openpt takes flags and returns a new descriptor or -1.
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    // macOS's posix_openpt takes no O_CLOEXEC: the device itself does.
+    #[cfg(target_os = "macos")]
+    // SAFETY: a NUL-terminated path and flags; returns a descriptor or -1.
+    let master = unsafe {
+        libc::open(
+            c"/dev/ptmx".as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
         )
     };
-    if opened != 0 {
+    if master == -1 {
         return Err(io::Error::last_os_error()).context("Failed to open a terminal");
     }
-    // SAFETY: both descriptors were just opened and nothing else owns them.
-    let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
-    test_pause::pause_at("pty-allocated");
-    close_on_exec(&master)?;
-    close_on_exec(&slave)?;
-    Ok((master, slave))
+    // SAFETY: the descriptor was just opened and nothing else owns it.
+    Ok(unsafe { File::from_raw_fd(master) })
 }
 
-/// The highest descriptor a child closes, from this process's limit.
+/// The slave's path, from the master.
+#[cfg(target_os = "linux")]
+fn slave_name(master: &File) -> Result<std::ffi::CString> {
+    let mut name = [0 as libc::c_char; 128];
+    // SAFETY: ptsname_r writes at most `name.len()` bytes, NUL included.
+    if unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) } != 0 {
+        return Err(io::Error::last_os_error()).context("Failed to open a terminal");
+    }
+    // SAFETY: ptsname_r wrote a NUL-terminated string into the buffer.
+    Ok(unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_owned())
+}
+
+/// The slave's path, from the master. macOS has ptsname_r only since 10.13.4
+/// and the app supports 10.13: ptsname's static buffer is read under a lock.
+#[cfg(target_os = "macos")]
+fn slave_name(master: &File) -> Result<std::ffi::CString> {
+    static PTSNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _reading = PTSNAME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: the descriptor is the open master; ptsname returns a pointer
+    // to a static buffer, or null.
+    let name = unsafe { libc::ptsname(master.as_raw_fd()) };
+    if name.is_null() {
+        return Err(io::Error::last_os_error()).context("Failed to open a terminal");
+    }
+    // SAFETY: non-null, a NUL-terminated string, copied while the lock keeps
+    // any other ptsname call of this process from overwriting it.
+    Ok(unsafe { std::ffi::CStr::from_ptr(name) }.to_owned())
+}
+
+/// The highest descriptor a child marks, from this process's limit.
 fn descriptor_limit() -> libc::c_int {
     // SAFETY: rlimit is plain data; getrlimit fills it.
     let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: the pointer is valid for the call.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return MAX_CLOSED_FD;
+        return MAX_MARKED_FD;
     }
     libc::c_int::try_from(limit.rlim_cur)
-        .unwrap_or(MAX_CLOSED_FD)
-        .clamp(256, MAX_CLOSED_FD)
-}
-
-/// Keeps a descriptor out of every other child the process starts.
-#[cfg(target_os = "macos")]
-fn close_on_exec(file: &File) -> Result<()> {
-    // SAFETY: F_SETFD on a descriptor this process owns changes only its flags.
-    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-    if result == -1 {
-        return Err(io::Error::last_os_error()).context("Failed to configure the terminal");
-    }
-    Ok(())
+        .unwrap_or(MAX_MARKED_FD)
+        .clamp(256, MAX_MARKED_FD)
 }
 
 fn termios(fd: RawFd) -> Result<libc::termios> {
@@ -342,6 +370,58 @@ mod tests {
         }
         child.wait().unwrap();
         assert!(String::from_utf8_lossy(&output).contains("30 100"));
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_executed_is_a_spawn_error() {
+        // The pipe that reports a failed exec survives the child's setup.
+        let spawned = spawn(
+            Command::new("/nonexistent/shell"),
+            WindowSize::new(80, 24).unwrap(),
+            true,
+        );
+
+        assert!(spawned.is_err(), "a failed exec read as a spawned terminal");
+    }
+
+    #[test]
+    fn a_child_holds_no_descriptor_above_standard_error_that_was_not_close_on_exec() {
+        // A descriptor this process opened without close-on-exec, as a
+        // library or plugin might.
+        let (reader, writer) = {
+            let mut fds = [0; 2];
+            // SAFETY: pipe writes two new descriptors into the array.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            // SAFETY: both were just opened and nothing else owns them.
+            unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+        };
+        let leaked = writer.as_raw_fd();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!("if [ -e /dev/fd/{leaked} ]; then echo held; else echo none; fi"),
+        ]);
+
+        let (master, mut child) = spawn(command, WindowSize::new(80, 24).unwrap(), false).unwrap();
+
+        let mut reader_of_terminal = master.try_clone().unwrap();
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 256];
+        while !String::from_utf8_lossy(&output).contains("held")
+            && !String::from_utf8_lossy(&output).contains("none")
+        {
+            match reader_of_terminal.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+            }
+        }
+        child.wait().unwrap();
+        drop((reader, writer));
+        assert!(
+            String::from_utf8_lossy(&output).contains("none"),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
     }
 
     #[test]

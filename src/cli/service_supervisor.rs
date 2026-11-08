@@ -145,7 +145,7 @@ impl Supervision {
 /// `localify dev`, with the shell's code for that signal.
 fn end_resolution(code: i32) -> ! {
     report("\nStopped while the launch profile resolved.\n");
-    helpers::end_all(STOP_GRACE, KILL_WAIT);
+    helpers::helpers().end_all(STOP_GRACE, KILL_WAIT);
     std::process::exit(code);
 }
 

@@ -171,14 +171,10 @@ fn run_cli(project_root: &Path, args: &[&str], profile: Option<&str>) -> Result<
     if let Some(profile) = profile {
         command.args(["--profile", profile]);
     }
-    let spawned = command.spawn();
-    // Known from its spawn: a stop while the profile resolves ends it too.
-    let _helper = spawned
-        .as_ref()
-        .ok()
-        .map(process::helpers::Helper::register);
-    let mut child = match spawned {
-        Ok(child) => child,
+    // Known from its spawn: a stop while the profile resolves ends it too,
+    // and once a stop came, it does not start.
+    let (mut child, _helper) = match process::helpers::helpers().spawn(&mut command) {
+        Ok(spawned) => spawned,
         Err(error) if error.kind() == ErrorKind::NotFound => bail!(
             "the Infisical CLI ('{INFISICAL_CLI}') is not installed or not on PATH; install it with: brew install infisical/get-cli/infisical, then sign in with: {INFISICAL_CLI} login"
         ),

@@ -94,7 +94,8 @@ fn list_json<T: serde::de::DeserializeOwned>(args: &[&str]) -> Result<T> {
 
 fn run_pass_cli(args: &[&str]) -> Result<Output> {
     // Known while it runs: a stop while the profile resolves ends it too.
-    match process::helpers::output(Command::new(PASS_CLI).args(args).stdin(Stdio::null())) {
+    match process::helpers::helpers().output(Command::new(PASS_CLI).args(args).stdin(Stdio::null()))
+    {
         Ok(output) => Ok(output),
         Err(error) if error.kind() == ErrorKind::NotFound => bail!(
             "Proton Pass CLI ('{PASS_CLI}') is not installed or not on PATH.\n\
@@ -135,7 +136,8 @@ fn interpret(output: Output) -> Result<Option<String>> {
 }
 
 fn session_is_active() -> bool {
-    process::helpers::output(Command::new(PASS_CLI).arg("info").stdin(Stdio::null()))
+    process::helpers::helpers()
+        .output(Command::new(PASS_CLI).arg("info").stdin(Stdio::null()))
         .is_ok_and(|output| output.status.success())
 }
 

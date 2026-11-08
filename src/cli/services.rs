@@ -312,8 +312,11 @@ pub fn run(
         &project_root,
         &workdir,
         &effective_current_dir()?,
-    )?;
+    );
+    // Also when it failed: a stop that refused its next helper is still
+    // ending the others, and `localify dev` exits only once it has.
     supervision.resolved();
+    let profile = profile?;
 
     let endpoint = service_endpoint(&service, ports, ctx)?;
     let url = service_url(&service, endpoint);

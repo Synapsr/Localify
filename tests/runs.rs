@@ -1032,6 +1032,32 @@ fn a_durable_child_forked_after_the_last_proof_keeps_the_run_open() {
 }
 
 #[test]
+fn an_unconfirmed_worker_that_leaves_the_session_no_longer_keeps_the_run_open() {
+    let dir = run_folder();
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), true)]);
+    *table.fork_on_kill.borrow_mut() = Some((4243, (fake_process(4246, 4242, FAKE_NOW), true)));
+    let first = finisher(&table)
+        .finish(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+    assert_eq!(first, Finish::Unconfirmed(vec![4246]));
+
+    // The worker daemonizes: the same process, in a session of its own.
+    for (process, _) in table.processes.borrow_mut().iter_mut() {
+        if process.pid == 4246 {
+            process.sid = Some(4246);
+            process.pgid = 4246;
+        }
+    }
+
+    // The next launch's finisher finalizes, and so admits it.
+    let next = finisher(&table)
+        .finish(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+    assert_eq!(next, Finish::Finalized(EndReason::Interrupted));
+    assert!(!table.signals.borrow().iter().any(|(pid, _)| *pid == 4246));
+}
+
+#[test]
 fn a_process_in_the_run_s_group_but_another_session_is_not_a_member() {
     let dir = run_folder();
     let stranger = ProcessInfo {

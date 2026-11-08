@@ -1194,9 +1194,8 @@ fn fd_race(config: &str, app: &Path) {
         pause.join("pty-allocated.reached").exists().then_some(())
     })
     .expect("the PTY never reached its barrier");
-    // A spawn while the first PTY is allocated, as the shell resolver spawns.
+    // A spawn that cooperates with nothing, while the first PTY is allocated.
     let resolver = thread::spawn(|| {
-        let _spawning = process::spawning();
         Command::new("/bin/sh")
             .args(["-c", TTY_CHECK])
             .stdin(Stdio::null())

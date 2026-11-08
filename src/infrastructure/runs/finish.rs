@@ -508,18 +508,18 @@ impl Finisher<'_> {
             }
         } else {
             // What an earlier finisher could not confirm keeps the run open
-            // while it lives, though no scan proves the session now.
+            // while it lives as itself and still carries the session, though
+            // no scan proves the session now. One that left it, by setsid or
+            // by daemonizing, is the run's no more.
             let alive: Vec<u32> = saved
                 .unconfirmed
                 .iter()
-                .map(|target| Identity {
-                    pid: target.pid,
-                    start: target.start,
+                .filter(|target| {
+                    self.table.process(target.pid).is_some_and(|process| {
+                        process.start == target.start && session.contains(&process)
+                    })
                 })
-                .filter(|identity| {
-                    Identity::current_in(self.table, identity.pid) == Some(*identity)
-                })
-                .map(|identity| identity.pid)
+                .map(|target| target.pid)
                 .collect();
             if !alive.is_empty() {
                 return Ok(Finish::Unconfirmed(alive));
