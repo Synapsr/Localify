@@ -639,10 +639,13 @@ fn a_killed_executor_s_run_is_ended_and_finalized_complete_by_the_app() {
     sandbox.wait_for_proof(executor);
 
     assert!(process::send_signal(executor, Signal::Kill));
+    // A launch meanwhile waits for the run to end, the app's reading of the
+    // PTY included, then is admitted.
     let between = sandbox.launch_from_terminal();
     assert!(
-        !between.status.success(),
-        "a launch was admitted before the run ended"
+        between.status.success(),
+        "{}",
+        String::from_utf8_lossy(&between.stderr)
     );
 
     let (end, finalized) = tab.wait_end(Duration::from_secs(60));
@@ -664,11 +667,14 @@ fn a_killed_executor_s_run_is_ended_and_finalized_complete_by_the_app() {
 
 #[test]
 fn a_tab_whose_launch_is_refused_registers_nothing_and_leaves_no_folder() {
-    let sandbox = Sandbox::new("echo first; sleep 300");
+    let sandbox = Sandbox::new("printf 'first-%s\\n' up; sleep 300");
     let first = sandbox.open_tab();
-    first.wait_for("first");
+    first.wait_for("first-up");
 
+    // In a terminal, `localify dev` asks before replacing a running service.
     let second = sandbox.open_tab();
+    second.wait_for("Stop it and start again?");
+    second.type_keys("n\r");
     let (end, _) = second.wait_end(Duration::from_secs(30));
 
     assert!(!end.registered);
@@ -756,11 +762,12 @@ fn the_daemon_finishes_a_run_pty_whose_app_and_executor_both_died() {
 
     assert_eq!(finished.len(), 1, "{finished:?}");
     assert_eq!(finished[0].1, Finish::Finalized(EndReason::Interrupted));
-    assert!(
-        session_alive(executor).is_empty(),
-        "{:?}",
-        session_alive(executor)
-    );
+    // A `sleep 1` the loop started after the last proof is not the run's to
+    // signal: it ends by itself.
+    let emptied = wait_until(Duration::from_secs(3), || {
+        session_alive(executor).is_empty().then_some(())
+    });
+    assert!(emptied.is_some(), "{:?}", session_alive(executor));
     let after = sandbox.launch_from_terminal();
     assert!(
         after.status.success(),

@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -120,14 +120,6 @@ pub struct FinalizeLock {
     _file: File,
 }
 
-pub enum TryFinalizeLock {
-    Acquired(FinalizeLock),
-    /// Another finisher holds it.
-    Busy,
-    /// The run's folder is gone: its service moved on or was forgotten.
-    Gone,
-}
-
 impl FinalizeLock {
     /// Waits for the lock. `None` when the run's folder is gone, before or
     /// while waiting: nothing is left to finalize, and nothing is recreated.
@@ -137,19 +129,31 @@ impl FinalizeLock {
         };
         file.lock()
             .with_context(|| format!("Failed to lock '{}'", dir.join(LOCK_FILE).display()))?;
-        Ok(dir.is_dir().then_some(Self { _file: file }))
+        Ok(run_dir_exists(dir)?.then_some(Self { _file: file }))
     }
 
-    pub fn try_acquire(dir: &Path) -> Result<TryFinalizeLock> {
+    /// `acquire`, giving up once `limit` passed while another holds it.
+    pub fn acquire_within(dir: &Path, limit: Duration) -> Result<Acquired> {
         let Some(file) = open_lock_file(dir)? else {
-            return Ok(TryFinalizeLock::Gone);
+            return Ok(Acquired::Gone);
         };
-        match file.try_lock() {
-            Ok(()) if dir.is_dir() => Ok(TryFinalizeLock::Acquired(Self { _file: file })),
-            Ok(()) => Ok(TryFinalizeLock::Gone),
-            Err(TryLockError::WouldBlock) => Ok(TryFinalizeLock::Busy),
-            Err(TryLockError::Error(error)) => Err(error)
-                .with_context(|| format!("Failed to lock '{}'", dir.join(LOCK_FILE).display())),
+        let deadline = Instant::now() + limit;
+        loop {
+            match file.try_lock() {
+                Ok(()) if run_dir_exists(dir)? => {
+                    return Ok(Acquired::Locked(Self { _file: file }));
+                }
+                Ok(()) => return Ok(Acquired::Gone),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(TryLockError::WouldBlock) => return Ok(Acquired::Busy),
+                Err(TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to lock '{}'", dir.join(LOCK_FILE).display())
+                    });
+                }
+            }
         }
     }
 }
@@ -204,8 +208,17 @@ pub fn reader_alive(dir: &Path) -> Result<bool> {
     }
 }
 
+/// What [`FinalizeLock::acquire_within`] got.
+pub enum Acquired {
+    Locked(FinalizeLock),
+    /// The run's folder is gone: nothing is left to finalize.
+    Gone,
+    /// Another finisher still held it when the wait ran out.
+    Busy,
+}
+
 fn open_lock_file(dir: &Path) -> Result<Option<File>> {
-    if !dir.is_dir() {
+    if !run_dir_exists(dir)? {
         return Ok(None);
     }
     match OpenOptions::new()
@@ -214,9 +227,30 @@ fn open_lock_file(dir: &Path) -> Result<Option<File>> {
         .open(dir.join(LOCK_FILE))
     {
         Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        // A folder deleted while it opens, as the next run's registration
+        // does, fails with ENOENT, or EINVAL on macOS: gone only once a look
+        // at the folder confirms it.
+        Err(error)
+            if (error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::EINVAL))
+                && !run_dir_exists(dir)? =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error)
             .with_context(|| format!("Failed to open '{}'", dir.join(LOCK_FILE).display())),
+    }
+}
+
+/// Whether the run's folder is there. `false` only when it is confirmed
+/// gone: a failure to look (a permission, an I/O error) is an error, never
+/// a run that ended.
+fn run_dir_exists(dir: &Path) -> Result<bool> {
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => bail!("'{}' is not a folder", dir.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Failed to inspect '{}'", dir.display())),
     }
 }
 
@@ -875,17 +909,21 @@ mod tests {
 
         let held = FinalizeLock::acquire(&run).unwrap().unwrap();
         assert!(matches!(
-            FinalizeLock::try_acquire(&run).unwrap(),
-            TryFinalizeLock::Busy
+            FinalizeLock::acquire_within(&run, Duration::from_millis(100)).unwrap(),
+            Acquired::Busy
         ));
         drop(held);
         assert!(matches!(
-            FinalizeLock::try_acquire(&run).unwrap(),
-            TryFinalizeLock::Acquired(_)
+            FinalizeLock::acquire_within(&run, Duration::ZERO).unwrap(),
+            Acquired::Locked(_)
         ));
 
         fs::remove_dir_all(&run).unwrap();
         assert!(FinalizeLock::acquire(&run).unwrap().is_none());
+        assert!(matches!(
+            FinalizeLock::acquire_within(&run, Duration::ZERO).unwrap(),
+            Acquired::Gone
+        ));
         assert!(!run.exists());
     }
 

@@ -34,4 +34,5 @@ pub mod service_sockets;
 pub mod shell_env;
 pub mod system_service;
 pub mod target_probe;
+pub mod test_pause;
 pub mod tracing;

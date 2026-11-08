@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::output::{self, EndReason, FinalizeLock, RunEnd, TryFinalizeLock};
+use super::output::{self, Acquired, EndReason, FinalizeLock, RunEnd};
 use crate::infrastructure::process::{
     Identity, NativeProcesses, ProcessInfo, ProcessTable, Signal, track_tree,
 };
@@ -36,6 +36,12 @@ use crate::infrastructure::process::{
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
 /// How long a finisher keeps sending SIGKILL before it gives up.
 pub const KILL_WAIT: Duration = Duration::from_secs(5);
+/// How long a launcher, which holds its service's lock, waits for another
+/// finisher of the previous run. A finisher signals for at most STOP_GRACE
+/// plus KILL_WAIT under the run's lock; twice that leaves room for its scans.
+/// A finisher still holding it after that is stuck or suspended.
+pub const CLEANUP_WAIT: Duration =
+    Duration::from_secs(2 * (STOP_GRACE.as_secs() + KILL_WAIT.as_secs()));
 /// How many scans a finisher tries before it gives up proving a session whose
 /// witnesses keep vanishing.
 const PROOF_ATTEMPTS: usize = 5;
@@ -173,23 +179,12 @@ pub enum Finish {
     Finalized(EndReason),
     /// The executor still runs, so the run is not over.
     ExecutorAlive,
-    /// Processes proven to belong to the run are alive, and this finisher does
-    /// not signal them.
-    LiveMembers(Vec<u32>),
-    /// Another finisher holds the run's lock, or the run is a run PTY whose
+    /// Another finisher still held the run's lock when the wait ran out
+    /// ([`Finisher::finish_within`] only), or the run is a run PTY whose
     /// reader, the app, still reads it and finalizes it itself.
     Busy,
     /// The run's folder is gone: nothing is left to finalize.
     Gone,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FinishMode {
-    /// The next launcher: finalizes only a run with nothing left alive, and
-    /// refuses rather than wait for another finisher.
-    Admit,
-    /// The daemon and `stop`: signals proven members, and waits for the lock.
-    End,
 }
 
 /// What a finisher proved, kept in the run's folder for the next one.
@@ -346,7 +341,9 @@ impl Finisher<'static> {
 
 impl Finisher<'_> {
     /// Finishes a run whose executor is gone, holding the run's finalization
-    /// lock throughout, from what an earlier finisher proved if one did.
+    /// lock throughout, from what an earlier finisher proved if one did: its
+    /// proven processes are ended, then its stream is finalized. The daemon,
+    /// `stop` and the next launcher all finish a run this way.
     /// `captured_elsewhere` says another process read the run's output: the
     /// executor through pipes, or the app from a run PTY. Once that reader is
     /// gone, what it had not read yet is lost, so the stream ends
@@ -357,19 +354,50 @@ impl Finisher<'_> {
         dir: &Path,
         session: &RunSession,
         captured_elsewhere: bool,
-        mode: FinishMode,
     ) -> Result<Finish> {
-        let _lock = match mode {
-            FinishMode::Admit => match FinalizeLock::try_acquire(dir)? {
-                TryFinalizeLock::Acquired(lock) => lock,
-                TryFinalizeLock::Busy => return Ok(Finish::Busy),
-                TryFinalizeLock::Gone => return Ok(Finish::Gone),
-            },
-            FinishMode::End => match FinalizeLock::acquire(dir)? {
-                Some(lock) => lock,
-                None => return Ok(Finish::Gone),
-            },
-        };
+        match FinalizeLock::acquire(dir)? {
+            Some(lock) => self.finish_locked(&lock, dir, session, captured_elsewhere),
+            None => Ok(Finish::Gone),
+        }
+    }
+
+    /// `finish`, for a launcher, which holds its service's lock meanwhile: it
+    /// waits at most `limit` for another finisher of the run, the app reading
+    /// a run PTY to its end included, so a stuck or suspended one never holds
+    /// the service forever.
+    pub fn finish_within(
+        &self,
+        dir: &Path,
+        session: &RunSession,
+        captured_elsewhere: bool,
+        limit: Duration,
+    ) -> Result<Finish> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let finish = match FinalizeLock::acquire_within(dir, left)? {
+                Acquired::Locked(lock) => {
+                    self.finish_locked(&lock, dir, session, captured_elsewhere)?
+                }
+                Acquired::Gone => return Ok(Finish::Gone),
+                Acquired::Busy => return Ok(Finish::Busy),
+            };
+            // A run PTY's reader finalizes it once it has read it all: the
+            // lock is released meanwhile, so it can.
+            if finish != Finish::Busy || Instant::now() >= deadline {
+                return Ok(finish);
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn finish_locked(
+        &self,
+        _lock: &FinalizeLock,
+        dir: &Path,
+        session: &RunSession,
+        captured_elsewhere: bool,
+    ) -> Result<Finish> {
         let finalized = output::read_end(dir)?.is_some();
         // Another boot ended every process of the run: nothing it saved is
         // trusted, nothing is signalled.
@@ -386,7 +414,7 @@ impl Finisher<'_> {
             // The executor finalized its own run, but what it left outside its
             // session, captured while it lived, is still ended: those exact
             // processes, nothing found by session.
-            if mode == FinishMode::End && !escaped.is_empty() {
+            if !escaped.is_empty() {
                 let mut journal = Journal {
                     dir,
                     locked: true,
@@ -416,11 +444,6 @@ impl Finisher<'_> {
             .into_iter()
             .filter(|identity| Identity::current_in(self.table, identity.pid) == Some(*identity))
             .collect();
-        if mode == FinishMode::Admit && (!members.is_empty() || !escaped.is_empty()) {
-            let mut pids: Vec<u32> = members.iter().map(|process| process.pid).collect();
-            pids.extend(escaped.iter().map(|identity| identity.pid));
-            return Ok(Finish::LiveMembers(pids));
-        }
         if !members.is_empty() || !escaped.is_empty() {
             let mut journal = Journal {
                 dir,
@@ -483,7 +506,7 @@ impl Finisher<'_> {
                 Scope::WhileExecutorLives,
             )?;
         }
-        self.finish(dir, session, captured_elsewhere, FinishMode::End)
+        self.finish(dir, session, captured_elsewhere)
     }
 
     /// Signals SIGTERM to `members` and `tree`, SIGKILL to those left after
@@ -508,6 +531,12 @@ impl Finisher<'_> {
         let mut horizon = session.last_alive_at;
         let mut signalled: HashSet<Identity> = HashSet::new();
         let started = Instant::now();
+        // The SIGKILL wait counts from the first SIGKILL sent, or, when none
+        // could reach a process as itself, from the first round that tried;
+        // never from before, so a finisher suspended past the grace period,
+        // or right before that SIGKILL, still sends it and waits for it.
+        let mut killing_from: Option<Instant> = None;
+        let mut killed_at: Option<Instant> = None;
         loop {
             if scope != Scope::SavedOnly {
                 // A member read alive now proves the session until then.
@@ -521,13 +550,21 @@ impl Finisher<'_> {
             }
             journal.record(horizon, &known, &retained)?;
             let killing = started.elapsed() >= self.grace;
+            if killing && killing_from.is_none() {
+                killing_from = Some(Instant::now());
+            }
             for (process, member) in targets(&known, &retained) {
                 let signal = match killing {
                     true => Signal::Kill,
                     false if signalled.insert(process) => Signal::Terminate,
                     false => continue,
                 };
-                self.signal_checked(session, process, member, signal);
+                if self.signal_checked(session, process, member, signal)
+                    && signal == Signal::Kill
+                    && killed_at.is_none()
+                {
+                    killed_at = Some(Instant::now());
+                }
             }
             thread::sleep(POLL);
             let scan = self.table.processes();
@@ -551,7 +588,10 @@ impl Finisher<'_> {
                 journal.record(horizon, &known, &retained)?;
                 return Ok(Ended::ExecutorGone);
             }
-            if started.elapsed() >= self.grace + KILL_WAIT {
+            if killed_at
+                .or(killing_from)
+                .is_some_and(|since| since.elapsed() >= KILL_WAIT)
+            {
                 let left: Vec<String> = left
                     .iter()
                     .map(|(process, _)| process.pid.to_string())
@@ -604,14 +644,14 @@ impl Finisher<'_> {
     }
 
     /// Signals a process only while it is the one seen: same start, and for a
-    /// session member, still in the session.
+    /// session member, still in the session. Returns whether it was signalled.
     fn signal_checked(
         &self,
         session: &RunSession,
         process: Identity,
         member: bool,
         signal: Signal,
-    ) {
+    ) -> bool {
         let unchanged = self
             .table
             .process(process.pid)
@@ -619,6 +659,7 @@ impl Finisher<'_> {
         if unchanged {
             self.table.signal(process.pid, signal);
         }
+        unchanged
     }
 }
 

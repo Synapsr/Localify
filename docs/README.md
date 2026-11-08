@@ -116,8 +116,12 @@ message saying so. **Settings → AI agents** has the switch to turn this off an
 
 `localify dev --in-app` starts a service in the desktop app's terminal, as its launch
 button does: the app opens if needed, and the command prints the URL and returns once the
-service listens. If the service already runs, it says so and starts nothing. Without the
-app, `--detach` runs it in the background instead.
+service listens. Without the app, `--detach` runs it in the background instead.
+
+If the service already runs, `localify dev` asks in a terminal whether to stop it and start it
+again; `--replace` does that without asking, and anything else (an agent, a script) says it
+already runs and starts nothing. What a run left behind after its `localify dev` died is
+stopped by the next launch on its own.
 
 The app's terminal also writes what it shows to a file, so everyone reads the same lines:
 

@@ -1,9 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use dialoguer::{Select, theme::ColorfulTheme};
@@ -33,8 +35,8 @@ use crate::infrastructure::project_marker::{
     ensure_marker_is_excluded, read_project_marker, write_project_marker,
 };
 use crate::infrastructure::running_services::{
-    NewRun, RunOutput, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
-    ServiceOrigin,
+    Admission, NewRun, RunLock, RunOutput, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV,
+    ServiceKey, ServiceOrigin,
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::Finisher;
@@ -101,6 +103,8 @@ pub struct RunArgs {
     pub launch_profile: LaunchProfileArgs,
     /// The run id a dispatcher chose (`--launch-id`); `None` picks one.
     pub launch_id: Option<String>,
+    /// What to do when the service already runs.
+    pub replace: Replace,
 }
 
 pub fn list(ctx: &AppContext, json: bool) -> Result<()> {
@@ -226,6 +230,7 @@ pub fn run(
         override_command,
         launch_profile,
         launch_id,
+        replace,
     } = args;
     let run_id = match launch_id.as_deref() {
         Some(id) => RunId::parse(id)?,
@@ -286,7 +291,7 @@ pub fn run(
     let key = service_key(&service, effective_environment, ctx);
     // Before anything runs, profile sources included: one executor per service.
     let store = RunningServiceStore::new_default()?;
-    let lock = store.lock(&key)?;
+    let lock = admit(&store, &key, replace)?;
     ensure_port_available(port, &service)?;
 
     let workdir = service_workdir(&service)?;
@@ -700,6 +705,180 @@ fn service_key(
         environment: environment_slug(service, environment, ctx),
         service_id: service.id.clone(),
     }
+}
+
+/// What a launch does when the service already runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replace {
+    /// Ask the person at the terminal.
+    Ask,
+    /// Stop whatever runs, and start again (`--replace`).
+    Yes,
+    /// Stop that run only, which a person agreed to stop (`--replace=<runId>`).
+    Approved(RunId),
+    /// Leave it running, and start nothing.
+    No,
+}
+
+impl Replace {
+    /// `--replace` stops it, `--replace=<runId>` only that run. Otherwise a
+    /// person at a terminal is asked, and anything else (an agent, a script,
+    /// CI, `< /dev/null`) leaves it.
+    pub fn for_launch(flag: Option<Option<&str>>) -> Result<Self> {
+        Ok(match flag {
+            Some(Some(run_id)) => Self::Approved(RunId::parse(run_id)?),
+            Some(None) => Self::Yes,
+            None if io::stdin().is_terminal() && io::stderr().is_terminal() => Self::Ask,
+            None => Self::No,
+        })
+    }
+
+    /// Whether to stop `running`, asking on the terminal when it should.
+    pub(crate) fn stops(&self, running: &RunningService) -> Result<bool> {
+        match self {
+            Self::Yes => Ok(true),
+            Self::Approved(run_id) => Ok(running.run_id() == Some(run_id)),
+            Self::No => Ok(false),
+            Self::Ask => confirm_replace(running, &mut io::stdin().lock(), &mut io::stderr()),
+        }
+    }
+}
+
+/// How long a replacing launch waits for the run it stopped to let go of the
+/// service's lock.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Takes the service's lock for this launch. A run that is already going is
+/// stopped, as `stop` would, and finalized first when `replace` says so. Only
+/// the run chosen is replaced, the one a person agreed to stop or else the
+/// one seen first: when the service holds another run once the lock is
+/// free, someone else restarted it, and this launch starts nothing, so two
+/// replacing launches never both start. A run of an older version is never
+/// stopped here.
+pub(crate) fn admit(
+    store: &RunningServiceStore,
+    key: &ServiceKey,
+    replace: Replace,
+) -> Result<RunLock> {
+    let mut chosen = match &replace {
+        Replace::Approved(run_id) => Some(run_id.clone()),
+        _ => None,
+    };
+    let mut stopped_at: Option<Instant> = None;
+    loop {
+        let running = match store.lock(key)? {
+            Admission::Admitted(lock) => {
+                // The record only changes under this lock now.
+                let current = store.get(key)?;
+                let current = current.as_ref().and_then(RunningService::run_id);
+                if let Some(chosen) = &chosen {
+                    match current {
+                        Some(current) if current == chosen => {}
+                        Some(current) => bail!("{}", restarted_by_someone_else(key, current)),
+                        None => bail!(
+                            "'{}' is no longer running (run {chosen}), and nothing was started.",
+                            key.service_id
+                        ),
+                    }
+                }
+                return Ok(lock);
+            }
+            Admission::Running(running) => running,
+        };
+        let Some(running) = running else {
+            bail!(
+                "'{}' is already running: another launch is starting it. Check it with: {} services status",
+                key.service_id,
+                BRANDING.cli_command()
+            );
+        };
+        let Some(run_id) = running.run_id().cloned() else {
+            bail!("{}", older_version_running(&running));
+        };
+        if let Some(chosen) = &chosen
+            && *chosen != run_id
+        {
+            bail!("{}", restarted_by_someone_else(key, &run_id));
+        }
+        if let Some(since) = stopped_at {
+            // The run just stopped is letting go of the lock.
+            if since.elapsed() >= RELEASE_TIMEOUT {
+                bail!(
+                    "'{}' was stopped, but it still holds the service's lock (PID {}).",
+                    key.service_id,
+                    running.pid
+                );
+            }
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        if !replace.stops(&running)? {
+            bail!("{}", already_running(&running));
+        }
+        crate::infrastructure::test_pause::pause_at("replace-chosen");
+        eprintln!(
+            "Stopping '{}' (PID {}) to start it again...",
+            key.service_id, running.pid
+        );
+        store.stop(&running)?;
+        chosen = Some(run_id);
+        stopped_at = Some(Instant::now());
+    }
+}
+
+fn restarted_by_someone_else(key: &ServiceKey, run_id: &RunId) -> String {
+    format!(
+        "'{}' was restarted by someone else (run {run_id}), and is left as it is; nothing was started.",
+        key.service_id
+    )
+}
+
+/// A run with no run id, from before Localify could prove what is its own.
+pub(crate) fn older_version_running(running: &RunningService) -> String {
+    format!(
+        "'{}' runs from an older version of {} (PID {}), which a launch does not stop. Stop it first with: {} stop {}",
+        running.key.service_id,
+        BRANDING.app_name,
+        running.pid,
+        BRANDING.cli_command(),
+        crate::infrastructure::running_services::service_selector(&running.key)
+    )
+}
+
+pub(crate) fn already_running(running: &RunningService) -> String {
+    format!(
+        "'{}' is already running (PID {}) at {}. Stop it first with: {} stop {}, or start it with --replace.",
+        running.key.service_id,
+        running.pid,
+        running.url,
+        BRANDING.cli_command(),
+        crate::infrastructure::running_services::service_selector(&running.key)
+    )
+}
+
+/// Asks whether to stop the running service and start it again. Enter or
+/// `y` says yes; anything else, an end of input included, says no.
+fn confirm_replace(
+    running: &RunningService,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    let since = crate::infrastructure::process::lstart_label(running.started_at)
+        .unwrap_or_else(|| "a while".into());
+    write!(
+        output,
+        "{} is already running (since {since}, pid {}). Stop it and start again? [Y/n] ",
+        running.key.service_id, running.pid
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer)? == 0 {
+        return Ok(false);
+    }
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
 }
 
 /// Which run of a service `stop`, `restart` and `logs` act on. Inside a
@@ -2400,6 +2579,42 @@ fn env_key_list(envs: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn running_web() -> RunningService {
+        serde_json::from_value(serde_json::json!({
+            "projectId": "app", "environment": null, "serviceId": "web", "pid": 4242,
+            "url": "https://web.localify", "port": 3000, "origin": "terminal",
+            "profile": null, "startedAt": 1_794_000_000u64, "logFile": null, "exit": null
+        }))
+        .unwrap()
+    }
+
+    fn answer(typed: &str) -> (bool, String) {
+        let mut asked = Vec::new();
+        let replace = confirm_replace(&running_web(), &mut typed.as_bytes(), &mut asked).unwrap();
+        (replace, String::from_utf8(asked).unwrap())
+    }
+
+    #[test]
+    fn enter_or_yes_replaces_a_running_service_and_anything_else_leaves_it() {
+        let (replace, asked) = answer("\n");
+        assert!(replace);
+        assert!(
+            asked.starts_with("web is already running (since "),
+            "{asked}"
+        );
+        assert!(
+            asked.ends_with(", pid 4242). Stop it and start again? [Y/n] "),
+            "{asked}"
+        );
+
+        assert!(answer("y\n").0);
+        assert!(answer("YES\n").0);
+        assert!(!answer("n\n").0);
+        assert!(!answer("later\n").0);
+        // No answer at all, as from a closed input, is a no.
+        assert!(!answer("").0);
+    }
 
     fn test_service(id: &str, root_path: &str, service_path: Option<&str>) -> ConfiguredService {
         ConfiguredService {
