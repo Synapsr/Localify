@@ -735,10 +735,15 @@ pub(crate) fn admit(
                 // The record only changes under this lock now.
                 let current = store.get(key)?;
                 let current = current.as_ref().and_then(RunningService::run_id);
-                if let (Some(chosen), Some(current)) = (&chosen, current)
-                    && current != chosen
-                {
-                    bail!("{}", restarted_by_someone_else(key, current));
+                if let Some(chosen) = &chosen {
+                    match current {
+                        Some(current) if current == chosen => {}
+                        Some(current) => bail!("{}", restarted_by_someone_else(key, current)),
+                        None => bail!(
+                            "'{}' is no longer running (run {chosen}), and nothing was started.",
+                            key.service_id
+                        ),
+                    }
                 }
                 return Ok(lock);
             }

@@ -128,7 +128,7 @@ impl FinalizeLock {
         };
         file.lock()
             .with_context(|| format!("Failed to lock '{}'", dir.join(LOCK_FILE).display()))?;
-        Ok(dir.is_dir().then_some(Self { _file: file }))
+        Ok(run_dir_exists(dir)?.then_some(Self { _file: file }))
     }
 
     /// `acquire`, giving up once `limit` passed while another holds it.
@@ -139,7 +139,9 @@ impl FinalizeLock {
         let deadline = Instant::now() + limit;
         loop {
             match file.try_lock() {
-                Ok(()) if dir.is_dir() => return Ok(Acquired::Locked(Self { _file: file })),
+                Ok(()) if run_dir_exists(dir)? => {
+                    return Ok(Acquired::Locked(Self { _file: file }));
+                }
                 Ok(()) => return Ok(Acquired::Gone),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -165,7 +167,7 @@ pub enum Acquired {
 }
 
 fn open_lock_file(dir: &Path) -> Result<Option<File>> {
-    if !dir.is_dir() {
+    if !run_dir_exists(dir)? {
         return Ok(None);
     }
     match OpenOptions::new()
@@ -175,10 +177,29 @@ fn open_lock_file(dir: &Path) -> Result<Option<File>> {
     {
         Ok(file) => Ok(Some(file)),
         // A folder deleted while it opens, as the next run's registration
-        // does, fails with ENOENT, or EINVAL on macOS.
-        Err(error) if error.kind() == io::ErrorKind::NotFound || !dir.is_dir() => Ok(None),
+        // does, fails with ENOENT, or EINVAL on macOS: gone only once a look
+        // at the folder confirms it.
+        Err(error)
+            if (error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::EINVAL))
+                && !run_dir_exists(dir)? =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error)
             .with_context(|| format!("Failed to open '{}'", dir.join(LOCK_FILE).display())),
+    }
+}
+
+/// Whether the run's folder is there. `false` only when it is confirmed
+/// gone: a failure to look (a permission, an I/O error) is an error, never
+/// a run that ended.
+fn run_dir_exists(dir: &Path) -> Result<bool> {
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => bail!("'{}' is not a folder", dir.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Failed to inspect '{}'", dir.display())),
     }
 }
 

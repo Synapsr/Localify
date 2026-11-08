@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 
 use localify::branding::BRANDING;
 use localify::infrastructure::process::{self, ProcessInfo, ProcessTable, Signal};
-use localify::infrastructure::running_services::{RunningService, RunningServiceStore};
+use localify::infrastructure::running_services::{Admission, RunningService, RunningServiceStore};
 use localify::infrastructure::runs::RunId;
-use localify::infrastructure::runs::finish::{CLEANUP_WAIT, Finish, Finisher, RunSession};
+use localify::infrastructure::runs::finish::{
+    CLEANUP_WAIT, Finish, Finisher, KILL_WAIT, RunSession,
+};
 use localify::infrastructure::runs::output::{self, EndReason, FinalizeLock};
 use localify::infrastructure::test_pause::PAUSE_DIR_ENV;
 
@@ -565,6 +567,9 @@ struct FakeTable {
     die_after_signal: std::cell::Cell<Option<(u32, Signal)>>,
     /// Processes every scan shows, but that are gone when looked up.
     vanish_on_lookup: RefCell<Vec<u32>>,
+    /// The finisher is suspended this long right before its first SIGKILL
+    /// lands, and that process is gone only after one more scan.
+    suspend_before_kill: std::cell::Cell<Option<Duration>>,
 }
 
 impl FakeTable {
@@ -580,6 +585,7 @@ impl FakeTable {
             die_on_signal: None.into(),
             die_after_signal: None.into(),
             vanish_on_lookup: Vec::new().into(),
+            suspend_before_kill: None.into(),
         }
     }
 
@@ -617,6 +623,21 @@ impl ProcessTable for FakeTable {
         if self.die_on_signal.get() == Some((pid, signal)) {
             self.die_on_signal.set(None);
             panic!("the finisher died");
+        }
+        if signal == Signal::Kill
+            && let Some(suspended) = self.suspend_before_kill.take()
+        {
+            thread::sleep(suspended);
+            self.signals.borrow_mut().push((pid, signal));
+            let after = self
+                .processes
+                .borrow()
+                .iter()
+                .filter(|(process, _)| process.pid != pid)
+                .copied()
+                .collect();
+            *self.after_scan.borrow_mut() = Some(after);
+            return;
         }
         self.signals.borrow_mut().push((pid, signal));
         let forks = self
@@ -747,6 +768,22 @@ fn proven_members_are_ended_before_the_run_is_finalized() {
     assert!(signals.contains(&(4243, Signal::Terminate)));
     assert!(signals.contains(&(4243, Signal::Kill)));
     assert!(signals.contains(&(4250, Signal::Terminate)));
+}
+
+#[test]
+fn a_finisher_suspended_right_before_its_first_sigkill_still_waits_for_it() {
+    let dir = run_folder();
+    // A member that ignores SIGTERM, so SIGKILL ends it.
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), true)]);
+    table
+        .suspend_before_kill
+        .set(Some(KILL_WAIT + Duration::from_millis(500)));
+    let session = recorded_session("boot-a");
+
+    let end = finisher(&table).finish(dir.path(), &session, true);
+
+    assert_eq!(end.unwrap(), Finish::Finalized(EndReason::Interrupted));
+    assert!(table.processes().is_empty());
 }
 
 #[test]
@@ -1582,10 +1619,10 @@ fn a_launch_gives_up_on_a_suspended_cleanup_of_the_previous_run() {
     kill_executor(&mut executor);
     // A stop that holds the run's finalization lock, suspended while it waits
     // for leftovers that ignore SIGTERM.
-    let mut stop = sandbox
+    let stop = sandbox
         .localify(&["stop", "web", "--project", "app"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let lock = fs::File::open(sandbox.run_dir(&record).join("finalize.lock"));
@@ -1617,7 +1654,7 @@ fn a_launch_gives_up_on_a_suspended_cleanup_of_the_previous_run() {
         let _ = launch.kill();
     }
     signal_raw(&stop, libc::SIGCONT);
-    stop.wait().unwrap();
+    let stop = stop.wait_with_output().unwrap();
     let launch = launch.wait_with_output().unwrap();
 
     assert!(
@@ -1631,6 +1668,7 @@ fn a_launch_gives_up_on_a_suspended_cleanup_of_the_previous_run() {
         said.contains("another cleanup of 'web' is still running") && said.contains("try again"),
         "{said}"
     );
+    assert!(stop.status.success(), "{}", stderr(&stop));
     assert!(session_members(sid).is_empty());
 }
 
@@ -1779,4 +1817,58 @@ fn a_yes_given_before_detaching_stops_only_the_run_it_was_asked_about() {
     assert!(still_runs, "the run nobody was asked about was stopped");
     assert_eq!(current.pid, replacing.id());
     assert!(stop.status.success(), "{}", stderr(&stop));
+}
+
+#[test]
+fn a_run_folder_that_cannot_be_inspected_admits_nothing() {
+    if process::is_root() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let mut executor = sandbox.spawn_background(STUBBORN);
+    let sid = executor.id();
+    let record = wait_for_proof(&sandbox, sid, 5);
+    kill_executor(&mut executor);
+    // Every look at the run's folder fails, as a permission or I/O error would.
+    let outputs = sandbox.run_dir(&record).parent().unwrap().to_path_buf();
+    fs::set_permissions(&outputs, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let admission = match sandbox.store().lock(&record.key) {
+        Ok(Admission::Admitted(_)) => Err("admitted over the previous run's survivors"),
+        Ok(Admission::Running(_)) => Err("reported as running"),
+        Err(error) => Ok(format!("{error:#}")),
+    };
+    let after = sandbox.record().unwrap();
+    fs::set_permissions(&outputs, fs::Permissions::from_mode(0o755)).unwrap();
+    let survivors = session_members(sid).len();
+    // Readable again: the survivors are ended, whatever the outcome above.
+    let stop = sandbox.run(&["stop", "web", "--project", "app"]);
+
+    let error = admission.unwrap();
+    assert!(error.contains("Failed to inspect"), "{error}");
+    assert!(after.exit.is_none(), "the previous run was marked ended");
+    assert!(survivors >= 4, "{survivors}");
+    assert!(stop.status.success(), "{}", stderr(&stop));
+    assert!(session_members(sid).is_empty());
+}
+
+#[test]
+fn replacing_a_run_that_is_no_longer_there_starts_nothing() {
+    let sandbox = Sandbox::new();
+    let marker = sandbox.root.join("started");
+    let gone = RunId::generate().unwrap();
+
+    let launch = dev_with(
+        &sandbox,
+        &[&format!("--replace={gone}")],
+        &format!("touch '{}'", marker.display()),
+    )
+    .output()
+    .unwrap();
+
+    assert!(!launch.status.success());
+    let said = stderr(&launch);
+    assert!(said.contains("no longer running"), "{said}");
+    assert!(said.contains(&gone.to_string()), "{said}");
+    assert!(!marker.exists(), "it started");
 }

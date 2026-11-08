@@ -510,9 +510,12 @@ impl Finisher<'_> {
         let mut horizon = session.last_alive_at;
         let mut signalled: HashSet<Identity> = HashSet::new();
         let started = Instant::now();
-        // Counted from the first SIGKILL, so a finisher suspended past the
-        // grace period still sends it before giving up.
-        let mut killing_since: Option<Instant> = None;
+        // The SIGKILL wait counts from the first SIGKILL sent, or, when none
+        // could reach a process as itself, from the first round that tried;
+        // never from before, so a finisher suspended past the grace period,
+        // or right before that SIGKILL, still sends it and waits for it.
+        let mut killing_from: Option<Instant> = None;
+        let mut killed_at: Option<Instant> = None;
         loop {
             if scope != Scope::SavedOnly {
                 // A member read alive now proves the session until then.
@@ -526,8 +529,8 @@ impl Finisher<'_> {
             }
             journal.record(horizon, &known, &retained)?;
             let killing = started.elapsed() >= self.grace;
-            if killing && killing_since.is_none() {
-                killing_since = Some(Instant::now());
+            if killing && killing_from.is_none() {
+                killing_from = Some(Instant::now());
             }
             for (process, member) in targets(&known, &retained) {
                 let signal = match killing {
@@ -535,7 +538,12 @@ impl Finisher<'_> {
                     false if signalled.insert(process) => Signal::Terminate,
                     false => continue,
                 };
-                self.signal_checked(session, process, member, signal);
+                if self.signal_checked(session, process, member, signal)
+                    && signal == Signal::Kill
+                    && killed_at.is_none()
+                {
+                    killed_at = Some(Instant::now());
+                }
             }
             thread::sleep(POLL);
             let scan = self.table.processes();
@@ -559,7 +567,10 @@ impl Finisher<'_> {
                 journal.record(horizon, &known, &retained)?;
                 return Ok(Ended::ExecutorGone);
             }
-            if killing_since.is_some_and(|since| since.elapsed() >= KILL_WAIT) {
+            if killed_at
+                .or(killing_from)
+                .is_some_and(|since| since.elapsed() >= KILL_WAIT)
+            {
                 let left: Vec<String> = left
                     .iter()
                     .map(|(process, _)| process.pid.to_string())
@@ -612,14 +623,14 @@ impl Finisher<'_> {
     }
 
     /// Signals a process only while it is the one seen: same start, and for a
-    /// session member, still in the session.
+    /// session member, still in the session. Returns whether it was signalled.
     fn signal_checked(
         &self,
         session: &RunSession,
         process: Identity,
         member: bool,
         signal: Signal,
-    ) {
+    ) -> bool {
         let unchanged = self
             .table
             .process(process.pid)
@@ -627,6 +638,7 @@ impl Finisher<'_> {
         if unchanged {
             self.table.signal(process.pid, signal);
         }
+        unchanged
     }
 }
 
