@@ -558,7 +558,8 @@ fn read_span(
     }
 }
 
-/// Prints new lines as they come, until the run ends.
+/// Prints new lines as they come, until the run ends, or until another run of
+/// the service replaces it and its stream goes.
 fn follow_stream(
     store: &RunningServiceStore,
     run: &RunningService,
@@ -566,7 +567,23 @@ fn follow_stream(
     mut offset: u64,
 ) -> Result<u64> {
     loop {
-        let chunk = read_span(dir, offset, LOGS_WINDOW, print_stream_chunk)?;
+        let current = store.get(&run.key)?;
+        let current_id = current.as_ref().and_then(RunningService::run_id);
+        if current_id != run.run_id() || !dir.is_dir() {
+            match current_id {
+                Some(next) if Some(next) != run.run_id() => {
+                    eprintln!("'{}' restarted as run {next}.", run.key.service_id)
+                }
+                _ => eprintln!("The run of '{}' ended.", run.key.service_id),
+            }
+            return Ok(offset);
+        }
+        let chunk = match read_span(dir, offset, LOGS_WINDOW, print_stream_chunk) {
+            Ok(chunk) => chunk,
+            // Removed while it was read: the next look says by what.
+            Err(_) if !dir.is_dir() => continue,
+            Err(error) => return Err(error),
+        };
         let caught_up = chunk.next == offset;
         offset = chunk.next;
         if chunk.ended || (caught_up && !store.is_running(run)) {
@@ -785,6 +802,45 @@ mod tests {
             result,
             args(&["dev", "web", "--launch-id", "AAAAAAAAAAAAAAAAAAAAAA"])
         );
+    }
+
+    #[test]
+    fn following_a_run_ends_cleanly_when_another_run_replaces_it() {
+        use crate::infrastructure::running_services::NewRun;
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let key = ServiceKey {
+            project_id: "app".into(),
+            environment: None,
+            service_id: "web".into(),
+        };
+        let new_run = || NewRun {
+            key: key.clone(),
+            run_id: RunId::generate().unwrap(),
+            url: "https://web.localify".into(),
+            port: 3000,
+            origin: ServiceOrigin::Background,
+            profile: None,
+            log_file: None,
+            output: None,
+        };
+        let lock = store.lock(&key).unwrap();
+        let first = store.register(&lock, new_run()).unwrap();
+        let first_dir = store.run_dir(first.run_id().unwrap());
+        let (done, finished) = std::sync::mpsc::channel();
+
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = done.send(follow_stream(&store, &first, &first_dir, 0));
+            });
+            thread::sleep(Duration::from_millis(500));
+            store.register(&lock, new_run()).unwrap();
+
+            let followed = finished
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the follow went on after its run was replaced");
+            assert!(followed.is_ok(), "{followed:?}");
+        });
     }
 
     #[test]

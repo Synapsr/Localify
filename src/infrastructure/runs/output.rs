@@ -186,7 +186,7 @@ impl StreamWriter {
         Self::with_segment_size(dir, SEGMENT_SIZE)
     }
 
-    fn with_segment_size(dir: &Path, segment_size: u64) -> Result<Self> {
+    pub(crate) fn with_segment_size(dir: &Path, segment_size: u64) -> Result<Self> {
         let file = File::create_new(segment_path(dir, 0))
             .with_context(|| format!("Failed to start the output stream in '{}'", dir.display()))?;
         Ok(Self {
@@ -239,6 +239,8 @@ pub struct StreamSink {
 struct SinkState {
     writer: StreamWriter,
     closed: bool,
+    /// The first write that failed, kept even when the copy never finishes.
+    failure: Option<String>,
 }
 
 impl StreamSink {
@@ -247,8 +249,14 @@ impl StreamSink {
             state: Arc::new(Mutex::new(SinkState {
                 writer,
                 closed: false,
+                failure: None,
             })),
         }
+    }
+
+    /// Why writing failed, the first time it did.
+    pub fn failure(&self) -> Option<String> {
+        self.lock().failure.clone()
     }
 
     /// Stops writing and returns where the stream ends.
@@ -269,8 +277,11 @@ impl StreamSink {
 impl Write for StreamSink {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut state = self.lock();
-        if !state.closed {
-            state.writer.append(bytes)?;
+        if !state.closed
+            && let Err(error) = state.writer.append(bytes)
+        {
+            state.failure.get_or_insert_with(|| error.to_string());
+            return Err(error);
         }
         Ok(bytes.len())
     }

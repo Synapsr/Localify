@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use localify::branding::BRANDING;
-use localify::infrastructure::process::{self, Identity, ProcessInfo, ProcessTable, Signal};
+use localify::infrastructure::process::{self, ProcessInfo, ProcessTable, Signal};
 use localify::infrastructure::running_services::{RunningService, RunningServiceStore};
 use localify::infrastructure::runs::RunId;
 use localify::infrastructure::runs::finish::{Finish, FinishMode, Finisher, RunSession};
@@ -510,6 +510,9 @@ fn identity_and_heartbeats_are_native_and_spawn_no_ps() {
     );
 }
 
+/// Now, in a fake table: later than every start these tests make up.
+const FAKE_NOW: u64 = 1_000_000;
+
 /// A process table a test controls: PIDs and sessions reused at will, and
 /// processes that die when signalled, unless they ignore SIGTERM.
 struct FakeTable {
@@ -526,6 +529,10 @@ struct FakeTable {
     fork_on_term: RefCell<Option<(u32, (ProcessInfo, bool))>>,
     /// A process `pid` started, which no scan saw until `pid` got SIGKILL.
     fork_on_kill: RefCell<Option<(u32, (ProcessInfo, bool))>>,
+    /// The finisher dies as it sends this signal to this process.
+    die_on_signal: std::cell::Cell<Option<(u32, Signal)>>,
+    /// Processes every scan shows, but that are gone when looked up.
+    vanish_on_lookup: RefCell<Vec<u32>>,
 }
 
 impl FakeTable {
@@ -538,6 +545,8 @@ impl FakeTable {
             after_scan: None.into(),
             fork_on_term: None.into(),
             fork_on_kill: None.into(),
+            die_on_signal: None.into(),
+            vanish_on_lookup: Vec::new().into(),
         }
     }
 
@@ -560,6 +569,9 @@ impl ProcessTable for FakeTable {
     }
 
     fn process(&self, pid: u32) -> Option<ProcessInfo> {
+        if self.vanish_on_lookup.borrow().contains(&pid) {
+            return None;
+        }
         if let Some(before) = self.first_lookup.borrow_mut().take() {
             return before.into_iter().find(|process| process.pid == pid);
         }
@@ -569,6 +581,10 @@ impl ProcessTable for FakeTable {
     }
 
     fn signal(&self, pid: u32, signal: Signal) {
+        if self.die_on_signal.get() == Some((pid, signal)) {
+            self.die_on_signal.set(None);
+            panic!("the finisher died");
+        }
         self.signals.borrow_mut().push((pid, signal));
         let forks = self
             .fork_on_term
@@ -597,9 +613,8 @@ impl ProcessTable for FakeTable {
         Some(self.boot_id.clone())
     }
 
-    /// Later than every start these tests make up.
     fn now(&self) -> u64 {
-        1_000_000
+        FAKE_NOW
     }
 }
 
@@ -838,25 +853,153 @@ fn a_witness_that_vanishes_during_the_scan_proves_nothing() {
 
 #[test]
 fn a_worker_forked_by_an_escaped_descendant_during_shutdown_is_ended_too() {
-    let table = FakeTable::new("boot-a", vec![(escaped(5000, 4242, 2_000), true)]);
+    let dir = run_folder();
+    // The executor dies of its SIGTERM; its descendant that left the session
+    // ignores it, and forks a worker as it gets it.
+    let table = FakeTable::new(
+        "boot-a",
+        vec![
+            (fake_process(4242, 4242, 100), false),
+            (escaped(5000, 4242, 2_000), true),
+        ],
+    );
     *table.fork_on_term.borrow_mut() = Some((5000, (escaped(5001, 5000, 2_100), true)));
-    let tree = vec![Identity {
-        pid: 5000,
-        start: 2_000,
-    }];
 
-    finisher(&table)
-        .end_members(
+    let finish = finisher(&table)
+        .stop(dir.path(), &recorded_session("boot-a"), true)
+        .unwrap();
+
+    assert_eq!(finish, Finish::Finalized(EndReason::Interrupted));
+    assert!(table.current().is_empty(), "{:?}", table.current());
+    assert!(table.signals.borrow().contains(&(5001, Signal::Kill)));
+}
+
+#[test]
+fn a_successor_ends_what_a_finisher_that_died_mid_way_had_proven() {
+    let dir = run_folder();
+    // Heartbeat 1000; the witness started at 900 and leaves on SIGTERM; the
+    // worker started at 1500, after the heartbeat, and ignores it.
+    let table = FakeTable::new(
+        "boot-a",
+        vec![
+            (fake_process(4243, 4242, 900), false),
+            (fake_process(4247, 4242, 1_500), true),
+        ],
+    );
+    // The first finisher dies as it sends its first SIGTERM to the worker.
+    table.die_on_signal.set(Some((4247, Signal::Terminate)));
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        finisher(&table).finish(
+            dir.path(),
             &recorded_session("boot-a"),
-            Vec::new(),
-            tree,
-            Duration::from_millis(200),
-            None,
+            true,
+            FinishMode::End,
+        )
+    }));
+    assert!(crashed.is_err(), "the first finisher was meant to die");
+    assert_eq!(table.current().len(), 1, "{:?}", table.current());
+
+    let next = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
         )
         .unwrap();
 
+    assert_eq!(next, Finish::Finalized(EndReason::Interrupted));
     assert!(table.current().is_empty(), "{:?}", table.current());
-    assert!(table.signals.borrow().contains(&(5001, Signal::Kill)));
+    assert!(table.signals.borrow().contains(&(4247, Signal::Kill)));
+}
+
+#[test]
+fn a_stable_witness_proves_the_run_when_earlier_ones_keep_vanishing() {
+    let dir = run_folder();
+    // 4243 and 4244 show in every scan but are gone when read again; 4245,
+    // started before the heartbeat too, is stable.
+    let table = FakeTable::new(
+        "boot-a",
+        vec![
+            (fake_process(4243, 4242, 800), true),
+            (fake_process(4244, 4242, 850), true),
+            (fake_process(4245, 4242, 950), true),
+        ],
+    );
+    *table.vanish_on_lookup.borrow_mut() = vec![4243, 4244];
+
+    let admit = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::Admit,
+        )
+        .unwrap();
+
+    assert_eq!(admit, Finish::LiveMembers(vec![4243, 4244, 4245]));
+    assert!(output::read_end(dir.path()).unwrap().is_none());
+}
+
+#[test]
+fn witnesses_that_always_vanish_leave_the_run_open() {
+    let dir = run_folder();
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 800), true)]);
+    *table.vanish_on_lookup.borrow_mut() = vec![4243];
+
+    let error = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::Admit,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("Try again"), "{error}");
+    assert!(output::read_end(dir.path()).unwrap().is_none());
+}
+
+#[test]
+fn a_start_in_the_tick_of_the_last_proof_proves_nothing() {
+    let dir = run_folder();
+    // Started exactly when the session was last proven, and first seen once
+    // its parent was killed: nothing ties it to the run.
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), true)]);
+    *table.fork_on_kill.borrow_mut() = Some((4243, (fake_process(4246, 4242, FAKE_NOW), true)));
+
+    finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert!(!table.signals.borrow().iter().any(|(pid, _)| *pid == 4246));
+}
+
+#[test]
+fn a_process_in_the_run_s_group_but_another_session_is_not_a_member() {
+    let dir = run_folder();
+    let stranger = ProcessInfo {
+        pgid: 4242,
+        ..fake_process(4243, 9999, 900)
+    };
+    let table = FakeTable::new("boot-a", vec![(stranger, false)]);
+
+    let finish = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert_eq!(finish, Finish::Finalized(EndReason::Interrupted));
+    assert!(table.signals.borrow().is_empty(), "{:?}", table.signals);
 }
 
 #[test]

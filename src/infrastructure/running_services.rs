@@ -550,9 +550,10 @@ impl RunningServiceStore {
         let finalized = output::read_end(&self.run_dir(&run.run_id))
             .map(|end| end.is_some())
             .unwrap_or(false);
+        // Undecided counts as running: nothing may start over it.
         let proven = matches!(
             membership(&NativeProcesses, &session),
-            Membership::Proven(_)
+            Membership::Proven(_) | Membership::Inconclusive
         );
         if !finalized && proven {
             RunState::Running

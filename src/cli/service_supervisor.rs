@@ -28,9 +28,9 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
 use crate::infrastructure::process::{
-    self, Identity, ProcessInfo, Signal, all_processes, signal_identities, track_tree,
+    self, Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities, track_tree,
 };
-use crate::infrastructure::runs::finish::{Finisher, RunSession};
+use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT};
 use crate::infrastructure::runs::output::StreamSink;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -126,18 +126,44 @@ pub enum Capture {
 #[derive(Default)]
 pub struct StopRequests {
     pub interrupts: AtomicUsize,
+    /// The interrupts a process sent with `kill`, not the terminal.
+    pub directed: AtomicUsize,
     pub signalled: AtomicBool,
+    /// The process-wide SIGINT counts when this run began to watch them.
+    baseline: Option<(usize, usize)>,
 }
 
 impl StopRequests {
+    fn watching() -> Self {
+        Self {
+            baseline: Some(process::interrupts()),
+            ..Self::default()
+        }
+    }
+
+    /// Every Ctrl+C so far, and how many of them a process sent.
+    fn presses(&self) -> (usize, usize) {
+        let mut all = self.interrupts.load(Ordering::SeqCst);
+        let mut directed = self.directed.load(Ordering::SeqCst);
+        if let Some((base_all, base_directed)) = self.baseline {
+            let (now_all, now_directed) = process::interrupts();
+            all += now_all.saturating_sub(base_all);
+            directed += now_directed.saturating_sub(base_directed);
+        }
+        (all, directed)
+    }
+
     fn any(&self) -> bool {
-        self.interrupts.load(Ordering::SeqCst) > 0 || self.signalled.load(Ordering::SeqCst)
+        self.presses().0 > 0 || self.signalled.load(Ordering::SeqCst)
     }
 }
 
 /// Starts the service and waits for it, returning why it stopped.
 pub fn run(launch: SupervisedLaunch<'_>) -> Result<LaunchEnd> {
-    run_with(launch, Arc::new(StopRequests::default()), true)
+    if let Err(error) = process::count_interrupts() {
+        eprintln!("Warning: Ctrl+C may end Localify before the service: {error}");
+    }
+    run_with(launch, Arc::new(StopRequests::watching()), true)
 }
 
 /// `run`, with stop requests a test can make without signalling itself.
@@ -148,27 +174,28 @@ fn run_with(
 ) -> Result<LaunchEnd> {
     let mut child = spawn(&launch)?;
     // A service that already exited is a zombie no table shows: nothing to signal.
-    let root = Identity::current(child.id()).unwrap_or(Identity {
-        pid: child.id(),
-        start: 0,
-    });
+    let root = launch
+        .finisher
+        .table
+        .process(child.id())
+        .map(|process| Identity::of(&process))
+        .unwrap_or(Identity {
+            pid: child.id(),
+            start: 0,
+        });
     (launch.heartbeat)();
     if watch_signals {
         watch_stop_signals(root, Arc::clone(&stops));
     }
     let output_done = copy_output(&mut child, &launch);
 
-    let outcome = wait(&mut child, root, &launch, &stops);
-    let cleanup = match launch.leads_session {
-        true => end_own_session(launch.finisher),
-        false => Ok(()),
-    };
+    let (outcome, cleanup) = supervise(&mut child, root, &launch, &stops);
     if cleanup.is_err() {
         // Every survivor started before this heartbeat, so the next launcher
         // proves it belongs to the run, and refuses.
         (launch.heartbeat)();
     }
-    let capture = drain_output(output_done);
+    let capture = drain_output(output_done, launch.stream.as_ref());
 
     let outcome = outcome?;
     if let Some(session) = &launch.session
@@ -251,122 +278,246 @@ fn copy_output(
 }
 
 /// Waits for the remaining output, but not forever: a process that left the
-/// run's session may keep the pipe open.
-fn drain_output(done: Option<mpsc::Receiver<Result<(), String>>>) -> Capture {
+/// run's session may keep the pipe open. A write that already failed is
+/// reported even then.
+fn drain_output(
+    done: Option<mpsc::Receiver<Result<(), String>>>,
+    stream: Option<&StreamSink>,
+) -> Capture {
     let Some(done) = done else {
         return Capture::Complete;
     };
     match done.recv_timeout(OUTPUT_DRAIN_TIMEOUT) {
         Ok(Ok(())) => Capture::Complete,
         Ok(Err(error)) => Capture::Failed(error),
-        Err(_) => Capture::Unfinished,
+        Err(_) => match stream.and_then(StreamSink::failure) {
+            Some(error) => Capture::Failed(error),
+            None => Capture::Unfinished,
+        },
     }
 }
 
-/// Ends what the service left in the session `localify dev` leads: SIGTERM,
-/// then SIGKILL after the grace period. The executor is alive, so its session
-/// is the run's without any further proof. Fails while a member is left.
-fn end_own_session(finisher: &Finisher<'_>) -> Result<()> {
-    let pid = std::process::id();
-    let me = finisher
-        .table
-        .process(pid)
-        .context("Failed to read this process's identity from the kernel")?;
-    let session = RunSession {
-        executor_pid: pid,
-        executor_start: me.start,
-        sid: Some(pid),
-        pgid: Some(pid),
-        boot_id: String::new(),
-        last_alive_at: me.start,
-    };
-    let members = session.members(finisher.table);
-    finisher.end_members(&session, members, Vec::new(), finisher.grace, Some(pid))
-}
-
-/// Where a service stands in being stopped by `localify dev` itself.
-#[derive(Default)]
-struct Stopping {
-    /// The service and its descendants, by identity.
+/// Where a service stands in being stopped by `localify dev`, from its start
+/// until every process it is after is gone, the service's own exit included.
+struct Stopping<'a> {
+    table: &'a dyn ProcessTable,
+    grace: Duration,
+    /// The service, as it started.
+    root: Identity,
+    /// `localify dev`'s PID, when it leads the run's session.
+    leader: Option<u32>,
+    /// The service and its descendants, kept by identity all along, so one
+    /// that outlives its parent is still known.
     tracked: Vec<Identity>,
+    /// The other members of the session `localify dev` leads.
+    members: Vec<Identity>,
     expiring_since: Option<Instant>,
     interrupted_since: Option<Instant>,
+    /// The service exited by itself, and its session is being emptied.
+    cleaning_since: Option<Instant>,
     terminated: bool,
 }
 
-impl Stopping {
-    fn refresh(&mut self, root: Identity) -> Vec<ProcessInfo> {
-        if self.tracked.is_empty() {
-            self.tracked.push(root);
+impl<'a> Stopping<'a> {
+    fn new(launch: &SupervisedLaunch<'a>, root: Identity) -> Self {
+        Self {
+            table: launch.finisher.table,
+            grace: launch.finisher.grace,
+            root,
+            leader: launch.leads_session.then(std::process::id),
+            tracked: Vec::new(),
+            members: Vec::new(),
+            expiring_since: None,
+            interrupted_since: None,
+            cleaning_since: None,
+            terminated: false,
         }
-        let scan = all_processes();
-        self.tracked = track_tree(&self.tracked, &scan);
+    }
+
+    fn track(&mut self) -> Vec<ProcessInfo> {
+        let scan = self.table.processes();
+        let mut roots = self.tracked.clone();
+        if !roots.contains(&self.root) {
+            roots.push(self.root);
+        }
+        self.tracked = track_tree(&roots, &scan);
+        if let Some(leader) = self.leader {
+            self.members = scan
+                .iter()
+                .filter(|process| process.sid == Some(leader) && process.pid != leader)
+                .map(Identity::of)
+                .collect();
+        }
         scan
     }
 
-    fn signal(&mut self, root: Identity, signal: Signal) {
-        self.refresh(root);
-        signal_identities(&self.tracked, signal);
+    fn stopping(&self) -> bool {
+        self.expiring_since.is_some() || self.interrupted_since.is_some()
     }
 
-    /// Ctrl+C: the first one is forwarded as SIGINT to whoever did not get it
-    /// from the terminal; after the grace period comes SIGTERM, after twice
-    /// that SIGKILL. A second Ctrl+C kills at once.
-    fn on_interrupts(&mut self, root: Identity, presses: usize, grace: Duration, now: Instant) {
-        let Some(since) = self.interrupted_since else {
-            let scan = self.refresh(root);
-            signal_identities(&interrupt_targets(&self.tracked, &scan), Signal::Interrupt);
-            self.interrupted_since = Some(now);
-            return;
+    /// A stop is after the service's tree and the session; a cleanup after a
+    /// normal exit, after the session only.
+    fn targets(&self) -> Vec<Identity> {
+        let mut targets = Vec::new();
+        if self.stopping() {
+            targets.extend(self.tracked.iter().copied());
+        }
+        if self.stopping() || self.cleaning_since.is_some() {
+            for member in &self.members {
+                if !targets.contains(member) {
+                    targets.push(*member);
+                }
+            }
+        }
+        targets
+    }
+
+    fn signal(&self, targets: &[Identity], signal: Signal) {
+        for target in targets {
+            let unchanged = self
+                .table
+                .process(target.pid)
+                .is_some_and(|now| now.start == target.start);
+            if unchanged {
+                self.table.signal(target.pid, signal);
+            }
+        }
+    }
+
+    /// The first Ctrl+C: SIGINT to whoever did not get it already. One from
+    /// the terminal reached `localify dev`'s whole process group; one a
+    /// process sent reached `localify dev` alone.
+    fn interrupt(&mut self, now: Instant, directed: bool, scan: &[ProcessInfo]) {
+        let own_group = scan
+            .iter()
+            .find(|process| process.pid == std::process::id())
+            .map(|process| process.pgid);
+        let targets = interrupt_targets(&self.targets_on_interrupt(), scan, own_group, directed);
+        self.signal(&targets, Signal::Interrupt);
+        self.interrupted_since = Some(now);
+    }
+
+    fn targets_on_interrupt(&self) -> Vec<Identity> {
+        let mut targets = self.tracked.clone();
+        targets.extend(
+            self.members
+                .iter()
+                .filter(|member| !self.tracked.contains(member)),
+        );
+        targets
+    }
+
+    /// SIGTERM after the grace period and SIGKILL after twice that, counted
+    /// from the first Ctrl+C or from `max_duration`; a second Ctrl+C kills at
+    /// once. A cleanup sends SIGTERM at once and SIGKILL after the grace.
+    fn escalate(&mut self, now: Instant, presses: usize) {
+        let targets = self.targets();
+        let kill = match (
+            self.interrupted_since,
+            self.expiring_since,
+            self.cleaning_since,
+        ) {
+            (Some(since), _, _) => presses >= 2 || now >= since + self.grace * 2,
+            (None, Some(since), _) => now >= since + self.grace,
+            (None, None, Some(since)) => now >= since + self.grace,
+            (None, None, None) => false,
         };
-        if presses >= 2 || now.duration_since(since) >= grace * 2 {
-            self.signal(root, Signal::Kill);
-        } else if now.duration_since(since) >= grace && !self.terminated {
-            self.signal(root, Signal::Terminate);
+        let terminate = match (self.interrupted_since, self.cleaning_since) {
+            (Some(since), _) => now >= since + self.grace,
+            (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        if kill {
+            self.signal(&targets, Signal::Kill);
+        } else if terminate && !self.terminated {
+            self.signal(&targets, Signal::Terminate);
             self.terminated = true;
+        }
+    }
+
+    /// When SIGKILL is due, for a stop or a cleanup in progress.
+    fn kill_due(&self) -> Option<Instant> {
+        match (
+            self.interrupted_since,
+            self.expiring_since,
+            self.cleaning_since,
+        ) {
+            (Some(since), _, _) => Some(since + self.grace * 2),
+            (None, Some(since), _) | (None, None, Some(since)) => Some(since + self.grace),
+            (None, None, None) => None,
         }
     }
 }
 
-/// The processes a Ctrl+C has not reached: all of them when `localify dev`
-/// is not the terminal's foreground job, otherwise those outside its group.
-fn interrupt_targets(tracked: &[Identity], scan: &[ProcessInfo]) -> Vec<Identity> {
-    let own_group = process::foreground_group();
-    tracked
+/// The processes a Ctrl+C has not reached: all of them when a process sent
+/// it to `localify dev`, otherwise those outside `localify dev`'s group, which
+/// the terminal signalled whole.
+fn interrupt_targets(
+    targets: &[Identity],
+    scan: &[ProcessInfo],
+    own_group: Option<u32>,
+    directed: bool,
+) -> Vec<Identity> {
+    targets
         .iter()
-        .filter(|identity| {
+        .filter(|target| {
             let group = scan
                 .iter()
-                .find(|process| Identity::of(process) == **identity)
+                .find(|process| Identity::of(process) == **target)
                 .map(|process| process.pgid);
-            own_group.is_none() || group != own_group
+            directed || own_group.is_none() || group != own_group
         })
         .copied()
         .collect()
 }
 
-fn wait(
+/// When the run's and the daemon session's heartbeats are next due.
+struct Heartbeats {
+    run: Instant,
+    session: Instant,
+}
+
+impl Heartbeats {
+    fn beat(&mut self, now: Instant, launch: &SupervisedLaunch<'_>) {
+        if now >= self.run {
+            (launch.heartbeat)();
+            self.run = now + launch.heartbeat_every;
+        }
+        if now >= self.session {
+            if let Some(session) = &launch.session {
+                let _ = session.heartbeat();
+            }
+            self.session = now + LAUNCH_SESSION_HEARTBEAT;
+        }
+    }
+}
+
+/// Waits for the service, stopping it on Ctrl+C or at `max_duration`, then
+/// goes on until every process the stop or the session cleanup is after is
+/// gone, on the same clock. Returns why the service stopped, and whether
+/// anything it left is still alive.
+fn supervise(
     child: &mut Child,
     root: Identity,
     launch: &SupervisedLaunch<'_>,
     stops: &StopRequests,
-) -> Result<LaunchOutcome> {
+) -> (Result<LaunchOutcome>, Result<()>) {
     let started = Instant::now();
-    let grace = launch.finisher.grace;
-    let mut next_session_heartbeat = started + LAUNCH_SESSION_HEARTBEAT;
-    let mut next_run_heartbeat = started + launch.heartbeat_every;
-    let mut stopping = Stopping::default();
-
-    loop {
-        if let Some(status) = child.try_wait().context("Failed to wait for the service")? {
-            return Ok(match (stopping.expiring_since, launch.max_duration) {
-                (Some(_), Some(duration)) => LaunchOutcome::Expired(duration),
-                _ if stops.any() => LaunchOutcome::Interrupted,
-                _ => LaunchOutcome::Exited(status),
-            });
+    let mut beats = Heartbeats {
+        run: started + launch.heartbeat_every,
+        session: started + LAUNCH_SESSION_HEARTBEAT,
+    };
+    let mut stopping = Stopping::new(launch, root);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                return (Err(error).context("Failed to wait for the service"), Ok(()));
+            }
         }
-
         let now = Instant::now();
+        let scan = stopping.track();
         if let Some(duration) = launch.max_duration
             && stopping.expiring_since.is_none()
             && now.duration_since(started) >= duration
@@ -376,37 +527,62 @@ fn wait(
                 BRANDING.app_name,
                 humantime::format_duration(duration)
             );
-            stopping.signal(root, Signal::Terminate);
             stopping.expiring_since = Some(now);
+            stopping.signal(&stopping.targets(), Signal::Terminate);
         }
-        if stopping
-            .expiring_since
-            .is_some_and(|since| now.duration_since(since) >= grace)
-        {
-            stopping.signal(root, Signal::Kill);
-        }
-        let presses = stops.interrupts.load(Ordering::SeqCst);
-        if presses > 0 {
-            stopping.on_interrupts(root, presses, grace, now);
-        }
-
-        if now >= next_run_heartbeat {
-            (launch.heartbeat)();
-            next_run_heartbeat = now + launch.heartbeat_every;
-        }
-        if now >= next_session_heartbeat {
-            if let Some(session) = &launch.session {
-                let _ = session.heartbeat();
-            }
-            next_session_heartbeat = now + LAUNCH_SESSION_HEARTBEAT;
-        }
+        respond_to_interrupts(&mut stopping, stops, now, &scan);
+        beats.beat(now, launch);
         thread::sleep(POLL_INTERVAL);
+    };
+
+    if launch.leads_session && !stopping.stopping() {
+        stopping.cleaning_since = Some(Instant::now());
     }
+    let cleanup = loop {
+        let scan = stopping.track();
+        let left = stopping.targets();
+        if left.is_empty() {
+            break Ok(());
+        }
+        let now = Instant::now();
+        respond_to_interrupts(&mut stopping, stops, now, &scan);
+        if stopping
+            .kill_due()
+            .is_some_and(|due| now >= due + KILL_WAIT)
+        {
+            let left: Vec<String> = left.iter().map(|target| target.pid.to_string()).collect();
+            let left = left.join(" ");
+            break Err(anyhow::anyhow!(
+                "processes of the run are still alive after SIGKILL: {left}. Stop them with: kill -9 {left}"
+            ));
+        }
+        beats.beat(now, launch);
+        thread::sleep(POLL_INTERVAL);
+    };
+
+    let outcome = match (stopping.expiring_since, launch.max_duration) {
+        (Some(_), Some(duration)) => LaunchOutcome::Expired(duration),
+        _ if stops.any() => LaunchOutcome::Interrupted,
+        _ => LaunchOutcome::Exited(status),
+    };
+    (Ok(outcome), cleanup)
 }
 
-/// Keeps Localify alive on Ctrl+C so it can stop the service in bounds and
-/// finish its output. SIGTERM and SIGHUP sent to Localify alone are forwarded
-/// to the service's tree.
+fn respond_to_interrupts(
+    stopping: &mut Stopping<'_>,
+    stops: &StopRequests,
+    now: Instant,
+    scan: &[ProcessInfo],
+) {
+    let (presses, directed) = stops.presses();
+    if presses > 0 && stopping.interrupted_since.is_none() {
+        stopping.interrupt(now, directed > 0, scan);
+    }
+    stopping.escalate(now, presses);
+}
+
+/// Forwards SIGTERM and SIGHUP sent to Localify alone to the service's tree.
+/// Ctrl+C is counted by the handler `process::count_interrupts` installs.
 fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
     let (ready_sender, ready_receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -422,8 +598,7 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
         };
         runtime.block_on(async move {
             use tokio::signal::unix::{SignalKind, signal};
-            let (Ok(mut interrupt), Ok(mut terminate), Ok(mut hangup)) = (
-                signal(SignalKind::interrupt()),
+            let (Ok(mut terminate), Ok(mut hangup)) = (
                 signal(SignalKind::terminate()),
                 signal(SignalKind::hangup()),
             ) else {
@@ -437,9 +612,6 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
             };
             loop {
                 tokio::select! {
-                    _ = interrupt.recv() => {
-                        stops.interrupts.fetch_add(1, Ordering::SeqCst);
-                    }
                     _ = terminate.recv() => forward(Signal::Terminate),
                     _ = hangup.recv() => forward(Signal::Hangup),
                 }
@@ -608,18 +780,27 @@ mod tests {
         assert!(beats.get() >= 5, "{} heartbeats in a second", beats.get());
     }
 
-    /// This process as the executor leading its session, with a member that no
-    /// signal ever reaches. The member starts when a scan first sees it, after
-    /// the service exited, so after the run's first heartbeat.
+    /// This process as the executor leading its session, with a member that
+    /// ignores SIGTERM, and SIGKILL too unless `dies_on_kill`. The member shows
+    /// once `visible_from` has passed, and starts when a scan first sees it.
     struct Unkillable {
         me: crate::infrastructure::process::ProcessInfo,
         member: crate::infrastructure::process::ProcessInfo,
         member_start: Cell<Option<u64>>,
         executor_gone: Cell<bool>,
+        visible_from: Instant,
+        dies_on_kill: bool,
+        dead: Cell<bool>,
+        signals: std::cell::RefCell<Vec<(u32, Signal)>>,
     }
 
     impl Unkillable {
+        /// Hidden for its first 250 ms: after the run's first heartbeat.
         fn new() -> Self {
+            Self::with(Duration::from_millis(250), false)
+        }
+
+        fn with(hidden_for: Duration, dies_on_kill: bool) -> Self {
             let pid = std::process::id();
             let me = crate::infrastructure::process::process_info(pid).unwrap();
             let me = crate::infrastructure::process::ProcessInfo {
@@ -639,12 +820,20 @@ mod tests {
                 member,
                 member_start: Cell::new(None),
                 executor_gone: Cell::new(false),
+                visible_from: Instant::now() + hidden_for,
+                dies_on_kill,
+                dead: Cell::new(false),
+                signals: Vec::new().into(),
             }
         }
     }
 
     impl crate::infrastructure::process::ProcessTable for Unkillable {
         fn processes(&self) -> Vec<crate::infrastructure::process::ProcessInfo> {
+            let me = (!self.executor_gone.get()).then_some(self.me);
+            if self.dead.get() || Instant::now() < self.visible_from {
+                return me.into_iter().collect();
+            }
             let start = self
                 .member_start
                 .get()
@@ -654,10 +843,7 @@ mod tests {
                 start,
                 ..self.member
             };
-            match self.executor_gone.get() {
-                true => vec![member],
-                false => vec![self.me, member],
-            }
+            me.into_iter().chain([member]).collect()
         }
 
         fn process(&self, pid: u32) -> Option<crate::infrastructure::process::ProcessInfo> {
@@ -666,7 +852,12 @@ mod tests {
                 .find(|process| process.pid == pid)
         }
 
-        fn signal(&self, _pid: u32, _signal: Signal) {}
+        fn signal(&self, pid: u32, signal: Signal) {
+            self.signals.borrow_mut().push((pid, signal));
+            if pid == self.member.pid && signal == Signal::Kill && self.dies_on_kill {
+                self.dead.set(true);
+            }
+        }
 
         fn boot_id(&self) -> Option<String> {
             Some("this boot".into())
@@ -682,7 +873,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let command = shell("exit 0");
         let environment = LaunchEnvironment::default();
-        let table = Unkillable::new();
+        let table = Unkillable::with(Duration::ZERO, false);
         let finisher = Finisher {
             table: &table,
             grace: Duration::from_millis(50),
@@ -718,7 +909,7 @@ mod tests {
         // The executor exits; the next launcher looks at what it recorded.
         table.executor_gone.set(true);
         let pid = std::process::id();
-        let recorded = RunSession {
+        let recorded = crate::infrastructure::runs::finish::RunSession {
             executor_pid: pid,
             executor_start: table.me.start,
             sid: Some(pid),
@@ -797,6 +988,166 @@ mod tests {
         assert_eq!(exit("exit 3"), 3);
         assert_eq!(exit("kill -TERM $$"), 143);
         assert_eq!(LaunchOutcome::Interrupted.exit_code(), 130);
+    }
+
+    /// A service whose launcher and worker react to signals differently; the
+    /// worker writes its PID to `worker.pid` in `dir`.
+    fn launcher_and_worker(dir: &Path, launcher_ignores: &str) -> Vec<String> {
+        let pid_file = dir.join("worker.pid");
+        shell(&format!(
+            "(trap '' INT TERM; exec sleep 30) & echo $! > '{}'; trap '' {launcher_ignores}; exec sleep 30",
+            pid_file.display()
+        ))
+    }
+
+    fn worker_is_gone(dir: &Path) -> bool {
+        let pid: u32 = std::fs::read_to_string(dir.join("worker.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        crate::infrastructure::process::process_info(pid).is_none()
+    }
+
+    /// Presses Ctrl+C, as a `kill` would, after `after`.
+    fn press(stops: &Arc<StopRequests>, after: Duration, times: usize) {
+        let stops = Arc::clone(stops);
+        thread::spawn(move || {
+            thread::sleep(after);
+            for _ in 0..times {
+                stops.directed.fetch_add(1, Ordering::SeqCst);
+                stops.interrupts.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+
+    #[test]
+    fn a_worker_that_ignores_ctrl_c_is_stopped_after_its_launcher_exits() {
+        for leads_session in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            // The launcher ends on SIGINT; the worker ignores SIGINT and SIGTERM.
+            let command = launcher_and_worker(dir.path(), "TERM");
+            let environment = LaunchEnvironment::default();
+            let finisher = Finisher {
+                table: &crate::infrastructure::process::NativeProcesses,
+                grace: Duration::from_millis(300),
+            };
+            let mut request = launch(&command, &environment, dir.path(), &|| {});
+            request.finisher = &finisher;
+            request.leads_session = leads_session;
+            let stops = Arc::new(StopRequests::default());
+            press(&stops, Duration::from_millis(500), 1);
+
+            let end = run_with(request, stops, false).unwrap();
+
+            assert!(matches!(end.outcome, LaunchOutcome::Interrupted));
+            assert!(
+                worker_is_gone(dir.path()),
+                "the worker survived its launcher"
+            );
+        }
+    }
+
+    #[test]
+    fn a_launcher_that_exits_on_sigterm_leaves_its_worker_to_sigkill_on_time() {
+        let dir = tempfile::tempdir().unwrap();
+        // The launcher ignores SIGINT and ends on SIGTERM; the worker ignores both.
+        let command = launcher_and_worker(dir.path(), "INT");
+        let environment = LaunchEnvironment::default();
+        let grace = Duration::from_millis(300);
+        let finisher = Finisher {
+            table: &crate::infrastructure::process::NativeProcesses,
+            grace,
+        };
+        let mut request = launch(&command, &environment, dir.path(), &|| {});
+        request.finisher = &finisher;
+        let stops = Arc::new(StopRequests::default());
+        press(&stops, Duration::from_millis(500), 1);
+        let started = Instant::now();
+
+        let end = run_with(request, stops, false).unwrap();
+
+        assert!(end.cleanup.is_ok());
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(500) + grace * 2, "{took:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert!(
+            worker_is_gone(dir.path()),
+            "the worker survived its launcher"
+        );
+    }
+
+    #[test]
+    fn a_second_ctrl_c_during_the_session_cleanup_kills_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = shell("exit 0");
+        let environment = LaunchEnvironment::default();
+        let table = Unkillable::with(Duration::ZERO, true);
+        let finisher = Finisher {
+            table: &table,
+            grace: Duration::from_secs(10),
+        };
+        let mut request = launch(&command, &environment, dir.path(), &|| {});
+        request.leads_session = true;
+        request.finisher = &finisher;
+        let stops = Arc::new(StopRequests::default());
+        press(&stops, Duration::from_millis(500), 2);
+        let started = Instant::now();
+
+        let end = run_with(request, stops, false).unwrap();
+
+        assert!(end.cleanup.is_ok());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            table
+                .signals
+                .borrow()
+                .contains(&(u32::MAX - 7, Signal::Kill))
+        );
+    }
+
+    #[test]
+    fn a_ctrl_c_from_the_terminal_skips_the_group_it_already_reached() {
+        let own = |pid, pgid| crate::infrastructure::process::ProcessInfo {
+            pid,
+            ppid: 1,
+            pgid,
+            sid: Some(1),
+            start: 10,
+            started_wall: 0,
+        };
+        let scan = [own(10, 7), own(11, 8)];
+        let targets: Vec<Identity> = scan.iter().map(Identity::of).collect();
+
+        let from_terminal = interrupt_targets(&targets, &scan, Some(7), false);
+        let from_kill = interrupt_targets(&targets, &scan, Some(7), true);
+
+        assert_eq!(from_terminal, [Identity::of(&scan[1])]);
+        assert_eq!(from_kill, targets);
+        assert!(!process::sent_by_a_process(0));
+        assert!(process::sent_by_a_process(4242));
+    }
+
+    #[test]
+    fn a_failed_write_is_reported_even_when_the_copy_never_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        crate::infrastructure::runs::output::create_run_dir(&run).unwrap();
+        let writer =
+            crate::infrastructure::runs::output::StreamWriter::with_segment_size(&run, 4).unwrap();
+        let mut sink = StreamSink::new(writer);
+        std::fs::remove_dir_all(&run).unwrap();
+        assert!(std::io::Write::write(&mut sink, b"more than one segment").is_err());
+        // A copy that never ends, as when a process holds the pipe open.
+        let (_still_copying, done) = mpsc::channel();
+
+        let capture = drain_output(Some(done), Some(&sink));
+
+        assert!(matches!(capture, Capture::Failed(_)), "{capture:?}");
     }
 
     #[test]
