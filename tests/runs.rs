@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::net::TcpListener;
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -55,11 +56,15 @@ impl Sandbox {
 
     /// `localify --config <sandbox> <args>`, in the sandbox's home and state.
     fn localify(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_localify"));
+        let mut command = self.in_sandbox(env!("CARGO_BIN_EXE_localify"));
+        command.arg("--config").arg(&self.config).args(args);
         command
-            .arg("--config")
-            .arg(&self.config)
-            .args(args)
+    }
+
+    /// Any program, in the sandbox's home, state and app folder.
+    fn in_sandbox(&self, program: &str) -> Command {
+        let mut command = Command::new(program);
+        command
             .current_dir(&self.app)
             .env("HOME", &self.root)
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -531,6 +536,8 @@ struct FakeTable {
     fork_on_kill: RefCell<Option<(u32, (ProcessInfo, bool))>>,
     /// The finisher dies as it sends this signal to this process.
     die_on_signal: std::cell::Cell<Option<(u32, Signal)>>,
+    /// The finisher dies right after this signal reached this process.
+    die_after_signal: std::cell::Cell<Option<(u32, Signal)>>,
     /// Processes every scan shows, but that are gone when looked up.
     vanish_on_lookup: RefCell<Vec<u32>>,
 }
@@ -546,6 +553,7 @@ impl FakeTable {
             fork_on_term: None.into(),
             fork_on_kill: None.into(),
             die_on_signal: None.into(),
+            die_after_signal: None.into(),
             vanish_on_lookup: Vec::new().into(),
         }
     }
@@ -607,6 +615,10 @@ impl ProcessTable for FakeTable {
             .retain(|(process, ignores_term)| {
                 process.pid != pid || (*ignores_term && signal == Signal::Terminate)
             });
+        if self.die_after_signal.get() == Some((pid, signal)) {
+            self.die_after_signal.set(None);
+            panic!("the finisher died");
+        }
     }
 
     fn boot_id(&self) -> Option<String> {
@@ -1174,4 +1186,209 @@ fn a_launch_id_that_starts_with_a_dash_reaches_the_run() {
         sandbox.record().unwrap().run_id().map(RunId::as_str),
         Some(launch_id)
     );
+}
+
+#[test]
+fn the_horizon_is_saved_before_the_signal_that_ends_its_witness() {
+    let dir = run_folder();
+    // The witness leaves on SIGTERM, forking a worker as it goes; the worker
+    // started after the heartbeat, before the witness was read again.
+    let table = FakeTable::new("boot-a", vec![(fake_process(4243, 4242, 900), false)]);
+    *table.fork_on_term.borrow_mut() = Some((4243, (fake_process(4247, 4242, 1_500), true)));
+    // The finisher dies right after that SIGTERM.
+    table.die_after_signal.set(Some((4243, Signal::Terminate)));
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        finisher(&table).finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+    }));
+    assert!(crashed.is_err(), "the first finisher was meant to die");
+
+    finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert!(table.current().is_empty(), "{:?}", table.current());
+    assert!(table.signals.borrow().contains(&(4247, Signal::Kill)));
+}
+
+/// What a finisher of an earlier boot saved: an escaped descendant, whose PID
+/// and start an unrelated process of this boot now has.
+fn saved_by_another_boot(dir: &Path) {
+    fs::write(
+        dir.join("finalize-state.json"),
+        r#"{"provenThrough":1000,"targets":[{"pid":5000,"start":2000,"member":false}]}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_finisher_of_another_boot_s_run_trusts_nothing_it_saved() {
+    let dir = run_folder();
+    saved_by_another_boot(dir.path());
+    let table = FakeTable::new("boot-b", vec![(escaped(5000, 1, 2_000), false)]);
+
+    let finish = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert_eq!(finish, Finish::Finalized(EndReason::Interrupted));
+    assert!(table.signals.borrow().is_empty(), "{:?}", table.signals);
+    assert!(!dir.path().join("finalize-state.json").exists());
+}
+
+#[test]
+fn an_already_finalized_run_of_another_boot_signals_nothing() {
+    let dir = run_folder();
+    saved_by_another_boot(dir.path());
+    output::publish_end(dir.path(), &output::RunEnd::now(EndReason::Complete, 0)).unwrap();
+    let table = FakeTable::new("boot-b", vec![(escaped(5000, 1, 2_000), false)]);
+
+    let finish = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert_eq!(finish, Finish::AlreadyFinalized);
+    assert!(table.signals.borrow().is_empty(), "{:?}", table.signals);
+}
+
+#[test]
+fn an_already_finalized_run_ends_only_the_exact_processes_saved() {
+    let dir = run_folder();
+    saved_by_another_boot(dir.path());
+    output::publish_end(dir.path(), &output::RunEnd::now(EndReason::Complete, 0)).unwrap();
+    // Same boot: the saved escaped descendant, and a process in the session
+    // that nothing saved names.
+    let table = FakeTable::new(
+        "boot-a",
+        vec![
+            (escaped(5000, 1, 2_000), false),
+            (fake_process(4243, 4242, 500), false),
+        ],
+    );
+
+    finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    let signals = table.signals.borrow();
+    assert!(signals.contains(&(5000, Signal::Terminate)));
+    assert!(!signals.iter().any(|(pid, _)| *pid == 4243), "{signals:?}");
+}
+
+/// A pseudo-terminal: its master, and its slave for a child to use.
+fn open_pty() -> (fs::File, fs::File) {
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty writes two descriptors into the integers; a null name,
+    // termios and window size mean the defaults.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(opened, 0, "{}", io::Error::last_os_error());
+    // SAFETY: both descriptors were just opened and are owned by nothing else.
+    unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) }
+}
+
+/// A service that writes a line to `count` for each SIGINT it gets, and ends
+/// by itself after about 3 seconds.
+fn counting_interrupts(count: &Path) -> String {
+    format!(
+        "trap \"echo int >> {}\" INT; i=0; while [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done",
+        count.display()
+    )
+}
+
+fn interrupts_counted(count: &Path) -> usize {
+    fs::read_to_string(count)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+#[test]
+fn a_terminal_s_ctrl_c_reaches_a_foreground_service_exactly_once() {
+    let sandbox = Sandbox::new();
+    let count = sandbox.root.join("interrupts");
+    let (mut master, slave) = open_pty();
+    // A shell leads the terminal's session and runs `localify dev` in its
+    // foreground group, as a person's shell would. It traps Ctrl+C rather than
+    // ignore it: an ignored signal stays ignored in what it runs.
+    let mut shell = sandbox.in_sandbox("/bin/sh");
+    shell
+        .arg("-c")
+        .arg(format!(
+            "trap : INT; '{}' --config '{}' dev web --project app -- sh -c '{}'",
+            env!("CARGO_BIN_EXE_localify"),
+            sandbox.config.display(),
+            counting_interrupts(&count)
+        ))
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    // SAFETY: only setsid and ioctl run between fork and exec; both are
+    // async-signal-safe and touch no memory of the parent.
+    unsafe {
+        shell.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut shell = shell.spawn().unwrap();
+    drop(shell.stdin.take());
+    // What the terminal shows is read and dropped, so no writer ever blocks.
+    let mut output = master.try_clone().unwrap();
+    thread::spawn(move || io::copy(&mut output, &mut io::sink()));
+    sandbox.wait_for_record(|run| run.run_id().is_some());
+    thread::sleep(Duration::from_millis(500));
+
+    io::Write::write_all(&mut master, b"\x03").unwrap();
+
+    let status = shell.wait().unwrap();
+    assert_eq!(status.code(), Some(130));
+    assert_eq!(interrupts_counted(&count), 1);
+}
+
+#[test]
+fn a_ctrl_c_sent_to_a_detached_run_is_forwarded_to_its_service() {
+    let sandbox = Sandbox::new();
+    let count = sandbox.root.join("interrupts");
+    let mut executor = sandbox.spawn_background(&counting_interrupts(&count));
+    sandbox.wait_for_record(|run| run.run_id().is_some());
+    thread::sleep(Duration::from_millis(500));
+
+    assert!(process::send_signal(executor.id(), Signal::Interrupt));
+
+    executor.wait().unwrap();
+    assert_eq!(interrupts_counted(&count), 1);
 }

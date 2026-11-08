@@ -223,6 +223,15 @@ impl FinalizeState {
         }
     }
 
+    /// Forgets what was saved: it belongs to another boot.
+    fn discard(dir: &Path) -> Result<()> {
+        match fs::remove_file(dir.join(STATE_FILE)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error)
+                .with_context(|| format!("Failed to remove '{}'", dir.join(STATE_FILE).display())),
+            _ => Ok(()),
+        }
+    }
+
     /// Written whole through a synced temporary file renamed over it.
     fn save(&self, dir: &Path) -> Result<()> {
         let path = dir.join(STATE_FILE);
@@ -298,6 +307,17 @@ impl Journal<'_> {
     }
 }
 
+/// What a round of ending processes is after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// The run's processes, found by session and by descent, until none is left.
+    Run,
+    /// The same, but only while the executor lives.
+    WhileExecutorLives,
+    /// Only the exact processes it is given, alive as themselves.
+    SavedOnly,
+}
+
 /// How a round of ending processes stopped.
 enum Ended {
     /// No process is left.
@@ -346,18 +366,29 @@ impl Finisher<'_> {
                 None => return Ok(Finish::Gone),
             },
         };
+        let finalized = output::read_end(dir)?.is_some();
+        // Another boot ended every process of the run: nothing it saved is
+        // trusted, nothing is signalled.
+        if !session.same_boot(self.table) {
+            FinalizeState::discard(dir)?;
+            return match finalized {
+                true => Ok(Finish::AlreadyFinalized),
+                false => self.publish_end(dir, captured_by_executor),
+            };
+        }
         let saved = FinalizeState::load(dir)?;
         let escaped = saved.identities(false);
-        if output::read_end(dir)?.is_some() {
+        if finalized {
             // The executor finalized its own run, but what it left outside its
-            // session, captured while it lived, is still ended.
+            // session, captured while it lived, is still ended: those exact
+            // processes, nothing found by session.
             if mode == FinishMode::End && !escaped.is_empty() {
                 let mut journal = Journal {
                     dir,
                     locked: true,
                     saved,
                 };
-                self.end_until(&mut journal, session, Vec::new(), escaped, false)?;
+                self.end_until(&mut journal, session, Vec::new(), escaped, Scope::SavedOnly)?;
             }
             return Ok(Finish::AlreadyFinalized);
         }
@@ -376,9 +407,7 @@ impl Finisher<'_> {
                 "Could not confirm which processes belong to the run: they kept changing while Localify looked. Try again."
             ),
         };
-        if session.same_boot(self.table) {
-            members.extend(still_saved_members(self.table, &session, &saved, &members));
-        }
+        members.extend(still_saved_members(self.table, &session, &saved, &members));
         let escaped: Vec<Identity> = escaped
             .into_iter()
             .filter(|identity| Identity::current_in(self.table, identity.pid) == Some(*identity))
@@ -394,8 +423,12 @@ impl Finisher<'_> {
                 locked: true,
                 saved,
             };
-            self.end_until(&mut journal, &session, members, escaped, false)?;
+            self.end_until(&mut journal, &session, members, escaped, Scope::Run)?;
         }
+        self.publish_end(dir, captured_by_executor)
+    }
+
+    fn publish_end(&self, dir: &Path, captured_by_executor: bool) -> Result<Finish> {
         let reason = if captured_by_executor {
             EndReason::Interrupted
         } else {
@@ -434,7 +467,13 @@ impl Finisher<'_> {
                 table: self.table,
                 grace,
             };
-            finisher.end_until(&mut journal, session, members, tree, true)?;
+            finisher.end_until(
+                &mut journal,
+                session,
+                members,
+                tree,
+                Scope::WhileExecutorLives,
+            )?;
         }
         self.finish(dir, session, captured_by_executor, FinishMode::End)
     }
@@ -444,15 +483,16 @@ impl Finisher<'_> {
     /// start is checked before each signal. `tree` holds the executor's
     /// descendants by identity, so one that left the session is still ended,
     /// and grows from every one of them still alive. What is proven goes to
-    /// the journal before each round's signals. With `while_executor_lives`,
-    /// it returns as soon as a scan no longer shows the executor alive.
+    /// the journal before each round's signals: a known member is read again,
+    /// which moves the proof horizon, the horizon is written, and only then
+    /// is any process signalled, each one's identity checked again first.
     fn end_until(
         &self,
         journal: &mut Journal<'_>,
         session: &RunSession,
         members: Vec<ProcessInfo>,
         tree: Vec<Identity>,
-        while_executor_lives: bool,
+        scope: Scope,
     ) -> Result<Ended> {
         let mut known = members;
         let mut retained = tree;
@@ -461,6 +501,16 @@ impl Finisher<'_> {
         let mut signalled: HashSet<Identity> = HashSet::new();
         let started = Instant::now();
         loop {
+            if scope != Scope::SavedOnly {
+                // A member read alive now proves the session until then.
+                let before_reading = self.table.now();
+                if known
+                    .iter()
+                    .any(|process| session.still_member(self.table, process))
+                {
+                    horizon = horizon.max(before_reading);
+                }
+            }
             journal.record(horizon, &known, &retained)?;
             let killing = started.elapsed() >= self.grace;
             for (process, member) in targets(&known, &retained) {
@@ -469,21 +519,27 @@ impl Finisher<'_> {
                     false if signalled.insert(process) => Signal::Terminate,
                     false => continue,
                 };
-                let before_reading = self.table.now();
-                if self.signal_checked(session, process, member, signal) && member {
-                    // A member read alive just now proves the session until then.
-                    horizon = horizon.max(before_reading);
-                }
+                self.signal_checked(session, process, member, signal);
             }
             thread::sleep(POLL);
             let scan = self.table.processes();
-            known = self.still_members(session, &known, &scan, &mut horizon);
-            retained = still_retained(session, &retained, &scan);
+            if scope == Scope::SavedOnly {
+                // Those exact processes, alive as themselves: nothing more.
+                let alive = |identity: &Identity| {
+                    scan.iter()
+                        .any(|process| Identity::of(process) == *identity)
+                };
+                known.retain(|process| alive(&Identity::of(process)));
+                retained.retain(alive);
+            } else {
+                known = self.still_members(session, &known, &scan, &mut horizon);
+                retained = still_retained(session, &retained, &scan);
+            }
             let left = targets(&known, &retained);
             if left.is_empty() {
                 return Ok(Ended::Empty);
             }
-            if while_executor_lives && !session.executor_alive(self.table) {
+            if scope == Scope::WhileExecutorLives && !session.executor_alive(self.table) {
                 journal.record(horizon, &known, &retained)?;
                 return Ok(Ended::ExecutorGone);
             }
@@ -540,14 +596,14 @@ impl Finisher<'_> {
     }
 
     /// Signals a process only while it is the one seen: same start, and for a
-    /// session member, still in the session. Returns whether it was.
+    /// session member, still in the session.
     fn signal_checked(
         &self,
         session: &RunSession,
         process: Identity,
         member: bool,
         signal: Signal,
-    ) -> bool {
+    ) {
         let unchanged = self
             .table
             .process(process.pid)
@@ -555,7 +611,6 @@ impl Finisher<'_> {
         if unchanged {
             self.table.signal(process.pid, signal);
         }
-        unchanged
     }
 }
 

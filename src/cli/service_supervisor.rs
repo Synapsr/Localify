@@ -28,7 +28,7 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
 use crate::infrastructure::process::{
-    self, Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities, track_tree,
+    Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities, track_tree,
 };
 use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT};
 use crate::infrastructure::runs::output::StreamSink;
@@ -133,44 +133,22 @@ pub enum Capture {
 #[derive(Default)]
 pub struct StopRequests {
     pub interrupts: AtomicUsize,
-    /// The interrupts a process sent with `kill`, not the terminal.
-    pub directed: AtomicUsize,
     pub signalled: AtomicBool,
-    /// The process-wide SIGINT counts when this run began to watch them.
-    baseline: Option<(usize, usize)>,
 }
 
 impl StopRequests {
-    fn watching() -> Self {
-        Self {
-            baseline: Some(process::interrupts()),
-            ..Self::default()
-        }
-    }
-
-    /// Every Ctrl+C so far, and how many of them a process sent.
-    fn presses(&self) -> (usize, usize) {
-        let mut all = self.interrupts.load(Ordering::SeqCst);
-        let mut directed = self.directed.load(Ordering::SeqCst);
-        if let Some((base_all, base_directed)) = self.baseline {
-            let (now_all, now_directed) = process::interrupts();
-            all += now_all.saturating_sub(base_all);
-            directed += now_directed.saturating_sub(base_directed);
-        }
-        (all, directed)
+    fn presses(&self) -> usize {
+        self.interrupts.load(Ordering::SeqCst)
     }
 
     fn any(&self) -> bool {
-        self.presses().0 > 0 || self.signalled.load(Ordering::SeqCst)
+        self.presses() > 0 || self.signalled.load(Ordering::SeqCst)
     }
 }
 
 /// Starts the service and waits for it, returning why it stopped.
 pub fn run(launch: SupervisedLaunch<'_>) -> Result<LaunchEnd> {
-    if let Err(error) = process::count_interrupts() {
-        eprintln!("Warning: Ctrl+C may end Localify before the service: {error}");
-    }
-    run_with(launch, Arc::new(StopRequests::watching()), true)
+    run_with(launch, Arc::new(StopRequests::default()), true)
 }
 
 /// `run`, with stop requests a test can make without signalling itself.
@@ -320,6 +298,8 @@ struct Stopping<'a> {
     members: Vec<Identity>,
     expiring_since: Option<Instant>,
     interrupted_since: Option<Instant>,
+    /// A SIGTERM or SIGHUP sent to `localify dev` was forwarded to the service.
+    signalled_since: Option<Instant>,
     /// The service exited by itself, and its session is being emptied.
     cleaning_since: Option<Instant>,
     terminated: bool,
@@ -336,6 +316,7 @@ impl<'a> Stopping<'a> {
             members: Vec::new(),
             expiring_since: None,
             interrupted_since: None,
+            signalled_since: None,
             cleaning_since: None,
             terminated: false,
         }
@@ -359,7 +340,9 @@ impl<'a> Stopping<'a> {
     }
 
     fn stopping(&self) -> bool {
-        self.expiring_since.is_some() || self.interrupted_since.is_some()
+        self.expiring_since.is_some()
+            || self.interrupted_since.is_some()
+            || self.signalled_since.is_some()
     }
 
     /// A stop is after the service's tree and the session; a cleanup after a
@@ -391,15 +374,15 @@ impl<'a> Stopping<'a> {
         }
     }
 
-    /// The first Ctrl+C: SIGINT to whoever did not get it already. One from
-    /// the terminal reached `localify dev`'s whole process group; one a
-    /// process sent reached `localify dev` alone.
-    fn interrupt(&mut self, now: Instant, directed: bool, scan: &[ProcessInfo]) {
+    /// The first Ctrl+C: SIGINT to whoever no terminal reached (see
+    /// [`interrupt_targets`]).
+    fn interrupt(&mut self, now: Instant, scan: &[ProcessInfo]) {
         let own_group = scan
             .iter()
             .find(|process| process.pid == std::process::id())
             .map(|process| process.pgid);
-        let targets = interrupt_targets(&self.targets_on_interrupt(), scan, own_group, directed);
+        let dedicated = self.leader.is_some();
+        let targets = interrupt_targets(&self.targets_on_interrupt(), scan, own_group, dedicated);
         self.signal(&targets, Signal::Interrupt);
         self.interrupted_since = Some(now);
     }
@@ -421,7 +404,7 @@ impl<'a> Stopping<'a> {
         let targets = self.targets();
         let kill = match (
             self.interrupted_since,
-            self.expiring_since,
+            self.expiring_since.or(self.signalled_since),
             self.cleaning_since,
         ) {
             (Some(since), _, _) => presses >= 2 || now >= since + self.grace * 2,
@@ -446,7 +429,7 @@ impl<'a> Stopping<'a> {
     fn kill_due(&self) -> Option<Instant> {
         match (
             self.interrupted_since,
-            self.expiring_since,
+            self.expiring_since.or(self.signalled_since),
             self.cleaning_since,
         ) {
             (Some(since), _, _) => Some(since + self.grace * 2),
@@ -456,14 +439,19 @@ impl<'a> Stopping<'a> {
     }
 }
 
-/// The processes a Ctrl+C has not reached: all of them when a process sent
-/// it to `localify dev`, otherwise those outside `localify dev`'s group, which
-/// the terminal signalled whole.
+/// Who gets a forwarded SIGINT. In a terminal, `localify dev` does not lead
+/// its session, and the terminal delivers a Ctrl+C to the whole foreground
+/// group, so only processes outside `localify dev`'s own group get one: those
+/// that left it. In a session of its own, no terminal delivers anything, so
+/// every process does. Where the SIGINT came from is not asked: on macOS a
+/// terminal's Ctrl+C carries a sender, as a `kill` does. A `kill -INT` of
+/// `localify dev` in a terminal therefore reaches its group only through the
+/// SIGTERM and SIGKILL that follow.
 fn interrupt_targets(
     targets: &[Identity],
     scan: &[ProcessInfo],
     own_group: Option<u32>,
-    directed: bool,
+    dedicated_session: bool,
 ) -> Vec<Identity> {
     targets
         .iter()
@@ -472,7 +460,7 @@ fn interrupt_targets(
                 .iter()
                 .find(|process| Identity::of(process) == **target)
                 .map(|process| process.pgid);
-            directed || own_group.is_none() || group != own_group
+            dedicated_session || (own_group.is_some() && group.is_some() && group != own_group)
         })
         .copied()
         .collect()
@@ -518,13 +506,6 @@ fn supervise(
     let mut next_scan = started;
     let mut scan = Vec::new();
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                return (Err(error).context("Failed to wait for the service"), Ok(()));
-            }
-        }
         let now = Instant::now();
         let expiring = launch
             .max_duration
@@ -552,7 +533,15 @@ fn supervise(
             stopping.expiring_since = Some(now);
             stopping.signal(&stopping.targets(), Signal::Terminate);
         }
-        respond_to_interrupts(&mut stopping, stops, now, &scan);
+        // Before the exit: a service a Ctrl+C just ended leaves its stop to run.
+        respond_to_stop_requests(&mut stopping, stops, now, &scan);
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                return (Err(error).context("Failed to wait for the service"), Ok(()));
+            }
+        }
         beats.beat(now, launch);
         thread::sleep(POLL_INTERVAL);
     };
@@ -563,12 +552,12 @@ fn supervise(
     // The rest is a stop or a cleanup: every SCAN_WHILE_STOPPING.
     let cleanup = loop {
         let scan = stopping.track();
+        let now = Instant::now();
+        respond_to_stop_requests(&mut stopping, stops, now, &scan);
         let left = stopping.targets();
         if left.is_empty() {
             break Ok(());
         }
-        let now = Instant::now();
-        respond_to_interrupts(&mut stopping, stops, now, &scan);
         if stopping
             .kill_due()
             .is_some_and(|due| now >= due + KILL_WAIT)
@@ -591,21 +580,27 @@ fn supervise(
     (Ok(outcome), cleanup)
 }
 
-fn respond_to_interrupts(
+/// Turns pending stop requests into a stop: a Ctrl+C, or a SIGTERM or SIGHUP
+/// already forwarded to the service, whose survivors get SIGKILL after the
+/// grace period.
+fn respond_to_stop_requests(
     stopping: &mut Stopping<'_>,
     stops: &StopRequests,
     now: Instant,
     scan: &[ProcessInfo],
 ) {
-    let (presses, directed) = stops.presses();
+    let presses = stops.presses();
     if presses > 0 && stopping.interrupted_since.is_none() {
-        stopping.interrupt(now, directed > 0, scan);
+        stopping.interrupt(now, scan);
+    }
+    if stops.signalled.load(Ordering::SeqCst) && stopping.signalled_since.is_none() {
+        stopping.signalled_since = Some(now);
     }
     stopping.escalate(now, presses);
 }
 
-/// Forwards SIGTERM and SIGHUP sent to Localify alone to the service's tree.
-/// Ctrl+C is counted by the handler `process::count_interrupts` installs.
+/// Counts each Ctrl+C, keeping Localify alive to stop the service in bounds,
+/// and forwards SIGTERM and SIGHUP sent to Localify alone to the service's tree.
 fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
     let (ready_sender, ready_receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -621,7 +616,8 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
         };
         runtime.block_on(async move {
             use tokio::signal::unix::{SignalKind, signal};
-            let (Ok(mut terminate), Ok(mut hangup)) = (
+            let (Ok(mut interrupt), Ok(mut terminate), Ok(mut hangup)) = (
+                signal(SignalKind::interrupt()),
                 signal(SignalKind::terminate()),
                 signal(SignalKind::hangup()),
             ) else {
@@ -635,6 +631,9 @@ fn watch_stop_signals(root: Identity, stops: Arc<StopRequests>) {
             };
             loop {
                 tokio::select! {
+                    _ = interrupt.recv() => {
+                        stops.interrupts.fetch_add(1, Ordering::SeqCst);
+                    }
                     _ = terminate.recv() => forward(Signal::Terminate),
                     _ = hangup.recv() => forward(Signal::Hangup),
                 }
@@ -1079,13 +1078,12 @@ mod tests {
         crate::infrastructure::process::process_info(pid).is_none()
     }
 
-    /// Presses Ctrl+C, as a `kill` would, after `after`.
+    /// Counts a Ctrl+C for `localify dev`, as its handler would, after `after`.
     fn press(stops: &Arc<StopRequests>, after: Duration, times: usize) {
         let stops = Arc::clone(stops);
         thread::spawn(move || {
             thread::sleep(after);
             for _ in 0..times {
-                stops.directed.fetch_add(1, Ordering::SeqCst);
                 stops.interrupts.fetch_add(1, Ordering::SeqCst);
             }
         });
@@ -1181,7 +1179,48 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_c_from_the_terminal_skips_the_group_it_already_reached() {
+    fn a_ctrl_c_that_ends_the_launcher_before_the_next_poll_still_stops_its_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher_pid = dir.path().join("launcher.pid");
+        // The launcher ends on SIGINT; the worker ignores it.
+        let command = shell(&format!(
+            "(trap '' INT; exec sleep 30) & echo $! > '{}'; echo $$ > '{}'; exec sleep 30",
+            dir.path().join("worker.pid").display(),
+            launcher_pid.display()
+        ));
+        let environment = LaunchEnvironment::default();
+        let finisher = Finisher {
+            table: &crate::infrastructure::process::NativeProcesses,
+            grace: Duration::from_millis(300),
+        };
+        let mut request = launch(&command, &environment, dir.path(), &|| {});
+        request.finisher = &finisher;
+        let stops = Arc::new(StopRequests::default());
+        let pressing = Arc::clone(&stops);
+        thread::spawn(move || {
+            // Once a healthy scan has seen the worker, a terminal's Ctrl+C:
+            // counted by `localify dev`, and the launcher ended at once.
+            thread::sleep(SCAN_WHILE_HEALTHY + Duration::from_millis(500));
+            let launcher: u32 = std::fs::read_to_string(launcher_pid)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            pressing.interrupts.fetch_add(1, Ordering::SeqCst);
+            crate::infrastructure::process::send_signal(launcher, Signal::Interrupt);
+        });
+
+        let end = run_with(request, stops, false).unwrap();
+
+        assert_eq!(end.outcome.exit_code(), 130);
+        assert!(
+            worker_is_gone(dir.path()),
+            "the worker outlived its launcher"
+        );
+    }
+
+    #[test]
+    fn a_ctrl_c_in_a_terminal_skips_the_group_the_terminal_reached() {
         let own = |pid, pgid| crate::infrastructure::process::ProcessInfo {
             pid,
             ppid: 1,
@@ -1193,13 +1232,11 @@ mod tests {
         let scan = [own(10, 7), own(11, 8)];
         let targets: Vec<Identity> = scan.iter().map(Identity::of).collect();
 
-        let from_terminal = interrupt_targets(&targets, &scan, Some(7), false);
-        let from_kill = interrupt_targets(&targets, &scan, Some(7), true);
+        let in_a_terminal = interrupt_targets(&targets, &scan, Some(7), false);
+        let in_its_own_session = interrupt_targets(&targets, &scan, Some(7), true);
 
-        assert_eq!(from_terminal, [Identity::of(&scan[1])]);
-        assert_eq!(from_kill, targets);
-        assert!(!process::sent_by_a_process(0));
-        assert!(process::sent_by_a_process(4242));
+        assert_eq!(in_a_terminal, [Identity::of(&scan[1])]);
+        assert_eq!(in_its_own_session, targets);
     }
 
     #[test]

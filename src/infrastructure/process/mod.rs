@@ -18,10 +18,6 @@ use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
 
-use std::io;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 /// A living process, as the kernel describes it. Zombies are left out: they
 /// have ended and only wait for their parent to read their exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,67 +134,6 @@ pub fn send_signal(pid: u32, signal: Signal) -> bool {
     // SAFETY: kill takes two integers and touches no memory; the PID is positive,
     // so it names one process, never a group.
     unsafe { libc::kill(pid, signal.raw()) == 0 }
-}
-
-static INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-static DIRECTED_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-static COUNTING: OnceLock<Result<(), i32>> = OnceLock::new();
-
-/// Counts every SIGINT this process gets instead of letting it end it, and
-/// tells a Ctrl+C from a `kill`: the terminal signals its foreground group as
-/// the kernel, with no sender, while `kill(2)` names the process that sent it.
-/// It does not matter where stdin points. Installed once per process.
-pub fn count_interrupts() -> io::Result<()> {
-    let installed = COUNTING.get_or_init(|| {
-        // SAFETY: sigaction holds integers, a signal set and a handler slot, for
-        // which all zeros is valid before they are set.
-        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = on_interrupt as extern "C" fn(_, _, _) as libc::sighandler_t;
-        action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
-        // SAFETY: `action.sa_mask` is a writable sigset_t; sigaction reads
-        // `action` and writes nothing back, its third argument being null. The
-        // handler only touches atomics, which is async-signal-safe.
-        let result = unsafe {
-            libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut())
-        };
-        match result {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error().raw_os_error().unwrap_or(0)),
-        }
-    });
-    installed.map_err(io::Error::from_raw_os_error)
-}
-
-/// Every SIGINT counted so far, and how many of them a process sent.
-pub fn interrupts() -> (usize, usize) {
-    (
-        INTERRUPTS.load(Ordering::SeqCst),
-        DIRECTED_INTERRUPTS.load(Ordering::SeqCst),
-    )
-}
-
-/// Whether a SIGINT came from a process (`kill`), from what its siginfo says:
-/// a terminal's comes from the kernel, with no sending process.
-pub fn sent_by_a_process(sender: libc::pid_t) -> bool {
-    sender > 0
-}
-
-extern "C" fn on_interrupt(
-    _signal: libc::c_int,
-    info: *mut libc::siginfo_t,
-    _context: *mut libc::c_void,
-) {
-    INTERRUPTS.fetch_add(1, Ordering::SeqCst);
-    // SAFETY: with SA_SIGINFO the kernel passes a valid siginfo_t, or null, and
-    // reading its sender is a plain field read.
-    let sender = match info.is_null() {
-        true => 0,
-        false => unsafe { (*info).si_pid() },
-    };
-    if sent_by_a_process(sender) {
-        DIRECTED_INTERRUPTS.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 /// A process known by its PID and start time, so a reused PID is never
