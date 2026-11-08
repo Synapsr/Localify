@@ -298,6 +298,72 @@ describe("SIGNUP", () => {
   });
 });
 
+describe("TEAM_GITHUB_IDS", () => {
+  function overrideOf(githubId: number) {
+    return context.sqlite
+      .prepare(
+        `SELECT serving_machines, public_urls, reason, expires_at FROM plan_overrides
+         WHERE user_id = (SELECT id FROM users WHERE github_id = ?)`,
+      )
+      .get(githubId);
+  }
+
+  beforeEach(() => {
+    context.env.TEAM_GITHUB_IDS = "1, 3";
+  });
+
+  it("gives a team member the team override at their first sign-in", async () => {
+    const { token } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    expect(overrideOf(1)).toEqual({
+      serving_machines: 5,
+      public_urls: 10,
+      reason: "team",
+      expires_at: null,
+    });
+    expect((await me(token)).body.plan).toMatchObject({
+      status: "override",
+      entitled: true,
+      limits: { servingMachines: 5, publicUrls: 10 },
+      endsAt: null,
+    });
+  });
+
+  it("keeps an override an operator changed when the member signs in again", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    sql(
+      "UPDATE plan_overrides SET serving_machines = 1, public_urls = 3, reason = 'trial', expires_at = 99 WHERE user_id = ?",
+      userId,
+    );
+    await signIn(context, "teo-goulois", 1, "desktop", { entitled: false });
+    expect(overrideOf(1)).toEqual({
+      serving_machines: 1,
+      public_urls: 3,
+      reason: "trial",
+      expires_at: 99,
+    });
+  });
+
+  it("gives nothing to an allowlisted id outside the team", async () => {
+    const { token } = await signIn(context, "guest", 2, "laptop", { entitled: false });
+    expect(overrideOf(2)).toBeUndefined();
+    expect((await me(token)).body.plan).toMatchObject({ status: "none", entitled: false });
+  });
+
+  it("gives nothing to a banned team member", async () => {
+    context.env.TEAM_GITHUB_IDS = "";
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    sql("UPDATE users SET banned_at = 1, banned_reason = 'spam' WHERE id = ?", userId);
+    context.env.TEAM_GITHUB_IDS = "1";
+    fakeSignIn(context, "teo-goulois", 1);
+    const response = await api(context, "POST", "/v1/auth/device/token", {
+      body: { deviceCode: "device-1", machineName: "desktop", ingressPort: 7381 },
+    });
+    expect(response.status).toBe(403);
+    expect(await errorOf(response)).toBe("banned");
+    expect(overrideOf(1)).toBeUndefined();
+  });
+});
+
 describe("bans", () => {
   it("answer 403 banned on every route but sign-out, and keep the tokens and URLs", async () => {
     const { token, userId } = await signIn(context);

@@ -153,6 +153,7 @@ The `localify.dev` zone needs two rules, so that nobody holding a tunnel token c
 |---|---|---|
 | `SIGNUP` | var | `allowlist` while invite-only, `open` once anyone may sign in |
 | `ALLOWED_GITHUB_IDS` | var | under `SIGNUP=allowlist`, who may sign in |
+| `TEAM_GITHUB_IDS` | var | who gets the `team` override at sign-in; stays once sign-up opens |
 | `MAX_TUNNELS` | var | `950`; the sweep logs an error above 800 |
 | `POLAR_API_BASE` | var | `https://api.polar.sh`, or `https://sandbox-api.polar.sh` |
 | `POLAR_PRODUCT_PRO_MONTHLY`, `POLAR_PRODUCT_PRO_YEARLY` | var | Pro product ids |
@@ -171,6 +172,8 @@ curl -s https://api.github.com/users/<login> | jq .id
 ```
 
 The allowlist only gates sign-in. Serving takes an entitlement in both modes: a plan, or an override. Removing an id from the allowlist does not stop an account that is already signed in.
+
+`TEAM_GITHUB_IDS`, in the same format, lists the team. When one of those ids signs in without an override and is not banned, the Worker gives it the `team` override: 5 serving machines, 10 URLs, no expiry. It never overwrites an override, so one you changed with `pnpm cloud:admin override` stays. The list outlives the allowlist, which goes when `SIGNUP` opens. It only grants: removing an id leaves its override, so remove the id first, then run `pnpm cloud:admin override --remove <github-login>`.
 
 Overrides, bans and takedowns go through `pnpm cloud:admin` (docs/public-urls.md, "Moderation"), and `pnpm cloud:admin --help` lists them. Each one writes the production D1 as `CLOUDFLARE_DEPLOY_TOKEN` from Infisical, or with your own `wrangler login` when that key is missing, and prints what it changed. It reaches the public path within 10 seconds and closes the affected streams at the next sweep. `--local` runs it on the D1 of `pnpm cloud:dev`.
 
