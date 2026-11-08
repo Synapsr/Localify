@@ -25,6 +25,11 @@ export type Site = {
   passwordHash: string | null;
   passwordSalt: string | null;
   passwordVersion: number;
+  /**
+   * When the read behind this decision started, on this Worker's clock. A
+   * decision older than `SITE_CACHE_TTL_MS` is not forwarded on.
+   */
+  readAt: number;
   /** The owner, whose traffic limit the URL shares, and their GitHub login. */
   userId: string;
   ownerLogin: string;
@@ -62,6 +67,14 @@ const cache = new Map<string, { site: Site | null; expires: number }>();
 export async function findSite(env: Env, slug: string, now = Date.now()): Promise<Site | null> {
   const cached = cache.get(slug);
   if (cached && cached.expires > now) return cached.site;
+  const site = await loadSite(env, slug, now);
+  if (cache.size >= MAX_ENTRIES) cache.clear();
+  cache.set(slug, { site, expires: now + SITE_CACHE_TTL_MS });
+  return site;
+}
+
+/** The public URL for a slug, read now whatever the cache holds, and cached. */
+export async function reloadSite(env: Env, slug: string, now = Date.now()): Promise<Site | null> {
   const site = await loadSite(env, slug, now);
   if (cache.size >= MAX_ENTRIES) cache.clear();
   cache.set(slug, { site, expires: now + SITE_CACHE_TTL_MS });
@@ -113,6 +126,7 @@ async function loadSite(env: Env, slug: string, now: number): Promise<Site | nul
     passwordHash: row.password_hash,
     passwordSalt: row.password_salt,
     passwordVersion: row.password_version,
+    readAt: now,
     userId: row.user_id,
     ownerLogin: row.login,
   };

@@ -31,6 +31,8 @@ import {
   reconcileStatements,
   servingUrlIds,
   servingUrlLimit,
+  D1_NOW_MS,
+  STAMP_STOP,
   type AccountRow,
   type Entitlement,
   type OwnedUrl,
@@ -48,10 +50,11 @@ import { meteredDb } from "./queries";
 import { SITE_CACHE_TTL_MS } from "./sites";
 
 /**
- * No new tunnel generation of an owner starts until this long after one of
- * their URLs stopped serving. A public path lookup that still said it
- * served was cached before the stop, so it has expired by then, and no
- * request can follow it to the new tunnel.
+ * No new tunnel generation of an owner starts until this long after their
+ * latest serving stop or tunnel release, on D1's clock. A routing decision
+ * lives at most `SITE_CACHE_TTL_MS` from the start of its read, so one
+ * made before the stop has ended by then. The 5 seconds cover the skew
+ * between a Worker's clock and D1's.
  */
 export const QUIET_AFTER_STOP_MS = SITE_CACHE_TTL_MS + 5_000;
 /** An operation older than this is abandoned. */
@@ -77,6 +80,8 @@ const BACKOFF_QUERIES = 1;
 const SLOT_QUERIES = 3;
 /** The orphan listing and the slot count, at the end of a run. */
 const FINAL_QUERIES = 2;
+/** The two writes of the status readings: healthy again, and first seen down. */
+const STATUS_QUERIES = 2;
 /**
  * The revocations every run attempts first, whatever came before them: the
  * reconcile stops while their queries are left, and they take at most
@@ -186,7 +191,7 @@ export async function machineRuntime(
   }
 
   if (row.tunnel_state === "none") {
-    const quiet = await quietLeft(env, caller.userId, now);
+    const quiet = await quietLeft(env, caller.userId);
     if (quiet > 0) return { ...provisioning, retryAfter: Math.ceil(quiet / 1000) };
     const reserved = await reserveSlot(env, caller, entitlement.servingMachines, now);
     if (reserved) {
@@ -196,7 +201,7 @@ export async function machineRuntime(
     row = await tunnelRow(env, caller.machineId);
     if (row.tunnel_state === "none") {
       // A stop that landed since the check above.
-      const late = await quietLeft(env, caller.userId, now);
+      const late = await quietLeft(env, caller.userId);
       if (late > 0) return { ...provisioning, retryAfter: Math.ceil(late / 1000) };
       return blockedRuntime(env, caller, entitlement, base);
     }
@@ -304,13 +309,14 @@ type Reservation = {
   dnsRecordId: string | null;
 };
 
-/** How long the owner's quiet period after a stop still lasts, in milliseconds. */
-async function quietLeft(env: Env, userId: string, now: number): Promise<number> {
-  const row = await env.DB.prepare(`SELECT serving_stopped_at FROM users WHERE id = ?1`)
-    .bind(userId)
-    .first<{ serving_stopped_at: number | null }>();
-  const stoppedAt = row?.serving_stopped_at ?? null;
-  return stoppedAt === null ? 0 : Math.max(0, stoppedAt + QUIET_AFTER_STOP_MS - now);
+/** How long the owner's quiet period still lasts, in milliseconds of D1's clock. */
+async function quietLeft(env: Env, userId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT serving_stopped_at + ?2 - ${D1_NOW_MS} AS left FROM users WHERE id = ?1`,
+  )
+    .bind(userId, QUIET_AFTER_STOP_MS)
+    .first<{ left: number | null }>();
+  return Math.max(0, row?.left ?? 0);
 }
 
 /**
@@ -332,7 +338,8 @@ async function reserveSlot(
      WHERE id = ?1 AND status = 'active' AND tunnel_state = 'none'
        AND (SELECT COUNT(*) FROM machines WHERE user_id = ?4 AND tunnel_state != 'none') < ?5
        AND (SELECT COUNT(*) FROM machines WHERE tunnel_state != 'none') < ?6
-       AND NOT EXISTS (SELECT 1 FROM users WHERE id = ?4 AND serving_stopped_at > ?7)
+       AND NOT EXISTS (SELECT 1 FROM users
+                       WHERE id = ?4 AND serving_stopped_at > ${D1_NOW_MS} - ?7)
      RETURNING tunnel_generation, ingress_port, dns_record_id`,
   )
     .bind(
@@ -342,7 +349,7 @@ async function reserveSlot(
       caller.userId,
       servingMachines,
       maxTunnels(env),
-      now - QUIET_AFTER_STOP_MS,
+      QUIET_AFTER_STOP_MS,
     )
     .first<{ tunnel_generation: number; ingress_port: number; dns_record_id: string | null }>();
   return row
@@ -496,8 +503,11 @@ async function releaseTunnel(
   { now = Date.now(), urgent = false, budget = null, ifIdle = false }: ReleaseOptions = {},
 ): Promise<ReleaseResult> {
   const op = newOp();
-  const taken = await env.DB.prepare(
-    `UPDATE machines SET tunnel_state = 'releasing', tunnel_op = ?3, tunnel_op_at = ?4,
+  // Claiming the release stamps the owner's quiet period in the same batch:
+  // a request routed before it cannot reach the generation that follows.
+  const [claim] = await env.DB.batch<{ tunnel_id: string | null }>([
+    env.DB.prepare(
+      `UPDATE machines SET tunnel_state = 'releasing', tunnel_op = ?3, tunnel_op_at = ?4,
             rotate_requested_at = CASE WHEN ?6 THEN COALESCE(rotate_requested_at, ?4)
                                        ELSE rotate_requested_at END
      WHERE id = ?1 AND status = 'active' AND tunnel_generation = ?2
@@ -506,9 +516,13 @@ async function releaseTunnel(
        AND (?7 = 0 OR NOT EXISTS (SELECT 1 FROM public_urls p WHERE p.machine_id = machines.id
                                   AND p.deleted_at IS NULL AND p.taken_down_at IS NULL))
      RETURNING tunnel_id`,
-  )
-    .bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0, ifIdle ? 1 : 0)
-    .first<{ tunnel_id: string | null }>();
+    ).bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0, ifIdle ? 1 : 0),
+    env.DB.prepare(
+      `UPDATE users SET ${STAMP_STOP}
+       WHERE id = (SELECT user_id FROM machines WHERE id = ?1 AND tunnel_op = ?2)`,
+    ).bind(machineId, op),
+  ]);
+  const taken = claim?.results[0];
   if (!taken) return "skipped";
   try {
     const cloudflare = new CloudflareApi(env, budget);
@@ -729,8 +743,11 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   await revoke(REVOCATIONS_PER_RUN, 0, MAINTENANCE_QUERIES);
   await revoke(Number.POSITIVE_INFINITY, MAINTENANCE_CALLS, MAINTENANCE_QUERIES);
 
-  // 2. Revoked machines, as many as the queries left allow.
-  const cleanups = Math.floor((queries.left - FINAL_QUERIES - 1) / CLEANUP_QUERIES_PER_MACHINE);
+  // 2. Revoked machines, as many as the queries left allow after their own
+  // read, the status readings and the end of the run.
+  const cleanups = Math.floor(
+    (queries.left - 1 - STATUS_QUERIES - FINAL_QUERIES) / CLEANUP_QUERIES_PER_MACHINE,
+  );
   if (cleanups > 0) await cleanUpRevokedMachines(env, now, budget, cleanups);
 
   // 3. and 4. Status readings, from the account's tunnel listing.

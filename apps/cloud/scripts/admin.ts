@@ -18,6 +18,7 @@ import {
   isRotation,
   reconcileStatements,
   servingUrlLimit,
+  STAMP_STOP,
   stopStatements,
   type AccountRow,
   type Entitlement,
@@ -212,7 +213,7 @@ async function ban(db: AdminDb, args: string[], now: number): Promise<string[]> 
     lines: [describeUser(user), `Banned: ${reason}.`],
     change: [
       statement(
-        `UPDATE users SET banned_at = ?2, banned_reason = ?3, serving_stopped_at = ?2
+        `UPDATE users SET banned_at = ?2, banned_reason = ?3, ${STAMP_STOP}
          WHERE id = ?1 AND banned_at IS NULL`,
         user.id,
         now,

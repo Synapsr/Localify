@@ -234,6 +234,20 @@ export const ALL_ACCOUNTS_SQL = `${SELECT_ACCOUNTS}
   WHERE u.id IN (SELECT user_id FROM public_urls WHERE deleted_at IS NULL
                  UNION SELECT user_id FROM machines WHERE tunnel_state != 'none')`;
 
+/**
+ * D1's clock in Unix milliseconds, read as the statement runs: the quiet
+ * period after a stop is stamped and checked on it, never on a Worker's.
+ * `julianday('now')` is core SQLite, in D1 and in `node:sqlite` alike.
+ */
+export const D1_NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+
+/**
+ * Moves an owner's last serving stop to now, on D1's clock as the write
+ * commits, and never backwards: an older operation cannot shorten a newer
+ * quiet period.
+ */
+export const STAMP_STOP = `serving_stopped_at = MAX(COALESCE(serving_stopped_at, 0), ${D1_NOW_MS})`;
+
 /** A statement with its values, for D1 or for `wrangler d1 execute`. */
 export type Statement = { sql: string; params: (string | number | null)[] };
 
@@ -248,22 +262,24 @@ export type Statement = { sql: string; params: (string | number | null)[] };
  */
 const ROTATE_OWNER_SQL = `
   UPDATE machines SET rotate_requested_at = ?2
-  WHERE user_id = ?3 AND status = 'active' AND tunnel_state != 'none'
+  WHERE user_id = ?3 AND status = 'active'
+    AND (tunnel_state != 'none' OR tunnel_id IS NOT NULL)
     AND rotate_requested_at IS NULL
     AND EXISTS (SELECT 1 FROM public_urls
                 WHERE user_id = ?3 AND id IN (SELECT value FROM json_each(?1))
                   AND suspended_at IS NULL)
   RETURNING id, name`;
 /**
- * Records, on the owner `?3`, when one of the URLs `?1` stopped serving, at
- * `?2`: no new tunnel generation of theirs starts within the quiet period
- * after it. Guarded like `ROTATE_OWNER_SQL`, and before `SUSPEND_SQL`.
+ * Stamps the owner `?2` with a serving stop, when one of the URLs `?1` has
+ * not recorded its own yet: no new tunnel generation of theirs starts
+ * within the quiet period after it. Guarded like `ROTATE_OWNER_SQL`, and
+ * before `SUSPEND_SQL`.
  */
 const STOPPED_SQL = `
-  UPDATE users SET serving_stopped_at = ?2
-  WHERE id = ?3
+  UPDATE users SET ${STAMP_STOP}
+  WHERE id = ?2
     AND EXISTS (SELECT 1 FROM public_urls
-                WHERE user_id = ?3 AND id IN (SELECT value FROM json_each(?1))
+                WHERE user_id = ?2 AND id IN (SELECT value FROM json_each(?1))
                   AND suspended_at IS NULL)`;
 /** `?1` a JSON array of URL ids, `?2` now: records that they stopped serving. */
 const SUSPEND_SQL = `
@@ -285,7 +301,7 @@ export function stopStatements(userId: string, urlIds: string[], now: number): S
   const ids = JSON.stringify(urlIds);
   return [
     { sql: ROTATE_OWNER_SQL, params: [ids, now, userId] },
-    { sql: STOPPED_SQL, params: [ids, now, userId] },
+    { sql: STOPPED_SQL, params: [ids, userId] },
     { sql: SUSPEND_SQL, params: [ids, now] },
   ];
 }

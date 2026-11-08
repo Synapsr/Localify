@@ -988,3 +988,39 @@ describe("moderation and plans before the warning page", () => {
     expect((await acknowledge(host(), "/", { notice })).status).toBe(410);
   });
 });
+
+describe("a routing decision held past the cache lifetime", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is made again before forwarding, so a URL suspended meanwhile answers 402", async () => {
+    await makePublic();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.parse("2026-11-08T12:00:00Z");
+    vi.setSystemTime(t0);
+    // The owner's traffic limit answers 20 seconds later.
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    context.env.OWNER_LIMITER = {
+      limit: async () => {
+        entered = true;
+        await gate;
+        return { success: true };
+      },
+    } as RateLimit;
+
+    const pending = visit(context, `https://${host()}/`);
+    await vi.waitFor(() => expect(entered).toBe(true));
+    const { user_id: owner } = context.sqlite
+      .prepare("SELECT user_id FROM public_urls WHERE id = ?")
+      .get(urlId) as { user_id: string };
+    context.sqlite.prepare("DELETE FROM plan_overrides WHERE user_id = ?").run(owner);
+    vi.setSystemTime(t0 + 20_000);
+    release();
+
+    expect((await pending).status).toBe(402);
+    expect(machineCalls()).toEqual([]);
+  });
+});

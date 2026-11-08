@@ -2,12 +2,13 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { hmacHex } from "../src/crypto";
-import { runSweep } from "../src/tunnels";
+import { reconcileOwner, runSweep } from "../src/tunnels";
 import {
   api,
   applyMigrations,
   cloudflareOk,
   createContext,
+  endQuietPeriods,
   jsonResponse,
   serve,
   settle,
@@ -346,6 +347,8 @@ describe("runtime v2", () => {
     expect(rotating.body.state).toBe("provisioning");
     expect(row(machineId)).toMatchObject({ tunnel_state: "none", rotate_requested_at: null });
 
+    // The release stamped the owner's quiet period: let it pass.
+    endQuietPeriods(context);
     await serve(context, token, 1);
     const next = await serve(context, token, 1);
     expect(next.body).toMatchObject({
@@ -380,6 +383,8 @@ describe("runtime v2", () => {
     ]);
     expect(row(machineId).tunnel_state).toBe("none");
 
+    // The release stamped the owner's quiet period: let it pass.
+    endQuietPeriods(context);
     await serve(context, token);
     expect(row(machineId)).toMatchObject({ tunnel_state: "ready", tunnel_generation: 2 });
   });
@@ -403,6 +408,8 @@ describe("operations", () => {
     await runSweep(context.env, Date.now() + 3 * MINUTE);
     expect(row(machineId)).toMatchObject({ tunnel_state: "none", tunnel_op: null });
 
+    // The release stamped the owner's quiet period: let it pass.
+    endQuietPeriods(context);
     // The next fetch provisions generation 2 while generation 1's call is still on its way.
     const fetched = api(context, "GET", "/v2/machines/self/runtime?generation=0", { token });
     stalled.resolve(cloudflareOk({ id: "tunnel-gen-1" }));
@@ -435,6 +442,8 @@ describe("operations", () => {
     let creates = 0;
     context.routes.set(`POST ${TUNNELS}`, () => cloudflareOk({ id: `tunnel-${++creates + 1}` }));
     await createUrl(token, "again.localify");
+    // The release stamped the owner's quiet period: let it pass.
+    endQuietPeriods(context);
     await serve(context, token);
     expect(row(machineId)).toMatchObject({
       tunnel_state: "ready",
@@ -460,6 +469,8 @@ describe("operations", () => {
     await settle(context);
     expect(row(laptop.machineId).tunnel_state).toBe("none");
     expect(row(runner.machineId).tunnel_state).toBe("none");
+    // The release stamped the owner's quiet period: let it pass.
+    endQuietPeriods(context);
     await serve(context, runner.token);
     expect(row(runner.machineId).tunnel_state).toBe("ready");
   });
@@ -609,6 +620,8 @@ describe("the sweep", () => {
       errors.mock.calls.some((call) => String(call[0]).includes("waited more than 10 minutes")),
     ).toBe(true);
 
+    // The release stamped the owner's quiet period: let it pass.
+    endQuietPeriods(context);
     await serve(context, token, 1);
     const next = await serve(context, token, 1);
     expect(next.body).toMatchObject({ state: "ready", tunnel: { generation: 2 } });
@@ -1190,7 +1203,8 @@ describe("the sweep's D1 queries", () => {
 describe("a sweep with many owners to reconcile", () => {
   /**
    * `owners` owners, each with one URL beyond its limit of 1 that the
-   * reconcile suspends (a rotation and a mark: 2 statements). The last one
+   * reconcile suspends (a rotation, a quiet-period stamp and a mark: 3
+   * statements). The last one
    * also serves its other URL from a ready machine, which that rotation must
    * release in the same run. `orphans` old tunnels no machine holds.
    */
@@ -1261,5 +1275,99 @@ describe("a sweep with many owners to reconcile", () => {
 
   it("counts the reconcile's batch as one query, so the last owner's rotation lands", async () => {
     await sweepMany(354, 0);
+  });
+});
+
+describe("the quiet period's barrier", () => {
+  it("rotates an older Worker's untracked tunnel for a stop before its adoption", async () => {
+    const { token, machineId, userId } = await signIn(context);
+    await createUrl(token, "a.localify");
+    await createUrl(token, "b.localify");
+    await settle(context);
+    // A tunnel an older Worker made at sign-in, not yet adopted.
+    update("UPDATE machines SET tunnel_id = 'tunnel-legacy' WHERE id = ?", machineId);
+    // B stops serving before any runtime fetch or sweep adopts the tunnel.
+    update("UPDATE plan_overrides SET public_urls = 1 WHERE user_id = ?", userId);
+    await reconcileOwner(context.env, userId);
+    expect(row(machineId).rotate_requested_at).not.toBeNull();
+
+    context.calls.length = 0;
+    const runtime = await serve(context, token, 0);
+    expect(runtime.body.state).toBe("provisioning");
+    expect(cloudflareCalls()).toContain("DELETE /accounts/account-1/cfd_tunnel/tunnel-legacy");
+    expect(row(machineId)).toMatchObject({ tunnel_state: "none", tunnel_id: null });
+  });
+
+  it("holds a new generation after the last URL's release, when another URL comes at once", async () => {
+    const { token, machineId, urlId } = await servingMachine();
+    await api(context, "DELETE", `/v1/public-urls/${urlId}`, { token });
+    await settle(context);
+    expect(row(machineId).tunnel_state).toBe("none");
+
+    await createUrl(token, "again.localify");
+    const held = await serve(context, token, 1);
+    expect(held.body.state).toBe("provisioning");
+    expect(held.body.retryAfter as number).toBeGreaterThan(3);
+    expect(row(machineId)).toMatchObject({ tunnel_state: "none", tunnel_generation: 1 });
+
+    endQuietPeriods(context);
+    await serve(context, token, 1);
+    expect(row(machineId)).toMatchObject({ tunnel_state: "ready", tunnel_generation: 2 });
+  });
+});
+
+describe("a reconcile batch that fails", () => {
+  it("leaves the other batches applied, and the next sweep repairs it", async () => {
+    const insertUser = context.sqlite.prepare(
+      "INSERT INTO users (id, github_id, login, created_at) VALUES (?, ?, ?, 1)",
+    );
+    const insertOverride = context.sqlite.prepare(
+      `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
+       VALUES (?, 2, 1, 'team', 1)`,
+    );
+    const insertUrl = context.sqlite.prepare(
+      `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
+                                password_version, created_at)
+       VALUES (?, ?, ?, ?, 0, NULL, 0, 1, ?)`,
+    );
+    // 150 owners with a URL to suspend, 3 statements each: 3 batches of 150.
+    for (let u = 0; u < 150; u++) {
+      insertUser.run(`u-${u}`, 1000 + u, `user-${u}`);
+      insertOverride.run(`u-${u}`);
+      insertUrl.run(`url-${u}-a`, `u-${u}`, `a-${u}`, `a-${u}.localify`, 1);
+      insertUrl.run(`url-${u}-b`, `u-${u}`, `b-${u}`, `b-${u}.localify`, 2);
+    }
+    listTunnels([]);
+    listRecords([]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const db = context.env.DB;
+    let reconcileBatches = 0;
+    context.env.DB = {
+      prepare: (sql: string) => db.prepare(sql),
+      batch: (statements: D1PreparedStatement[]) => {
+        // The middle reconcile batch fails, after the first one committed.
+        if (statements.length > 10 && ++reconcileBatches === 2) {
+          return Promise.reject(new Error("D1 timed out"));
+        }
+        return db.batch(statements);
+      },
+    } as unknown as D1Database;
+    const suspended = () =>
+      (
+        context.sqlite
+          .prepare("SELECT COUNT(*) AS n FROM public_urls WHERE suspended_at IS NOT NULL")
+          .get() as { n: number }
+      ).n;
+
+    await runSweep(context.env);
+    expect(reconcileBatches).toBe(3);
+    expect(suspended()).toBe(100);
+    expect(
+      errors.mock.calls.some((call) => String(call[0]).includes("A reconcile batch failed")),
+    ).toBe(true);
+
+    context.env.DB = db;
+    await runSweep(context.env);
+    expect(suspended()).toBe(150);
   });
 });

@@ -9,6 +9,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import ts from "typescript";
 import { vi } from "vitest";
 
+import { D1_NOW_MS } from "../src/entitlement";
 import { QUIET_AFTER_STOP_MS } from "../src/tunnels";
 
 const MIGRATIONS = join(import.meta.dirname, "..", "migrations");
@@ -67,7 +68,7 @@ class TestStatement {
 
   async first<T>(): Promise<T | null> {
     countQueries(this.counter, 1);
-    const row = this.db.prepare(this.sql).get(...this.params);
+    const row = this.db.prepare(this.text).get(...this.params);
     return row ? ({ ...row } as T) : null;
   }
 
@@ -81,15 +82,20 @@ class TestStatement {
     return this.runSync();
   }
 
+  /** The SQL with D1's clock read from the test's, so fake timers move both. */
+  private get text(): string {
+    return this.sql.replaceAll(D1_NOW_MS, String(Date.now()));
+  }
+
   rows(): Record<string, unknown>[] {
     return this.db
-      .prepare(this.sql)
+      .prepare(this.text)
       .all(...this.params)
       .map((row) => ({ ...row }));
   }
 
   runSync(): { results: []; success: true; meta: { changes: number } } {
-    const result = this.db.prepare(this.sql).run(...this.params);
+    const result = this.db.prepare(this.text).run(...this.params);
     return { results: [], success: true, meta: { changes: Number(result.changes) } };
   }
 }
@@ -110,7 +116,7 @@ class TestD1 {
     this.sqlite.exec("BEGIN");
     try {
       const results = statements.map((statement) =>
-        /^\s*SELECT/i.test(statement.sql)
+        /^\s*SELECT|\bRETURNING\b/i.test(statement.sql)
           ? { results: statement.rows(), success: true, meta: {} }
           : statement.runSync(),
       );
