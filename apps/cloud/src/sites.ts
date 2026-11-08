@@ -43,6 +43,7 @@ type SiteRow = {
   user_id: string;
   login: string;
   taken_down_at: number | null;
+  suspended_at: number | null;
   /** The URL's rank among its owner's live URLs, oldest first. */
   live_rank: number;
   tunnel_state: string | null;
@@ -74,7 +75,7 @@ export function forgetSite(slug: string): void {
 async function loadSite(env: Env, slug: string, now: number): Promise<Site | null> {
   const row = await env.DB.prepare(
     `SELECT p.id, p.slug, p.local_domain, p.wildcard, p.machine_id, p.protected,
-            p.password_hash, p.password_salt, p.password_version, p.user_id, u.login, p.taken_down_at,
+            p.password_hash, p.password_salt, p.password_version, p.user_id, u.login, p.taken_down_at, p.suspended_at,
             (SELECT COUNT(*) FROM public_urls q
              WHERE q.user_id = p.user_id AND q.deleted_at IS NULL AND q.taken_down_at IS NULL
                AND (q.created_at < p.created_at OR (q.created_at = p.created_at AND q.id <= p.id)))
@@ -91,7 +92,7 @@ async function loadSite(env: Env, slug: string, now: number): Promise<Site | nul
   const state =
     row.taken_down_at !== null || !account || account.banned
       ? "removed"
-      : row.live_rank <= servingUrlLimit(account.entitlement)
+      : row.live_rank <= servingUrlLimit(account.entitlement) && row.suspended_at === null
         ? "serving"
         : "suspended";
   const machineId = state === "serving" && row.tunnel_state === "ready" ? row.machine_id : null;

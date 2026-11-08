@@ -5,9 +5,10 @@
 import { CallBudget } from "./cloudflare";
 
 /**
- * `db` with every query it runs taken from `budget`, a batch counting each
- * of its statements. It never refuses one: the run checks `budget.has`
- * before each piece of work, and D1 itself refuses past its limit.
+ * `db` with every query it runs taken from `budget`. A batch counts as one,
+ * as D1 counts it against the invocation's limit. It never refuses one: the
+ * run checks `budget.has` before each piece of work, and D1 itself refuses
+ * past its limit.
  */
 export function meteredDb(db: D1Database, budget: CallBudget): D1Database {
   const spend = (count: number) => {
@@ -16,7 +17,7 @@ export function meteredDb(db: D1Database, budget: CallBudget): D1Database {
   return {
     prepare: (sql: string) => metered(db.prepare(sql), spend),
     batch: (statements: D1PreparedStatement[]) => {
-      spend(statements.length);
+      spend(1);
       return db.batch(statements.map(unwrap));
     },
     exec: (sql: string) => {

@@ -41,7 +41,7 @@ function countingLimiter(limiter: CountingLimiter): RateLimit {
 
 /**
  * The queries a test D1 has run, and the most it accepts, as D1 refuses
- * query 1,001 of a Worker invocation. A batch counts each statement.
+ * query 1,001 of a Worker invocation. A batch counts as one, as in D1.
  */
 export type QueryCounter = { count: number; limit: number };
 
@@ -104,7 +104,7 @@ class TestD1 {
   }
 
   async batch(statements: TestStatement[]): Promise<unknown[]> {
-    countQueries(this.counter, statements.length);
+    countQueries(this.counter, 1);
     this.sqlite.exec("BEGIN");
     try {
       const results = statements.map((statement) =>

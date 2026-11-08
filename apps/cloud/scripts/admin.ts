@@ -145,7 +145,7 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
     ),
     statement(
       `SELECT p.slug, p.machine_id, m.name AS machine_name, p.deleted_at, p.taken_down_at,
-              p.taken_down_reason
+              p.taken_down_reason, p.suspended_at
        FROM public_urls p LEFT JOIN machines m ON m.id = p.machine_id
        WHERE p.user_id = ?1 AND (p.deleted_at IS NULL OR p.taken_down_at IS NOT NULL)
        ORDER BY p.created_at, p.id`,
@@ -186,9 +186,11 @@ async function show(db: AdminDb, who: string, now: number): Promise<string[]> {
     const state =
       url.taken_down_at !== null
         ? `taken down on ${date(Number(url.taken_down_at))}: ${url.taken_down_reason ?? "(no reason)"}`
-        : rank <= limit
+        : rank <= limit && url.suspended_at === null
           ? "serving"
-          : "suspended";
+          : rank <= limit
+            ? "suspended until the next reconcile"
+            : "suspended";
     const machine = url.machine_name ? ` on ${url.machine_name}` : "";
     lines.push(`  ${url.slug}: ${state}${url.deleted_at !== null ? ", deleted" : ""}${machine}`);
   }

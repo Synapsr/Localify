@@ -253,13 +253,14 @@ export async function cleanUpRevokedMachines(
   env: Env,
   now: number,
   budget: CallBudget,
+  maxMachines = Number.POSITIVE_INFINITY,
 ): Promise<void> {
   const pending = await env.DB.prepare(
     `${SELECT_REVOKED} AND ${HOLDS_RESOURCES}
        AND (next_cleanup_at IS NULL OR next_cleanup_at <= ?1)
      ORDER BY next_cleanup_at IS NOT NULL, next_cleanup_at, revoked_at LIMIT ?2`,
   )
-    .bind(now, Math.floor(budget.left / CALLS_PER_REVOKED_MACHINE))
+    .bind(now, Math.min(maxMachines, Math.floor(budget.left / CALLS_PER_REVOKED_MACHINE)))
     .all<RevokedMachine>();
   for (const machine of pending.results) {
     if (!budget.has(CALLS_PER_REVOKED_MACHINE)) break;

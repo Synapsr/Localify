@@ -388,3 +388,61 @@ describe("rotations resolved at write time", () => {
     expect(machine(machineId).tunnel_state).toBe("none");
   });
 });
+
+describe("a suspension waiting for its reconcile", () => {
+  /**
+   * Quota 1: A serves from the laptop, B and C from the runner are marked
+   * suspended. A is deleted, and the reconcile that would resume B fails.
+   */
+  async function deleteWithoutResume() {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const laptop = await signIn(context, "teo-goulois", 1, "laptop");
+    const runner = await signIn(context, "teo-goulois", 1, "runner");
+    const a = await createUrl(laptop.token, "a.localify");
+    const b = await createUrl(runner.token, "b.localify");
+    await createUrl(runner.token, "c.localify");
+    await admin("override", "teo-goulois", "2", "1", "team");
+    await serve(context, laptop.token);
+    await runSweep(context.env);
+    context.sqlite
+      .prepare("UPDATE public_urls SET deleted_at = ? WHERE id = ?")
+      .run(Date.now(), a.id);
+    return { laptop, runner, b };
+  }
+
+  function suspendedAt(id: string): number | null {
+    return get<{ suspended_at: number | null }>(
+      "SELECT suspended_at FROM public_urls WHERE id = ?",
+      id,
+    ).suspended_at;
+  }
+
+  it("keeps the URL from serving, so a takedown has nothing left to rotate", async () => {
+    const { runner, b } = await deleteWithoutResume();
+    // B ranks within the limit now, but stays suspended until a reconcile.
+    const runtime = await serve(context, runner.token);
+    expect(runtime.body.state).toBe("idle");
+    expect(
+      (runtime.body.publicUrls as { id: string; state: string }[]).find((url) => url.id === b.id),
+    ).toMatchObject({ state: "suspended" });
+    expect((await visit(context, `https://${b.slug}.localify.fyi/`)).status).toBe(402);
+    expect(machine(runner.machineId).tunnel_state).toBe("none");
+
+    // Nothing served B since its mark: skipping its rotation leaves no stream open.
+    const lines = await admin("takedown", b.slug, "malware");
+    expect(lines.some((line) => line.startsWith("Rotating"))).toBe(false);
+    expect(machine(runner.machineId).tunnel_state).toBe("none");
+  });
+
+  it("serves the URL once the next reconcile resumes it, and then a takedown rotates", async () => {
+    const { runner, b } = await deleteWithoutResume();
+    await runSweep(context.env);
+    expect(suspendedAt(b.id)).toBeNull();
+    await serve(context, runner.token);
+    expect(machine(runner.machineId).tunnel_state).toBe("ready");
+
+    const lines = await admin("takedown", b.slug, "malware");
+    expect(lines.some((line) => line.startsWith("Rotating runner"))).toBe(true);
+    expect(machine(runner.machineId).rotate_requested_at).not.toBeNull();
+  });
+});

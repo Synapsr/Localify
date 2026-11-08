@@ -34,7 +34,6 @@ import {
   type AccountRow,
   type Entitlement,
   type OwnedUrl,
-  type Statement,
 } from "./entitlement";
 import {
   cleanUpRevokedMachines,
@@ -55,28 +54,32 @@ const LATE_REVOCATION_MS = 10 * 60 * 1000;
 const SWEEP_CALL_BUDGET = 300;
 /**
  * D1 queries a sweep may make, below the 1,000 a Worker invocation may send
- * on the paid plan, leaving room for the cron's other work.
+ * on the paid plan, leaving room for the cron's other work. A batch counts
+ * as one.
  */
 const SWEEP_QUERY_BUDGET = 900;
-/** A release takes the row, then sets `none`; one that fails records its backoff. */
-const RELEASE_QUERIES = 3;
-/** What the reconcile leaves: at least 60 revocations, and the reads around them. */
-const REVOCATION_QUERY_RESERVE = 60 * RELEASE_QUERIES + 10;
-/** The revoked-machine cleanup: up to 60 machines within the call budget, 4 queries each. */
-const CLEANUP_QUERIES = 250;
-/** Correcting a CNAME takes the row, records the record, and lets the row go. */
-const CNAME_QUERIES = 3;
-/** The orphan listing and the slot count, at the end of a run. */
-const FINAL_QUERIES = 2;
-/** Statements per reconcile batch. */
-const RECONCILE_BATCH = 50;
-/**
- * Calls kept for the rest of the sweep while revocations run first.
- * Revocations get them too, once the rest of the work is done.
- */
-const MAINTENANCE_RESERVE = 60;
 /** A release looks the tunnel up by name at most once, then removes it. */
 const RELEASE_CALLS = 1 + REMOVE_TUNNEL_CALLS;
+/** A release takes the row, then sets `none`. */
+const RELEASE_QUERIES = 2;
+/** A release that failed outside the revocations records its backoff. */
+const BACKOFF_QUERIES = 1;
+/** Reading the slots, and the owners of slots reserved since the owners were read. */
+const SLOT_QUERIES = 3;
+/** The orphan listing and the slot count, at the end of a run. */
+const FINAL_QUERIES = 2;
+/**
+ * The revocations every run can do, whatever came before them: the
+ * reconcile stops while their queries are left, and they run before any
+ * maintenance, with all the calls (60 × 4 = 240 of 300).
+ */
+const REVOCATIONS_PER_RUN = 60;
+/** What the reconcile leaves for the slot read, 60 revocations and the end of the run. */
+const REVOCATION_QUERIES = SLOT_QUERIES + REVOCATIONS_PER_RUN * RELEASE_QUERIES + FINAL_QUERIES;
+/** A revoked machine's cleanup records its lookups, the tunnel, the record and its attempts. */
+const CLEANUP_QUERIES_PER_MACHINE = 4;
+/** Correcting a CNAME takes the row, records the record, and lets the row go. */
+const CNAME_QUERIES = 3;
 /** Moving a CNAME may find it gone, fail to create it, then look it up and move it. */
 const CNAME_CALLS = 4;
 const SLOT_ALERT = 800;
@@ -555,24 +558,16 @@ export async function reconcileServing(
   now = Date.now(),
   queries: { budget: CallBudget; reserve: number } | null = null,
 ): Promise<void> {
-  const perOwner = [...owners.entitlements]
-    .map(([userId, entitlement]) =>
-      reconcileStatements(userId, entitlement, owners.urls.get(userId) ?? [], now),
-    )
-    .filter((statements) => statements.length > 0);
-  // An owner's rotation and the record of its stop always share a batch.
-  let chunk: Statement[] = [];
-  const flush = async () => {
-    if (chunk.length === 0) return;
-    await env.DB.batch(chunk.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)));
-    chunk = [];
-  };
-  for (const statements of perOwner) {
-    if (chunk.length + statements.length > RECONCILE_BATCH) await flush();
-    if (queries && !queries.budget.has(chunk.length + statements.length + queries.reserve)) break;
-    chunk.push(...statements);
-  }
-  await flush();
+  const statements = [...owners.entitlements].flatMap(([userId, entitlement]) =>
+    reconcileStatements(userId, entitlement, owners.urls.get(userId) ?? [], now),
+  );
+  if (statements.length === 0) return;
+  // One batch, which D1 counts as one query and runs as one transaction, so
+  // an owner's rotation and the record of its stop always land together.
+  // Each statement binds at most 3 values to fixed SQL, far below D1's
+  // per-statement limits, so nothing needs the batch split.
+  if (queries && !queries.budget.has(1 + queries.reserve)) return;
+  await env.DB.batch(statements.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)));
 }
 
 /** Reconciles one owner, after a change of their URLs. */
@@ -605,13 +600,13 @@ type SlotRow = {
 };
 
 /**
- * The 5-minute sweep, within a budget of Cloudflare calls. It first marks
- * for a rotation the machines of URLs that stopped serving. Revocations come
- * first, with all but a reserve of the budget: rotations, and the slots of
- * owners who lost their entitlement or hold more than it allows. Then the
- * revoked machines' cleanup, the status readings and reaps, abandoned
- * operations, machines with nothing to serve, CNAME drift and orphan
- * tunnels. What they leave goes to the revocations still queued.
+ * The 5-minute sweep, within a budget of Cloudflare calls and one of D1
+ * queries. It first marks for a rotation the machines of URLs that stopped
+ * serving. Revocations come next, with what they need of both budgets:
+ * rotations, and the slots of owners who lost their entitlement or hold
+ * more than it allows. Then, with what they leave, the revoked machines'
+ * cleanup, the status readings and reaps, abandoned operations, machines
+ * with nothing to serve, CNAME drift and orphan tunnels.
  */
 export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   const budget = new CallBudget(SWEEP_CALL_BUDGET);
@@ -623,10 +618,7 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   // the rotations it marks are revoked in this run.
   const owners = await loadOwners(env, null, now);
   try {
-    await reconcileServing(env, owners, now, {
-      budget: queries,
-      reserve: REVOCATION_QUERY_RESERVE,
-    });
+    await reconcileServing(env, owners, now, { budget: queries, reserve: REVOCATION_QUERIES });
   } catch (error) {
     console.error("Reconciling the serving URLs failed; the next sweep retries it", error);
   }
@@ -658,20 +650,19 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
     }
     done.add(slot.id);
   }
-  const revoke = async (reserve: number, queryReserve: number) => {
-    while (
-      queue.length > 0 &&
-      budget.has(RELEASE_CALLS + reserve) &&
-      queries.has(RELEASE_QUERIES + queryReserve)
-    ) {
-      const slot = queue.shift()!;
-      await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
-    }
-  };
-  await revoke(MAINTENANCE_RESERVE, CLEANUP_QUERIES + FINAL_QUERIES);
+  // They take what they need before any maintenance, which gets the rest.
+  while (
+    queue.length > 0 &&
+    budget.has(RELEASE_CALLS) &&
+    queries.has(RELEASE_QUERIES + FINAL_QUERIES)
+  ) {
+    const slot = queue.shift()!;
+    await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, urgent: true, budget });
+  }
 
-  // 2. Revoked machines.
-  if (queries.has(CLEANUP_QUERIES + FINAL_QUERIES)) await cleanUpRevokedMachines(env, now, budget);
+  // 2. Revoked machines, as many as the queries left allow.
+  const cleanups = Math.floor((queries.left - FINAL_QUERIES - 1) / CLEANUP_QUERIES_PER_MACHINE);
+  if (cleanups > 0) await cleanUpRevokedMachines(env, now, budget, cleanups);
 
   // 3. and 4. Status readings, from the account's tunnel listing.
   const tunnels = await listAll(budget, (cloudflare, page) => cloudflare.listTunnels(page), env);
@@ -726,7 +717,11 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
     if (done.has(slot.id)) continue;
     done.add(slot.id);
     if (slot.next_cleanup_at !== null && slot.next_cleanup_at > now) continue;
-    if (!budget.has(RELEASE_CALLS) || !queries.has(RELEASE_QUERIES + FINAL_QUERIES)) continue;
+    if (
+      !budget.has(RELEASE_CALLS) ||
+      !queries.has(RELEASE_QUERIES + BACKOFF_QUERIES + FINAL_QUERIES)
+    )
+      continue;
     const ifIdle = !reaps.includes(slot) && idle.includes(slot);
     const released = await releaseTunnel(env, slot.id, slot.tunnel_generation, {
       now,
@@ -790,9 +785,6 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
       }
     }
   }
-
-  // The revocations the reserve kept waiting.
-  await revoke(0, FINAL_QUERIES);
 
   // 8. The account's slots.
   const total = await env.DB.prepare(

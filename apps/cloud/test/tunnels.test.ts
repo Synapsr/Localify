@@ -970,7 +970,7 @@ describe("second review", () => {
     expect(JSON.stringify(body)).not.toContain("token-after-rotation");
   });
 
-  it("lets no failing revocation starve the others or the rest of the sweep", async () => {
+  it("lets no failing revocation starve the others, and leaves the rest of the sweep what they spare", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     context.sqlite.exec(`
@@ -1019,7 +1019,8 @@ describe("second review", () => {
       context.calls.length = 0;
       await runSweep(context.env, start + run * 5 * MINUTE);
       expect(cloudflareCalls().length, `run ${run}`).toBeLessThanOrEqual(300);
-      expect(count("PATCH /zones/zone-1/dns_records/dns-keep"), `run ${run}`).toBe(1);
+      // The revocations take what they need first: no call is left for the CNAME.
+      expect(count("PATCH /zones/zone-1/dns_records/dns-keep"), `run ${run}`).toBe(0);
       for (const call of cloudflareCalls()) {
         const match = /^PATCH \/accounts\/account-1\/cfd_tunnel\/(t-[rg]-\d+)$/.exec(call);
         if (match) tried.add(match[1]!);
@@ -1033,6 +1034,13 @@ describe("second review", () => {
       )
       .get();
     expect(unmarked).toEqual({ n: 0 });
+
+    // Once Cloudflare deletes them, the rest of the sweep gets its calls back.
+    context.routes.set(`DELETE ${TUNNELS}/t-`, () => cloudflareOk(null));
+    await runSweep(context.env, start + 10 * MINUTE);
+    context.calls.length = 0;
+    await runSweep(context.env, start + 15 * MINUTE);
+    expect(count("PATCH /zones/zone-1/dns_records/dns-keep")).toBe(1);
   });
 
   it("cleans up at sign-in only what that sign-in replaced, within a small budget", async () => {
@@ -1183,5 +1191,82 @@ describe("the sweep's D1 queries", () => {
       )
       .all(JSON.stringify(rotated));
     expect(released).toHaveLength(60);
+  });
+});
+
+describe("a sweep with many owners to reconcile", () => {
+  /**
+   * `owners` owners, each with one URL beyond its limit of 1 that the
+   * reconcile suspends (a rotation and a mark: 2 statements). The last one
+   * also serves its other URL from a ready machine, which that rotation must
+   * release in the same run. `orphans` old tunnels no machine holds.
+   */
+  async function sweepMany(owners: number, orphans: number) {
+    const insertUser = context.sqlite.prepare(
+      "INSERT INTO users (id, github_id, login, created_at) VALUES (?, ?, ?, 1)",
+    );
+    const insertOverride = context.sqlite.prepare(
+      `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
+       VALUES (?, 2, 1, 'team', 1)`,
+    );
+    const insertUrl = context.sqlite.prepare(
+      `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
+                                password_version, created_at)
+       VALUES (?, ?, ?, ?, 0, ?, 0, 1, ?)`,
+    );
+    const affected = "f".repeat(24);
+    for (let u = 0; u < owners; u++) {
+      const machine = u === owners - 1 ? affected : null;
+      insertUser.run(`u-${u}`, 1000 + u, `user-${u}`);
+      insertOverride.run(`u-${u}`);
+      if (machine) {
+        context.sqlite
+          .prepare(
+            `INSERT INTO machines (id, user_id, name, status, ingress_port, created_at,
+                                   tunnel_state, tunnel_generation, tunnel_id, tunnel_ready_at)
+             VALUES (?, ?, 'affected', 'active', 7381, 1, 'ready', 1, 't-affected', 1)`,
+          )
+          .run(machine, `u-${u}`);
+      }
+      insertUrl.run(`url-${u}-a`, `u-${u}`, `a-${u}`, `a-${u}.localify`, machine, 1);
+      insertUrl.run(`url-${u}-b`, `u-${u}`, `b-${u}`, `b-${u}.localify`, machine, 2);
+    }
+    listTunnels([
+      { id: "t-affected", name: `localify-${affected}-1`, status: "healthy", ageMs: 0 },
+      ...Array.from({ length: orphans }, (_, i) => ({
+        id: `orphan-${i}`,
+        name: `localify-${i.toString(16).padStart(24, "0")}-1`,
+        status: "inactive",
+        ageMs: 2 * 60 * MINUTE,
+      })),
+    ]);
+    listRecords([]);
+    context.routes.set(`PATCH ${TUNNELS}/`, () => cloudflareOk({}));
+    context.routes.set(`DELETE ${TUNNELS}/`, () => cloudflareOk(null));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    context.queries.count = 0;
+    context.queries.limit = 1000;
+    context.calls.length = 0;
+    await runSweep(context.env);
+    expect(context.queries.count).toBeLessThanOrEqual(1000);
+    expect(cloudflareCalls().length).toBeLessThanOrEqual(300);
+    expect(row(affected)).toMatchObject({ tunnel_state: "none", rotate_requested_at: null });
+    expect(
+      context.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM public_urls WHERE suspended_at IS NOT NULL")
+        .get(),
+    ).toEqual({ n: owners });
+  }
+
+  it("revokes before any maintenance, with 99 old orphan tunnels to delete", async () => {
+    await sweepMany(353, 99);
+    // The orphans got what the revocation left.
+    expect(count("DELETE /accounts/account-1/cfd_tunnel/orphan-")).toBeGreaterThan(0);
+  });
+
+  it("counts the reconcile's batch as one query, so the last owner's rotation lands", async () => {
+    await sweepMany(354, 0);
   });
 });

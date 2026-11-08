@@ -291,9 +291,9 @@ export function reconcileStatements(
   urls: OwnedUrl[],
   now: number,
 ): Statement[] {
-  const serving = servingUrlIds(entitlement, urls);
-  const stopped = urls.filter((url) => !serving.has(url.id) && url.suspended_at === null);
-  const resumed = urls.filter((url) => serving.has(url.id) && url.suspended_at !== null);
+  const within = withinLimitIds(entitlement, urls);
+  const stopped = urls.filter((url) => !within.has(url.id) && url.suspended_at === null);
+  const resumed = urls.filter((url) => within.has(url.id) && url.suspended_at !== null);
   const statements = stopStatements(
     userId,
     stopped.map((url) => url.id),
@@ -305,13 +305,26 @@ export function reconcileStatements(
   return statements;
 }
 
-/** The ids of the URLs that serve: the oldest live ones within the limit. */
-export function servingUrlIds(entitlement: Entitlement, urls: OwnedUrl[]): Set<string> {
+/** The ids of the oldest live URLs within the limit. */
+function withinLimitIds(entitlement: Entitlement, urls: OwnedUrl[]): Set<string> {
   return new Set(
     urls
       .filter((url) => url.taken_down_at === null)
       .slice(0, servingUrlLimit(entitlement))
       .map((url) => url.id),
+  );
+}
+
+/**
+ * The ids of the URLs that serve: within the limit, and without
+ * `suspended_at`. Only a reconcile clears that mark, so a URL that served
+ * at no point since its mark, whose machines rotated when it was marked,
+ * never serves before the reconcile has seen it again.
+ */
+export function servingUrlIds(entitlement: Entitlement, urls: OwnedUrl[]): Set<string> {
+  const within = withinLimitIds(entitlement, urls);
+  return new Set(
+    urls.filter((url) => within.has(url.id) && url.suspended_at === null).map((url) => url.id),
   );
 }
 

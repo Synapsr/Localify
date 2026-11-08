@@ -583,12 +583,13 @@ async function claimUrl(
   if (!before) throw urlNotFound();
   if (before.taken_down_at !== null) throw takenDown();
   const entitlement = await requireEntitlement(env, caller);
-  // Only a URL that serves moves: live, and among the owner's `publicUrls`
-  // oldest. A takedown or a deletion between the read and this update
-  // leaves it where it was.
+  // Only a URL that serves moves: live, among the owner's `publicUrls`
+  // oldest, and resumed by a reconcile if it was suspended. A takedown or a
+  // deletion between the read and this update leaves it where it was.
   const claimed = await env.DB.prepare(
     `UPDATE public_urls SET machine_id = ?3
      WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL AND taken_down_at IS NULL
+       AND suspended_at IS NULL
        AND (SELECT COUNT(*) FROM public_urls q
             WHERE q.user_id = ?2 AND q.deleted_at IS NULL AND q.taken_down_at IS NULL
               AND (q.created_at < public_urls.created_at
