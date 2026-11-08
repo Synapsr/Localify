@@ -502,7 +502,7 @@ The executor, the `localify dev` process that runs the service (in a person's te
 3. It publishes its decision in the launch record (below): `admitted`, or `refused` with its code. When it finds the record already decided as `expired`, it does not start.
 4. Still under the lock, it writes the run record atomically (a temporary file renamed over it). Every read-modify-write of a record (registration, heartbeats, exits) holds a short exclusive `flock` on `services/<record name>@record.lock`, and a change for one run is dropped once the record names another, so a late finisher never overwrites the next run. A failure to write is fatal: nothing starts, and the launch record gets an exit that says so.
 
-Dispatchers pass `--launch-id <id> --launch-expires <unix ms>`, and the daemon or the bridge, for a remote control, `--remote-launch <id>` in place of `--launch-id`, with `--expect-rev <configRev>` and `--request <machineId>:<requestId>`. A launch expires 15 seconds after it is dispatched. `--remote-launch` only adds restrictions, so it needs no authentication. A person's own `localify dev` takes the lock the same way, so a foreground run is fenced too.
+Dispatchers pass `--launch-id <id> --launch-expires <unix ms>` (as `--launch-id=<id>`: a base64url id may start with `-`), and the daemon or the bridge, for a remote control, `--remote-launch <id>` in place of `--launch-id`, with `--expect-rev <configRev>` and `--request <machineId>:<requestId>`. A launch expires 15 seconds after it is dispatched. `--remote-launch` only adds restrictions, so it needs no authentication. A person's own `localify dev` takes the lock the same way, so a foreground run is fenced too.
 
 ### Launch records
 

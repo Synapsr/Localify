@@ -106,10 +106,10 @@ fn foreground_args(
     foreground
 }
 
+/// In one argument: an id may start with `-`, which would read as a flag.
 fn push_launch_id(args: &mut Vec<OsString>, launch_id: Option<&RunId>) {
     if let Some(launch_id) = launch_id {
-        args.push("--launch-id".into());
-        args.push(launch_id.as_str().into());
+        args.push(format!("--launch-id={launch_id}").into());
     }
 }
 
@@ -757,6 +757,21 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_id_that_starts_with_a_dash_is_passed_as_one_argument() {
+        let launch_id = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
+
+        let result = foreground_args(
+            args(&["dev", "web", "--detach"]).into_iter(),
+            Some(&launch_id),
+        );
+
+        assert_eq!(
+            result,
+            args(&["dev", "web", "--launch-id=-qAAAAAAAAAAAAAAAAAAAA"])
+        );
+    }
+
+    #[test]
     fn the_background_run_drops_only_localify_s_detach_flag() {
         let launch_id = RunId::parse("AAAAAAAAAAAAAAAAAAAAAA").unwrap();
         let result = foreground_args(
@@ -774,8 +789,7 @@ mod tests {
                 "web",
                 "--env",
                 "feat",
-                "--launch-id",
-                "AAAAAAAAAAAAAAAAAAAAAA",
+                "--launch-id=AAAAAAAAAAAAAAAAAAAAAA",
                 "--",
                 "pnpm",
                 "dev",

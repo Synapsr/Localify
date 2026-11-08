@@ -1148,3 +1148,30 @@ fn a_detached_start_exits_with_the_executor_s_status() {
     let killed = detached("kill -TERM $$");
     assert_eq!(killed.status.code(), Some(143), "{}", stderr(&killed));
 }
+
+#[test]
+fn a_launch_id_that_starts_with_a_dash_reaches_the_run() {
+    let sandbox = Sandbox::new();
+    let launch_id = "-qAAAAAAAAAAAAAAAAAAAA";
+
+    let output = sandbox
+        .localify(&[
+            "dev",
+            "web",
+            "--project",
+            "app",
+            &format!("--launch-id={launch_id}"),
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        sandbox.record().unwrap().run_id().map(RunId::as_str),
+        Some(launch_id)
+    );
+}
