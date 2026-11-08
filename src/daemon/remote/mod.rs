@@ -20,7 +20,7 @@ mod fake_relay;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -42,6 +42,7 @@ use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
 use crate::infrastructure::cloud::http::{CloudError, CloudHttp};
+use crate::infrastructure::cloud::passwords::PasswordStore;
 use crate::infrastructure::cloud::types::RosterMachine;
 use crate::infrastructure::remote::noise::{StaticKeys, decode_key, fingerprint};
 use crate::infrastructure::remote::store::{DEFAULT_SETTINGS, RemoteStore, SettingsChange};
@@ -87,6 +88,8 @@ pub struct Timings {
     pub stable_after: Duration,
     pub lease_renew: Duration,
     pub lease_renew_jitter: Duration,
+    /// The first wait after a renewal fails, doubling up to 16 times.
+    pub lease_retry: Duration,
     /// After `4402`, the first lease request waits this long, plus up to
     /// `lapsed_spread`.
     pub lapsed_first: Duration,
@@ -119,6 +122,7 @@ impl Default for Timings {
             stable_after: seconds(60),
             lease_renew: seconds(45),
             lease_renew_jitter: seconds(5),
+            lease_retry: seconds(1),
             lapsed_first: seconds(30),
             lapsed_spread: seconds(30),
             lapsed_recheck: seconds(15 * 60),
@@ -202,6 +206,9 @@ struct Shared {
     events: broadcast::Sender<Event>,
     /// Clients of `remote_events`: a person who can confirm a pairing here.
     subscribers: AtomicUsize,
+    /// The pairing attempts of the last hour on this machine as a target.
+    /// The link keeps them, so a new connection does not reset the limit.
+    pair_attempts: Mutex<VecDeque<Instant>>,
     refresh: Notify,
     #[cfg(test)]
     wake: std::sync::atomic::AtomicBool,
@@ -210,6 +217,12 @@ struct Shared {
 impl Shared {
     fn view(&self) -> MutexGuard<'_, View> {
         self.view
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn pair_attempts(&self) -> MutexGuard<'_, VecDeque<Instant>> {
+        self.pair_attempts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -289,6 +302,7 @@ impl RemoteLink {
                 conn: Mutex::new(None),
                 events,
                 subscribers: AtomicUsize::new(0),
+                pair_attempts: Mutex::new(VecDeque::new()),
                 refresh: Notify::new(),
                 #[cfg(test)]
                 wake: std::sync::atomic::AtomicBool::new(false),
@@ -519,12 +533,15 @@ async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     RelayState::Connecting
                 };
                 shared.set_relay(relay, None, None);
+                let token = ready.credentials.token.clone();
                 let (ending, up_for) = connect_and_serve(&shared, ready, &cancel).await;
                 ever_connected |= up_for > Duration::ZERO;
                 if cancel.is_cancelled() {
                     return;
                 }
-                plan(&shared, &mut backoff, &mut uploaded_for, &ending, up_for)
+                let next = backoff.next(&ending, up_for, &shared.timings);
+                info!(?ending, up_for = ?up_for, "The relay connection ended");
+                plan(&shared, &mut uploaded_for, next, &token)
             }
             Err(wait) => wait,
         };
@@ -563,7 +580,7 @@ async fn prepare(
                 Some(shared.timings.lapsed_recheck),
             ));
         }
-        Err(error) => return Err(cloud_refusal(shared, backoff, &error)),
+        Err(error) => return Err(cloud_refusal(shared, backoff, &error, &credentials.token)),
     };
     if !account.remote_access {
         return Err(lapsed(shared, shared.timings.lapsed_recheck));
@@ -606,7 +623,7 @@ async fn prepare(
             }) => {
                 return Err(block(shared, &code, &message, None));
             }
-            Err(error) => return Err(cloud_refusal(shared, backoff, &error)),
+            Err(error) => return Err(cloud_refusal(shared, backoff, &error, &credentials.token)),
         }
     }
     Ok(Ready {
@@ -636,9 +653,30 @@ fn lapsed(shared: &Shared, first: Duration) -> Wait {
     }
 }
 
-fn cloud_refusal(shared: &Shared, backoff: &mut Backoff, error: &CloudError) -> Wait {
+/// Localify Cloud no longer accepts the token: this machine signs out here,
+/// as `logout` does, unless `cloud.json` already holds another sign-in.
+fn signed_out_by_cloud(shared: &Shared, token: &str) -> Wait {
+    match shared.credentials.load() {
+        Ok(Some(credentials)) if credentials.token == token => {
+            info!("Localify Cloud revoked this machine's token; signing out here");
+            if let Err(error) = shared.credentials.delete() {
+                warn!(error = %format!("{error:#}"), "Could not delete this machine's sign-in");
+            }
+            let data_dir = shared.credentials.data_dir();
+            if let Err(error) = PasswordStore::in_data_dir(&data_dir).update(|saved| saved.clear())
+            {
+                warn!(error = %format!("{error:#}"), "Could not delete the saved passwords");
+            }
+        }
+        // A new sign-in, or none: nothing of this one is left.
+        _ => return Wait::Retry(Duration::ZERO),
+    }
+    block(shared, "signed_out", SIGNED_OUT, None)
+}
+
+fn cloud_refusal(shared: &Shared, backoff: &mut Backoff, error: &CloudError, token: &str) -> Wait {
     match error {
-        CloudError::Api { status: 401, .. } => block(shared, "signed_out", SIGNED_OUT, None),
+        CloudError::Api { status: 401, .. } => signed_out_by_cloud(shared, token),
         CloudError::Api {
             status: 403, code, ..
         } if code == "banned" => block(shared, "banned", BANNED, None),
@@ -687,6 +725,7 @@ async fn connect_and_serve(
     }
     let context = actor::Context {
         self_id: ready.credentials.machine_id,
+        token: ready.credentials.token,
         account: ready.account.user_id,
         keys: ready.keys,
         lease,
@@ -705,21 +744,14 @@ async fn connect_and_serve(
     (ending, started.elapsed())
 }
 
-fn plan(
-    shared: &Shared,
-    backoff: &mut Backoff,
-    uploaded_for: &mut Option<String>,
-    ending: &Ending,
-    up_for: Duration,
-) -> Wait {
-    info!(?ending, up_for = ?up_for, "The relay connection ended");
-    match backoff.next(ending, up_for, &shared.timings) {
+fn plan(shared: &Shared, uploaded_for: &mut Option<String>, next: Next, token: &str) -> Wait {
+    match next {
         Next::Retry(wait) => Wait::Retry(wait),
         Next::UploadKey(wait) => {
             *uploaded_for = None;
             Wait::Retry(wait)
         }
-        Next::Stop(Stop::SignedOut) => block(shared, "signed_out", SIGNED_OUT, None),
+        Next::Stop(Stop::SignedOut) => signed_out_by_cloud(shared, token),
         // `random(30, 60)` s, so an account's machines do not all ask at once.
         Next::Stop(Stop::Lapsed) => lapsed(
             shared,

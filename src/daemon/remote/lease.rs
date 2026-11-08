@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use tracing::info;
 
 use super::Timings;
-use super::backoff::up_to;
+use super::backoff::{random_fraction, up_to};
 use crate::infrastructure::cloud::api::CloudClient;
 use crate::infrastructure::cloud::http::CloudError;
 use crate::infrastructure::cloud::types::LeaseGrant;
@@ -58,16 +58,40 @@ impl Lease {
 /// Why no lease could be had.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseError {
-    /// The cloud said no: `402`, `403` or `401`.
-    Refused(String),
-    /// The cloud could not be reached; a lease still running stays.
+    /// The cloud said no: `402`, `403`, or `401` for a revoked token.
+    Refused { status: u16, code: String },
+    /// The cloud could not be reached, or failed; a lease still running
+    /// stays.
     Unreachable(String),
+}
+
+impl LeaseError {
+    /// The token itself is no longer accepted: the machine is signed out.
+    pub fn is_revoked(&self) -> bool {
+        matches!(self, Self::Refused { status: 401, .. })
+    }
+}
+
+/// When a renewal that failed is tried again: `base`, doubling with each
+/// failure up to 16 times `base`, then between half of that and all of it.
+pub fn retry_delay(failures: u32, base: Duration, fraction: f64) -> Duration {
+    let ceiling = base.saturating_mul(2_u32.saturating_pow(failures.saturating_sub(1).min(4)));
+    ceiling.mul_f64(0.5 + 0.5 * fraction.clamp(0.0, 1.0))
+}
+
+#[derive(Debug, Default)]
+struct Renewal {
+    failures: u32,
+    not_before: Option<Instant>,
 }
 
 pub struct LeaseKeeper {
     cloud: CloudClient,
     timings: Timings,
     lease: Mutex<Option<Lease>>,
+    /// After a failed renewal, the next one waits; the lease keeps its own
+    /// expiry meanwhile.
+    renewal: Mutex<Renewal>,
     /// One request at a time: a caller that waited finds the fresh lease.
     fetching: tokio::sync::Mutex<()>,
 }
@@ -78,8 +102,15 @@ impl LeaseKeeper {
             cloud,
             timings,
             lease: Mutex::new(None),
+            renewal: Mutex::new(Renewal::default()),
             fetching: tokio::sync::Mutex::new(()),
         }
+    }
+
+    fn renewal(&self) -> MutexGuard<'_, Renewal> {
+        self.renewal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn lease(&self) -> MutexGuard<'_, Option<Lease>> {
@@ -100,10 +131,25 @@ impl LeaseKeeper {
         self.fetch().await
     }
 
-    /// Asks for a new lease now, whatever the current one.
+    /// Asks for a new lease now, whatever the current one. A failure puts
+    /// the next renewal off, with backoff and jitter.
     pub async fn renew(&self) -> Result<(), LeaseError> {
         let _one = self.fetching.lock().await;
-        self.fetch().await
+        let result = self.fetch().await;
+        let mut renewal = self.renewal();
+        match &result {
+            Err(LeaseError::Unreachable(_)) => {
+                renewal.failures = renewal.failures.saturating_add(1);
+                let delay = retry_delay(
+                    renewal.failures,
+                    self.timings.lease_retry,
+                    random_fraction(),
+                );
+                renewal.not_before = Some(Instant::now() + delay);
+            }
+            _ => *renewal = Renewal::default(),
+        }
+        result
     }
 
     async fn fetch(&self) -> Result<(), LeaseError> {
@@ -120,7 +166,7 @@ impl LeaseKeeper {
             }) => {
                 info!(status, code = %code, "Localify Cloud refused a remote lease");
                 *self.lease() = None;
-                Err(LeaseError::Refused(code))
+                Err(LeaseError::Refused { status, code })
             }
             Err(error) => Err(LeaseError::Unreachable(error.to_string())),
         }
@@ -139,9 +185,11 @@ impl LeaseKeeper {
     }
 
     pub fn needs_renewal(&self, now: Instant) -> bool {
-        self.lease()
+        let due = self
+            .lease()
             .as_ref()
-            .is_none_or(|lease| now >= lease.renew_at)
+            .is_none_or(|lease| now >= lease.renew_at);
+        due && self.renewal().not_before.is_none_or(|at| now >= at)
     }
 
     /// After a wake from sleep: sessions end until a renewal succeeds.
@@ -175,6 +223,16 @@ mod tests {
             renew <= Duration::from_secs(45) && renew > Duration::from_secs(40),
             "{renew:?}"
         );
+    }
+
+    #[test]
+    fn a_failed_renewal_backs_off_with_jitter_up_to_a_ceiling() {
+        let base = Duration::from_secs(1);
+        assert_eq!(retry_delay(1, base, 1.0), base);
+        assert_eq!(retry_delay(1, base, 0.0), base / 2);
+        assert_eq!(retry_delay(3, base, 1.0), 4 * base);
+        assert_eq!(retry_delay(9, base, 1.0), 16 * base);
+        assert_eq!(retry_delay(u32::MAX, base, 1.0), 16 * base);
     }
 
     #[test]

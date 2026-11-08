@@ -43,6 +43,10 @@ pub enum Ending {
     },
     /// No answer at all: DNS, TCP or TLS failed.
     Unreachable,
+    /// Localify Cloud no longer accepts the token: a `401` on a lease.
+    Revoked,
+    /// This machine signed out here, or signed in as another machine.
+    SignedOutHere,
 }
 
 /// Why the link stays down until something changes.
@@ -68,13 +72,28 @@ pub enum Next {
     UploadKey(Duration),
 }
 
-/// The attempt counter of one link.
-#[derive(Debug, Default)]
+/// The attempt counter of one link, and where its jitter comes from.
 pub struct Backoff {
     attempt: u32,
+    random: Box<dyn FnMut() -> f64 + Send>,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self::with_random(Box::new(random_fraction))
+    }
 }
 
 impl Backoff {
+    /// With a given source of numbers in `[0, 1)`, so a test can replay one.
+    pub fn with_random(random: Box<dyn FnMut() -> f64 + Send>) -> Self {
+        Self { attempt: 0, random }
+    }
+
+    fn up_to(&mut self, max: Duration) -> Duration {
+        max.mul_f64((self.random)().clamp(0.0, 1.0))
+    }
+
     /// What to do after `ending`, given how long the connection was up
     /// (zero for an attempt that never connected).
     pub fn next(&mut self, ending: &Ending, up_for: Duration, timings: &Timings) -> Next {
@@ -89,12 +108,15 @@ impl Backoff {
                 retry_after,
             } => self.after_refusal(*status, code.as_deref(), *retry_after, timings),
             Ending::Lost | Ending::Unreachable => Next::Retry(self.backoff(None, timings)),
+            Ending::Revoked => Next::Stop(Stop::SignedOut),
+            // The next pass reads the new sign-in, or finds none.
+            Ending::SignedOutHere => Next::Retry(Duration::ZERO),
         }
     }
 
     fn after_close(&mut self, code: u16, reason: &str, timings: &Timings) -> Next {
         match code {
-            1001 | 1012 => Next::Retry(up_to(timings.deploy_jitter)),
+            1001 | 1012 => Next::Retry(self.up_to(timings.deploy_jitter)),
             4001 => Next::Stop(Stop::Replaced),
             4002 => Next::Stop(Stop::Outdated),
             4401 => Next::Stop(Stop::SignedOut),
@@ -129,9 +151,12 @@ impl Backoff {
             .saturating_mul(2_u32.saturating_pow(self.attempt))
             .min(timings.backoff_cap);
         self.attempt = self.attempt.saturating_add(1);
-        let wait = up_to(ceiling);
+        let wait = self.up_to(ceiling);
         match hint {
-            Some(hint) => wait.max(hint + hint.mul_f64(HINT_JITTER * random_fraction())),
+            Some(hint) => {
+                let extra = hint.mul_f64(HINT_JITTER * (self.random)().clamp(0.0, 1.0));
+                wait.max(hint + extra)
+            }
             None => wait,
         }
     }
@@ -253,9 +278,84 @@ mod tests {
         ));
     }
 
-    /// The reconnect storm of the PR 2 gate, on the daemon's side: 200
-    /// daemons closed with `1012` at once come back spread over the 10
-    /// seconds, never all in the same second.
+    /// A replayable source of `[0, 1)`: a 64-bit linear congruential
+    /// generator.
+    fn seeded(seed: u64) -> Box<dyn FnMut() -> f64 + Send> {
+        let mut state = seed;
+        Box::new(move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        })
+    }
+
+    /// The reconnect storm of the PR 2 gate, the daemon's part, on a
+    /// simulated clock with replayed randomness: 200 daemons across 20
+    /// accounts, closed with `1012` at once. Each makes one attempt, at the
+    /// time its backoff chose; together they spread over the 10 seconds,
+    /// every account's machines too, and all are back well within 60 s.
+    /// (That the Worker sees them spread, and that malformed tokens never
+    /// reach D1, is the relay's part of the gate, in #65.)
+    #[test]
+    fn a_reconnect_storm_of_200_daemons_spreads_over_ten_seconds() {
+        let mut attempts: Vec<(usize, Duration)> = Vec::new();
+        for daemon in 0..200_usize {
+            let account = daemon % 20;
+            let mut backoff = Backoff::with_random(seeded(daemon as u64 + 1));
+            let ending = Ending::Closed {
+                code: 1012,
+                reason: String::new(),
+            };
+            let wait = retry(backoff.next(&ending, Duration::from_secs(3600), &timings()));
+            attempts.push((account, wait));
+        }
+        let mut seconds = [0_u32; 10];
+        for (_, wait) in &attempts {
+            assert!(*wait < Duration::from_secs(10));
+            seconds[wait.as_secs() as usize] += 1;
+        }
+        // About 20 a second, never a pile-up in one second.
+        assert!(
+            seconds.iter().all(|&count| (8..=36).contains(&count)),
+            "{seconds:?}"
+        );
+        for account in 0..20 {
+            let mut times: Vec<Duration> = attempts
+                .iter()
+                .filter(|(owner, _)| *owner == account)
+                .map(|(_, wait)| *wait)
+                .collect();
+            times.sort();
+            assert!(
+                times[9] - times[0] >= Duration::from_secs(3),
+                "account {account}: {times:?}"
+            );
+        }
+        let latest = attempts
+            .iter()
+            .map(|(_, wait)| *wait)
+            .max()
+            .unwrap_or_default();
+        assert!(latest < Duration::from_secs(60));
+    }
+
+    /// The same source replays the same waits.
+    #[test]
+    fn injected_randomness_replays() {
+        let ending = Ending::Lost;
+        let mut first = Backoff::with_random(seeded(7));
+        let mut second = Backoff::with_random(seeded(7));
+        for _ in 0..10 {
+            assert_eq!(
+                first.next(&ending, Duration::ZERO, &timings()),
+                second.next(&ending, Duration::ZERO, &timings())
+            );
+        }
+    }
+
+    /// The reconnect storm, with the system's randomness: 200 daemons
+    /// closed with `1012` at once come back spread over the 10 seconds.
     #[test]
     fn a_deploy_close_spreads_a_reconnect_storm_over_ten_seconds() {
         let mut seconds = [0_u32; 10];

@@ -6,7 +6,7 @@
 //! tick all arrive here in turn. When the connection ends, so does every
 //! session, and nothing is resent on the next one.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -16,15 +16,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::backoff::Ending;
-use super::lease::LeaseKeeper;
+use super::lease::{LeaseError, LeaseKeeper};
 use super::machines::SessionState;
-use super::pacer::{self, Bucket};
+use super::pacer::{self, Bucket, Outbox};
 use super::socket::RelaySocket;
 use super::{Shared, View};
 use crate::daemon::public_tunnel::Clocks;
@@ -145,16 +146,19 @@ pub enum Command {
         peer: String,
     },
     LeaseReady {
-        ok: bool,
+        result: Result<(), LeaseError>,
     },
     LeaseRenewed {
-        ok: bool,
+        result: Result<(), LeaseError>,
     },
 }
 
 /// What this connection is for.
 pub struct Context {
     pub self_id: String,
+    /// The token this connection signed in with: another one in `cloud.json`
+    /// means this machine signed out, or in again.
+    pub token: String,
     /// The account's user id, in every prologue.
     pub account: String,
     pub keys: StaticKeys,
@@ -265,15 +269,18 @@ enum End {
 struct Actor {
     shared: Arc<Shared>,
     ctx: Context,
-    out: mpsc::UnboundedSender<String>,
+    out: Outbox,
     commands: mpsc::UnboundedSender<Command>,
     sessions: HashMap<Key, Session>,
     fetching_lease: bool,
     renewing: bool,
-    pair_attempts: VecDeque<Instant>,
     not_before: HashMap<String, Instant>,
     clocks: Clocks,
     next_clock_check: Instant,
+    /// Set by a handler that ends the whole connection.
+    failed: Option<Ending>,
+    /// Lease and roster requests in flight, aborted with the connection.
+    tasks: Vec<JoinHandle<()>>,
 }
 
 pub async fn run(
@@ -286,9 +293,11 @@ pub async fn run(
 ) -> Ending {
     let timings = shared.timings;
     let (sink, mut stream) = socket.split();
-    let (out, queue) = mpsc::unbounded_channel();
+    let (out, queue) = pacer::queue();
     let bucket = Bucket::paced(Instant::now());
-    let writer = tokio::spawn(pacer::run(sink, queue, bucket));
+    let mut writer = tokio::spawn(pacer::run(sink, queue, bucket));
+    let mut writer_done = false;
+    let refresh = Arc::clone(&shared);
     let mut actor = Actor {
         shared,
         ctx,
@@ -297,10 +306,11 @@ pub async fn run(
         sessions: HashMap::new(),
         fetching_lease: false,
         renewing: false,
-        pair_attempts: VecDeque::new(),
         not_before: HashMap::new(),
         clocks: Clocks::now(),
         next_clock_check: Instant::now() + timings.clock_check,
+        failed: None,
+        tasks: Vec::new(),
     };
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -342,11 +352,32 @@ pub async fn run(
                 actor.on_tick();
             }
             _ = ping.tick() => actor.send_text("ping".to_string()),
+            _ = refresh.refresh.notified() => {
+                if actor.signed_out_here() {
+                    info!("This machine signed out; closing its relay connection");
+                    break Ending::SignedOutHere;
+                }
+            }
+            _ = &mut writer => {
+                writer_done = true;
+                break Ending::Lost;
+            }
+        }
+        if let Some(ending) = actor.failed.take() {
+            break ending;
         }
     };
     actor.end_all(&Failure::new("relay_lost", "The relay connection closed."));
+    for task in actor.tasks.drain(..) {
+        task.abort();
+    }
     drop(actor);
-    let _ = writer.await;
+    // A writer stuck on the socket must not hold up the reconnect: what it
+    // still holds is dropped.
+    if !writer_done {
+        writer.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), writer).await;
+    }
     ending
 }
 
@@ -355,12 +386,32 @@ impl Actor {
         self.shared.view()
     }
 
-    fn send_text(&self, text: String) {
-        let _ = self.out.send(text);
+    /// Queues a frame. A full queue means the socket is stuck: the
+    /// connection ends, and the link connects again.
+    fn send_text(&mut self, text: String) {
+        if !self.out.push(text) && self.failed.is_none() {
+            warn!("The relay socket stopped taking frames; reconnecting");
+            self.failed = Some(Ending::Lost);
+        }
+    }
+
+    /// Whether `cloud.json` no longer holds this connection's sign-in.
+    fn signed_out_here(&self) -> bool {
+        match self.shared.credentials.load() {
+            Ok(Some(credentials)) => {
+                credentials.token != self.ctx.token || credentials.machine_id != self.ctx.self_id
+            }
+            _ => true,
+        }
+    }
+
+    fn spawn(&mut self, task: impl std::future::Future<Output = ()> + std::marker::Send + 'static) {
+        self.tasks.retain(|task| !task.is_finished());
+        self.tasks.push(tokio::spawn(task));
     }
 
     fn send_frame(
-        &self,
+        &mut self,
         to: &str,
         sid: SessionId,
         kind: FrameKind,
@@ -481,10 +532,10 @@ impl Actor {
 
     /// A machine the roster does not list yet: read it again, for the
     /// names pins and pairing requests show.
-    fn refresh_roster(&self) {
+    fn refresh_roster(&mut self) {
         let shared = Arc::clone(&self.shared);
         let cloud = Arc::clone(&self.ctx.cloud);
-        tokio::spawn(async move {
+        self.spawn(async move {
             if let Ok(roster) = cloud.machines().await {
                 shared.view().roster = roster;
             }
@@ -644,14 +695,19 @@ impl Actor {
         self.fetching_lease = true;
         let lease = Arc::clone(&self.ctx.lease);
         let commands = self.commands.clone();
-        tokio::spawn(async move {
-            let ok = lease.ensure().await.is_ok();
-            let _ = commands.send(Command::LeaseReady { ok });
+        self.spawn(async move {
+            let result = lease.ensure().await;
+            let _ = commands.send(Command::LeaseReady { result });
         });
     }
 
-    fn on_lease_ready(&mut self, ok: bool) {
+    fn on_lease_ready(&mut self, result: Result<(), LeaseError>) {
         self.fetching_lease = false;
+        if result.as_ref().is_err_and(LeaseError::is_revoked) {
+            self.failed = Some(Ending::Revoked);
+            return;
+        }
+        let ok = result.is_ok();
         let parked: Vec<Key> = self
             .sessions
             .iter()
@@ -1099,13 +1155,17 @@ impl Actor {
     /// On the target, once both hellos are in: decline, or commit.
     fn start_pairing(&mut self, key: &Key) {
         let now = Instant::now();
-        while self
-            .pair_attempts
+        // Kept by the link, so a new connection does not reset the count.
+        let mut attempts = self.shared.pair_attempts();
+        while attempts
             .front()
             .is_some_and(|at| now.duration_since(*at) >= HOUR)
         {
-            self.pair_attempts.pop_front();
+            attempts.pop_front();
         }
+        let oldest = attempts.front().copied();
+        let full = attempts.len() >= PAIRINGS_PER_HOUR;
+        drop(attempts);
         let decline = |reason, retry_after| SessionMessage::PairDeclined {
             reason,
             retry_after,
@@ -1126,10 +1186,10 @@ impl Actor {
                     .as_ref()
                     .is_some_and(|pairing| !pairing.is_finished())
         });
-        if another || self.pair_attempts.len() >= PAIRINGS_PER_HOUR {
-            let retry_after = match self.pair_attempts.front() {
+        if another || full {
+            let retry_after = match oldest {
                 Some(oldest) if !another => HOUR
-                    .saturating_sub(now.duration_since(*oldest))
+                    .saturating_sub(now.duration_since(oldest))
                     .as_secs()
                     .max(1),
                 _ => 60,
@@ -1141,7 +1201,7 @@ impl Actor {
                 &Failure::new("busy", "Busy."),
             );
         }
-        self.pair_attempts.push_back(now);
+        self.shared.pair_attempts().push_back(now);
         let Some(hash) = self.sessions.get(key).and_then(|session| session.hash) else {
             return;
         };
@@ -1363,10 +1423,12 @@ impl Actor {
                     );
                 }
             }
-            Command::LeaseReady { ok } => self.on_lease_ready(ok),
-            Command::LeaseRenewed { ok } => {
+            Command::LeaseReady { result } => self.on_lease_ready(result),
+            Command::LeaseRenewed { result } => {
                 self.renewing = false;
-                if !ok && !self.ctx.lease.is_valid(Instant::now()) {
+                if result.as_ref().is_err_and(LeaseError::is_revoked) {
+                    self.failed = Some(Ending::Revoked);
+                } else if result.is_err() && !self.ctx.lease.is_valid(Instant::now()) {
                     self.end_open(ByeReason::LeaseExpired);
                 }
             }
@@ -1462,9 +1524,9 @@ impl Actor {
         self.renewing = true;
         let lease = Arc::clone(&self.ctx.lease);
         let commands = self.commands.clone();
-        tokio::spawn(async move {
-            let ok = lease.renew().await.is_ok();
-            let _ = commands.send(Command::LeaseRenewed { ok });
+        self.spawn(async move {
+            let result = lease.renew().await;
+            let _ = commands.send(Command::LeaseRenewed { result });
         });
     }
 

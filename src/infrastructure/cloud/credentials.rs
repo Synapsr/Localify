@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::infrastructure::file_security::write_private_file;
 use crate::infrastructure::remote::store::RemoteStore;
 
-const FILE_NAME: &str = "cloud.json";
+pub const FILE_NAME: &str = "cloud.json";
 
 /// What a signed-in machine keeps. The CLI, the app and the daemon all read
 /// it; the daemon runs outside the login session, so the Keychain is not an
@@ -50,6 +50,13 @@ impl CredentialsStore {
     }
 
     /// `None` when this machine is not signed in.
+    /// The folder `cloud.json` lives in.
+    pub fn data_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf)
+    }
+
     pub fn load(&self) -> Result<Option<CloudCredentials>> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,

@@ -19,6 +19,10 @@ use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+use crate::infrastructure::remote::noise::{Handshake, SessionContext, SessionId, StaticKeys};
 use crate::infrastructure::remote::wire::{FrameKind, Purpose, Send};
 
 /// What the relay does with one frame.
@@ -53,6 +57,10 @@ struct State {
     machines: Vec<Machine>,
     sockets: HashMap<String, mpsc::UnboundedSender<Message>>,
     hook: Option<Hook>,
+    mitm: Option<Mitm>,
+    budgets: HashMap<String, RelayBudget>,
+    refusals: u32,
+    lease_requests: u32,
     held: HashMap<String, Value>,
     /// Every frame a daemon sent, with its sender.
     log: Vec<(String, Send)>,
@@ -133,6 +141,41 @@ impl FakeCloud {
 
     pub fn upgrades(&self) -> Vec<(String, Instant)> {
         self.state().upgrades.clone()
+    }
+
+    /// Whether the machine holds a socket now.
+    pub fn connected(&self, id: &str) -> bool {
+        self.state().sockets.contains_key(id)
+    }
+
+    pub fn lease_requests(&self) -> u32 {
+        self.state().lease_requests
+    }
+
+    /// Frames the relay's budgets refused.
+    pub fn refusals(&self) -> u32 {
+        self.state().refusals
+    }
+
+    /// Puts the relay in the middle of every session between `a` (the
+    /// viewer) and `b`: it answers each side's handshake with its own static
+    /// key, as a relay that swapped keys in the roster would.
+    pub fn set_mitm(&self, a: &str, b: &str) {
+        self.state().mitm = Some(Mitm {
+            a: a.into(),
+            b: b.into(),
+            keys: StaticKeys::generate().unwrap(),
+            sessions: HashMap::new(),
+            completed_with_b: 0,
+        });
+    }
+
+    /// How many handshakes the relay completed with `b` as `a`.
+    pub fn mitm_completed(&self) -> u32 {
+        self.state()
+            .mitm
+            .as_ref()
+            .map_or(0, |mitm| mitm.completed_with_b)
     }
 
     pub fn connections(&self) -> u32 {
@@ -283,11 +326,15 @@ impl FakeCloud {
             };
         }
         if request.starts_with("GET /v1/remote/lease ") {
-            if state.lease_status != 200 {
-                return (
-                    "402 Payment Required",
-                    Some(json!({"error": "subscription_required", "message": "Pro."})),
-                );
+            state.lease_requests += 1;
+            let refused = |code: &str| Some(json!({"error": code, "message": "Refused."}));
+            match state.lease_status {
+                200 => {}
+                401 => return ("401 Unauthorized", refused("unauthorized")),
+                402 => return ("402 Payment Required", refused("subscription_required")),
+                403 => return ("403 Forbidden", refused("banned")),
+                503 => return ("503 Service Unavailable", refused("unavailable")),
+                _ => return ("500 Internal Server Error", refused("internal")),
             }
             let machines: Vec<&str> = state.machines.iter().map(|m| m.id.as_str()).collect();
             return (
@@ -397,6 +444,35 @@ impl FakeCloud {
     fn route(&self, from: &str, sender: &mpsc::UnboundedSender<Message>, mut frame: Send) {
         let mut state = self.state();
         state.log.push((from.to_string(), frame.clone()));
+        // relay.ts's budgets, checked as a frame arrives. This relay handles
+        // a frame at once, so none waits behind another.
+        let size = serde_json::to_string(&frame).map_or(0, |text| text.len());
+        let budget = state
+            .budgets
+            .entry(from.to_string())
+            .or_insert_with(|| RelayBudget::new(Instant::now()));
+        match budget.admit(size, 0, 0, Instant::now()) {
+            Admit::Forward => {}
+            Admit::Refuse => {
+                state.refusals += 1;
+                let error = json!({"t": "error", "code": "rate_limited", "sid": frame.sid, "message": "Slow down.", "retryAfter": 1});
+                let _ = sender.send(Message::text(error.to_string()));
+                return;
+            }
+            Admit::Close => {
+                state.refusals += 1;
+                let _ = sender.send(close(4429, r#"{"retryAfter":10}"#));
+                return;
+            }
+        }
+        if let Some(handled) = self.in_the_middle(&mut state, from, &frame) {
+            if let Some((to, value)) = handled
+                && let Some(socket) = state.sockets.get(&to)
+            {
+                let _ = socket.send(Message::text(value.to_string()));
+            }
+            return;
+        }
         let route = match state.hook.as_mut() {
             Some(hook) => hook(from, &mut frame),
             None => Route::Forward,
@@ -442,6 +518,141 @@ impl FakeCloud {
                 let _ = sender.send(Message::text(error.to_string()));
             }
         }
+    }
+}
+
+struct Mitm {
+    a: String,
+    b: String,
+    keys: StaticKeys,
+    /// By session id: the relay as B towards A, and as A towards B.
+    sessions: HashMap<String, (Handshake, Handshake)>,
+    completed_with_b: u32,
+}
+
+type Delivery = Option<(String, Value)>;
+
+impl FakeCloud {
+    /// Runs the relay's two handshakes for a session between the pair it
+    /// sits between; `None` for any other frame.
+    fn in_the_middle(&self, state: &mut State, from: &str, frame: &Send) -> Option<Delivery> {
+        let user = state.user_id.clone();
+        let mitm = state.mitm.as_mut()?;
+        let (a, b) = (mitm.a.clone(), mitm.b.clone());
+        if !((from == a && frame.to == b) || (from == b && frame.to == a)) {
+            return None;
+        }
+        let data = frame
+            .data
+            .as_deref()
+            .and_then(|data| URL_SAFE_NO_PAD.decode(data).ok());
+        let recv = |from: &str, purpose: Option<Purpose>, data: &[u8]| {
+            let mut value = json!({"t": "recv", "from": from, "sid": frame.sid, "kind": "hs",
+                                   "data": URL_SAFE_NO_PAD.encode(data)});
+            if let Some(purpose) = purpose {
+                value["purpose"] = json!(purpose);
+            }
+            value
+        };
+        match (from == a, frame.kind, frame.purpose, data) {
+            // A's first message: answer it as B, and open towards B as A.
+            (true, FrameKind::Hs, Some(purpose), Some(first)) => {
+                let context = SessionContext {
+                    purpose,
+                    account: user,
+                    initiator: a.clone(),
+                    responder: b.clone(),
+                    sid: SessionId::parse(&frame.sid)?,
+                };
+                let mut as_b = Handshake::responder(&mitm.keys, &context).ok()?;
+                as_b.read(&first).ok()?;
+                let second = as_b.write().ok()?;
+                let mut as_a = Handshake::initiator(&mitm.keys, &context).ok()?;
+                let towards_b = as_a.write().ok()?;
+                mitm.sessions.insert(frame.sid.clone(), (as_b, as_a));
+                if let Some(socket) = state.sockets.get(&b) {
+                    let _ = socket.send(Message::text(
+                        recv(&a, Some(purpose), &towards_b).to_string(),
+                    ));
+                }
+                Some(Some((a.clone(), recv(&b, None, &second))))
+            }
+            // B's second message: finish the handshake with B, as A.
+            (false, FrameKind::Hs, None, Some(second)) => {
+                let (_, as_a) = mitm.sessions.get_mut(&frame.sid)?;
+                as_a.read(&second).ok()?;
+                let third = as_a.write().ok()?;
+                if as_a.is_finished() {
+                    mitm.completed_with_b += 1;
+                }
+                Some(Some((b.clone(), recv(&a, None, &third))))
+            }
+            // Anything else between them goes nowhere.
+            _ => Some(None),
+        }
+    }
+}
+
+/// relay.ts's two budgets: 200 frames refilled at 50 a second, 5 MiB
+/// refilled at 512 KiB a second, and at most 32 frames or 512 KiB waiting
+/// behind the frame being handled. A refused frame takes nothing; the 50th
+/// refusal in a row closes the socket with `4429`.
+pub struct RelayBudget {
+    frames: f64,
+    bytes: f64,
+    updated: Instant,
+    refused_in_a_row: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    Forward,
+    Refuse,
+    Close,
+}
+
+impl RelayBudget {
+    const FRAMES: f64 = 200.0;
+    const FRAME_RATE: f64 = 50.0;
+    const BYTES: f64 = 5.0 * 1024.0 * 1024.0;
+    const BYTE_RATE: f64 = 512.0 * 1024.0;
+    pub const MAX_PENDING_FRAMES: usize = 32;
+    pub const MAX_PENDING_BYTES: usize = 512 * 1024;
+
+    pub fn new(now: Instant) -> Self {
+        Self {
+            frames: Self::FRAMES,
+            bytes: Self::BYTES,
+            updated: now,
+            refused_in_a_row: 0,
+        }
+    }
+
+    pub fn admit(
+        &mut self,
+        size: usize,
+        pending_frames: usize,
+        pending_bytes: usize,
+        now: Instant,
+    ) -> Admit {
+        let elapsed = now.saturating_duration_since(self.updated).as_secs_f64();
+        self.updated = now;
+        self.frames = (self.frames + elapsed * Self::FRAME_RATE).min(Self::FRAMES);
+        self.bytes = (self.bytes + elapsed * Self::BYTE_RATE).min(Self::BYTES);
+        let full = pending_frames >= Self::MAX_PENDING_FRAMES
+            || pending_bytes + size > Self::MAX_PENDING_BYTES;
+        if full || self.frames < 1.0 || self.bytes < size as f64 {
+            self.refused_in_a_row += 1;
+            return if self.refused_in_a_row >= 50 {
+                Admit::Close
+            } else {
+                Admit::Refuse
+            };
+        }
+        self.refused_in_a_row = 0;
+        self.frames -= 1.0;
+        self.bytes -= size as f64;
+        Admit::Forward
     }
 }
 

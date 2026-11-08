@@ -9,12 +9,14 @@ use std::fmt;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::noise::{StaticKeys, decode_key, encode_key};
 use super::wire::TargetSettings;
+use crate::infrastructure::cloud::credentials::FILE_NAME as CREDENTIALS_FILE;
 use crate::infrastructure::file_security::write_private_file;
 use crate::infrastructure::launch_rev::random_bytes;
 
@@ -23,8 +25,9 @@ const IDENTITY_FILE: &str = "identity.json";
 const PEERS_FILE: &str = "peers.json";
 const SETTINGS_FILE: &str = "settings.json";
 
-/// This machine's remote key, for the machine id it was made for.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// This machine's remote key, for the machine id it was made for. The
+/// encoded private key is wiped from memory when it is dropped.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     pub machine_id: String,
@@ -45,11 +48,25 @@ impl fmt::Debug for Identity {
     }
 }
 
+impl Drop for Identity {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
+}
+
 impl Identity {
+    /// The key pair. An error names the file, never what it holds.
     pub fn keys(&self) -> Result<StaticKeys> {
+        let invalid = |half: &str| {
+            anyhow!(
+                "The {half} key in {DIR_NAME}/{IDENTITY_FILE} is invalid. Sign out and sign in again, then pair this machine again."
+            )
+        };
+        let private = decode_key(&self.private_key).map_err(|_| invalid("private"))?;
+        let public = decode_key(&self.public_key).map_err(|_| invalid("public"))?;
         Ok(StaticKeys {
-            private: decode_key(&self.private_key).context("identity.json: privateKey")?,
-            public: decode_key(&self.public_key).context("identity.json: publicKey")?,
+            private: Zeroizing::new(private),
+            public,
         })
     }
 }
@@ -123,15 +140,19 @@ pub const DEFAULT_SETTINGS: TargetSettings = TargetSettings {
     background_starts: false,
 };
 
+/// Writes refuse once this machine is signed out: a pairing that ends
+/// after `logout` never brings the folder back.
 #[derive(Debug, Clone)]
 pub struct RemoteStore {
     dir: PathBuf,
+    credentials: PathBuf,
 }
 
 impl RemoteStore {
     pub fn in_data_dir(data_dir: &Path) -> Self {
         Self {
             dir: data_dir.join(DIR_NAME),
+            credentials: data_dir.join(CREDENTIALS_FILE),
         }
     }
 
@@ -153,6 +174,7 @@ impl RemoteStore {
             private_key: encode_key(&keys.private),
             created_at: now_rfc3339(),
         };
+        drop(keys);
         self.write(IDENTITY_FILE, &identity)?;
         Ok(identity)
     }
@@ -196,8 +218,21 @@ impl RemoteStore {
     }
 
     /// Signing out: a new sign-in starts with a new key, no pins and every
-    /// switch off. Deleting what is already gone is not an error.
+    /// switch off. It waits for a write in progress, which then finds the
+    /// machine signed out. Deleting what is already gone is not an error.
     pub fn delete_all(&self) -> Result<()> {
+        let _lock = match File::open(&self.dir) {
+            Ok(lock) => {
+                lock.lock()
+                    .with_context(|| format!("Could not lock {}", self.dir.display()))?;
+                Some(lock)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Could not open {}", self.dir.display()));
+            }
+        };
         match fs::remove_dir_all(&self.dir) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -223,27 +258,39 @@ impl RemoteStore {
         Ok(())
     }
 
+    /// The folder's lock, for a write. Checked again under the lock: a
+    /// signed-out machine writes nothing.
     fn lock(&self) -> Result<File> {
+        self.require_signed_in()?;
         create_private_dir(&self.dir)?;
         let lock = File::open(&self.dir)
             .with_context(|| format!("Could not open {}", self.dir.display()))?;
         lock.lock()
             .with_context(|| format!("Could not lock {}", self.dir.display()))?;
+        self.require_signed_in()?;
         Ok(lock)
+    }
+
+    fn require_signed_in(&self) -> Result<()> {
+        if self.credentials.exists() {
+            return Ok(());
+        }
+        bail!("This machine is not signed in to Localify Cloud, so it keeps no remote state.")
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         let path = self.dir.join(name);
         let contents = match fs::read_to_string(&path) {
-            Ok(contents) => contents,
+            Ok(contents) => Zeroizing::new(contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(error).with_context(|| format!("Could not read {}", path.display()));
             }
         };
+        // Without the parser's message: it can quote what the file holds.
         serde_json::from_str(&contents)
             .map(Some)
-            .with_context(|| format!("{} is not valid", path.display()))
+            .map_err(|_| anyhow!("{} is not valid", path.display()))
     }
 
     fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
@@ -252,7 +299,7 @@ impl RemoteStore {
         random_bytes(&mut suffix)?;
         let suffix: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
         let temporary = self.dir.join(format!("{name}.{suffix}.tmp"));
-        let contents = serde_json::to_vec_pretty(value)?;
+        let contents = Zeroizing::new(serde_json::to_vec_pretty(value)?);
         let written = write_private_file(&temporary, &contents)
             .with_context(|| format!("Could not write {}", temporary.display()))
             .and_then(|()| {
@@ -291,14 +338,75 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// A data dir with a `cloud.json`, as a signed-in machine has.
+    fn signed_in() -> (tempfile::TempDir, RemoteStore) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(CREDENTIALS_FILE), "{}").unwrap();
+        let store = RemoteStore::in_data_dir(dir.path());
+        (dir, store)
+    }
+
+    #[test]
+    fn a_signed_out_machine_writes_no_remote_state() {
+        let (dir, store) = signed_in();
+        store.identity_for("m1").unwrap();
+        fs::remove_file(dir.path().join(CREDENTIALS_FILE)).unwrap();
+        store.delete_all().unwrap();
+
+        // A pairing that ends after the sign-out pins nothing.
+        let refused = store.update_pins(|pins| {
+            pins.insert("m2".into(), pin("k"));
+        });
+        assert!(refused.unwrap_err().to_string().contains("not signed in"));
+        assert!(store.update_settings(SettingsChange::default()).is_err());
+        assert!(store.identity_for("m1").is_err());
+        assert!(!dir.path().join("remote").exists());
+    }
+
+    #[test]
+    fn an_invalid_key_is_reported_without_what_the_file_holds() {
+        let (dir, store) = signed_in();
+        let identity = store.identity_for("m1").unwrap();
+        let secret = "c2VjcmV0LXByaXZhdGUta2V5LXRoYXQtaXMtYnJva2Vu";
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join("remote/identity.json")).unwrap())
+                .unwrap();
+        saved["privateKey"] = serde_json::json!(secret);
+        fs::write(dir.path().join("remote/identity.json"), saved.to_string()).unwrap();
+
+        let error = format!(
+            "{:#}",
+            store.identity_for("m1").unwrap().keys().unwrap_err()
+        );
+        assert!(
+            error.contains("private key in remote/identity.json is invalid"),
+            "{error}"
+        );
+        for window in secret.as_bytes().windows(6) {
+            assert!(
+                !error.contains(std::str::from_utf8(window).unwrap()),
+                "{error}"
+            );
+        }
+        drop(identity);
+
+        // A file that does not parse is not quoted either.
+        fs::write(
+            dir.path().join("remote/identity.json"),
+            format!("{{\"privateKey\": {secret}}}"),
+        )
+        .unwrap();
+        let error = format!("{:#}", store.load_identity().unwrap_err());
+        assert!(!error.contains(&secret[..10]), "{error}");
+    }
+
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     #[test]
     fn the_identity_is_made_once_per_machine_id_and_only_the_owner_reads_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RemoteStore::in_data_dir(dir.path());
+        let (dir, store) = signed_in();
         assert_eq!(store.load_identity().unwrap(), None);
 
         let first = store.identity_for("m1").unwrap();
@@ -311,8 +419,7 @@ mod tests {
 
     #[test]
     fn an_identity_of_an_earlier_sign_in_takes_its_pins_and_settings_with_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RemoteStore::in_data_dir(dir.path());
+        let (_dir, store) = signed_in();
         let old = store.identity_for("m1").unwrap();
         store
             .update_pins(|pins| {
@@ -343,8 +450,7 @@ mod tests {
 
     #[test]
     fn pins_are_kept_by_machine_id_in_a_private_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RemoteStore::in_data_dir(dir.path());
+        let (dir, store) = signed_in();
         assert!(store.pins().unwrap().is_empty());
         store
             .update_pins(|pins| {
@@ -367,8 +473,7 @@ mod tests {
 
     #[test]
     fn settings_start_off_and_keep_their_dependencies() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RemoteStore::in_data_dir(dir.path());
+        let (dir, store) = signed_in();
         assert_eq!(store.settings().unwrap(), DEFAULT_SETTINGS);
 
         let on = SettingsChange {
@@ -400,8 +505,7 @@ mod tests {
 
     #[test]
     fn a_hand_edited_file_never_holds_a_switch_without_its_dependency() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RemoteStore::in_data_dir(dir.path());
+        let (dir, store) = signed_in();
         fs::create_dir_all(dir.path().join("remote")).unwrap();
         fs::write(
             dir.path().join("remote/settings.json"),
@@ -413,8 +517,7 @@ mod tests {
 
     #[test]
     fn deleting_everything_twice_is_fine() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RemoteStore::in_data_dir(dir.path());
+        let (dir, store) = signed_in();
         store.identity_for("m1").unwrap();
         store.delete_all().unwrap();
         store.delete_all().unwrap();

@@ -9,10 +9,11 @@
 
 use std::fmt;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::wire::{MAX_MESSAGE_BYTES, PROTO_MAX, Purpose};
 use crate::infrastructure::launch_rev::random_bytes;
@@ -96,10 +97,11 @@ impl SessionContext {
     }
 }
 
-/// This machine's static X25519 key pair.
-#[derive(Clone, PartialEq, Eq)]
+/// This machine's static X25519 key pair. The private half is wiped from
+/// memory when the pair is dropped.
+#[derive(PartialEq, Eq)]
 pub struct StaticKeys {
-    pub private: [u8; KEY_LEN],
+    pub private: Zeroizing<[u8; KEY_LEN]>,
     pub public: [u8; KEY_LEN],
 }
 
@@ -114,11 +116,13 @@ impl fmt::Debug for StaticKeys {
 
 impl StaticKeys {
     pub fn generate() -> Result<Self> {
-        let keypair = builder()?
+        let mut keypair = builder()?
             .generate_keypair()
             .map_err(|error| anyhow!("Could not generate a remote key: {error}"))?;
+        let private = key_bytes(&keypair.private).map(Zeroizing::new);
+        keypair.private.zeroize();
         Ok(Self {
-            private: key_bytes(&keypair.private)?,
+            private: private?,
             public: key_bytes(&keypair.public)?,
         })
     }
@@ -142,11 +146,18 @@ pub fn encode_key(key: &[u8; KEY_LEN]) -> String {
     URL_SAFE_NO_PAD.encode(key)
 }
 
+/// Decodes a key. The error never quotes the input: it may be a private
+/// key.
 pub fn decode_key(text: &str) -> Result<[u8; KEY_LEN]> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(text)
-        .with_context(|| format!("'{text}' is not base64url without padding"))?;
-    key_bytes(&bytes)
+    let bytes = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(text)
+            .map_err(|_| anyhow!("not {KEY_LEN} bytes of base64url without padding"))?,
+    );
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("not {KEY_LEN} bytes of base64url without padding"))
 }
 
 /// The first 8 bytes of SHA-256 of the key, as `1a2b 3c4d 5e6f 7a8b`.
@@ -176,7 +187,7 @@ impl Handshake {
     fn build(keys: &StaticKeys, context: &SessionContext, initiator: bool) -> Result<Self> {
         let prologue = context.prologue()?;
         let builder = builder()?
-            .local_private_key(&keys.private)
+            .local_private_key(keys.private.as_slice())
             .and_then(|builder| builder.prologue(&prologue))
             .map_err(|error| anyhow!("Could not set up the handshake: {error}"))?;
         let state = if initiator {
@@ -446,6 +457,9 @@ pub mod tests {
         assert_eq!(SessionId::parse(&sid.encode()), Some(sid));
         assert_eq!(SessionId::parse("too-short"), None);
         assert!(!format!("{keys:?}").contains(&encode_key(&keys.private)));
+        let secret = encode_key(&keys.private);
+        let error = format!("{:#}", decode_key(&format!("{secret}!")).unwrap_err());
+        assert!(!error.contains(&secret[..8]), "{error}");
     }
 
     #[test]
