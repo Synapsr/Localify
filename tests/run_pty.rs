@@ -968,7 +968,19 @@ fn concurrent_launches_from_the_app_and_a_terminal_leave_one_run() {
         .position(|tab| Some(tab.pty.run_id()) == record.run_id());
     for (index, tab) in tabs.iter().enumerate() {
         if Some(index) != admitted {
-            let (end, _) = tab.wait_end(Duration::from_secs(30));
+            // A tab that finds the service running asks before replacing it,
+            // as any terminal does: it is told no.
+            let mut answered = false;
+            let end = wait_until(Duration::from_secs(30), || {
+                if let Ok((end, _)) = tab.ended.try_recv() {
+                    return Some(end);
+                }
+                if !answered && tab.shown().contains("Stop it and start again?") {
+                    answered = tab.pty.write(b"n\r").is_ok();
+                }
+                None
+            })
+            .unwrap_or_else(|| panic!("a losing tab never ended:\n{}", tab.shown()));
             assert!(!end.registered, "a second tab ran the service");
         }
     }
