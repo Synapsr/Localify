@@ -9,6 +9,7 @@
 //! the record under it. A run is over once nothing of its session is left and
 //! its folder holds `end.json` (see `runs`).
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::branding::BRANDING;
 use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::process::{
-    self, NativeProcesses, Signal, process_info, process_tree, signal_processes,
+    self, Identity, NativeProcesses, Signal, process_info, signal_identities, track_tree,
 };
 use crate::infrastructure::runs::finish::{
     Finish, FinishMode, Finisher, Membership, RunSession, membership,
@@ -172,11 +173,19 @@ impl RunningService {
     /// second, unambiguously, and this boot began before the record was
     /// written. Anything less is `Unknown`, and is never signalled.
     fn legacy_state(&self) -> RunState {
+        match self.legacy_identity() {
+            Ok(_) => RunState::Running,
+            Err(state) => state,
+        }
+    }
+
+    /// The verified process of a legacy run, or the state it shows as.
+    fn legacy_identity(&self) -> Result<Identity, RunState> {
         let Some(process) = process_info(self.pid) else {
-            return RunState::Stopped;
+            return Err(RunState::Stopped);
         };
         let Some(saved) = self.process_started_at.as_deref().map(str::trim) else {
-            return RunState::Unknown;
+            return Err(RunState::Unknown);
         };
         let reads_as_saved =
             |seconds: u64| process::lstart_label(seconds).as_deref() == Some(saved);
@@ -185,9 +194,9 @@ impl RunningService {
             || reads_as_saved(process.started_wall + 3600);
         let booted_before = process::boot_time().is_some_and(|boot| boot < self.started_at);
         if reads_as_saved(process.started_wall) && !ambiguous && booted_before {
-            RunState::Running
+            Ok(Identity::of(&process))
         } else {
-            RunState::Unknown
+            Err(RunState::Unknown)
         }
     }
 }
@@ -227,6 +236,9 @@ pub struct RunningServiceStore {
     /// Runs between reading a record and writing it back, to replay races.
     #[cfg(test)]
     before_write: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Runs after a forgotten run was stopped, before its record goes.
+    #[cfg(test)]
+    before_forget: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl RunningServiceStore {
@@ -242,6 +254,8 @@ impl RunningServiceStore {
             dir,
             #[cfg(test)]
             before_write: None,
+            #[cfg(test)]
+            before_forget: None,
         }
     }
 
@@ -560,15 +574,18 @@ impl RunningServiceStore {
         let state = self.state(service);
         let running = state == RunState::Running;
         let (Some(run), Some(session)) = (&service.run, service.session()) else {
-            match state {
-                RunState::Running => stop_tree(&service.key.service_id, service.pid)?,
-                RunState::Stopped => {}
-                RunState::Unknown => bail!("{}", unverified_legacy_run(service)),
-            }
-            return Ok(running);
+            return match service.legacy_identity() {
+                Ok(root) => stop_tree(&service.key.service_id, root).map(|()| true),
+                Err(RunState::Unknown) => bail!("{}", unverified_legacy_run(service)),
+                Err(_) => Ok(false),
+            };
         };
         if running && run.sid.is_none() {
-            stop_tree(&service.key.service_id, service.pid)?;
+            let root = Identity {
+                pid: service.pid,
+                start: run.start,
+            };
+            stop_tree(&service.key.service_id, root)?;
         }
         let dir = self.run_dir(&run.run_id);
         let finisher = Finisher::native();
@@ -622,13 +639,22 @@ impl RunningServiceStore {
             RunState::Unknown => false,
             RunState::Running | RunState::Stopped => self.stop(&service)?,
         };
-        self.remove_output(&service, None);
-        let _record = self.lock_record(key)?;
-        let path = self.record_path(key);
-        if path.exists() {
-            fs::remove_file(&path)
-                .with_context(|| format!("Failed to remove '{}'", path.display()))?;
+        #[cfg(test)]
+        if let Some(pause) = &self.before_forget {
+            pause();
         }
+        let _record = self.lock_record(key)?;
+        // A run that registered meanwhile keeps its record and its output.
+        let current = self.get(key)?;
+        if !current
+            .as_ref()
+            .is_some_and(|current| same_run(current, &service))
+        {
+            return Ok(stopped);
+        }
+        self.remove_output(&service, None);
+        let path = self.record_path(key);
+        fs::remove_file(&path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
         Ok(stopped)
     }
 
@@ -670,6 +696,16 @@ impl RunningServiceStore {
     }
 }
 
+/// Whether two records name the same run: the same run id, or for legacy runs
+/// the same executor and start.
+fn same_run(left: &RunningService, right: &RunningService) -> bool {
+    match (left.run_id(), right.run_id()) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => left.pid == right.pid && left.started_at == right.started_at,
+        _ => false,
+    }
+}
+
 /// Why a legacy run is neither shown as running nor stopped.
 pub fn unverified_legacy_run(service: &RunningService) -> String {
     format!(
@@ -687,54 +723,42 @@ pub fn service_selector(key: &ServiceKey) -> String {
     selector
 }
 
-/// A process known by its PID and start time, so a reused PID is never signaled.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Tracked {
-    pid: u32,
-    start: u64,
-}
-
-impl Tracked {
-    fn of(pid: u32) -> Option<Self> {
-        process_info(pid).map(|process| Self {
-            pid,
-            start: process.start,
-        })
-    }
-
-    fn is_alive(&self) -> bool {
-        Self::of(self.pid).as_ref() == Some(self)
-    }
-}
-
 /// Asks a process and everything it started to stop, and kills what is still
-/// alive after a grace period. Every process of the tree is watched, not only
-/// `localify dev`: a server that ignores SIGTERM outlives its parent. For runs
-/// whose session is not their own: a legacy run, or one in a person's shell.
-fn stop_tree(service: &str, root: u32) -> Result<()> {
-    let mut tracked = track_tree(root, Vec::new());
-    signal_processes(&pids(&tracked), Signal::Terminate);
+/// alive after a grace period. `root` is the verified executor; the tree grows
+/// only from processes still alive as themselves, and each one's start is
+/// checked again before each signal. Every process of the tree is watched, not
+/// only `localify dev`: a server that ignores SIGTERM outlives its parent. For
+/// runs whose session is not their own: a legacy run, or one in a person's
+/// shell.
+fn stop_tree(service: &str, root: Identity) -> Result<()> {
+    let mut tracked = track_tree(&[root], &process::all_processes());
+    let mut terminated: HashSet<Identity> = HashSet::new();
 
     let deadline = Instant::now() + STOP_TIMEOUT;
     loop {
-        tracked.retain(Tracked::is_alive);
+        tracked = track_tree(&tracked, &process::all_processes());
         if tracked.is_empty() {
             return Ok(());
         }
         if Instant::now() >= deadline {
             break;
         }
+        let new: Vec<Identity> = tracked
+            .iter()
+            .filter(|identity| terminated.insert(**identity))
+            .copied()
+            .collect();
+        signal_identities(&new, Signal::Terminate);
         thread::sleep(Duration::from_millis(100));
-        tracked = track_tree(root, tracked);
     }
 
-    signal_processes(&pids(&tracked), Signal::Kill);
+    signal_identities(&tracked, Signal::Kill);
     thread::sleep(Duration::from_millis(300));
-    tracked.retain(Tracked::is_alive);
+    tracked = track_tree(&tracked, &process::all_processes());
     if !tracked.is_empty() {
-        let left = pids(&tracked)
+        let left = tracked
             .iter()
-            .map(u32::to_string)
+            .map(|identity| identity.pid.to_string())
             .collect::<Vec<_>>()
             .join(" ");
         bail!(
@@ -742,25 +766,6 @@ fn stop_tree(service: &str, root: u32) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Adds the descendants of every tracked process still alive, including ones
-/// started since the last look.
-fn track_tree(root: u32, mut tracked: Vec<Tracked>) -> Vec<Tracked> {
-    let mut roots = vec![root];
-    roots.extend(tracked.iter().map(|process| process.pid));
-    for pid in roots.into_iter().flat_map(process_tree) {
-        if !tracked.iter().any(|process| process.pid == pid)
-            && let Some(process) = Tracked::of(pid)
-        {
-            tracked.push(process);
-        }
-    }
-    tracked
-}
-
-fn pids(tracked: &[Tracked]) -> Vec<u32> {
-    tracked.iter().map(|process| process.pid).collect()
 }
 
 /// Lines of an app run's output file, and where to read on from.
@@ -1115,18 +1120,75 @@ mod tests {
             .spawn()
             .unwrap();
         thread::sleep(Duration::from_millis(300));
-        let tree = process_tree(parent.id());
+        let root = Identity::current(parent.id()).unwrap();
+        let tree = track_tree(&[root], &process::all_processes());
         assert!(tree.len() >= 2, "{tree:?}");
 
-        stop_tree("web", parent.id()).unwrap();
+        stop_tree("web", root).unwrap();
 
         let _ = parent.wait();
-        for pid in tree {
-            assert!(
-                !Tracked::of(pid).is_some_and(|process| process.is_alive()),
-                "{pid} survived"
-            );
+        for identity in tree {
+            assert_ne!(Identity::current(identity.pid), Some(identity), "survived");
         }
+    }
+
+    #[test]
+    fn stop_never_signals_a_root_whose_start_changed() {
+        let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+        let recorded = Identity {
+            pid: unrelated.id(),
+            start: Identity::current(unrelated.id()).unwrap().start + 1,
+        };
+
+        stop_tree("web", recorded).unwrap();
+
+        assert!(unrelated.try_wait().unwrap().is_none(), "it was signalled");
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+
+    #[test]
+    fn forgetting_a_run_keeps_the_record_of_one_that_registered_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gone = Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        let first = RunningService {
+            run: Some(RunIdentity {
+                run_id: RunId::generate().unwrap(),
+                start: 1,
+                sid: None,
+                pgid: None,
+                boot_id: process::boot_id().unwrap(),
+                last_alive_at: 1,
+                output: None,
+            }),
+            process_started_at: None,
+            ..legacy_record(gone.id(), 0, None)
+        };
+        let registering = std::sync::Arc::new(RunningServiceStore::new(dir.path().to_path_buf()));
+        registering.write(&first).unwrap();
+        let lock = std::sync::Arc::new(registering.lock(&key("web")).unwrap());
+        let second = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut forgetting = RunningServiceStore::new(dir.path().to_path_buf());
+        let (store, held, registered) = (registering.clone(), lock.clone(), second.clone());
+        forgetting.before_forget = Some(Box::new(move || {
+            let run = store.register(&held, run("web", None)).unwrap();
+            *registered.lock().unwrap() = Some(run);
+        }));
+
+        forgetting.stop_and_forget(&key("web")).unwrap();
+
+        let second = second
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the hook did not run");
+        let current = registering
+            .get(&key("web"))
+            .unwrap()
+            .expect("the new run was deleted");
+        assert_eq!(current.run_id(), second.run_id());
+        assert!(registering.run_dir(second.run_id().unwrap()).exists());
     }
 
     #[test]

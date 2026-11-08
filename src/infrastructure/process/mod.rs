@@ -18,8 +18,6 @@ use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
 
-use std::collections::HashMap;
-
 /// A living process, as the kernel describes it. Zombies are left out: they
 /// have ended and only wait for their parent to read their exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +36,7 @@ pub struct ProcessInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
+    Interrupt,
     Terminate,
     Kill,
 }
@@ -46,6 +45,7 @@ impl Signal {
     fn raw(self) -> libc::c_int {
         match self {
             Self::Hangup => libc::SIGHUP,
+            Self::Interrupt => libc::SIGINT,
             Self::Terminate => libc::SIGTERM,
             Self::Kill => libc::SIGKILL,
         }
@@ -136,31 +136,76 @@ pub fn send_signal(pid: u32, signal: Signal) -> bool {
     unsafe { libc::kill(pid, signal.raw()) == 0 }
 }
 
-/// Signals a process and every process it started (`pnpm` → `next` → workers).
-pub fn signal_process_tree(root_pid: u32, signal: Signal) {
-    signal_processes(&process_tree(root_pid), signal);
+/// This process's group, when it is the foreground job of the terminal on its
+/// stdin: a Ctrl+C there already reached every process of the group.
+pub fn foreground_group() -> Option<u32> {
+    // SAFETY: tcgetpgrp and getpgrp take integers and touch no memory.
+    let (foreground, own) = unsafe { (libc::tcgetpgrp(libc::STDIN_FILENO), libc::getpgrp()) };
+    (foreground > 0 && foreground == own)
+        .then(|| u32::try_from(own).ok())
+        .flatten()
 }
 
-/// A process and all its descendants, parents first.
-pub fn process_tree(root_pid: u32) -> Vec<u32> {
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for process in all_processes() {
-        children.entry(process.ppid).or_default().push(process.pid);
+/// A process known by its PID and start time, so a reused PID is never
+/// signalled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Identity {
+    pub pid: u32,
+    pub start: u64,
+}
+
+impl Identity {
+    pub fn of(process: &ProcessInfo) -> Self {
+        Self {
+            pid: process.pid,
+            start: process.start,
+        }
     }
-    let mut pids = vec![root_pid];
+
+    /// Whoever has this PID now.
+    pub fn current(pid: u32) -> Option<Self> {
+        process_info(pid).map(|process| Self::of(&process))
+    }
+
+    fn is_in(&self, scan: &[ProcessInfo]) -> bool {
+        scan.iter().any(|process| Self::of(process) == *self)
+    }
+}
+
+/// The `tracked` processes still alive as themselves in `scan`, and their
+/// descendants. A process is a child only when its parent PID is a tracked
+/// process alive in `scan` and it started no earlier than that parent, so a
+/// reused PID never brings in the children of another process. A tracked
+/// process that is gone is never added back.
+pub fn track_tree(tracked: &[Identity], scan: &[ProcessInfo]) -> Vec<Identity> {
+    let mut found: Vec<Identity> = tracked
+        .iter()
+        .filter(|identity| identity.is_in(scan))
+        .copied()
+        .collect();
     let mut index = 0;
-    while index < pids.len() {
-        if let Some(found) = children.get(&pids[index]) {
-            pids.extend(found.iter().filter(|pid| **pid != root_pid));
+    while index < found.len() {
+        let parent = found[index];
+        for child in scan.iter().filter(|process| {
+            process.ppid == parent.pid && process.pid != parent.pid && process.start >= parent.start
+        }) {
+            let child = Identity::of(child);
+            if !found.contains(&child) {
+                found.push(child);
+            }
         }
         index += 1;
     }
-    pids
+    found
 }
 
-pub fn signal_processes(pids: &[u32], signal: Signal) {
-    for pid in pids {
-        send_signal(*pid, signal);
+/// Signals each process that is still the one identified, checked right
+/// before its signal.
+pub fn signal_identities(identities: &[Identity], signal: Signal) {
+    for identity in identities {
+        if Identity::current(identity.pid) == Some(*identity) {
+            send_signal(identity.pid, signal);
+        }
     }
 }
 
@@ -238,7 +283,8 @@ mod tests {
                 .iter()
                 .any(|process| process.pid == child.id())
         );
-        assert!(process_tree(std::process::id()).contains(&child.id()));
+        let me = Identity::current(std::process::id()).unwrap();
+        assert!(track_tree(&[me], &all_processes()).contains(&Identity::of(&info)));
 
         assert!(send_signal(child.id(), Signal::Kill));
         child.wait().unwrap();
@@ -261,6 +307,69 @@ mod tests {
             Some(String::from_utf8_lossy(&printed.stdout).trim())
         );
         assert!(boot_time().is_some_and(|boot| boot <= info.started_wall));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    fn process(pid: u32, ppid: u32, start: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            ppid,
+            pgid: pid,
+            sid: Some(pid),
+            start,
+            started_wall: 0,
+        }
+    }
+
+    #[test]
+    fn a_tree_grows_only_from_living_tracked_parents() {
+        let root = process(10, 1, 100);
+        let child = process(11, 10, 110);
+        let grandchild = process(12, 11, 120);
+        let tracked = [Identity::of(&root)];
+
+        let tree = track_tree(&tracked, &[root, child, grandchild]);
+
+        assert_eq!(
+            tree,
+            [root, child, grandchild].map(|process| Identity::of(&process))
+        );
+    }
+
+    #[test]
+    fn a_root_that_is_gone_is_never_added_back_nor_its_pid_s_new_children() {
+        let root = process(10, 1, 100);
+        // PID 10 now belongs to another process, with a child of its own.
+        let reused = process(10, 1, 500);
+        let stranger = process(13, 10, 510);
+
+        assert!(track_tree(&[Identity::of(&root)], &[reused, stranger]).is_empty());
+    }
+
+    #[test]
+    fn a_child_older_than_its_parent_is_not_its_child() {
+        let parent = process(10, 1, 500);
+        // Started before PID 10 did: its parent was an earlier holder of PID 10.
+        let orphan_of_another = process(14, 10, 300);
+
+        let tree = track_tree(&[Identity::of(&parent)], &[parent, orphan_of_another]);
+
+        assert_eq!(tree, [Identity::of(&parent)]);
+    }
+
+    #[test]
+    fn a_pid_whose_start_changed_is_not_signalled() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let wrong = Identity {
+            pid: child.id(),
+            start: process_info(child.id()).unwrap().start + 1,
+        };
+
+        signal_identities(&[wrong], Signal::Kill);
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_none(), "it was signalled");
         child.kill().unwrap();
         child.wait().unwrap();
     }

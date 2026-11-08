@@ -11,11 +11,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use localify::branding::BRANDING;
-use localify::infrastructure::process::{self, ProcessInfo, ProcessTable, Signal};
+use localify::infrastructure::process::{self, Identity, ProcessInfo, ProcessTable, Signal};
 use localify::infrastructure::running_services::{RunningService, RunningServiceStore};
 use localify::infrastructure::runs::RunId;
 use localify::infrastructure::runs::finish::{Finish, FinishMode, Finisher, RunSession};
@@ -518,6 +519,11 @@ struct FakeTable {
     /// What the first lookup of one process sees, before the session was
     /// replaced by `processes`.
     first_lookup: RefCell<Option<Vec<ProcessInfo>>>,
+    /// What the table holds once the next enumeration is over: a scan that
+    /// outlives its own witness.
+    after_scan: RefCell<Option<Vec<(ProcessInfo, bool)>>>,
+    /// A process `pid` starts when it gets SIGTERM.
+    fork_on_term: RefCell<Option<(u32, (ProcessInfo, bool))>>,
 }
 
 impl FakeTable {
@@ -527,30 +533,48 @@ impl FakeTable {
             processes: processes.into(),
             signals: Vec::new().into(),
             first_lookup: None.into(),
+            after_scan: None.into(),
+            fork_on_term: None.into(),
         }
     }
-}
 
-impl ProcessTable for FakeTable {
-    fn processes(&self) -> Vec<ProcessInfo> {
+    fn current(&self) -> Vec<ProcessInfo> {
         self.processes
             .borrow()
             .iter()
             .map(|(process, _)| *process)
             .collect()
     }
+}
+
+impl ProcessTable for FakeTable {
+    fn processes(&self) -> Vec<ProcessInfo> {
+        let scan = self.current();
+        if let Some(after) = self.after_scan.borrow_mut().take() {
+            *self.processes.borrow_mut() = after;
+        }
+        scan
+    }
 
     fn process(&self, pid: u32) -> Option<ProcessInfo> {
         if let Some(before) = self.first_lookup.borrow_mut().take() {
             return before.into_iter().find(|process| process.pid == pid);
         }
-        self.processes()
+        self.current()
             .into_iter()
             .find(|process| process.pid == pid)
     }
 
     fn signal(&self, pid: u32, signal: Signal) {
         self.signals.borrow_mut().push((pid, signal));
+        let forks = self
+            .fork_on_term
+            .borrow()
+            .filter(|(parent, _)| *parent == pid && signal == Signal::Terminate);
+        if let Some((_, child)) = forks {
+            self.fork_on_term.borrow_mut().take();
+            self.processes.borrow_mut().push(child);
+        }
         self.processes
             .borrow_mut()
             .retain(|(process, ignores_term)| {
@@ -764,4 +788,178 @@ fn last_alive_at_is_refreshed_while_the_run_lives() {
     assert!(refreshed.unwrap() <= process::monotonic_now());
     sandbox.store().stop(&first).unwrap();
     executor.wait().unwrap();
+}
+
+#[test]
+fn a_witness_that_vanishes_during_the_scan_proves_nothing() {
+    let dir = run_folder();
+    // The scan sees the old member, then a process of a replacement session...
+    let table = FakeTable::new(
+        "boot-a",
+        vec![
+            (fake_process(4243, 4242, 900), true),
+            (fake_process(4244, 4242, 6_000), false),
+        ],
+    );
+    // ...because the old member died while the scan went on.
+    *table.after_scan.borrow_mut() = Some(vec![
+        (fake_process(4244, 4242, 6_000), false),
+        (fake_process(4245, 4242, 6_100), false),
+    ]);
+
+    let finish = finisher(&table)
+        .finish(
+            dir.path(),
+            &recorded_session("boot-a"),
+            true,
+            FinishMode::End,
+        )
+        .unwrap();
+
+    assert_eq!(finish, Finish::Finalized(EndReason::Interrupted));
+    assert!(table.signals.borrow().is_empty(), "{:?}", table.signals);
+}
+
+#[test]
+fn a_worker_forked_by_an_escaped_descendant_during_shutdown_is_ended_too() {
+    let table = FakeTable::new("boot-a", vec![(escaped(5000, 4242, 2_000), true)]);
+    *table.fork_on_term.borrow_mut() = Some((5000, (escaped(5001, 5000, 2_100), true)));
+    let tree = vec![Identity {
+        pid: 5000,
+        start: 2_000,
+    }];
+
+    finisher(&table)
+        .end_members(
+            &recorded_session("boot-a"),
+            Vec::new(),
+            tree,
+            Duration::from_millis(200),
+            None,
+        )
+        .unwrap();
+
+    assert!(table.current().is_empty(), "{:?}", table.current());
+    assert!(table.signals.borrow().contains(&(5001, Signal::Kill)));
+}
+
+/// A process of the run's executor that left its session.
+fn escaped(pid: u32, ppid: u32, start: u64) -> ProcessInfo {
+    ProcessInfo {
+        ppid,
+        ..fake_process(pid, pid, start)
+    }
+}
+
+/// A process table shared between finishers on two threads.
+struct SharedTable {
+    /// Each process, and whether SIGTERM ends it.
+    processes: Mutex<Vec<(ProcessInfo, bool)>>,
+    signals: Mutex<Vec<(u32, Signal, Instant)>>,
+}
+
+impl ProcessTable for SharedTable {
+    fn processes(&self) -> Vec<ProcessInfo> {
+        let processes = self.processes.lock().unwrap();
+        processes.iter().map(|(process, _)| *process).collect()
+    }
+
+    fn process(&self, pid: u32) -> Option<ProcessInfo> {
+        self.processes()
+            .into_iter()
+            .find(|process| process.pid == pid)
+    }
+
+    fn signal(&self, pid: u32, signal: Signal) {
+        self.signals
+            .lock()
+            .unwrap()
+            .push((pid, signal, Instant::now()));
+        self.processes
+            .lock()
+            .unwrap()
+            .retain(|(process, dies_on_term)| {
+                process.pid != pid || !(signal == Signal::Kill || *dies_on_term)
+            });
+    }
+
+    fn boot_id(&self) -> Option<String> {
+        Some("boot-a".into())
+    }
+}
+
+#[test]
+fn a_stop_whose_executor_dies_goes_on_only_under_the_lock() {
+    let dir = run_folder();
+    let table = SharedTable {
+        processes: Mutex::new(vec![
+            (fake_process(4242, 4242, 100), true),
+            (fake_process(4243, 4242, 900), false),
+        ]),
+        signals: Mutex::new(Vec::new()),
+    };
+
+    thread::scope(|scope| {
+        let stopping = scope.spawn(|| {
+            let finisher = Finisher {
+                table: &table,
+                grace: Duration::from_millis(300),
+            };
+            finisher.stop(dir.path(), &recorded_session("boot-a"), true)
+        });
+        // The executor dies of its SIGTERM; another finisher then takes the lock.
+        let died = wait_until(Duration::from_secs(5), || {
+            let signals = table.signals.lock().unwrap();
+            signals
+                .iter()
+                .any(|(pid, signal, _)| *pid == 4242 && *signal == Signal::Terminate)
+                .then_some(())
+        });
+        assert!(died.is_some(), "the executor was never signalled");
+        let other = FinalizeLock::acquire(dir.path()).unwrap().unwrap();
+        let from = Instant::now();
+        thread::sleep(Duration::from_secs(6));
+        let to = Instant::now();
+        drop(other);
+
+        let finish = stopping.join().unwrap().unwrap();
+
+        assert_eq!(finish, Finish::Finalized(EndReason::Interrupted));
+        let signals = table.signals.lock().unwrap();
+        let meanwhile: Vec<_> = signals
+            .iter()
+            .filter(|(_, _, at)| *at >= from && *at <= to)
+            .collect();
+        assert!(
+            meanwhile.is_empty(),
+            "signalled while another finisher held the lock: {meanwhile:?}"
+        );
+        assert!(table.processes().is_empty());
+    });
+}
+
+#[test]
+fn a_detached_start_exits_with_the_executor_s_status() {
+    let sandbox = Sandbox::new();
+    let detached = |script: &str| {
+        sandbox
+            .localify(&[
+                "dev",
+                "web",
+                "--project",
+                "app",
+                "--detach",
+                "--",
+                "sh",
+                "-c",
+                script,
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let failed = detached("exit 3");
+    assert_eq!(failed.status.code(), Some(3), "{}", stderr(&failed));
+    let killed = detached("kill -TERM $$");
+    assert_eq!(killed.status.code(), Some(143), "{}", stderr(&killed));
 }

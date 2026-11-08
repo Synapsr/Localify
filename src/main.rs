@@ -1140,7 +1140,7 @@ fn main() -> Result<()> {
             detach: true,
             launch_id,
             ..
-        } => cli::background::start_detached(launch_id.as_deref()),
+        } => exit_with(cli::background::start_detached(launch_id.as_deref())?),
         Commands::Dev {
             in_app: true,
             service,

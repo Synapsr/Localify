@@ -53,6 +53,9 @@ pub struct RunEnd {
     pub offset: u64,
     /// Unix seconds, for display.
     pub at: u64,
+    /// Why capture stopped, when writing the stream failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl RunEnd {
@@ -61,7 +64,12 @@ impl RunEnd {
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or(0);
-        Self { reason, offset, at }
+        Self {
+            reason,
+            offset,
+            at,
+            error: None,
+        }
     }
 }
 
@@ -294,6 +302,9 @@ pub struct StreamRead {
     pub ended: bool,
     /// With `ended`: capture stopped early.
     pub interrupted: bool,
+    /// With `interrupted`: why, when writing the stream failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -453,6 +464,7 @@ fn to_lines(start: u64, bytes: &[u8], total: u64, end: Option<&RunEnd>) -> Strea
         rotated: None,
         ended,
         interrupted: ended && end.is_some_and(|end| end.reason == EndReason::Interrupted),
+        capture_error: end.and_then(|end| end.error.clone()).filter(|_| ended),
     }
 }
 
@@ -499,7 +511,9 @@ fn incomplete_char_tail(bytes: &[u8]) -> usize {
 /// character when one ends shortly before.
 fn char_boundary(bytes: &[u8], limit: usize) -> usize {
     if bytes.len() <= limit {
-        return bytes.len();
+        // Up to the limit exactly, the last character may still be cut.
+        let whole = bytes.len() - incomplete_char_tail(bytes);
+        return if whole > 0 { whole } else { bytes.len() };
     }
     let floor = limit.saturating_sub(3).max(1);
     let mut cut = limit;
@@ -698,6 +712,28 @@ mod tests {
                 .iter()
                 .all(|line| !line.text.contains('\u{FFFD}'))
         );
+    }
+
+    #[test]
+    fn a_character_at_exactly_8_kib_is_never_split() {
+        let (dir, mut writer) = stream(SEGMENT_SIZE);
+        writer.append(&vec![b'a'; MAX_LINE - 1]).unwrap();
+        writer.append("é".as_bytes()).unwrap();
+
+        // The read ends exactly at 8 KiB, inside "é".
+        let first = read(dir.path(), 0, MAX_LINE).unwrap();
+        assert_eq!(first.next, (MAX_LINE - 1) as u64);
+        assert!(
+            first
+                .lines
+                .iter()
+                .all(|line| !line.text.contains('\u{FFFD}'))
+        );
+
+        writer.append(b"\n").unwrap();
+        let second = read(dir.path(), first.next, MAX_LINE).unwrap();
+        assert_eq!(second.next, (MAX_LINE + 2) as u64);
+        assert_eq!(second.lines[0].text, "é");
     }
 
     #[test]

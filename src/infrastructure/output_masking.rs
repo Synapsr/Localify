@@ -106,7 +106,15 @@ impl Masker {
 /// output are not delayed. At most [`QUEUED_CHUNKS`] chunks of [`CHUNK`] bytes
 /// wait between the reader and the writer, so a slow writer slows the service
 /// down instead of filling memory. Without patterns, bytes are copied as read.
-pub fn spawn_masked_copy<R, W>(reader: R, mut writer: W, patterns: Vec<Vec<u8>>) -> JoinHandle<()>
+///
+/// When the writer fails (a full disk), the copy keeps reading the service's
+/// output to its end and drops it, so the service never blocks on a full pipe
+/// and never gets a SIGPIPE it did not cause, and the copy ends with the error.
+pub fn spawn_masked_copy<R, W>(
+    reader: R,
+    mut writer: W,
+    patterns: Vec<Vec<u8>>,
+) -> JoinHandle<io::Result<()>>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -119,35 +127,38 @@ where
         let reader_thread = thread::spawn(move || read_chunks(reader, sender));
         let mut masker = Masker::new(patterns);
 
-        loop {
+        let written = loop {
             let output = match receiver.recv_timeout(IDLE_FLUSH) {
                 Ok(chunk) => masker.push(&chunk),
                 Err(RecvTimeoutError::Timeout) => masker.flush(),
                 Err(RecvTimeoutError::Disconnected) => {
-                    let _ = write_all(&mut writer, &masker.flush());
-                    break;
+                    break write_all(&mut writer, &masker.flush());
                 }
             };
-            if write_all(&mut writer, &output).is_err() {
-                break;
+            if let Err(error) = write_all(&mut writer, &output) {
+                break Err(error);
             }
-        }
+        };
+        // The reader's next send fails, and it drains the rest itself.
+        drop(receiver);
         let _ = reader_thread.join();
+        written
     })
 }
 
-fn copy_directly<R: Read, W: Write>(mut reader: R, mut writer: W) {
+fn copy_directly<R: Read, W: Write>(mut reader: R, mut writer: W) -> io::Result<()> {
     let mut buffer = vec![0_u8; CHUNK];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) => return,
+            Ok(0) => return Ok(()),
             Ok(count) => {
-                if write_all(&mut writer, &buffer[..count]).is_err() {
-                    return;
+                if let Err(error) = write_all(&mut writer, &buffer[..count]) {
+                    drain(&mut reader, &mut buffer);
+                    return Err(error);
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return,
+            Err(_) => return Ok(()),
         }
     }
 }
@@ -159,9 +170,22 @@ fn read_chunks<R: Read>(mut reader: R, sender: mpsc::SyncSender<Vec<u8>>) {
             Ok(0) => return,
             Ok(count) => {
                 if sender.send(buffer[..count].to_vec()).is_err() {
+                    drain(&mut reader, &mut buffer);
                     return;
                 }
             }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Reads to the end and keeps nothing.
+fn drain<R: Read>(reader: &mut R, buffer: &mut [u8]) {
+    loop {
+        match reader.read(buffer) {
+            Ok(0) => return,
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return,
         }
@@ -239,7 +263,7 @@ mod tests {
             .collect();
         let started = Instant::now();
         for copy in copies {
-            copy.join().unwrap();
+            copy.join().unwrap().unwrap();
         }
         assert!(started.elapsed() < Duration::from_secs(60), "too slow");
         assert_eq!(progress.written.load(Ordering::SeqCst), 2 * total);
@@ -254,6 +278,66 @@ mod tests {
         let bound = 2 * (QUEUED_CHUNKS + 4) * CHUNK;
         let widest = progress.widest.load(Ordering::SeqCst);
         assert!(widest <= bound, "{widest} bytes queued, more than {bound}");
+    }
+
+    /// A disk that fills up after `room` bytes.
+    struct FullDisk {
+        room: Arc<AtomicUsize>,
+    }
+
+    impl Write for FullDisk {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let left = self.room.load(Ordering::SeqCst);
+            if left < bytes.len() {
+                return Err(io::Error::other("No space left on device"));
+            }
+            self.room.fetch_sub(bytes.len(), Ordering::SeqCst);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Both outputs keep writing after the sink fails: every copy still
+    /// reaches the end of its output, so the service never blocks, and each
+    /// reports the failure.
+    fn flood_a_full_disk(patterns: Vec<Vec<u8>>) {
+        let progress = Arc::new(Progress::default());
+        let room = Arc::new(AtomicUsize::new(256 * 1024));
+        let total = 4 * 1024 * 1024;
+        let (done, finished) = mpsc::channel();
+        for _ in 0..2 {
+            let flood = Flood {
+                left: total,
+                progress: Arc::clone(&progress),
+            };
+            let sink = FullDisk {
+                room: Arc::clone(&room),
+            };
+            let copy = spawn_masked_copy(flood, sink, patterns.clone());
+            let done = done.clone();
+            thread::spawn(move || done.send(copy.join().unwrap()));
+        }
+
+        for _ in 0..2 {
+            let result = finished
+                .recv_timeout(Duration::from_secs(20))
+                .expect("a copy blocked after the disk filled up");
+            assert!(result.is_err(), "the failure was not reported");
+        }
+        assert_eq!(progress.produced.load(Ordering::SeqCst), 2 * total);
+    }
+
+    #[test]
+    fn a_full_disk_neither_blocks_the_service_nor_goes_unreported_with_masking() {
+        flood_a_full_disk(vec![b"supersecret".to_vec()]);
+    }
+
+    #[test]
+    fn a_full_disk_neither_blocks_the_service_nor_goes_unreported_without_masking() {
+        flood_a_full_disk(Vec::new());
     }
 
     #[test]
@@ -336,6 +420,7 @@ mod tests {
             secret_patterns([("TOKEN", "tok_1234567890")]),
         )
         .join()
+        .unwrap()
         .unwrap();
 
         assert_eq!(output.lock().unwrap().as_slice(), b"token *** end\n");

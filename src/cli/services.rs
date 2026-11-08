@@ -15,7 +15,7 @@ use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::project_env::{current_worktree_environment, ensure_implicit_worktree_environment};
-use super::service_supervisor::{self, LaunchEnd, LaunchOutcome, SupervisedLaunch};
+use super::service_supervisor::{self, Capture, LaunchEnd, LaunchOutcome, SupervisedLaunch};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
 use crate::domain::DomainRegistration;
@@ -413,12 +413,22 @@ impl RegisteredRun<'_> {
         let dir = self.store.run_dir(run_id);
         if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
             let offset = self.stream.as_ref().map_or(0, StreamSink::close);
-            let reason = match end {
-                Some(end) if !end.output_complete => EndReason::Interrupted,
-                _ => EndReason::Complete,
+            let capture = end.map_or(Capture::Complete, |end| end.capture.clone());
+            let mut finished = match capture {
+                Capture::Complete => RunEnd::now(EndReason::Complete, offset),
+                Capture::Unfinished | Capture::Failed(_) => {
+                    RunEnd::now(EndReason::Interrupted, offset)
+                }
             };
+            if let Capture::Failed(error) = capture {
+                eprintln!(
+                    "Warning: writing the output of '{}' failed ({error}). The service ran on, and what it printed after that was dropped.",
+                    self.record.key.service_id
+                );
+                finished.error = Some(error);
+            }
             if run_output::read_end(&dir)?.is_none() {
-                run_output::publish_end(&dir, &RunEnd::now(reason, offset))?;
+                run_output::publish_end(&dir, &finished)?;
             }
         }
         let code = end.and_then(|end| end.outcome.code());

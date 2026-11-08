@@ -10,4 +10,5 @@ fully gone instead of fighting it for its port. `localify logs` shows only the
 service's own output, keeps its last 4 to 8 MiB, and says when output was cut off
 because Localify itself was stopped. `localify dev` now exits with the service's own
 exit code, and with 130 after Ctrl+C, so `localify dev web && …` stops where it
-should.
+should. Ctrl+C also stops a service that ignores it, within 20 seconds, and a second
+Ctrl+C stops it at once.

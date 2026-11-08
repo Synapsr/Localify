@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -42,7 +42,7 @@ const READ_CHUNK: usize = 64 * 1024;
 /// Runs the same `dev` command again in the background, in its own session
 /// and with its output in the run's stream, and returns once the service
 /// listens, stopped, or is still starting.
-pub fn start_detached(launch_id: Option<&str>) -> Result<()> {
+pub fn start_detached(launch_id: Option<&str>) -> Result<i32> {
     let store = RunningServiceStore::new_default()?;
     let (launch_id, chosen) = match launch_id {
         Some(id) => (RunId::parse(id)?, false),
@@ -118,7 +118,7 @@ fn wait_for_child(
     store: &RunningServiceStore,
     launch_id: &RunId,
     launch_log: &Path,
-) -> Result<()> {
+) -> Result<i32> {
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         let run = store
@@ -137,13 +137,19 @@ fn wait_for_child(
             if run.is_none() {
                 let _ = fs::remove_file(launch_log);
             }
-            bail!("The service stopped while starting ({status}). Its last output:\n\n{output}");
+            eprintln!(
+                "The service stopped while starting ({status}). Its last output:\n\n{output}"
+            );
+            // As a shell reports a job: its code, or 128 + N for signal N.
+            return Ok(status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)));
         }
         if let Some(run) = &run
             && listens(run.port)
         {
             print_started(run, "Started");
-            return Ok(());
+            return Ok(0);
         }
         if Instant::now() >= deadline {
             match run {
@@ -155,7 +161,7 @@ fn wait_for_child(
                     launch_log.display()
                 ),
             }
-            return Ok(());
+            return Ok(0);
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -578,7 +584,10 @@ fn print_stream_chunk(chunk: &StreamRead) {
     }
     print_stream_lines(&chunk.lines);
     if chunk.interrupted {
-        eprintln!("Output was cut off when {} stopped.", BRANDING.app_name);
+        match &chunk.capture_error {
+            Some(error) => eprintln!("Output was cut off: writing it failed ({error})."),
+            None => eprintln!("Output was cut off when {} stopped.", BRANDING.app_name),
+        }
     }
 }
 
