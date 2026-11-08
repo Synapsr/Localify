@@ -8,10 +8,13 @@
 //! [`monotonic_now`], never with the wall clock, and only within one boot
 //! ([`boot_id`]).
 
+pub mod helpers;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[cfg(target_os = "linux")]
 use linux as native;
@@ -150,6 +153,22 @@ pub fn terminal_foreground_group() -> Option<u32> {
     // SAFETY: tcgetpgrp takes an open descriptor and touches no memory.
     let group = unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
     u32::try_from(group).ok().filter(|group| *group > 0)
+}
+
+static SPAWN: RwLock<()> = RwLock::new(());
+
+/// Held while a PTY's descriptors exist without close-on-exec, where the
+/// system has no atomic way to open them so (macOS): no terminal or shell
+/// resolver spawns meanwhile, so none inherits them.
+#[allow(dead_code)] // Used by the desktop app through the library crate.
+pub fn allocating() -> RwLockWriteGuard<'static, ()> {
+    SPAWN.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Held while a terminal or the shell resolver spawns its child.
+#[allow(dead_code)] // Used by the desktop app through the library crate.
+pub fn spawning() -> RwLockReadGuard<'static, ()> {
+    SPAWN.read().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A process known by its PID and start time, so a reused PID is never

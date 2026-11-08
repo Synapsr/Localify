@@ -9,6 +9,7 @@ use std::process::{Command, Output, Stdio};
 use anyhow::{Result, bail};
 
 use super::SecretStore;
+use crate::infrastructure::process;
 
 const PASS_CLI: &str = "pass-cli";
 const NOTE_FIELD: &str = "note";
@@ -92,11 +93,8 @@ fn list_json<T: serde::de::DeserializeOwned>(args: &[&str]) -> Result<T> {
 }
 
 fn run_pass_cli(args: &[&str]) -> Result<Output> {
-    match Command::new(PASS_CLI)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-    {
+    // Known while it runs: a stop while the profile resolves ends it too.
+    match process::helpers::output(Command::new(PASS_CLI).args(args).stdin(Stdio::null())) {
         Ok(output) => Ok(output),
         Err(error) if error.kind() == ErrorKind::NotFound => bail!(
             "Proton Pass CLI ('{PASS_CLI}') is not installed or not on PATH.\n\
@@ -137,13 +135,8 @@ fn interpret(output: Output) -> Result<Option<String>> {
 }
 
 fn session_is_active() -> bool {
-    Command::new(PASS_CLI)
-        .arg("info")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    process::helpers::output(Command::new(PASS_CLI).arg("info").stdin(Stdio::null()))
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Keeps the `pass-cli` error chain on one line. stderr carries messages

@@ -34,14 +34,15 @@ use localify::infrastructure::running_services::{
 use localify::infrastructure::runs::finish::Finish;
 use localify::infrastructure::runs::output::{self, EndReason};
 use localify::infrastructure::shell_env;
+use localify::infrastructure::test_pause::PAUSE_DIR_ENV;
 
 const HELPER_ENV: &str = "LOCALIFY_RUN_PTY_HELPER";
 
 /// Children that ignore SIGINT, SIGTERM and the hangup of their terminal, and
 /// never listen on their port.
 const STUBBORN: &str = r#"echo started
-sh -c 'trap "" INT TERM HUP; touch ../trapped-1; while :; do sleep 1; done' &
-sh -c 'trap "" INT TERM HUP; touch ../trapped-2; sleep 300' &
+sh -c 'trap "" INT TERM HUP; touch ../trapped-1; exec sleep 300' &
+sh -c 'trap "" INT TERM HUP; touch ../trapped-2; exec sleep 300' &
 echo ready
 wait"#;
 
@@ -737,6 +738,121 @@ fn killing_the_app_finalizes_its_run_interrupted_at_what_was_written() {
 }
 
 #[test]
+fn a_pty_allocated_while_another_child_spawns_leaks_no_descriptor() {
+    let sandbox = Sandbox::new("printf 'service-%s\\n' up; exec sleep 300");
+    let pause = sandbox.root.join("pause");
+    fs::create_dir_all(&pause).unwrap();
+    fs::write(pause.join("pty-allocated"), "").unwrap();
+
+    let mut app = sandbox.app_helper("fd-race", &[(PAUSE_DIR_ENV, pause.to_str().unwrap())]);
+    let resolver = app.line("resolver ");
+    let terminal = app.line("terminal ");
+    let run_id = app.line("run ");
+
+    assert!(resolver.contains("checked"), "{resolver}");
+    assert!(
+        !resolver.contains("leaked"),
+        "a spawn inherited the PTY: {resolver}"
+    );
+    assert!(terminal.contains("checked"), "{terminal}");
+    assert!(
+        !terminal.contains("leaked"),
+        "a terminal inherited the PTY: {terminal}"
+    );
+
+    // And the app's death still ends its run.
+    let dir = sandbox
+        .store()
+        .run_dir(&localify::infrastructure::runs::RunId::parse(run_id.trim()).unwrap());
+    let executor = sandbox.record().expect("the run never registered").pid;
+    app.kill();
+    let end = wait_until(Duration::from_secs(45), || {
+        let gone = process::process_info(executor).is_none();
+        output::read_end(&dir).unwrap().filter(|_| gone)
+    })
+    .expect("the run was never ended after the app died");
+    assert_eq!(end.reason, EndReason::Interrupted);
+    assert!(
+        session_alive(executor).is_empty(),
+        "{:?}",
+        session_alive(executor)
+    );
+}
+
+#[test]
+fn killing_the_app_while_the_profile_resolves_leaves_nothing_alive() {
+    let sandbox = Sandbox::new("touch ../service-started; exec sleep 300");
+    let marker = sandbox.hanging_infisical();
+    let path = format!("{}:/usr/bin:/bin", sandbox.root.join("bin").display());
+    let mut app = sandbox.app_helper("resolving", &[("HELPER_PROFILE", "slow"), ("PATH", &path)]);
+    app.line("started ");
+    let (helper, executor) = read_helper_pids(&marker);
+
+    app.kill();
+
+    let gone = wait_until(Duration::from_secs(45), || {
+        (process::process_info(helper).is_none() && process::process_info(executor).is_none())
+            .then_some(())
+    });
+    assert!(
+        gone.is_some(),
+        "the profile's CLI or localify dev outlived the app"
+    );
+    assert!(
+        session_alive(executor).is_empty(),
+        "{:?}",
+        session_alive(executor)
+    );
+    assert!(
+        !sandbox.root.join("service-started").exists(),
+        "the service started"
+    );
+    assert!(
+        sandbox.store().list().unwrap().is_empty(),
+        "the run registered"
+    );
+}
+
+/// The PIDs a hanging Infisical CLI wrote: its own, and its parent's,
+/// `localify dev`.
+fn read_helper_pids(marker: &Path) -> (u32, u32) {
+    wait_until(Duration::from_secs(30), || {
+        let content = fs::read_to_string(marker).ok()?;
+        let mut pids = content.split_whitespace().map(|pid| pid.parse().ok());
+        Some((pids.next()??, pids.next()??))
+    })
+    .expect("the profile never reached its Infisical source")
+}
+
+impl Sandbox {
+    /// A `slow` profile whose Infisical source never answers, as a CLI
+    /// waiting for a login does, and ignores SIGTERM and SIGHUP. Returns the
+    /// file it writes its PID and its parent's to.
+    fn hanging_infisical(&self) -> PathBuf {
+        fs::write(
+            self.app.join("localify.toml"),
+            "[profiles.slow]\nsources = [{ infisical = {} }]\n",
+        )
+        .unwrap();
+        fs::write(self.app.join(".infisical.yaml"), "workspaceId: \"w\"\n").unwrap();
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let marker = self.root.join("infisical.pids");
+        let cli = bin.join("infisical");
+        fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\ntrap '' TERM HUP\necho $$ $PPID > \"{}\"\nexec sleep 300\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+        marker
+    }
+}
+
+#[test]
 fn the_daemon_finishes_a_run_pty_whose_app_and_executor_both_died() {
     let sandbox = Sandbox::new(STUBBORN);
     let mut app = sandbox.app_helper("hold", &[]);
@@ -768,12 +884,11 @@ fn the_daemon_finishes_a_run_pty_whose_app_and_executor_both_died() {
 
     assert_eq!(finished.len(), 1, "{finished:?}");
     assert_eq!(finished[0].1, Finish::Finalized(EndReason::Interrupted));
-    // A `sleep 1` the loop started after the last proof is not the run's to
-    // signal: it ends by itself.
-    let emptied = wait_until(Duration::from_secs(3), || {
-        session_alive(executor).is_empty().then_some(())
-    });
-    assert!(emptied.is_some(), "{:?}", session_alive(executor));
+    assert!(
+        session_alive(executor).is_empty(),
+        "{:?}",
+        session_alive(executor)
+    );
     let after = sandbox.launch_from_terminal();
     assert!(
         after.status.success(),
@@ -996,30 +1111,7 @@ fn app_helper() {
             } else {
                 std::env::vars_os().collect()
             };
-            let (sender, ended) = mpsc::channel();
-            let shown = Arc::new(Mutex::new(Vec::new()));
-            let output_shown = Arc::clone(&shown);
-            let run = RunPty::spawn(
-                Arc::new(RunningServiceStore::new_default().unwrap()),
-                RunPtyLaunch {
-                    executable: env!("CARGO_BIN_EXE_localify").into(),
-                    args: ["--config", &config, "dev", "--project", "app", "web"]
-                        .map(OsString::from)
-                        .to_vec(),
-                    working_directory: app.clone(),
-                    environment: run_environment(
-                        environment,
-                        &app,
-                        &AppInstallation::of_this_process(),
-                    ),
-                    size: WindowSize::new(100, 30).unwrap(),
-                },
-                move |bytes| output_shown.lock().unwrap().extend_from_slice(bytes),
-                move |end| {
-                    let _ = sender.send(end);
-                },
-            )
-            .unwrap();
+            let (run, shown, ended) = helper_run(&config, &app, environment);
             if mode == "hold" {
                 wait_until(Duration::from_secs(30), || {
                     contains(&shown.lock().unwrap(), "ready").then_some(())
@@ -1032,9 +1124,109 @@ fn app_helper() {
             println!("HELPER run {}", run.run_id());
             println!("HELPER end {:?}", end.code);
         }
+        "resolving" => {
+            // Started, and killed by the test while its profile resolves.
+            let (run, _, _) = helper_run(&config, &app, std::env::vars_os().collect());
+            println!("HELPER started {}", run.run_id());
+            thread::sleep(Duration::from_secs(600));
+        }
+        "fd-race" => fd_race(&config, &app),
         _ => panic!("unknown helper mode {mode}"),
     }
 }
+
+/// `web` in a run PTY of the helper app, on `HELPER_PROFILE` when set: the
+/// run, what it showed, and its end.
+fn helper_run(
+    config: &str,
+    app: &Path,
+    environment: Vec<(OsString, OsString)>,
+) -> (RunPty, Arc<Mutex<Vec<u8>>>, Receiver<RunPtyEnd>) {
+    let mut args: Vec<OsString> = ["--config", config, "dev", "--project", "app", "web"]
+        .map(OsString::from)
+        .to_vec();
+    if let Ok(profile) = std::env::var("HELPER_PROFILE") {
+        args.extend(["--profile".into(), profile.into()]);
+    }
+    let (sender, ended) = mpsc::channel();
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let output_shown = Arc::clone(&shown);
+    let run = RunPty::spawn(
+        Arc::new(RunningServiceStore::new_default().unwrap()),
+        RunPtyLaunch {
+            executable: env!("CARGO_BIN_EXE_localify").into(),
+            args,
+            working_directory: app.to_path_buf(),
+            environment: run_environment(environment, app, &AppInstallation::of_this_process()),
+            size: WindowSize::new(100, 30).unwrap(),
+        },
+        move |bytes| output_shown.lock().unwrap().extend_from_slice(bytes),
+        move |end| {
+            let _ = sender.send(end);
+        },
+    )
+    .unwrap();
+    (run, shown, ended)
+}
+
+/// Opens a run PTY that stops, by the test's barrier, right after its
+/// descriptors are allocated; meanwhile starts a child as the shell resolver
+/// does and, once the PTY is done, another terminal. Says which descriptors
+/// of theirs are terminals, then holds the run until killed.
+fn fd_race(config: &str, app: &Path) {
+    let pause = PathBuf::from(std::env::var("LOCALIFY_TEST_PAUSE_DIR").unwrap());
+    let (config, app_dir) = (config.to_string(), app.to_path_buf());
+    let opening =
+        thread::spawn(move || helper_run(&config, &app_dir, std::env::vars_os().collect()));
+    wait_until(Duration::from_secs(30), || {
+        pause.join("pty-allocated.reached").exists().then_some(())
+    })
+    .expect("the PTY never reached its barrier");
+    // A spawn while the first PTY is allocated, as the shell resolver spawns.
+    let resolver = thread::spawn(|| {
+        let _spawning = process::spawning();
+        Command::new("/bin/sh")
+            .args(["-c", TTY_CHECK])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    });
+    fs::remove_file(pause.join("pty-allocated")).unwrap();
+    let resolver = resolver.join().unwrap();
+    let (run, shown, _ended) = opening.join().unwrap();
+    // Another terminal, opened next to the first.
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", &format!("{TTY_CHECK}; echo checked-done")]);
+    let (master, mut child) = pty::spawn(command, WindowSize::new(80, 24).unwrap(), false).unwrap();
+    let mut terminal = Vec::new();
+    let mut reader = master.try_clone().unwrap();
+    let mut buffer = [0_u8; 4096];
+    while !contains(&terminal, "checked-done") {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => terminal.extend_from_slice(&buffer[..count]),
+        }
+    }
+    child.wait().unwrap();
+    println!(
+        "HELPER resolver {}",
+        String::from_utf8_lossy(&resolver.stdout).replace('\n', " ")
+    );
+    println!(
+        "HELPER terminal {}",
+        String::from_utf8_lossy(&terminal).replace(['\r', '\n'], " ")
+    );
+    wait_until(Duration::from_secs(30), || {
+        contains(&shown.lock().unwrap(), "service-up").then_some(())
+    })
+    .expect("the run never started");
+    println!("HELPER run {}", run.run_id());
+    thread::sleep(Duration::from_secs(600));
+}
+
+/// Prints `leaked-N` for each descriptor above standard error that is a
+/// terminal: one inherited from another PTY.
+const TTY_CHECK: &str = "n=3; while [ $n -lt 64 ]; do if [ -t $n ]; then echo leaked-$n; fi; n=$((n+1)); done; echo checked";
 
 /// A shell's startup file, where the test user's shell init lives.
 fn init_file(home: &Path, shell: &str) -> PathBuf {

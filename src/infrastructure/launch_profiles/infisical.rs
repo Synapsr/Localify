@@ -16,6 +16,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::InfisicalStore;
+use crate::infrastructure::process;
 
 const INFISICAL_CLI: &str = "infisical";
 
@@ -170,7 +171,13 @@ fn run_cli(project_root: &Path, args: &[&str], profile: Option<&str>) -> Result<
     if let Some(profile) = profile {
         command.args(["--profile", profile]);
     }
-    let mut child = match command.spawn() {
+    let spawned = command.spawn();
+    // Known from its spawn: a stop while the profile resolves ends it too.
+    let _helper = spawned
+        .as_ref()
+        .ok()
+        .map(process::helpers::Helper::register);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) if error.kind() == ErrorKind::NotFound => bail!(
             "the Infisical CLI ('{INFISICAL_CLI}') is not installed or not on PATH; install it with: brew install infisical/get-cli/infisical, then sign in with: {INFISICAL_CLI} login"

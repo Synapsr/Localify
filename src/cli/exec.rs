@@ -103,6 +103,7 @@ fn run_with_profile(
         heartbeat_every: service_supervisor::RUN_HEARTBEAT,
         leads_session: false,
         app_terminal: false,
+        supervision: None,
         finisher: &crate::infrastructure::runs::finish::Finisher::native(),
     });
     if dangerous_name.is_some() {

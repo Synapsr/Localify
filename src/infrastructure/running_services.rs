@@ -386,6 +386,11 @@ impl RunningServiceStore {
                 "another cleanup of '{}' is still running; try again in a moment.",
                 previous.key.service_id
             ),
+            Finish::Unconfirmed(pids) => bail!(
+                "'{}' cannot start: {}",
+                previous.key.service_id,
+                Finish::unconfirmed_message(&pids)
+            ),
             Finish::AlreadyFinalized | Finish::Finalized(_) | Finish::Gone => {
                 self.mark_ended(previous)?;
                 Ok(false)
@@ -614,7 +619,12 @@ impl RunningServiceStore {
             // Its processes are gone, and the app reads what they left in the
             // PTY before it finalizes.
             Finish::Busy => wait_for_end(&service.key.service_id, &dir)?,
-            _ => {}
+            Finish::Unconfirmed(pids) => bail!(
+                "'{}' did not fully stop: {}",
+                service.key.service_id,
+                Finish::unconfirmed_message(&pids)
+            ),
+            Finish::AlreadyFinalized | Finish::Finalized(_) | Finish::Gone => {}
         }
         self.mark_ended(service)?;
         Ok(running)
@@ -657,7 +667,10 @@ impl RunningServiceStore {
                 continue;
             }
             let finish = Finisher::native().finish(&dir, &session, true)?;
-            self.mark_ended(&service)?;
+            // Left open while what it could not confirm lives.
+            if !matches!(finish, Finish::Unconfirmed(_)) {
+                self.mark_ended(&service)?;
+            }
             finished.push((service.key.clone(), finish));
         }
         Ok(finished)

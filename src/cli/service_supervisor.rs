@@ -28,10 +28,10 @@ use crate::branding::BRANDING;
 use crate::domain::launch_profile::LaunchEnvironment;
 use crate::infrastructure::output_masking::spawn_masked_copy;
 use crate::infrastructure::process::{
-    Identity, ProcessInfo, ProcessTable, Signal, all_processes, signal_identities,
+    Identity, ProcessInfo, ProcessTable, Signal, all_processes, helpers, signal_identities,
     terminal_foreground_group, track_tree,
 };
-use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT};
+use crate::infrastructure::runs::finish::{Finisher, KILL_WAIT, STOP_GRACE};
 use crate::infrastructure::runs::output::StreamSink;
 
 /// How often the service's exit is checked: a cheap wait on the child.
@@ -90,7 +90,56 @@ pub struct SupervisedLaunch<'a> {
     /// fails as on a closed terminal, means the app is gone: the run stops,
     /// as for a SIGTERM. In any other terminal a SIGHUP is only forwarded.
     pub app_terminal: bool,
+    /// Stop signals already watched, since before the profile resolved
+    /// (`localify dev`); `None` starts watching with the service.
+    pub supervision: Option<Supervision>,
     pub finisher: &'a Finisher<'a>,
+}
+
+/// The watch of the stop signals sent to `localify dev`, from before its
+/// profile resolves until it exits. While the profile resolves there is no
+/// service to stop: a Ctrl+C, SIGTERM or SIGHUP then ends the helpers the
+/// profile runs, such as `infisical`, and what they started, and exits.
+#[derive(Clone)]
+pub struct Supervision {
+    stops: Arc<StopRequests>,
+    forwarding: Arc<Mutex<Forwarding>>,
+}
+
+impl Supervision {
+    /// Watches from now on, in the resolving phase.
+    pub fn start(app_terminal: bool) -> Self {
+        let supervision = Self {
+            stops: Arc::new(StopRequests::default()),
+            forwarding: Arc::new(Mutex::new(Forwarding {
+                resolving: true,
+                ..Forwarding::default()
+            })),
+        };
+        watch_stop_signals(
+            Arc::clone(&supervision.forwarding),
+            Arc::clone(&supervision.stops),
+            app_terminal,
+        );
+        supervision
+    }
+
+    /// The profile resolved: stop signals now wait for the service, and
+    /// reach it once it runs.
+    pub fn resolved(&self) {
+        self.forwarding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .resolving = false;
+    }
+}
+
+/// A stop while the profile resolves: its helpers are ended, and so is
+/// `localify dev`, with the shell's code for that signal.
+fn end_resolution(code: i32) -> ! {
+    report("\nStopped while the launch profile resolved.\n");
+    helpers::end_all(STOP_GRACE, KILL_WAIT);
+    std::process::exit(code);
 }
 
 pub enum LaunchOutcome {
@@ -196,25 +245,22 @@ impl StopRequests {
 
 /// Starts the service and waits for it, returning why it stopped.
 pub fn run(launch: SupervisedLaunch<'_>) -> Result<LaunchEnd> {
-    run_with(launch, Arc::new(StopRequests::default()), true)
+    // Watching first: a Ctrl+C right after the service starts must not end
+    // `localify dev` before it can stop the service.
+    let supervision = match &launch.supervision {
+        Some(supervision) => supervision.clone(),
+        None => Supervision::start(launch.app_terminal),
+    };
+    supervision.resolved();
+    run_with(launch, supervision.stops, supervision.forwarding)
 }
 
 /// `run`, with stop requests a test can make without signalling itself.
 fn run_with(
     launch: SupervisedLaunch<'_>,
     stops: Arc<StopRequests>,
-    watch_signals: bool,
+    forwarding: Arc<Mutex<Forwarding>>,
 ) -> Result<LaunchEnd> {
-    // Watching first: a Ctrl+C right after the service starts must not end
-    // `localify dev` before it can stop the service.
-    let forwarding = Arc::new(Mutex::new(Forwarding::default()));
-    if watch_signals {
-        watch_stop_signals(
-            Arc::clone(&forwarding),
-            Arc::clone(&stops),
-            launch.app_terminal,
-        );
-    }
     let mut child = spawn(&launch)?;
     // A service that already exited is a zombie no table shows: nothing to signal.
     let root = launch
@@ -672,6 +718,8 @@ fn respond_to_stop_requests(
 struct Forwarding {
     root: Option<Identity>,
     pending: Vec<Signal>,
+    /// The profile still resolves: a stop ends its helpers and exits.
+    resolving: bool,
 }
 
 impl Forwarding {
@@ -728,17 +776,32 @@ fn watch_stop_signals(
                     .unwrap_or_else(PoisonError::into_inner)
                     .forward(signal);
             };
+            let resolving = || {
+                forwarding
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .resolving
+            };
             loop {
                 tokio::select! {
                     _ = interrupt.recv() => {
+                        if resolving() {
+                            end_resolution(128 + libc::SIGINT);
+                        }
                         stops.interrupts.fetch_add(1, Ordering::SeqCst);
                     }
                     _ = terminate.recv() => {
+                        if resolving() {
+                            end_resolution(128 + libc::SIGTERM);
+                        }
                         stops.terminated.store(true, Ordering::SeqCst);
                         forward(Signal::Terminate);
                         crate::infrastructure::test_pause::pause_at("terminate-handled");
                     }
                     _ = hangup.recv() => {
+                        if resolving() {
+                            end_resolution(128 + libc::SIGHUP);
+                        }
                         if app_terminal {
                             stops.terminated.store(true, Ordering::SeqCst);
                             forward(Signal::Terminate);
@@ -827,6 +890,7 @@ mod tests {
             heartbeat_every: RUN_HEARTBEAT,
             leads_session: false,
             app_terminal: false,
+            supervision: None,
             finisher: Box::leak(Box::new(Finisher::native())),
         }
     }
@@ -1133,7 +1197,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
         (end, started.elapsed())
     }
 
@@ -1216,7 +1280,7 @@ mod tests {
             let stops = Arc::new(StopRequests::default());
             press(&stops, Duration::from_millis(500), 1);
 
-            let end = run_with(request, stops, false).unwrap();
+            let end = run_with(request, stops, Arc::default()).unwrap();
 
             assert!(matches!(end.outcome, LaunchOutcome::Interrupted));
             assert!(
@@ -1243,7 +1307,7 @@ mod tests {
         press(&stops, Duration::from_millis(500), 1);
         let started = Instant::now();
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert!(end.cleanup.is_ok());
         let took = started.elapsed();
@@ -1272,7 +1336,7 @@ mod tests {
         press(&stops, Duration::from_millis(500), 2);
         let started = Instant::now();
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert!(end.cleanup.is_ok());
         assert!(
@@ -1326,7 +1390,7 @@ mod tests {
             drop(held);
         });
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert_eq!(end.outcome.exit_code(), 130);
         assert!(
@@ -1367,7 +1431,7 @@ mod tests {
             crate::infrastructure::process::send_signal(service, Signal::Hangup);
         });
 
-        let end = run_with(request, stops, false).unwrap();
+        let end = run_with(request, stops, Arc::default()).unwrap();
 
         assert!(end.cleanup.is_ok());
         assert!(done.exists(), "a SIGHUP ended the service");

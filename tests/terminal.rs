@@ -266,12 +266,13 @@ fn closing_a_tab_while_its_profile_resolves_starts_no_service() {
     )
     .unwrap();
     fs::write(sandbox.app.join(".infisical.yaml"), "workspaceId: \"w\"\n").unwrap();
-    // An Infisical CLI that never answers, as one waiting for a login does.
-    let marker = sandbox.root.join("infisical.pid");
+    // An Infisical CLI that never answers, as one waiting for a login does,
+    // and ignores SIGTERM and SIGHUP.
+    let marker = sandbox.root.join("infisical.pids");
     executable(
         &sandbox.bin.join("infisical"),
         &format!(
-            "#!/bin/sh\necho $$ > \"{}\"\nexec sleep 300\n",
+            "#!/bin/sh\ntrap '' TERM HUP\necho $$ $PPID > \"{}\"\nexec sleep 300\n",
             marker.display()
         ),
     );
@@ -280,8 +281,10 @@ fn closing_a_tab_while_its_profile_resolves_starts_no_service() {
     let launched = manager
         .launch_service(&api, sandbox.launch(&api, Some("slow")))
         .unwrap();
-    let infisical: u32 = wait_until(Duration::from_secs(30), || {
-        fs::read_to_string(&marker).ok()?.trim().parse().ok()
+    let (infisical, executor): (u32, u32) = wait_until(Duration::from_secs(30), || {
+        let content = fs::read_to_string(&marker).ok()?;
+        let mut pids = content.split_whitespace().map(|pid| pid.parse().ok());
+        Some((pids.next()??, pids.next()??))
     })
     .expect("the profile never reached its Infisical source");
     assert!(
@@ -295,16 +298,20 @@ fn closing_a_tab_while_its_profile_resolves_starts_no_service() {
         })
         .unwrap();
 
+    // Closed only once the launch and everything it started are gone.
     assert!(manager.list_sessions().is_empty());
     let run_id = launched.session.run.as_ref().map(|run| run.run_id.clone());
-    thread::sleep(Duration::from_secs(2));
+    assert!(
+        process::process_info(infisical).is_none(),
+        "the profile's CLI outlived the launch"
+    );
+    assert!(
+        process::process_info(executor).is_none(),
+        "localify dev outlived the launch"
+    );
     assert!(
         !sandbox.root.join("service-started").exists(),
         "the service started"
-    );
-    assert!(
-        !process::process_exists(infisical),
-        "the profile's CLI outlived the launch"
     );
     assert!(
         sandbox.store().list().unwrap().is_empty(),

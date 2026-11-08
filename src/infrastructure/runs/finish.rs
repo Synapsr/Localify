@@ -185,6 +185,22 @@ pub enum Finish {
     Busy,
     /// The run's folder is gone: nothing is left to finalize.
     Gone,
+    /// The run's proven processes are gone, but these still carry its
+    /// session: they started after the last proof, so nothing ties them to
+    /// the run, and they are never signalled. The run stays open until they
+    /// are gone.
+    Unconfirmed(Vec<u32>),
+}
+
+impl Finish {
+    /// What a person is told about an [`Finish::Unconfirmed`] run.
+    pub fn unconfirmed_message(pids: &[u32]) -> String {
+        let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
+        let pids = pids.join(", ");
+        format!(
+            "process {pids} in this run's session could not be confirmed as part of it; stop it yourself, then try again."
+        )
+    }
 }
 
 /// What a finisher proved, kept in the run's folder for the next one.
@@ -194,6 +210,10 @@ struct FinalizeState {
     /// The session is proven unbroken until this time, in the processes' time.
     proven_through: u64,
     targets: Vec<Target>,
+    /// Processes left in the session that nothing proved to be the run's:
+    /// the run stays open while one of them lives.
+    #[serde(default)]
+    unconfirmed: Vec<Target>,
 }
 
 /// A process found to be the run's.
@@ -286,10 +306,35 @@ impl Journal<'_> {
         let state = FinalizeState {
             proven_through: horizon.max(self.saved.proven_through),
             targets,
+            unconfirmed: self.saved.unconfirmed.clone(),
         };
         if state == self.saved {
             return Ok(());
         }
+        let _lock = match self.locked {
+            true => None,
+            false => match FinalizeLock::acquire(self.dir)? {
+                Some(lock) => Some(lock),
+                None => return Ok(()),
+            },
+        };
+        state.save(self.dir)?;
+        self.saved = state;
+        Ok(())
+    }
+
+    /// Keeps the processes left in the session that nothing proved, so the
+    /// next finisher keeps the run open while one of them lives.
+    fn record_unconfirmed(&mut self, unconfirmed: &[ProcessInfo]) -> Result<()> {
+        let mut state = self.saved.clone();
+        state.unconfirmed = unconfirmed
+            .iter()
+            .map(|process| Target {
+                pid: process.pid,
+                start: process.start,
+                member: true,
+            })
+            .collect();
         let _lock = match self.locked {
             true => None,
             false => match FinalizeLock::acquire(self.dir)? {
@@ -321,6 +366,8 @@ enum Ended {
     /// The executor died while it was being stopped without the lock; what it
     /// proved is in the journal, for the locked end.
     ExecutorGone,
+    /// No proven process is left, but these carry the session still.
+    Unconfirmed(Vec<u32>),
 }
 
 /// Ends runs. The native one acts on the kernel's processes; tests give a table
@@ -427,9 +474,13 @@ impl Finisher<'_> {
         if session.executor_alive(self.table) {
             return Ok(Finish::ExecutorAlive);
         }
-        // What an earlier finisher proved extends the executor's heartbeat.
+        // What an earlier finisher proved extends the executor's heartbeat. Its
+        // horizon is the moment just before a read, so, as for that finisher,
+        // a start in that same tick proves nothing.
         let session = RunSession {
-            last_alive_at: session.last_alive_at.max(saved.proven_through),
+            last_alive_at: session
+                .last_alive_at
+                .max(saved.proven_through.saturating_sub(1)),
             ..session.clone()
         };
         let mut members = match membership(self.table, &session) {
@@ -450,7 +501,29 @@ impl Finisher<'_> {
                 locked: true,
                 saved,
             };
-            self.end_until(&mut journal, &session, members, escaped, Scope::Run)?;
+            if let Ended::Unconfirmed(pids) =
+                self.end_until(&mut journal, &session, members, escaped, Scope::Run)?
+            {
+                return Ok(Finish::Unconfirmed(pids));
+            }
+        } else {
+            // What an earlier finisher could not confirm keeps the run open
+            // while it lives, though no scan proves the session now.
+            let alive: Vec<u32> = saved
+                .unconfirmed
+                .iter()
+                .map(|target| Identity {
+                    pid: target.pid,
+                    start: target.start,
+                })
+                .filter(|identity| {
+                    Identity::current_in(self.table, identity.pid) == Some(*identity)
+                })
+                .map(|identity| identity.pid)
+                .collect();
+            if !alive.is_empty() {
+                return Ok(Finish::Unconfirmed(alive));
+            }
         }
         self.publish_end(dir, captured_elsewhere)
     }
@@ -582,7 +655,23 @@ impl Finisher<'_> {
             }
             let left = targets(&known, &retained);
             if left.is_empty() {
-                return Ok(Ended::Empty);
+                // Never empty while the session is carried: what started after
+                // the last proof is not signalled, and not forgotten either.
+                let unconfirmed: Vec<ProcessInfo> = match scope {
+                    Scope::SavedOnly => Vec::new(),
+                    Scope::Run | Scope::WhileExecutorLives => scan
+                        .iter()
+                        .filter(|process| session.contains(process))
+                        .copied()
+                        .collect(),
+                };
+                if unconfirmed.is_empty() {
+                    return Ok(Ended::Empty);
+                }
+                journal.record_unconfirmed(&unconfirmed)?;
+                return Ok(Ended::Unconfirmed(
+                    unconfirmed.iter().map(|process| process.pid).collect(),
+                ));
             }
             if scope == Scope::WhileExecutorLives && !session.executor_alive(self.table) {
                 journal.record(horizon, &known, &retained)?;

@@ -17,7 +17,9 @@ use super::context::{AppContext, effective_current_dir};
 use super::init_project::{self, InitProjectArgs};
 use super::launch_profile::{self, LaunchProfileArgs, PreparedProfile, SessionTarget};
 use super::project_env::{current_worktree_environment, ensure_implicit_worktree_environment};
-use super::service_supervisor::{self, Capture, LaunchEnd, LaunchOutcome, SupervisedLaunch};
+use super::service_supervisor::{
+    self, Capture, LaunchEnd, LaunchOutcome, SupervisedLaunch, Supervision,
+};
 use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
 use crate::domain::DomainRegistration;
@@ -303,12 +305,16 @@ pub fn run(
     };
     warn_if_daemon_is_stopped(ctx);
 
+    // Before the profile resolves: a stop meanwhile ends the helpers it runs.
+    let origin = run_origin(launch_id.is_some());
+    let supervision = Supervision::start(origin == ServiceOrigin::App);
     let profile = launch_profile::prepare(
         &launch_profile,
         &service_project_root(&service, &workdir),
         &workdir,
         &effective_current_dir()?,
     )?;
+    supervision.resolved();
 
     let endpoint = service_endpoint(&service, ports, ctx)?;
     let url = service_url(&service, endpoint);
@@ -339,7 +345,6 @@ pub fn run(
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
-    let origin = run_origin(launch_id.is_some());
     let background = origin == ServiceOrigin::Background;
     let record = store.register(
         &lock,
@@ -380,6 +385,7 @@ pub fn run(
             stream,
             run: &run,
             socket_path: &paths.socket_path,
+            supervision,
         })
     });
     run.finish(end.as_ref().ok())?;
@@ -486,6 +492,7 @@ struct Supervised<'a> {
     stream: Option<StreamSink>,
     run: &'a RegisteredRun<'a>,
     socket_path: &'a Path,
+    supervision: Supervision,
 }
 
 /// Runs the service under the supervisor, with or without a launch profile.
@@ -533,6 +540,7 @@ fn supervise(launch: Supervised<'_>) -> Result<LaunchEnd> {
             .as_ref()
             .is_some_and(|run| run.sid.is_some()),
         app_terminal: launch.run.record.origin == ServiceOrigin::App,
+        supervision: Some(launch.supervision),
     });
     if dangerous_name.is_some() {
         launch_profile::reset_title();
