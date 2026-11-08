@@ -7,6 +7,8 @@ const clientNamespaces = [
   "DemoDialog",
   "Faq",
   "Footer",
+  "HowItWorks",
+  "InstallPrompt",
   "UseCases",
 ] as const;
 

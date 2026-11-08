@@ -18,14 +18,18 @@
     "description": "Every project, worktree, and machine gets a clean HTTPS URL. Coding agents set it all up over MCP. You watch and steer from one app.",
     "download": "Download for macOS",
     "source": "View source",
-    "terminal": "Or install the command line",
-    "availability": "Free and open source under the AGPL. Desktop app for macOS."
+    "promptHint": "Paste it into Claude Code, Codex, or Cursor, and your agent installs Localify for you. Free and open source."
   },
   "DemoDialog": {
     "title": "Want to try Localify for real?",
     "description": "Download the desktop app and set up your first local domain.",
     "later": "Maybe later",
     "download": "Download it now"
+  },
+  "InstallPrompt": {
+    "cta": "Copy the install prompt",
+    "copied": "Copied. Paste it into your agent",
+    "fallback": "Copy this prompt into your agent:"
   },
   "AgentStrip": {
     "label": "Works with your agents over MCP",
@@ -38,7 +42,8 @@
     "items": {
       "agent": {
         "title": "Your agent sets it up.",
-        "body": "Connect Claude Code, Codex, or Cursor once. Every action of the app is an MCP tool, so your agent creates the project, picks free ports, patches the Next.js or Vite config, and starts each service behind its URL. You just ask."
+        "body": "Connect Claude Code, Codex, or Cursor once. Every action of the app is an MCP tool, so your agent creates the project, picks free ports, patches the Next.js or Vite config, and starts each service behind its URL. You just ask.",
+        "hint": "One prompt, and your agent installs everything."
       },
       "worktrees": {
         "title": "One worktree, one URL.",
@@ -57,24 +62,12 @@
       "prompt": "Start the web app in the fix-auth worktree and send me the link.",
       "reply": "Done. It's running at"
     },
-    "worktreeDemo": {
-      "title": "Environments",
-      "primary": "main",
-      "running": "Running",
-      "stopped": "Stopped",
-      "removed": "Removed when merged"
-    },
-    "appDemo": {
-      "terminal": "Terminal",
-      "checkouts": "Checkouts"
-    },
     "machinesDemo": {
       "studio": "Mac Studio",
       "studioRole": "Your agents work here",
       "laptop": "MacBook",
       "laptopRole": "You review here",
       "phone": "iPhone",
-      "phoneRole": "You test here",
       "password": "Password protected"
     }
   },
@@ -101,31 +94,42 @@
     "titleLine2": "then you just ask.",
     "steps": [
       {
-        "title": "Download the app.",
-        "body": "On first launch it asks for your administrator password once, then sets up HTTPS, DNS, and the background service. After that, nothing of Localify's runs as root."
+        "title": "Give your agent the prompt.",
+        "body": "Copy the install prompt and paste it into Claude Code, Codex, or Cursor. Your agent installs the command line, sets up HTTPS and DNS, and connects itself. You approve the administrator password once."
       },
       {
-        "title": "Connect your agents.",
-        "body": "Settings → AI agents, or localify agent install, registers the MCP server with Claude Code, Codex, and Cursor."
+        "title": "Connect your other agents.",
+        "body": "Agents installed later connect from the app, in Settings → AI agents, or with localify agent install. Each one gets every Localify action as an MCP tool."
       },
       {
         "title": "Ask for a URL.",
-        "body": "“Run the app in this worktree.” Your agent starts it in the app and hands you its URL."
+        "body": "Ask for the app in a worktree. Your agent starts it, the worktree shows up in the app with its own URL, and you open it."
       }
     ],
+    "dashboardPrefix": "Want a dashboard to follow it all?",
+    "dashboardLink": "Download the app for macOS",
+    "demo": {
+      "ask": "Run the app in the fix-auth worktree."
+    },
     "diagram": {
+      "title": "How the pieces fit",
       "you": "You",
       "youDetail": "Desktop app",
       "agents": "Your agents",
       "agentsDetail": "MCP server",
       "machine": "Localify on each Mac",
-      "machineDetail": "DNS · HTTPS · router",
+      "dns": "DNS",
+      "dnsDetail": "Resolves every .localify name",
+      "https": "HTTPS",
+      "httpsDetail": "A local certificate authority",
+      "router": "Router",
+      "routerDetail": "One URL per worktree",
       "servers": "Dev servers",
-      "serversDetail": "One URL per worktree",
-      "devices": "Your other devices",
-      "devicesDetail": "Laptop, phone",
+      "serversDetail": "Behind their URLs",
       "cloud": "Localify Cloud",
-      "cloudDetail": "Password · tunnel"
+      "cloudDetail": "Password and tunnel",
+      "devices": "Your other devices",
+      "devicesDetail": "Laptop, phone, anywhere"
     }
   },
   "Pricing": {
@@ -160,7 +164,27 @@
         "7-day free trial"
       ],
       "cta": "Ask for an invite",
-      "note": "Invite-only for now. You sign in with GitHub."
+      "note": "Invite-only for now. You sign in with GitHub.",
+      "badge": "Most popular"
+    },
+    "addons": {
+      "title": "Add-ons",
+      "soon": "Soon",
+      "machine": "+1 machine: $3 a month",
+      "urls": "+10 public URLs: $2 a month"
+    },
+    "team": {
+      "name": "Localify Cloud Team",
+      "price": "$49",
+      "period": "a month",
+      "tagline": "For a team that shares its machines.",
+      "features": [
+        "Everything in Pro",
+        "3 seats, one invoice",
+        "More machines and public URLs for the team",
+        "Priority support"
+      ],
+      "cta": "Contact us"
     }
   },
   "Faq": {
@@ -219,7 +243,6 @@
     "description": "Let your agents run the dev servers. Open every one of them by name.",
     "download": "Download for macOS",
     "source": "View source",
-    "terminal": "Or from a terminal, on macOS and Linux:",
     "requirements": "macOS on Apple Silicon · Command line also on Linux x86_64"
   },
   "Footer": {
@@ -235,7 +258,14 @@
     "cookies": "Cookies",
     "copyright": "© 2026 Téo Goulois · Open source under the AGPL · Made quietly in Rust.",
     "language": "Language",
-    "switchLanguage": "Switch to {locale}"
+    "switchLanguage": "Switch to {locale}",
+    "product": "Product",
+    "useCases": "Use cases",
+    "howItWorks": "How it works",
+    "pricing": "Pricing",
+    "faq": "FAQ",
+    "tagline": "Clean URLs for every agent, worktree, and machine.",
+    "github": "Star on GitHub"
   },
   "CookieBanner": {
     "label": "Cookie consent",

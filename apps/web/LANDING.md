@@ -14,7 +14,7 @@ For the full Rust and desktop picture (architecture, DNS, TLS, proxy behavior, c
 - **Category**: local development proxy, HTTPS for localhost.
 - **Audience**: developers who let AI coding tools (Claude Code, Codex, Cursor) work in parallel, often on several machines.
 - **Tone**: pragmatic, technical, understated. Close to Linear, Raycast, or Arc in voice.
-- **Actions**: downloading the app is the primary action. Viewing the source at <https://github.com/Synapsr/Localify> is the secondary one.
+- **Actions**: copying the install prompt is the primary action: the visitor pastes it into their agent, which installs Localify (`INSTALL_PROMPT` in `app/_components/install-prompt-button.tsx`). Downloading the desktop app, the dashboard on top, is the second. Viewing the source at <https://github.com/Synapsr/Localify> is the third.
 
 ## 2. The problem we solve
 
@@ -77,6 +77,8 @@ A service started inside a Git worktree attaches the worktree to the project as 
 
 - **Plan**: Localify Cloud Pro, $7.99 a month or $79 a year, after a 7-day free trial: 2 serving machines, 10 public URLs.
 - **Access**: sign-in is invite-only for now (`ALLOWED_GITHUB_IDS` in `apps/cloud`). Say so wherever the page sells Pro, and drop it when sign-up opens.
+- **Add-ons**: +1 serving machine for $3 a month and +10 URLs for $2 a month are in the contract but ship after launch. The page shows them marked "Soon"; drop the mark when they can be bought.
+- **Team**: $49 a month for 3 seats, sold through "Contact us". It is not in the Cloud contract yet: each Team customer gets a plan override by hand. Its features stay general ("more machines and public URLs") until the contract sets them.
 
 ## 5. Technical snapshot
 
@@ -130,17 +132,19 @@ Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
 
 | Section | File | Notes |
 |---|---|---|
-| Hero | `app/_sections/hero.tsx` | Eyebrow, download and source actions, CLI install command, interactive mockup of the Projects view with a download dialog, then the strip of supported agents |
+| Hero | `app/_sections/hero.tsx` | Badge with the agents' logos, the install prompt and download actions, mixed local and public URL chips around the title, the interactive Projects mockup with a download dialog, then the strip of supported agents |
 | Use cases | `app/_sections/use-cases.tsx` | Four numbered rows: agent setup (4.7), one URL per worktree (4.8), watching from the app, every machine (4.9). Visuals in `app/_components/use-case-visuals.tsx` |
 | Not just URLs | `app/_sections/features.tsx` | Three cards: HTTPS setup, launch profiles, any stack |
-| How it works | `app/_sections/how-it-works.tsx` | Three steps and a diagram of the pieces |
-| Pricing | `app/_sections/pricing.tsx` | Free and Localify Cloud Pro (4.9); the Pro action asks for an invite by email while sign-in is invite-only |
+| How it works | `app/_sections/how-it-works.tsx` | Three steps, each with a demo (`app/_components/step-demos.tsx`): the prompt in the agent, Settings → AI agents connecting, a worktree URL appearing. Then a diagram of the pieces |
+| Pricing | `app/_sections/pricing.tsx` | Free, Localify Cloud Pro with its add-ons, and Team (4.9). The Pro action asks for an invite by email while sign-in is invite-only; Team asks to be contacted |
 | FAQ | `app/_sections/faq.tsx` | |
-| Final CTA | `app/_sections/final-cta.tsx` | Download and source actions, requirements |
+| Final CTA | `app/_sections/final-cta.tsx` | Install prompt, download and source actions, requirements |
 
 ## 9. Visuals
 
-The use-case visuals are coded mockups, not videos, so they follow the product without re-recording. They reuse the sky backgrounds in `public/sky/` and the example project `journal` from the docs. Keep what they show true: tool names from `localify mcp`, domain shapes from ADR 0009 and 0022.
+The use-case and step visuals are coded mockups, not videos, so they follow the product without re-recording. They reuse the sky backgrounds in `public/sky/` and the example project `journal` from the docs. Keep what they show true: tool names from `localify mcp`, domain shapes from ADR 0009 and 0022.
+
+The pieces of the app they show (project card and environments, domain chip, terminal panel, AI agents settings card) are copies of the desktop components with the same classes, in `app/_components/app-replicas.tsx`. The app is English only, so their strings stay English. Update them when those desktop components change. Domains use the sans font, as in the app; the mono font is for the terminal only.
 
 ## 10. Copy conventions
 

@@ -18,14 +18,18 @@
     "description": "모든 프로젝트, 워크트리, 머신에 깔끔한 HTTPS URL을. 설정은 코딩 에이전트가 MCP로 전부 처리합니다. 앱 하나에서 지켜보며 방향만 잡으세요.",
     "download": "macOS용 다운로드",
     "source": "소스 코드 보기",
-    "terminal": "또는 명령줄 도구 설치",
-    "availability": "AGPL 기반의 무료 오픈 소스입니다. 데스크톱 앱은 macOS용입니다."
+    "promptHint": "Claude Code, Codex, Cursor에 붙여 넣으면 에이전트가 Localify를 설치해 줍니다. 무료 오픈 소스입니다."
   },
   "DemoDialog": {
     "title": "Localify를 직접 사용해 보시겠어요?",
     "description": "데스크톱 앱을 다운로드하고 첫 로컬 도메인을 설정하세요.",
     "later": "나중에",
     "download": "지금 다운로드"
+  },
+  "InstallPrompt": {
+    "cta": "설치 프롬프트 복사",
+    "copied": "복사했습니다. 에이전트에 붙여 넣으세요",
+    "fallback": "이 프롬프트를 복사해 에이전트에 붙여 넣으세요:"
   },
   "AgentStrip": {
     "label": "MCP로 내 에이전트와 함께 작동",
@@ -38,7 +42,8 @@
     "items": {
       "agent": {
         "title": "설정은 에이전트가.",
-        "body": "Claude Code, Codex, Cursor를 한 번만 연결하세요. 앱의 모든 동작이 MCP 도구로 제공되므로, 에이전트가 프로젝트를 만들고, 빈 포트를 고르고, Next.js나 Vite 설정을 패치하고, 각 서비스를 해당 URL로 실행합니다. 요청만 하면 됩니다."
+        "body": "Claude Code, Codex, Cursor를 한 번만 연결하세요. 앱의 모든 동작이 MCP 도구로 제공되므로, 에이전트가 프로젝트를 만들고, 빈 포트를 고르고, Next.js나 Vite 설정을 패치하고, 각 서비스를 해당 URL로 실행합니다. 요청만 하면 됩니다.",
+        "hint": "프롬프트 하나면 에이전트가 전부 설치합니다."
       },
       "worktrees": {
         "title": "워크트리 하나, URL 하나.",
@@ -57,24 +62,12 @@
       "prompt": "fix-auth 워크트리에서 web 앱 실행하고 링크 보내 줘.",
       "reply": "완료했습니다. 실행 중인 주소:"
     },
-    "worktreeDemo": {
-      "title": "환경",
-      "primary": "main",
-      "running": "실행 중",
-      "stopped": "중지됨",
-      "removed": "병합 시 삭제"
-    },
-    "appDemo": {
-      "terminal": "터미널",
-      "checkouts": "체크아웃"
-    },
     "machinesDemo": {
       "studio": "Mac Studio",
       "studioRole": "에이전트가 일하는 곳",
       "laptop": "MacBook",
       "laptopRole": "리뷰하는 곳",
       "phone": "iPhone",
-      "phoneRole": "테스트하는 곳",
       "password": "비밀번호 보호"
     }
   },
@@ -101,31 +94,42 @@
     "titleLine2": "이제 요청만 하세요.",
     "steps": [
       {
-        "title": "앱을 다운로드하세요.",
-        "body": "처음 실행할 때 관리자 비밀번호를 한 번 묻고, HTTPS, DNS, 백그라운드 서비스를 설정합니다. 그 후로 Localify는 root 권한으로 아무것도 실행하지 않습니다."
+        "title": "에이전트에게 프롬프트를 건네세요.",
+        "body": "설치 프롬프트를 복사해 Claude Code, Codex, Cursor에 붙여 넣으세요. 에이전트가 명령줄 도구를 설치하고, HTTPS와 DNS를 설정하고, 스스로 연결합니다. 관리자 비밀번호는 한 번만 승인하면 됩니다."
       },
       {
-        "title": "에이전트를 연결하세요.",
-        "body": "Settings → AI agents 또는 localify agent install로 MCP 서버를 Claude Code, Codex, Cursor에 등록합니다."
+        "title": "다른 에이전트도 연결하세요.",
+        "body": "나중에 설치한 에이전트는 앱의 Settings → AI agents나 localify agent install로 연결합니다. 어떤 에이전트든 Localify의 모든 동작을 MCP 도구로 쓸 수 있습니다."
       },
       {
         "title": "URL을 요청하세요.",
-        "body": "“이 워크트리에서 앱 실행해 줘.” 에이전트가 앱에서 실행하고 URL을 건네줍니다."
+        "body": "워크트리에서 앱을 실행해 달라고 요청하세요. 에이전트가 실행하면 워크트리가 고유한 URL과 함께 앱에 나타나고, 열기만 하면 됩니다."
       }
     ],
+    "dashboardPrefix": "모든 과정을 한눈에 볼 대시보드가 필요하다면?",
+    "dashboardLink": "macOS용 앱 다운로드",
+    "demo": {
+      "ask": "fix-auth 워크트리에서 앱 실행해 줘."
+    },
     "diagram": {
+      "title": "전체 구조",
       "you": "나",
       "youDetail": "데스크톱 앱",
       "agents": "내 에이전트",
       "agentsDetail": "MCP 서버",
       "machine": "각 Mac의 Localify",
-      "machineDetail": "DNS · HTTPS · 라우터",
+      "dns": "DNS",
+      "dnsDetail": "모든 .localify 이름을 해석",
+      "https": "HTTPS",
+      "httpsDetail": "로컬 인증 기관",
+      "router": "라우터",
+      "routerDetail": "워크트리마다 URL 하나",
       "servers": "개발 서버",
-      "serversDetail": "워크트리마다 URL 하나",
-      "devices": "다른 기기",
-      "devicesDetail": "노트북, 휴대폰",
+      "serversDetail": "각자의 URL 뒤에서",
       "cloud": "Localify Cloud",
-      "cloudDetail": "비밀번호 · 터널"
+      "cloudDetail": "비밀번호와 터널",
+      "devices": "다른 기기",
+      "devicesDetail": "노트북, 휴대폰, 어디서든"
     }
   },
   "Pricing": {
@@ -160,7 +164,27 @@
         "7일 무료 체험"
       ],
       "cta": "초대 요청하기",
-      "note": "현재는 초대 전용입니다. GitHub로 로그인합니다."
+      "note": "현재는 초대 전용입니다. GitHub로 로그인합니다.",
+      "badge": "가장 인기"
+    },
+    "addons": {
+      "title": "애드온",
+      "soon": "출시 예정",
+      "machine": "머신 +1대: 월 $3",
+      "urls": "공개 URL +10개: 월 $2"
+    },
+    "team": {
+      "name": "Localify Cloud Team",
+      "price": "$49",
+      "period": "/ 월",
+      "tagline": "머신을 함께 쓰는 팀을 위해.",
+      "features": [
+        "Pro의 모든 기능",
+        "좌석 3개, 청구서는 하나",
+        "팀을 위한 더 많은 머신과 공개 URL",
+        "우선 지원"
+      ],
+      "cta": "문의하기"
     }
   },
   "Faq": {
@@ -219,7 +243,6 @@
     "description": "dev server는 에이전트에게 맡기세요. 모두 이름으로 열 수 있습니다.",
     "download": "macOS용 다운로드",
     "source": "소스 코드 보기",
-    "terminal": "또는 터미널에서 (macOS, Linux):",
     "requirements": "Apple Silicon 기반 macOS · 명령줄은 Linux x86_64도 지원"
   },
   "Footer": {
@@ -235,7 +258,14 @@
     "cookies": "쿠키",
     "copyright": "© 2026 Téo Goulois · AGPL 오픈 소스 · Rust로 조용히 만들었습니다.",
     "language": "언어",
-    "switchLanguage": "{locale}로 전환"
+    "switchLanguage": "{locale}로 전환",
+    "product": "제품",
+    "useCases": "사용 사례",
+    "howItWorks": "작동 방식",
+    "pricing": "가격",
+    "faq": "FAQ",
+    "tagline": "모든 에이전트, 워크트리, 머신을 위한 깔끔한 URL.",
+    "github": "GitHub에서 Star 주기"
   },
   "CookieBanner": {
     "label": "쿠키 동의",

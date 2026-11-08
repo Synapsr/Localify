@@ -14,7 +14,7 @@ import { UseCases } from "@/app/_sections/use-cases";
 import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { buildPageMetadata } from "@/app/page-metadata";
 import { SiteFooter } from "@/app/site-footer";
-import { siteAuthor, siteName, siteUrl, sourceUrl } from "@/app/site-metadata";
+import { siteAuthor, siteName, siteUrl } from "@/app/site-metadata";
 import { SiteHeader } from "@/app/site-ui";
 import { routing } from "@/i18n/routing";
 
@@ -79,7 +79,6 @@ const HomePage = async ({ params }: HomePageProps) => {
     { href: "#how-it-works", label: nav("howItWorks") },
     { href: "#pricing", label: nav("pricing") },
     { href: "#faq", label: nav("faq") },
-    { href: sourceUrl, label: nav("source") },
   ];
 
   return (

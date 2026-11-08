@@ -1,30 +1,30 @@
 import { getTranslations } from "next-intl/server";
+import type { ComponentType, ReactNode, SVGProps } from "react";
 
+import { InstallPromptButton } from "@/app/_components/install-prompt-button";
+import { AskDemo, ConnectDemo, PromptDemo } from "@/app/_components/step-demos";
+import { MACOS_APP_DOWNLOAD_URL } from "@/app/download-links";
 import { FadeIn, SectionHeading, sectionClass } from "@/app/site-ui";
+import {
+  ArrowRightIcon,
+  CloudIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  LockIcon,
+  MobileIcon,
+  MonitorIcon,
+  ServersIcon,
+  SparklesIcon,
+} from "@/components/icons";
+import { Link } from "@/i18n/navigation";
 
-type Node = { title: string; detail: string };
+type Icon = ComponentType<SVGProps<SVGSVGElement>>;
 
-const DiagramNode = ({ node, emphasis = false }: { node: Node; emphasis?: boolean }) => (
-  <div
-    className={`flex h-full flex-col justify-center rounded-2xl px-4 py-3.5 text-center ring-1 ${
-      emphasis ? "bg-foreground text-background ring-foreground" : "bg-muted/60 ring-border/60"
-    }`}
-  >
-    <p className="text-[15px] font-semibold tracking-tight">{node.title}</p>
-    <p className={`mt-0.5 font-mono text-[12px] ${emphasis ? "text-background/70" : "text-muted-foreground"}`}>
-      {node.detail}
-    </p>
-  </div>
-);
-
-const Connector = () => (
-  <div aria-hidden="true" className="mx-auto h-8 w-px bg-linear-to-b from-border to-foreground/40" />
-);
+const demos = [<PromptDemo key="prompt" />, <ConnectDemo key="connect" />, <AskDemo key="ask" />];
 
 export const HowItWorks = async () => {
   const t = await getTranslations("HowItWorks");
   const steps = t.raw("steps") as Array<{ title: string; body: string }>;
-  const node = (key: string): Node => ({ title: t(`diagram.${key}`), detail: t(`diagram.${key}Detail`) });
 
   return (
     <section className={sectionClass} id="how-it-works">
@@ -41,38 +41,146 @@ export const HowItWorks = async () => {
         />
       </FadeIn>
 
-      <div className="mt-16 grid gap-4 md:mt-20 md:grid-cols-3 md:gap-5">
+      <div className="mt-16 space-y-16 md:mt-24 md:space-y-24">
         {steps.map((step, index) => (
-          <FadeIn delay={0.05 + index * 0.08} key={step.title}>
-            <article className="flex h-full flex-col gap-4 rounded-3xl bg-muted/60 p-7 ring-1 ring-border/60 md:p-8">
-              <span className="inline-flex size-9 items-center justify-center rounded-full bg-foreground font-mono text-[13px] text-background">
+          <div className="grid grid-cols-[minmax(0,1fr)] items-center gap-8 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] md:gap-16" key={step.title}>
+            <FadeIn className="space-y-4">
+              <span className="inline-flex size-9 items-center justify-center rounded-full bg-foreground text-[14px] font-medium text-background tabular-nums">
                 {index + 1}
               </span>
-              <h3 className="text-[20px] leading-[1.2] font-medium tracking-tight text-balance text-foreground">
+              <h3 className="text-[28px] leading-[1.1] font-medium tracking-[-0.025em] text-balance text-foreground md:text-[34px]">
                 {step.title}
               </h3>
-              <p className="text-[14.5px] leading-[1.55] text-pretty text-muted-foreground">{step.body}</p>
-            </article>
-          </FadeIn>
+              <p className="max-w-md text-[16px] leading-[1.55] text-pretty text-muted-foreground">{step.body}</p>
+              {index === 0 ? (
+                <div className="space-y-3 pt-1">
+                  <InstallPromptButton size="default" source="how_it_works" />
+                  <p className="text-[13.5px] text-muted-foreground">
+                    {t("dashboardPrefix")}{" "}
+                    <Link
+                      className="text-foreground underline decoration-border decoration-[1.5px] underline-offset-4 hover:decoration-foreground"
+                      data-umami-event="download_clicked"
+                      data-umami-event-source="how_it_works"
+                      href={MACOS_APP_DOWNLOAD_URL}
+                    >
+                      {t("dashboardLink")}
+                    </Link>
+                  </p>
+                </div>
+              ) : null}
+            </FadeIn>
+            <FadeIn delay={0.1}>{demos[index]}</FadeIn>
+          </div>
         ))}
       </div>
 
-      <FadeIn className="mx-auto mt-16 max-w-3xl md:mt-24" delay={0.1}>
-        <div className="grid grid-cols-2 gap-3 md:gap-4">
-          <DiagramNode node={node("you")} />
-          <DiagramNode node={node("agents")} />
-        </div>
-        <Connector />
-        <DiagramNode emphasis node={node("machine")} />
-        <Connector />
-        <div className="grid grid-cols-2 gap-3 md:gap-4">
-          <DiagramNode node={node("servers")} />
-          <div className="space-y-3 md:space-y-4">
-            <DiagramNode node={node("cloud")} />
-            <DiagramNode node={node("devices")} />
-          </div>
-        </div>
-      </FadeIn>
+      <Diagram
+        labels={{
+          title: t("diagram.title"),
+          you: [t("diagram.you"), t("diagram.youDetail")],
+          agents: [t("diagram.agents"), t("diagram.agentsDetail")],
+          machine: t("diagram.machine"),
+          dns: [t("diagram.dns"), t("diagram.dnsDetail")],
+          https: [t("diagram.https"), t("diagram.httpsDetail")],
+          router: [t("diagram.router"), t("diagram.routerDetail")],
+          servers: [t("diagram.servers"), t("diagram.serversDetail")],
+          cloud: [t("diagram.cloud"), t("diagram.cloudDetail")],
+          devices: [t("diagram.devices"), t("diagram.devicesDetail")],
+        }}
+      />
     </section>
   );
 };
+
+type Pair = [string, string];
+
+const Node = ({ icon: IconComponent, label, children }: { icon: Icon; label: Pair; children?: ReactNode }) => (
+  <div className="rounded-2xl bg-muted/60 p-4 ring-1 ring-border/60">
+    <div className="flex items-center gap-3">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-background text-foreground/80 ring-1 ring-border/60">
+        <IconComponent className="size-4" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-[14.5px] font-semibold tracking-tight text-foreground">{label[0]}</p>
+        <p className="text-[12.5px] text-muted-foreground">{label[1]}</p>
+      </div>
+    </div>
+    {children}
+  </div>
+);
+
+const Arrow = () => (
+  <div aria-hidden="true" className="flex items-center justify-center text-muted-foreground/70">
+    <ArrowRightIcon className="size-5 rotate-90 md:rotate-0" />
+  </div>
+);
+
+const Diagram = ({
+  labels,
+}: {
+  labels: {
+    title: string;
+    you: Pair;
+    agents: Pair;
+    machine: string;
+    dns: Pair;
+    https: Pair;
+    router: Pair;
+    servers: Pair;
+    cloud: Pair;
+    devices: Pair;
+  };
+}) => (
+  <FadeIn className="mt-24 md:mt-32">
+    <h3 className="text-center text-[22px] font-medium tracking-tight text-foreground">{labels.title}</h3>
+    <div className="mx-auto mt-10 grid max-w-5xl grid-cols-[minmax(0,1fr)] items-center gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1.15fr)_auto_minmax(0,1fr)] md:gap-4">
+      <div className="space-y-3">
+        <Node icon={MonitorIcon} label={labels.you} />
+        <Node icon={SparklesIcon} label={labels.agents} />
+      </div>
+      <Arrow />
+      <div className="rounded-3xl bg-foreground p-5 text-background shadow-[0_30px_60px_-30px_rgba(13,13,13,0.5)]">
+        <p className="text-[15px] font-semibold tracking-tight">{labels.machine}</p>
+        <div className="mt-4 space-y-2.5">
+          {(
+            [
+              [GlobeIcon, labels.dns],
+              [LockIcon, labels.https],
+              [GitBranchIcon, labels.router],
+            ] as const
+          ).map(([IconComponent, pair]) => (
+            <div className="flex items-center gap-3 rounded-xl bg-background/10 px-3 py-2.5" key={pair[0]}>
+              <IconComponent className="size-4 shrink-0 text-background/80" />
+              <div className="min-w-0">
+                <p className="text-[13.5px] font-medium">{pair[0]}</p>
+                <p className="text-[12px] text-background/60">{pair[1]}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <Arrow />
+      <div className="space-y-3">
+        <Node icon={ServersIcon} label={labels.servers}>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {["web.journal", "web--fix-auth.journal", "api.journal"].map((host) => (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-1 text-[11.5px] text-foreground/80" key={host}>
+                <span className="size-2 rounded-full bg-success" />
+                {host}.localify
+              </span>
+            ))}
+          </div>
+        </Node>
+        <Node icon={CloudIcon} label={labels.cloud}>
+          <div className="mt-3 flex items-center gap-2 rounded-xl bg-background px-3 py-2 ring-1 ring-border/60">
+            <MobileIcon className="size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0">
+              <p className="text-[12.5px] font-medium text-foreground">{labels.devices[0]}</p>
+              <p className="truncate text-[11.5px] text-muted-foreground">{labels.devices[1]}</p>
+            </div>
+          </div>
+        </Node>
+      </div>
+    </div>
+  </FadeIn>
+);
