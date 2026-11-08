@@ -159,17 +159,33 @@ impl Served {
         self.in_flight.retain(|(id, _)| id != re);
     }
 
-    /// Drops the answers still waiting for `re`.
+    /// Whether `id` names a request still going: waiting, watched,
+    /// followed, or with answers still to send.
+    fn is_active(&self, id: &str) -> bool {
+        self.in_flight.iter().any(|(active, _)| active == id)
+            || self.gets.iter().any(|(active, _)| active == id)
+            || self.watch.as_ref().is_some_and(|watch| watch.id == id)
+            || self.follows.iter().any(|follow| follow.id == id)
+            || self.bulk.iter().any(|pending| pending.re == id)
+    }
+
+    /// Drops the answers still waiting for `re`; a request whose last
+    /// answer goes with them is no longer in flight.
     fn drop_pending(&mut self, re: &str) {
         let mut freed = 0;
+        let mut finished = false;
         self.bulk.retain(|pending| {
             let kept = pending.re != re;
             if !kept {
                 freed += pending.bytes;
+                finished |= pending.last;
             }
             kept
         });
         self.pending_bytes -= freed;
+        if finished {
+            self.done(re);
+        }
     }
 
     fn push(&mut self, re: &str, message: SessionMessage, last: bool) {
@@ -226,10 +242,24 @@ impl Actor {
         self.shelf.sharing
     }
 
+    /// Reads `share` from the settings file, which every change is written
+    /// to atomically before anyone is told, and acts on it when it changed.
+    /// Never from a notice: one can arrive after a newer change.
+    pub(super) fn reload_share(&mut self) {
+        let share = self
+            .shared
+            .store
+            .settings()
+            .is_ok_and(|settings| settings.share);
+        if share != self.shelf.sharing {
+            self.on_share(share);
+        }
+    }
+
     /// `share` changed here: turned off, every watch, follow and waiting
     /// answer ends now, before the change is confirmed, so nothing read
     /// after it is sent.
-    pub(super) fn on_share(&mut self, share: bool) {
+    fn on_share(&mut self, share: bool) {
         self.shelf.sharing = share;
         if !share {
             self.end_served("not_shared", NOT_SHARED);
@@ -369,14 +399,28 @@ impl Actor {
 
     /// A request for what `share` covers.
     fn on_share_request(&mut self, key: &Key, request: SessionMessage) {
+        let id = match &request {
+            SessionMessage::InventoryGet { id, .. }
+            | SessionMessage::InventoryWatch { id, .. }
+            | SessionMessage::OutputRead { id, .. }
+            | SessionMessage::OutputFollow { id, .. } => id.clone(),
+            _ => return,
+        };
+        // An id names one request at a time, whatever its kind: a second
+        // one would share its answers and its slot.
+        if self
+            .sessions
+            .get(key)
+            .is_some_and(|session| session.served.is_active(&id))
+        {
+            return self.refuse(
+                key,
+                &id,
+                "bad_request",
+                "This request id is already in use.",
+            );
+        }
         if !self.sharing() {
-            let id = match &request {
-                SessionMessage::InventoryGet { id, .. }
-                | SessionMessage::InventoryWatch { id, .. }
-                | SessionMessage::OutputRead { id, .. }
-                | SessionMessage::OutputFollow { id, .. } => id.clone(),
-                _ => return,
-            };
             return self.refuse(key, &id, "not_shared", NOT_SHARED);
         }
         match request {
@@ -634,7 +678,6 @@ impl Actor {
         let Some(served) = self.served(key) else {
             return;
         };
-        served.follows.retain(|follow| follow.id != id);
         if served.follows.len() >= FOLLOWS_PER_SESSION || total >= FOLLOWS_PER_TARGET {
             return self.refuse(key, &id, "too_many", "Too many follows at once.");
         }
@@ -789,14 +832,7 @@ impl Actor {
         // A change made without the management socket.
         if self.shelf.next_recheck.is_none_or(|at| now >= at) {
             self.shelf.next_recheck = Some(now + self.shared.timings.settings_recheck);
-            let share = self
-                .shared
-                .store
-                .settings()
-                .is_ok_and(|settings| settings.share);
-            if share != self.shelf.sharing {
-                self.on_share(share);
-            }
+            self.reload_share();
         }
         let served = self.served_sessions();
         if served.is_empty() || !self.sharing() {

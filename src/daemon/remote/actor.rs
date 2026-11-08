@@ -180,11 +180,18 @@ pub enum Command {
         id: String,
         offset: u64,
     },
-    /// `share` was just saved: answered once the actor acted on it, so a
-    /// switch turned off stops every follow before the change is confirmed.
-    Share {
-        share: bool,
+    /// The switches were just saved: the actor reads them from the file,
+    /// never from the message, so a late notice of an older change cannot
+    /// undo a newer one. Answered once it acted on them, so a switch turned
+    /// off stops every follow before the change is confirmed.
+    SettingsChanged {
         reply: oneshot::Sender<()>,
+    },
+    /// Sends a message as the viewer of `peer`, whatever it is.
+    #[cfg(test)]
+    Raw {
+        peer: String,
+        message: SessionMessage,
     },
     /// A snapshot of this machine's inventory, built for a viewer.
     Snapshot {
@@ -1512,9 +1519,15 @@ impl Actor {
             Command::Untap { peer, id } => self.untap(&peer, &id),
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
             Command::Snapshot { result } => self.on_snapshot(result),
-            Command::Share { share, reply } => {
-                self.on_share(share);
+            Command::SettingsChanged { reply } => {
+                self.reload_share();
                 let _ = reply.send(());
+            }
+            #[cfg(test)]
+            Command::Raw { peer, message } => {
+                if let Some(key) = self.viewer_session(&peer) {
+                    self.send_message(&key, &message);
+                }
             }
             Command::Pair { peer, events } => {
                 let holder = Holder::Pair(events);

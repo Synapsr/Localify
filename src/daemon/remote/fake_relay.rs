@@ -723,9 +723,16 @@ pub struct FakeSource {
     revisions: Mutex<Option<Revisions>>,
     runs: Mutex<HashMap<String, Result<PathBuf, RunLookup>>>,
     builds: AtomicUsize,
+    /// How long each build takes, in milliseconds.
+    build_ms: AtomicUsize,
 }
 
 impl FakeSource {
+    /// Each build takes this long, so requests pile up behind it.
+    pub fn set_build_time(&self, ms: usize) {
+        self.build_ms.store(ms, Ordering::SeqCst);
+    }
+
     pub fn set_items(&self, items: Vec<InventoryItem>) {
         *self.items.lock().unwrap() = items;
     }
@@ -751,7 +758,11 @@ impl LocalSource for FakeSource {
             .unwrap()
             .get_or_insert_with(|| Revisions::new("epoch-1".into()))
             .snapshot(items);
-        Box::pin(async move { snapshot })
+        let delay = std::time::Duration::from_millis(self.build_ms.load(Ordering::SeqCst) as u64);
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            snapshot
+        })
     }
 
     fn run_output(&self, run_id: &RunId) -> anyhow::Result<Result<PathBuf, RunLookup>> {

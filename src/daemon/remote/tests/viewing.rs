@@ -285,6 +285,83 @@ async fn nothing_written_after_sharing_is_turned_off_reaches_the_viewer() {
     assert!(follow.next().await.is_none());
 }
 
+/// Two changes at once: A saves `share` on and is slow to tell the
+/// connection, B saves it off and is confirmed, then A's notice lands. The
+/// connection reads the switch from the file, so sharing stays off, and
+/// nothing is read or sent.
+#[tokio::test]
+async fn a_late_notice_of_an_older_change_never_turns_sharing_back_on() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = paired_and_shared(&cloud).await;
+    let mut writer = run_on(&b, "one\n");
+    let mut follow = a.link.follow("mB", RUN, Some(0), 0).await.unwrap();
+    assert_eq!(lines_until(&mut follow, 1).await, ["one"]);
+
+    // A saved `share: true` before B's change (it is on), and pauses.
+    // B saves `share: false` and is confirmed.
+    sharing(&b, false).await;
+    assert_eq!(ended_code(&next_follow(&mut follow).await), "not_shared");
+    // A's notice lands now.
+    let conn = b.link.shared.conn().unwrap();
+    let (reply, done) = tokio::sync::oneshot::channel();
+    conn.commands
+        .send(crate::daemon::remote::actor::Command::SettingsChanged { reply })
+        .unwrap();
+    done.await.unwrap();
+    writer.append(b"secret\n").unwrap();
+
+    assert!(!b.link.status().settings.share);
+    let mut again = a.link.follow("mB", RUN, Some(0), 0).await.unwrap();
+    assert_eq!(ended_code(&next_follow(&mut again).await), "not_shared");
+    let read = a.link.read_output("mB", RUN, 0, 1024).await.unwrap_err();
+    assert_eq!(read.code, "not_shared");
+    assert!(a.link.inventory("mB").await.is_err());
+    assert_eq!(b.source.builds(), 0, "nothing was built");
+}
+
+/// A request id already in use, by any kind of request, is refused before
+/// any work, and takes no slot: the get quota is whole afterwards.
+#[tokio::test]
+async fn a_reused_request_id_is_refused_and_takes_no_slot() {
+    use crate::daemon::remote::actor::Command;
+    use crate::infrastructure::remote::wire::SessionMessage;
+
+    let cloud = FakeCloud::start().await;
+    let (a, b) = paired_and_shared(&cloud).await;
+    b.source.set_items(vec![item("web")]);
+    // Every request below arrives during one build, and is answered by it.
+    b.source.set_build_time(300);
+    run_on(&b, "one\n");
+    a.link.open("mB", true).await.unwrap();
+    let conn = a.link.shared.conn().unwrap();
+    let raw = |message: SessionMessage| {
+        let command = Command::Raw {
+            peer: "mB".into(),
+            message,
+        };
+        conn.commands.send(command).unwrap();
+    };
+    let id = || "x".to_string();
+    raw(SessionMessage::InventoryWatch {
+        id: id(),
+        have: None,
+    });
+    // The watch's pages would replace the gets' last ones, and their slots
+    // would never be released.
+    for _ in 0..4 {
+        raw(SessionMessage::InventoryGet {
+            id: id(),
+            have: None,
+        });
+    }
+
+    // Four gets at once: every one admitted and answered.
+    let gets = futures_util::future::join_all((0..4).map(|_| a.link.inventory("mB"))).await;
+    for get in gets {
+        assert_eq!(get.unwrap().items.len(), 1);
+    }
+}
+
 /// A viewer asking for many snapshots and reads at once: the target admits
 /// a bounded number, answers the rest `too_many` or `busy` without doing
 /// the work, keeps what waits to be sent bounded, and serves again after.

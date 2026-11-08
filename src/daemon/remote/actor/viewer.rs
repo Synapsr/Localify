@@ -150,7 +150,7 @@ fn answer_to(answer: &SessionMessage) -> Option<&str> {
 
 impl Actor {
     /// This machine's session as a viewer of `peer`, open or opening.
-    fn viewer_session(&self, peer: &str) -> Option<Key> {
+    pub(super) fn viewer_session(&self, peer: &str) -> Option<Key> {
         self.sessions
             .iter()
             .find(|(key, session)| {

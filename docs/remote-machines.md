@@ -360,7 +360,7 @@ type PairConfirm = { t: "pair.confirm"; accept: boolean };
 type PairDeclined = { t: "pair.declined"; reason: "nobody_to_confirm" | "busy" | "cancelled" };
 ```
 
-`InventoryItem` and `MachineSummary` are in "Inventory". A message that does not parse, has an unknown `t`, or breaks a bound ends the session with `error` `bad_request` then `bye`. An `error` with `re` answers that one request, which is over, and the session goes on; an `error` without `re` ends the session.
+`InventoryItem` and `MachineSummary` are in "Inventory". A message that does not parse, has an unknown `t`, or breaks a bound ends the session with `error` `bad_request` then `bye`. An `error` with `re` answers that one request, which is over, and the session goes on; an `error` without `re` ends the session. A request whose `id` still names one in progress in the session (waiting, watched, followed, or with answers still to send), whatever its kind, is answered `bad_request`, and nothing is done for it.
 
 ### Errors
 

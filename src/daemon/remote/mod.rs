@@ -458,10 +458,7 @@ impl RemoteLink {
         let settings = self.shared.store.update_settings(&machine_id, change)?;
         if let Some(conn) = self.shared.conn() {
             let (reply, done) = oneshot::channel();
-            let command = Command::Share {
-                share: settings.share,
-                reply,
-            };
+            let command = Command::SettingsChanged { reply };
             // A closed connection serves nothing; the next one reads the file.
             if conn.commands.send(command).is_ok() {
                 let _ = done.await;
