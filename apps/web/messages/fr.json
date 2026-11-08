@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "Les agents d'abord, l'humain dans la boucle",
-    "titleLine1": "Tes agents le lancent.",
-    "titleLine2": "Toi, tu ouvres l'URL.",
-    "description": "Chaque projet, worktree et machine a son URL HTTPS propre. Les agents de code configurent tout via MCP. Toi, tu suis et tu pilotes depuis une seule app.",
+    "titleLine1": "Des URLs propres pour agents,",
+    "titleLine2": "worktrees et machines.",
+    "description": "Chaque projet et worktree Git a son URL HTTPS de confiance, locale ou publique. Ton agent de code s'en charge via MCP, et tu suis tout depuis une seule app.",
     "download": "Télécharger pour macOS",
     "source": "Voir le code source",
-    "promptHint": "Colle-le dans Claude Code, Codex ou Cursor, et ton agent installe Localify pour toi. Gratuit et open source."
+    "promptHint": "Gratuit et open source",
+    "chips": {
+      "local": "locale",
+      "public": "publique",
+      "worktree": "worktree",
+      "linux": "serveur Linux"
+    }
   },
   "DemoDialog": {
     "title": "Envie d'essayer Localify pour de vrai ?",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "Fonctionne avec tes agents via MCP",
-    "more": "et tout client MCP"
+    "more": "Tout client MCP"
   },
   "UseCases": {
     "titleLine1": "Les agents font le travail.",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "Sur toutes tes machines.",
-        "body": "Laisse les agents travailler sur un ordinateur fixe ou un Mac qui ne te sert plus pendant que tu testes depuis ton portable ou ton téléphone. Une URL publique par projet ouvre chacun de ses services et worktrees, protégée par défaut par un mot de passe."
+        "body": "Laisse les agents travailler sur un serveur Linux distant ou un Mac qui ne te sert plus pendant que tu relis depuis ton portable. Une URL publique par projet ouvre chacun de ses services et worktrees, protégée par défaut par un mot de passe."
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "C'est fait. Elle tourne sur"
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "Tes agents travaillent ici",
       "laptop": "MacBook",
       "laptopRole": "Tu relis ici",
-      "phone": "iPhone",
-      "password": "Protégé par mot de passe"
+      "password": "Protégé par mot de passe",
+      "server": "Serveur Linux",
+      "serverRole": "Tes agents travaillent ici"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "Donne le prompt à ton agent.",
-        "body": "Copie le prompt d'installation et colle-le dans Claude Code, Codex ou Cursor. Ton agent installe la ligne de commande, configure le HTTPS et le DNS, et se connecte tout seul. Tu valides le mot de passe administrateur une seule fois."
+        "body": "Colle-le dans Claude Code, Codex ou Cursor. Ton agent installe Localify et se connecte tout seul. Tu valides le mot de passe administrateur une seule fois."
       },
       {
         "title": "Connecte tes autres agents.",
-        "body": "Les agents installés plus tard se connectent depuis l'app, dans Settings → AI agents, ou avec localify agent install. Chacun reçoit toutes les actions de Localify sous forme d'outils MCP."
+        "body": "Les agents que tu ajoutes plus tard se connectent dans l'app, dans Settings → AI agents, ou avec localify agent install."
       },
       {
         "title": "Demande une URL.",
-        "body": "Demande l'app dans un worktree. Ton agent la lance, le worktree apparaît dans l'app avec sa propre URL, et tu l'ouvres."
+        "body": "Demande l'app dans un worktree. Il apparaît dans l'app avec sa propre URL."
       }
     ],
-    "dashboardPrefix": "Envie d'un tableau de bord pour tout suivre ?",
-    "dashboardLink": "Télécharger l'app pour macOS",
+    "dashboardLink": "Ou télécharge l'app pour macOS",
     "demo": {
       "ask": "Lance l'app dans le worktree fix-auth."
     },
@@ -164,11 +168,10 @@
         "7 jours d'essai gratuit"
       ],
       "cta": "Demander une invitation",
-      "note": "Sur invitation pour l'instant. Connexion avec GitHub.",
       "badge": "Le plus populaire"
     },
     "addons": {
-      "title": "Options",
+      "title": "Options Pro",
       "soon": "Bientôt",
       "machine": "+1 machine : $3 par mois",
       "urls": "+10 URLs publiques : $2 par mois"

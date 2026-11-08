@@ -13,12 +13,18 @@
   },
   "Hero": {
     "eyebrow": "エージェントファースト、舵取りはあなた",
-    "titleLine1": "動かすのはエージェント。",
-    "titleLine2": "あなたは URL を開くだけ。",
-    "description": "すべてのプロジェクト、ワークツリー、マシンにクリーンな HTTPS URL を。設定はコーディングエージェントが MCP 経由ですべて行います。あなたは一つのアプリから見守り、指示を出すだけです。",
+    "titleLine1": "エージェント、ワークツリー、",
+    "titleLine2": "マシンにクリーンな URL を。",
+    "description": "すべてのプロジェクトと Git ワークツリーに、信頼された HTTPS URL を。ローカルでも公開でも使えます。設定はコーディングエージェントが MCP 経由で行い、あなたは一つのアプリから見守るだけです。",
     "download": "macOS 版をダウンロード",
     "source": "ソースコードを見る",
-    "promptHint": "Claude Code、Codex、Cursor に貼り付けるだけで、エージェントが Localify をインストールします。無料のオープンソースです。"
+    "promptHint": "無料のオープンソース",
+    "chips": {
+      "local": "ローカル",
+      "public": "公開",
+      "worktree": "ワークツリー",
+      "linux": "Linux サーバー"
+    }
   },
   "DemoDialog": {
     "title": "Localify を実際に試してみませんか？",
@@ -33,7 +39,7 @@
   },
   "AgentStrip": {
     "label": "MCP であなたのエージェントと連携",
-    "more": "ほか、あらゆる MCP クライアント"
+    "more": "あらゆる MCP クライアント"
   },
   "UseCases": {
     "titleLine1": "作業するのはエージェント。",
@@ -55,7 +61,7 @@
       },
       "machines": {
         "title": "手持ちのすべてのマシンで。",
-        "body": "デスクトップや空いている Mac でエージェントに作業させ、自分はノートパソコンやスマートフォンからテスト。プロジェクトごとの公開 URL 一つで、その下のすべてのサービスとワークツリーにアクセスできます。デフォルトでパスワード保護付きです。"
+        "body": "リモートの Linux サーバーや空いている Mac でエージェントに作業させ、自分はノートパソコンからレビュー。プロジェクトごとの公開 URL 一つで、その下のすべてのサービスとワークツリーにアクセスできます。デフォルトでパスワード保護付きです。"
       }
     },
     "agentDemo": {
@@ -63,12 +69,11 @@
       "reply": "完了しました。起動先："
     },
     "machinesDemo": {
-      "studio": "Mac Studio",
-      "studioRole": "ここでエージェントが作業",
       "laptop": "MacBook",
       "laptopRole": "ここでレビュー",
-      "phone": "iPhone",
-      "password": "パスワード保護"
+      "password": "パスワード保護",
+      "server": "Linux サーバー",
+      "serverRole": "ここでエージェントが作業"
     }
   },
   "Features": {
@@ -95,19 +100,18 @@
     "steps": [
       {
         "title": "エージェントにプロンプトを渡す。",
-        "body": "インストール用プロンプトをコピーして、Claude Code、Codex、Cursor に貼り付けます。エージェントがコマンドラインをインストールし、HTTPS と DNS をセットアップして、自分自身を接続します。あなたは管理者パスワードを一度承認するだけです。"
+        "body": "Claude Code、Codex、Cursor に貼り付けます。エージェントが Localify をインストールして、自分自身を接続します。あなたは管理者パスワードを一度承認するだけです。"
       },
       {
         "title": "ほかのエージェントもつなぐ。",
-        "body": "あとからインストールしたエージェントは、アプリの Settings → AI agents か localify agent install でつなげます。どのエージェントも、Localify のすべての操作を MCP ツールとして使えます。"
+        "body": "あとから追加したエージェントは、アプリの Settings → AI agents か localify agent install でつなげます。"
       },
       {
         "title": "URL を頼む。",
-        "body": "ワークツリーでアプリを起動するよう頼みます。エージェントが起動すると、そのワークツリーが専用の URL とともにアプリに表示されるので、あとは開くだけです。"
+        "body": "ワークツリーでアプリを起動するよう頼みます。そのワークツリーが専用の URL とともにアプリに表示されます。"
       }
     ],
-    "dashboardPrefix": "すべてを見渡せるダッシュボードが欲しいですか？",
-    "dashboardLink": "macOS 版アプリをダウンロード",
+    "dashboardLink": "または macOS 版アプリをダウンロード",
     "demo": {
       "ask": "fix-auth ワークツリーでアプリを起動して。"
     },
@@ -164,11 +168,10 @@
         "7 日間の無料トライアル"
       ],
       "cta": "招待をリクエスト",
-      "note": "現在は招待制です。GitHub でサインインします。",
       "badge": "一番人気"
     },
     "addons": {
-      "title": "アドオン",
+      "title": "Pro のアドオン",
       "soon": "近日公開",
       "machine": "マシン +1 台：月額 $3",
       "urls": "公開 URL +10 個：月額 $2"

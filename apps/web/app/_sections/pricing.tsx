@@ -83,21 +83,10 @@ export const Pricing = async () => {
               <Price extra={t("pro.yearly")} muted="text-background/65" period={t("pro.period")} price={t("pro.price")} />
               <p className="text-[14.5px] text-background/65">{t("pro.tagline")}</p>
             </header>
-            <div className="flex-1 space-y-6">
+            <div className="flex-1">
               <Features items={t.raw("pro.features") as string[]} />
-              <div className="rounded-2xl bg-background/10 p-4">
-                <p className="flex items-center gap-2 text-[13px] font-medium">
-                  {t("addons.title")}
-                  <span className="rounded-full bg-background/15 px-2 py-0.5 text-[11px]">{t("addons.soon")}</span>
-                </p>
-                <ul className="mt-2 space-y-1 text-[13px] text-background/70">
-                  <li>{t("addons.machine")}</li>
-                  <li>{t("addons.urls")}</li>
-                </ul>
-              </div>
             </div>
-            <div className="space-y-3">
-              <a
+            <a
                 className={cn(
                   buttonVariants({ variant: "outline", size: "lg" }),
                   "w-full border-background/20 bg-background text-foreground hover:bg-background/90",
@@ -107,9 +96,7 @@ export const Pricing = async () => {
                 href={INVITE_URL}
               >
                 {t("pro.cta")}
-              </a>
-              <p className="text-center text-[12.5px] text-background/60">{t("pro.note")}</p>
-            </div>
+            </a>
           </article>
         </FadeIn>
 
@@ -134,6 +121,19 @@ export const Pricing = async () => {
           </article>
         </FadeIn>
       </div>
+
+      <FadeIn className="mx-auto mt-5 max-w-6xl" delay={0.25}>
+        <div className="flex flex-col gap-3 rounded-2xl bg-muted/60 px-6 py-4 text-[14px] ring-1 ring-border/60 md:flex-row md:items-center md:gap-6">
+          <p className="flex items-center gap-2 font-medium text-foreground">
+            {t("addons.title")}
+            <span className="rounded-full bg-background px-2 py-0.5 text-[11.5px] text-muted-foreground ring-1 ring-border">
+              {t("addons.soon")}
+            </span>
+          </p>
+          <p className="text-muted-foreground">{t("addons.machine")}</p>
+          <p className="text-muted-foreground">{t("addons.urls")}</p>
+        </div>
+      </FadeIn>
     </section>
   );
 };
