@@ -5,6 +5,7 @@
 // changed. The public path feels it within its 10-second cache; the next
 // sweep releases or rotates the affected tunnels, which closes open streams
 // (ADR 0027). `--local` works on the database of `pnpm cloud:dev` instead.
+// `duplicates` writes nothing: it reads D1, then Polar.
 //
 // Node runs this file as it is, so it imports only files without build
 // steps: the entitlement rules come from the Worker's own module.
@@ -38,6 +39,8 @@ export const USAGE = `Usage: pnpm cloud:admin [--local] <command>
   override <github-login> <serving-machines> <urls> <reason> [--expires <date>]
   override --remove <github-login>
   refresh <github-login>                  queues a billing refresh for the next 5-minute run
+  duplicates                              duplicate Pro subscriptions and their orders, live
+                                          from Polar, to refund in its dashboard; reads only
 
 <github-login> may also be id:<numeric GitHub id>, for a login two accounts held.
 <date> is an ISO 8601 date or time, such as 2027-01-31.`;
@@ -112,8 +115,52 @@ export function wranglerDb(local: boolean): AdminDb {
   };
 }
 
+/** A GET on Polar's API: the parsed JSON body. The only call the commands make to Polar. */
+export type AdminPolar = (path: string) => Promise<unknown>;
+
+/** Every Polar call pins this version, as `src/polar.ts` does. */
+const POLAR_VERSION = "2026-10";
+
+/**
+ * Polar's API with the production token from Infisical, or, with
+ * `--local`, the sandbox with `POLAR_ACCESS_TOKEN` from the environment.
+ * `POLAR_API_BASE` in the environment overrides the base. The token is
+ * read only when a command needs Polar, and never printed.
+ */
+export function polarReader(local: boolean): AdminPolar {
+  const base = (
+    process.env.POLAR_API_BASE || (local ? "https://sandbox-api.polar.sh" : "https://api.polar.sh")
+  ).replace(/\/+$/, "");
+  let token: string | undefined;
+  return async (path) => {
+    token ??=
+      process.env.POLAR_ACCESS_TOKEN || (local ? undefined : readCloudValues().POLAR_ACCESS_TOKEN);
+    if (!token) {
+      throw new AdminError(
+        local
+          ? "Set POLAR_ACCESS_TOKEN to the sandbox token (Infisical localify, /cloud, dev)."
+          : "POLAR_ACCESS_TOKEN is not in Infisical (localify, /cloud, prod).",
+      );
+    }
+    const response = await fetch(`${base}${path}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/json",
+        "polar-version": POLAR_VERSION,
+      },
+    });
+    if (!response.ok) throw new AdminError(`Polar answered ${response.status} to GET ${path}.`);
+    return response.json();
+  };
+}
+
 /** Runs one command and returns the lines to print. */
-export async function runCommand(db: AdminDb, args: string[], now = Date.now()): Promise<string[]> {
+export async function runCommand(
+  db: AdminDb,
+  args: string[],
+  now = Date.now(),
+  polar: AdminPolar | null = null,
+): Promise<string[]> {
   const [command, ...rest] = args;
   switch (command) {
     case "show":
@@ -132,6 +179,10 @@ export async function runCommand(db: AdminDb, args: string[], now = Date.now()):
         : setOverride(db, rest, now);
     case "refresh":
       return refresh(db, one(rest, "refresh <github-login>"), now);
+    case "duplicates":
+      if (rest.length > 0) throw new UsageError("duplicates takes no argument.");
+      if (!polar) throw new Error("The duplicates command needs Polar");
+      return duplicates(db, polar);
     default:
       throw new UsageError(command ? `Unknown command: ${command}` : "No command given.");
   }
@@ -416,6 +467,96 @@ async function refresh(db: AdminDb, who: string, now: number): Promise<string[]>
   return [describeUser(user), "Queued for a billing refresh at the next 5-minute run."];
 }
 
+/** Order pages read per duplicate; a subscription has one order per period. */
+const MAX_ORDER_PAGES = 10;
+
+/**
+ * Every recorded duplicate Pro subscription, with its orders as Polar has
+ * them now: their status, what was paid, what was refunded and what can
+ * still be refunded. Unpaid orders are listed too, so a payment that
+ * completes after the revocation shows up on a later run. It reads only:
+ * the operator refunds in Polar's dashboard (docs/public-urls.md, "Billing").
+ */
+async function duplicates(db: AdminDb, polar: AdminPolar): Promise<string[]> {
+  const [rows] = await query(
+    db,
+    statement(
+      `SELECT d.subscription_id, d.revoked_at, d.attempts, d.created_at,
+              u.id, u.github_id, u.login, u.banned_at, u.banned_reason
+       FROM duplicate_subscriptions d JOIN users u ON u.id = d.user_id
+       ORDER BY d.created_at, d.subscription_id`,
+    ),
+  );
+  if (rows.length === 0) return ["No duplicate Pro subscription is recorded."];
+  const lines: string[] = [];
+  for (const row of rows) {
+    const id = String(row.subscription_id);
+    lines.push(
+      `Duplicate ${id} of ${describeUser(row as User)}, recorded ${date(Number(row.created_at))}: ${
+        row.revoked_at === null
+          ? `not revoked yet (${Number(row.attempts)} failed attempts)`
+          : `revoked ${date(Number(row.revoked_at))}`
+      }.`,
+    );
+    try {
+      const orders = await ordersOf(polar, id);
+      if (orders.length === 0) lines.push("  No order.");
+      for (const order of orders) lines.push(`  ${describeOrder(order)}`);
+    } catch (error) {
+      lines.push(
+        `  Its orders could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  lines.push(
+    "Refund each order marked to refund in Polar's dashboard (Sales → Orders), reason Duplicate. Run this again for payments still pending.",
+  );
+  return lines;
+}
+
+async function ordersOf(polar: AdminPolar, subscriptionId: string): Promise<Row[]> {
+  const orders: Row[] = [];
+  for (let page = 1; page <= MAX_ORDER_PAGES; page++) {
+    const query = new URLSearchParams({
+      subscription_id: subscriptionId,
+      limit: "100",
+      page: String(page),
+    });
+    const result = (await polar(`/v1/orders/?${query}`)) as {
+      items?: unknown;
+      pagination?: { max_page?: unknown };
+    } | null;
+    if (!Array.isArray(result?.items)) throw new AdminError("Polar's order listing has no items.");
+    orders.push(...(result.items as Row[]));
+    if (page >= Number(result.pagination?.max_page ?? 1)) return orders;
+  }
+  throw new AdminError(`More than ${MAX_ORDER_PAGES} pages of orders: look in Polar's dashboard.`);
+}
+
+/** One order: status, paid, refunded (tax included) and refundable (before tax, as Polar refunds). */
+function describeOrder(order: Row): string {
+  const currency = typeof order.currency === "string" ? ` ${order.currency.toUpperCase()}` : "";
+  const money = (...cents: unknown[]) =>
+    `${(cents.reduce<number>((sum, value) => sum + (Number(value) || 0), 0) / 100).toFixed(2)}${currency}`;
+  const created =
+    typeof order.created_at === "string" && Number.isFinite(Date.parse(order.created_at))
+      ? `, ${date(Date.parse(order.created_at))}`
+      : "";
+  const status = String(order.status ?? "unknown");
+  const refundable = Number(order.refundable_amount) || 0;
+  const paid = order.paid === true ? `paid ${money(order.total_amount)}` : "not paid";
+  const note =
+    (status === "paid" || status === "partially_refunded") && refundable > 0
+      ? " ← to refund"
+      : status === "pending" || status === "draft"
+        ? " ← payment pending: run this again later"
+        : "";
+  return `${String(order.id)} (${status}${created}): ${paid}, refunded ${money(
+    order.refunded_amount,
+    order.refunded_tax_amount,
+  )}, refundable ${money(refundable)} before tax${note}`;
+}
+
 // --- Applying a change ---
 
 /** What decides which of an owner's URLs serve. */
@@ -622,7 +763,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (args.length === 0 || args.includes("--help")) {
       console.log(USAGE);
     } else {
-      const lines = await runCommand(wranglerDb(local), local ? args.slice(1) : args);
+      const lines = await runCommand(
+        wranglerDb(local),
+        local ? args.slice(1) : args,
+        Date.now(),
+        polarReader(local),
+      );
       console.log([local ? "Local D1:" : "Production D1:", ...lines].join("\n"));
     }
   } catch (error) {

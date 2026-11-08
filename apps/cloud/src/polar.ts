@@ -1,7 +1,7 @@
 // The Polar API calls behind the paid plan (docs/public-urls.md, "Billing";
 // ADR 0024): checkouts, customer portal sessions, the subscription list, and
-// the revocation and refund of a duplicate subscription. Never called on the
-// public path.
+// the revocation of a duplicate subscription. Never called on the public
+// path. Refunds are an operator's, in Polar's dashboard.
 
 import type { CallBudget } from "./cloudflare";
 
@@ -29,8 +29,8 @@ export class PolarError extends Error {
 }
 
 /**
- * Polar refused the call for its rate limit, the refunds' own included:
- * a reason to wait, not a failure.
+ * Polar refused the call for its rate limit: a reason to wait, not a
+ * failure.
  */
 export function isRateLimited(error: unknown): error is PolarError & { retryAfterMs: number } {
   return error instanceof PolarError && error.status === 429;
@@ -70,16 +70,6 @@ export type CheckoutRequest = {
 };
 
 export type Checkout = { id: string; url: string; expiresAt: number };
-
-/**
- * An order of a subscription: its payment status (`paid`,
- * `partially_refunded`, `refunded`, `pending`, `draft`, `void`), and what
- * can still be refunded of it, in cents before tax.
- */
-export type PolarOrder = { id: string; status: string; refundableAmount: number };
-
-/** A refund: `pending`, then `succeeded`, `failed` or `canceled`. */
-export type PolarRefund = { id: string; status: string; amount: number };
 
 export class PolarApi {
   private readonly base: string;
@@ -143,45 +133,6 @@ export class PolarApi {
       if (error instanceof PolarError && error.code === "AlreadyCanceledSubscription") return;
       throw error;
     }
-  }
-
-  /** One page, from 1, of a subscription's orders. */
-  async listOrders(subscriptionId: string, page: number): Promise<Page<PolarOrder>> {
-    const query = new URLSearchParams({
-      subscription_id: subscriptionId,
-      limit: String(PAGE_SIZE),
-      page: String(page),
-    });
-    const result = await this.call("GET", `/v1/orders/?${query}`);
-    return listing(result, "order", toOrder);
-  }
-
-  /** Every refund of an order, whatever its status. */
-  async listRefunds(orderId: string): Promise<PolarRefund[]> {
-    const query = new URLSearchParams({ order_id: orderId, limit: String(PAGE_SIZE) });
-    const result = await this.call("GET", `/v1/refunds/?${query}`);
-    return listing(result, "refund", toRefund).items;
-  }
-
-  /**
-   * Refunds `amount` of an order as a duplicate. Polar may answer while the
-   * refund is still `pending`. Null when the order is already fully refunded.
-   */
-  async refundDuplicate(orderId: string, amount: number): Promise<PolarRefund | null> {
-    let result: unknown;
-    try {
-      result = await this.call("POST", "/v1/refunds/", {
-        order_id: orderId,
-        reason: "duplicate",
-        amount,
-      });
-    } catch (error) {
-      if (error instanceof PolarError && error.code === "RefundedAlready") return null;
-      throw error;
-    }
-    const refund = typeof result === "object" && result !== null ? toRefund(result as never) : null;
-    if (refund === null) throw new PolarError(502, null, "The refund Polar created has no id");
-    return refund;
   }
 
   private async call(method: string, path: string, body?: unknown): Promise<unknown> {
@@ -272,27 +223,6 @@ function toSubscription(item: Record<string, unknown>): PolarSubscription | null
     pastDueAt: timeOf(item.past_due_at),
     units: typeof item.units === "number" ? item.units : null,
     externalCustomerId: typeof customer?.external_id === "string" ? customer.external_id : null,
-  };
-}
-
-function toOrder(item: Record<string, unknown>): PolarOrder | null {
-  if (typeof item.id !== "string" || typeof item.status !== "string") return null;
-  // Without `refundable_amount`, what was paid before tax, less what was refunded.
-  const refundable =
-    typeof item.refundable_amount === "number"
-      ? item.refundable_amount
-      : typeof item.net_amount === "number"
-        ? item.net_amount - (typeof item.refunded_amount === "number" ? item.refunded_amount : 0)
-        : 0;
-  return { id: item.id, status: item.status, refundableAmount: Math.max(0, refundable) };
-}
-
-function toRefund(item: Record<string, unknown>): PolarRefund | null {
-  if (typeof item.id !== "string" || typeof item.status !== "string") return null;
-  return {
-    id: item.id,
-    status: item.status,
-    amount: typeof item.amount === "number" ? item.amount : 0,
   };
 }
 

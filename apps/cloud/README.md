@@ -40,7 +40,7 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/names.ts` | Slugs, labels, public hosts, and the origin rule |
 | `src/cookie.ts`, `src/headers.ts`, `src/crypto.ts` | Access and notice cookies, forwarded headers, hashing |
 | `src/pages.ts`, `src/passwords.ts` | The HTML pages (warning, password, errors) and generated passwords |
-| `scripts/admin.ts` | `pnpm cloud:admin`: bans, takedowns, overrides |
+| `scripts/admin.ts` | `pnpm cloud:admin`: bans, takedowns, overrides, billing refreshes, and the duplicate subscriptions to refund |
 
 ## Run locally
 
@@ -106,7 +106,7 @@ Steps 1 to 4 were done for `localify.fyi` on 2026-11-05. Step 5 was done on 2026
    - "Prevent trial abuse" turned on (Settings → Subscriptions);
    - "Enable subscription plan changes" turned on in the customer portal settings, so a subscriber can switch between monthly and yearly there;
    - a webhook endpoint at `https://api.localify.dev/v1/webhooks/polar` (the sandbox points at a dev deployment), with `api_version` `2026-10`, subscribed to every `subscription.*` event and `customer.state_changed`; its `whsec_…` secret goes in Infisical as `POLAR_WEBHOOK_SECRET`, then `pnpm cloud:deploy` again;
-   - an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write`, `orders:read` and `refunds:write`.
+   - an organization access token with `checkouts:write`, `customer_sessions:write`, `subscriptions:read`, `subscriptions:write` and `orders:read`. Refunds are made in the dashboard, so it needs no refund scope.
 
    The Worker sends `Polar-Version: 2026-10` on every call. Polar removes that version in April 2027: move the Worker and the webhook endpoint to the next version together before then.
 
@@ -186,3 +186,5 @@ pnpm cloud:admin show teo-goulois
 pnpm cloud:admin takedown journal-a8f3 "phishing page"
 pnpm cloud:admin override teo-goulois 5 10 team --expires 2027-06-30
 ```
+
+A duplicate Pro subscription is revoked automatically and logged as an error, but never refunded by the Worker. `pnpm cloud:admin duplicates` lists each one with its orders, read live from Polar: refund the orders it marks in Polar's dashboard (Sales → Orders, reason Duplicate), and run it again later for payments that were still pending. It writes nothing.

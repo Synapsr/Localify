@@ -50,7 +50,7 @@ const EVENT_RETENTION_MS = 30 * DAY;
 const MAX_PAGES_PER_USER = 5;
 /** Tries of a refresh that keeps meeting another one's duplicates. */
 const REFRESH_ATTEMPTS = 3;
-/** A duplicate's failed step waits this long, doubling up to a day; a pending refund, this long. */
+/** A duplicate's failed revocation waits this long, doubling up to a day. */
 const DUPLICATE_RETRY_BASE_MS = 5 * MINUTE;
 
 /** An open checkout is reused while it expires more than this from now. */
@@ -73,15 +73,8 @@ const REFRESHES_PER_RUN = 25;
 /** An owed serving reconcile: the owner's two reads, its batch, the slugs. */
 const OWED_QUERIES = 4;
 const OWED_PER_RUN = 10;
-const DUPLICATES_PER_RUN = 10;
-/** A duplicate's revocation, its order listing and an order's refunds. */
-const DUPLICATE_CALLS = 3;
-/** A duplicate's revocation or its final state. */
-const DUPLICATE_QUERIES = 1;
-/** One order: its refunds, then a refund. */
-const REFUND_CALLS = 2;
-/** One order: `creating`, then the refund's state. */
-const REFUND_QUERIES = 2;
+/** Revocations a run attempts, each one Polar call and one query, on a Polar budget of their own. */
+const REVOCATIONS_PER_RUN = 10;
 /** Pages of the organization's subscriptions the daily reconciliation reads. */
 const DAILY_PAGES = 20;
 
@@ -340,7 +333,7 @@ function compare(a: number, b: number): number {
  * keeps while it is entitled, otherwise the one ending latest; and without
  * any, the most recently started one. The other entitled ones are
  * duplicates. A subscription already recorded as a duplicate is never kept:
- * it is on its way to being revoked and refunded.
+ * it is on its way to being revoked.
  */
 function snapshotOf(
   env: Env,
@@ -438,8 +431,8 @@ async function commit(
            AND ended_at IS ?12 AND past_due_at IS ?13 AND addon_machines = ?14
            AND addon_url_packs = ?15)`,
     ).bind(...decides, now, ...fields),
-    // Recorded before any call to Polar: revoking does not refund, and a
-    // revoked subscription no longer looks like a duplicate.
+    // Recorded before any call to Polar: a revoked subscription no longer
+    // looks like a duplicate, and the operator refunds from this record.
     env.DB.prepare(
       `INSERT INTO duplicate_subscriptions (subscription_id, user_id, created_at)
        SELECT value, ?1, ?5 FROM json_each(?4) WHERE ${MAY_WRITE}
@@ -482,14 +475,18 @@ async function commit(
 
   for (const row of duplicates?.results ?? []) {
     console.error(
-      `Duplicate Pro subscription ${String(row.subscription_id)} of user ${userId}: it is revoked and refunded`,
+      `Duplicate Pro subscription ${String(row.subscription_id)} of user ${userId}: it is revoked, and an operator refunds it (pnpm cloud:admin duplicates)`,
     );
   }
   if (owed?.results[0]?.serving_due_at != null) await applyEntitlement(env, userId, revision, now);
   if (watermark !== null) {
     await env.DB.prepare(
+      // Only once no serving reconcile is owed: a reconcile this refresh
+      // was overtaken in, or a newer one's that failed, keeps them pending.
       `UPDATE webhook_events SET processed_at = ?3, next_attempt_at = NULL
-       WHERE user_id = ?1 AND seq <= ?2 AND processed_at IS NULL`,
+       WHERE user_id = ?1 AND seq <= ?2 AND processed_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM billing_revisions
+                         WHERE user_id = ?1 AND serving_due_at IS NOT NULL)`,
     )
       .bind(userId, watermark, now)
       .run();
@@ -535,8 +532,8 @@ async function applyEntitlement(
 /**
  * A failed refresh: its events wait 1 minute, doubling up to 6 hours, and
  * the user's turn in the reconciliation queue goes to the back. Polar's
- * rate limit is no failure: the events wait what it asks, and keep their
- * count.
+ * rate limit is no failure: the events and the user's turn wait what it
+ * asks, and the events keep their count.
  */
 async function recordFailure(
   env: Env,
@@ -564,7 +561,7 @@ async function recordFailure(
       env.DB.prepare(
         `UPDATE billing_revisions SET check_due_at = ?2
          WHERE user_id = ?1 AND check_due_at IS NOT NULL`,
-      ).bind(userId, now),
+      ).bind(userId, limited ? now + Math.max(error.retryAfterMs, RETRY_BASE_MS) : now),
     ]);
     for (const event of events?.results ?? []) {
       if (!limited && event.attempts >= RETRY_ALERT_ATTEMPTS) {
@@ -581,30 +578,31 @@ async function recordFailure(
 // --- The 5-minute job ---
 
 /**
- * Within its budgets: refreshes the users with a webhook retry due, then
- * those due for the reconciliation, oldest first; runs the serving
- * reconciles still owed; then settles duplicate subscriptions. Nothing
- * reaches Polar when nothing is due, and Polar's rate limit ends that part
- * of the run.
+ * Within its budgets: revokes duplicate subscriptions; refreshes the users
+ * with a webhook retry due, then those due for the reconciliation, oldest
+ * first; then runs the serving reconciles still owed. Nothing reaches
+ * Polar when nothing is due, and Polar's rate limit ends that part of the
+ * run.
  */
 export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<void> {
   const queries = new CallBudget(JOB_QUERY_BUDGET);
-  const calls = new CallBudget(JOB_CALL_BUDGET);
   const env: Env = { ...jobEnv, DB: meteredDb(jobEnv.DB, queries) };
-  let polar: PolarApi | null = null;
-  const api = () => (polar ??= new PolarApi(env, calls));
-
-  const { results: due } = await env.DB.prepare(
-    `SELECT user_id FROM (
-       SELECT user_id, 0 AS turn, next_attempt_at AS due FROM webhook_events
-       WHERE processed_at IS NULL AND user_id IS NOT NULL AND next_attempt_at <= ?1
-       UNION ALL
-       SELECT user_id, 1, check_due_at FROM billing_revisions WHERE check_due_at <= ?1)
-     GROUP BY user_id ORDER BY MIN(turn), MIN(due), user_id LIMIT ?2`,
-  )
-    .bind(now, REFRESHES_PER_RUN)
-    .all<{ user_id: string }>();
   try {
+    // First, and on their own Polar budget: refresh work never holds them back.
+    await revokeDuplicates(env, now, queries);
+    const calls = new CallBudget(JOB_CALL_BUDGET);
+    let polar: PolarApi | null = null;
+    const api = () => (polar ??= new PolarApi(env, calls));
+    const { results: due } = await env.DB.prepare(
+      `SELECT user_id FROM (
+         SELECT user_id, 0 AS turn, next_attempt_at AS due FROM webhook_events
+         WHERE processed_at IS NULL AND user_id IS NOT NULL AND next_attempt_at <= ?1
+         UNION ALL
+         SELECT user_id, 1, check_due_at FROM billing_revisions WHERE check_due_at <= ?1)
+       GROUP BY user_id ORDER BY MIN(turn), MIN(due), user_id LIMIT ?2`,
+    )
+      .bind(now, REFRESHES_PER_RUN)
+      .all<{ user_id: string }>();
     for (const { user_id: userId } of due) {
       if (!queries.has(REFRESH_QUERIES + OWED_QUERIES + 1) || !calls.has(1)) break;
       try {
@@ -619,7 +617,6 @@ export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<voi
       }
     }
     await runOwedReconciles(env, now, queries);
-    await settleDuplicates(env, api, now, queries, calls);
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
     console.error("Billing jobs need Polar's settings:", error.message);
@@ -627,14 +624,16 @@ export async function runBillingJobs(jobEnv: Env, now = Date.now()): Promise<voi
 }
 
 /**
- * The serving reconciles a refresh committed but could not finish, oldest
- * first, each guarded by the revision `billing` holds now.
+ * The serving reconciles a refresh committed but could not finish, each
+ * guarded by the revision `billing` holds now, every run. The ones owed
+ * longest go first, and one that fails goes to the back, so a few that
+ * keep failing cannot hold back the others.
  */
 async function runOwedReconciles(env: Env, now: number, queries: CallBudget): Promise<void> {
   if (!queries.has(1 + OWED_QUERIES + 1)) return;
   const { results } = await env.DB.prepare(
     `SELECT r.user_id, b.revision FROM billing_revisions r JOIN billing b ON b.user_id = r.user_id
-     WHERE r.serving_due_at IS NOT NULL ORDER BY r.serving_due_at LIMIT ?1`,
+     WHERE r.serving_due_at IS NOT NULL ORDER BY r.serving_due_at, r.user_id LIMIT ?1`,
   )
     .bind(OWED_PER_RUN)
     .all<{ user_id: string; revision: number }>();
@@ -643,64 +642,50 @@ async function runOwedReconciles(env: Env, now: number, queries: CallBudget): Pr
     try {
       await applyEntitlement(env, userId, revision, now);
     } catch (error) {
-      console.error("An owed serving reconcile failed; the next run retries it", userId, error);
+      console.error("An owed serving reconcile failed; it is retried", userId, error);
+      await env.DB.prepare(
+        `UPDATE billing_revisions SET serving_due_at = ?2
+         WHERE user_id = ?1 AND serving_due_at IS NOT NULL`,
+      )
+        .bind(userId, now)
+        .run();
     }
   }
 }
 
-type DuplicateRow = {
-  subscription_id: string;
-  user_id: string;
-  revoked_at: number | null;
-  attempts: number;
-  created_at: number;
-};
-
-/** What a pass over a duplicate's orders left: all refunded, refunds pending, a failure, or no budget. */
-type RefundOutcome = "settled" | "waiting" | "failed" | "budget";
+type DuplicateRow = { subscription_id: string; user_id: string; attempts: number };
 
 /**
- * Revokes each recorded duplicate, then refunds its paid orders in full as
- * `duplicate`, until Polar reports every refund `succeeded`. A failure
- * waits 5 minutes, doubling up to a day; one still unsettled after a day
- * is logged as an error at every failure. Pending refunds are looked at
- * again 5 minutes later. Polar's rate limit ends the pass and counts as no
- * failure.
+ * Revokes recorded duplicates on a Polar budget of their own: those never
+ * tried first, then the others by their next attempt, so one that keeps
+ * failing waits its backoff (5 minutes × 2^(attempts − 1), at most a day)
+ * behind the rest. Refunds are an operator's: `pnpm cloud:admin
+ * duplicates` lists the orders of each duplicate, live from Polar.
  */
-async function settleDuplicates(
-  env: Env,
-  api: () => PolarApi,
-  now: number,
-  queries: CallBudget,
-  calls: CallBudget,
-): Promise<void> {
-  if (!queries.has(1 + DUPLICATE_QUERIES)) return;
+async function revokeDuplicates(env: Env, now: number, queries: CallBudget): Promise<void> {
+  if (!queries.has(1 + REVOCATIONS_PER_RUN)) return;
   const { results } = await env.DB.prepare(
-    `SELECT subscription_id, user_id, revoked_at, attempts, created_at
-     FROM duplicate_subscriptions
-     WHERE (revoked_at IS NULL OR refunded_at IS NULL)
-       AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
-     ORDER BY next_attempt_at IS NOT NULL, next_attempt_at, created_at LIMIT ?2`,
+    `SELECT subscription_id, user_id, attempts FROM duplicate_subscriptions
+     WHERE revoked_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
+     ORDER BY next_attempt_at IS NOT NULL, next_attempt_at, created_at, subscription_id
+     LIMIT ?2`,
   )
-    .bind(now, DUPLICATES_PER_RUN)
+    .bind(now, REVOCATIONS_PER_RUN)
     .all<DuplicateRow>();
+  if (results.length === 0) return;
+  const polar = new PolarApi(env, new CallBudget(REVOCATIONS_PER_RUN));
   for (const row of results) {
-    if (!queries.has(DUPLICATE_QUERIES) || !calls.has(DUPLICATE_CALLS)) return;
-    const polar = api();
-    let outcome: RefundOutcome;
-    let failure: unknown = null;
     try {
-      if (row.revoked_at === null) {
-        await polar.revokeSubscription(row.subscription_id);
-        await env.DB.prepare(
-          `UPDATE duplicate_subscriptions SET revoked_at = ?2 WHERE subscription_id = ?1`,
-        )
-          .bind(row.subscription_id, now)
-          .run();
-        row.revoked_at = now;
-      }
-      // Refunded once revoked, so no order can follow the refunds.
-      outcome = await refundOrders(env, polar, row.subscription_id, now, queries, calls);
+      await polar.revokeSubscription(row.subscription_id);
+      await env.DB.prepare(
+        `UPDATE duplicate_subscriptions SET revoked_at = ?2, attempts = 0, next_attempt_at = NULL
+         WHERE subscription_id = ?1`,
+      )
+        .bind(row.subscription_id, now)
+        .run();
+      console.error(
+        `Duplicate Pro subscription ${row.subscription_id} of user ${row.user_id} is revoked: refund it in Polar (pnpm cloud:admin duplicates)`,
+      );
     } catch (error) {
       if (error instanceof ConfigError) throw error;
       if (isRateLimited(error)) {
@@ -709,27 +694,9 @@ async function settleDuplicates(
         )
           .bind(row.subscription_id, now + error.retryAfterMs)
           .run();
-        console.warn("Polar's rate limit stops this run's duplicate refunds");
+        console.warn("Polar's rate limit stops this run's revocations");
         return;
       }
-      outcome = "failed";
-      failure = error;
-    }
-    if (outcome === "budget") return;
-    if (outcome === "settled") {
-      await env.DB.prepare(
-        `UPDATE duplicate_subscriptions SET refunded_at = ?2, attempts = 0, next_attempt_at = NULL
-         WHERE subscription_id = ?1`,
-      )
-        .bind(row.subscription_id, now)
-        .run();
-    } else if (outcome === "waiting") {
-      await env.DB.prepare(
-        `UPDATE duplicate_subscriptions SET next_attempt_at = ?2 WHERE subscription_id = ?1`,
-      )
-        .bind(row.subscription_id, now + DUPLICATE_RETRY_BASE_MS)
-        .run();
-    } else {
       const attempts = row.attempts + 1;
       await env.DB.prepare(
         `UPDATE duplicate_subscriptions SET attempts = ?2, next_attempt_at = ?3
@@ -737,129 +704,17 @@ async function settleDuplicates(
       )
         .bind(row.subscription_id, attempts, duplicateRetryAt(now, attempts))
         .run();
-      const log = row.created_at <= now - DAY ? console.error : console.warn;
-      log(
-        `Duplicate Pro subscription ${row.subscription_id} of user ${row.user_id} is not ${
-          row.revoked_at === null ? "revoked" : "refunded"
-        } yet`,
-        failure ?? "a refund failed",
+      console.error(
+        `Revoking duplicate Pro subscription ${row.subscription_id} of user ${row.user_id} failed; it is retried`,
+        error,
       );
     }
   }
 }
 
-/** A failure waits 5 minutes × 2^(attempts − 1), at most a day. */
+/** A failed revocation waits 5 minutes × 2^(attempts − 1), at most a day. */
 function duplicateRetryAt(now: number, attempts: number): number {
   return now + Math.min(DUPLICATE_RETRY_BASE_MS * 2 ** (attempts - 1), DAY);
-}
-
-/** Orders that took money: the only ones refunded. */
-const PAID_ORDERS = new Set(["paid", "partially_refunded"]);
-
-type RefundRow = { order_id: string; refund_id: string | null; amount: number; status: string };
-
-/**
- * One pass over a revoked duplicate's orders. For each paid order, the
- * order's refunds are looked up first, so a refund created before a crash
- * is found rather than made again: a pending one is waited for, one of ours
- * that ended `failed` or `canceled` is recorded and retried after the
- * backoff, and while something is left to refund, a refund of it all is
- * recorded `creating`, then created. An error on one order is recorded on
- * it and does not stop the others; only Polar's rate limit does.
- */
-async function refundOrders(
-  env: Env,
-  polar: PolarApi,
-  subscriptionId: string,
-  now: number,
-  queries: CallBudget,
-  calls: CallBudget,
-): Promise<RefundOutcome> {
-  const orders = [];
-  for (let page = 1; ; page++) {
-    const { items, maxPage } = await polar.listOrders(subscriptionId, page);
-    orders.push(...items);
-    if (page >= maxPage) break;
-  }
-  const { results: rows } = await env.DB.prepare(
-    `SELECT order_id, refund_id, amount, status FROM duplicate_refunds WHERE subscription_id = ?1`,
-  )
-    .bind(subscriptionId)
-    .all<RefundRow>();
-  const tracked = new Map(rows.map((row) => [row.order_id, row]));
-  const save = (
-    orderId: string,
-    refundId: string | null,
-    amount: number,
-    status: string,
-    error: string | null = null,
-  ) =>
-    env.DB.prepare(
-      `INSERT INTO duplicate_refunds (order_id, subscription_id, refund_id, amount, status, error,
-                                      created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-       ON CONFLICT (order_id) DO UPDATE SET refund_id = excluded.refund_id,
-         amount = excluded.amount, status = excluded.status, error = excluded.error,
-         updated_at = excluded.updated_at`,
-    )
-      .bind(orderId, subscriptionId, refundId, amount, status, error, now)
-      .run();
-
-  let waiting = false;
-  let failed = false;
-  for (const order of orders) {
-    const mine = tracked.get(order.id);
-    // An order refunded in full since the last pass still closes its record.
-    if (!PAID_ORDERS.has(order.status) && (!mine || mine.status === "succeeded")) continue;
-    if (!calls.has(REFUND_CALLS) || !queries.has(REFUND_QUERIES + DUPLICATE_QUERIES)) {
-      return "budget";
-    }
-    try {
-      const refunds = await polar.listRefunds(order.id);
-      const pending = refunds.find((refund) => refund.status === "pending");
-      if (pending) {
-        await save(order.id, pending.id, pending.amount, "pending");
-        waiting = true;
-        continue;
-      }
-      const ours = mine?.refund_id ? refunds.find((refund) => refund.id === mine.refund_id) : null;
-      if (order.refundableAmount <= 0) {
-        if (mine) await save(order.id, mine.refund_id, ours?.amount ?? mine.amount, "succeeded");
-        continue;
-      }
-      if (!PAID_ORDERS.has(order.status)) continue;
-      if (
-        ours &&
-        (ours.status === "failed" || ours.status === "canceled") &&
-        (mine?.status === "pending" || mine?.status === "creating")
-      ) {
-        // Seen ending for the first time: retried after the backoff.
-        await save(order.id, ours.id, ours.amount, ours.status);
-        failed = true;
-        continue;
-      }
-      await save(order.id, null, order.refundableAmount, "creating");
-      const created = await polar.refundDuplicate(order.id, order.refundableAmount);
-      if (created === null) {
-        await save(order.id, null, order.refundableAmount, "succeeded");
-        continue;
-      }
-      await save(order.id, created.id, created.amount, created.status);
-      if (created.status === "pending") waiting = true;
-      else if (created.status !== "succeeded") failed = true;
-    } catch (error) {
-      if (isRateLimited(error)) throw error;
-      await save(
-        order.id,
-        mine?.refund_id ?? null,
-        order.refundableAmount,
-        "failed",
-        error instanceof PolarError ? `${error.status} ${error.code ?? ""}`.trim() : String(error),
-      );
-      failed = true;
-    }
-  }
-  return failed ? "failed" : waiting ? "waiting" : "settled";
 }
 
 // --- The daily reconciliation ---
@@ -981,7 +836,7 @@ export async function proCheckout(
   if (stored) return { kind: "checkout", url: stored.url };
   // Another request took the row over while Polar answered: its checkout
   // is the one, and this one's link is never given out. A subscription
-  // made through it anyway would be a duplicate, revoked and refunded.
+  // made through it anyway would be a duplicate, and revoked.
   console.warn(`Checkout ${checkout.id} of user ${userId} lost its row to another request`);
   return storedCheckout(env, userId);
 }

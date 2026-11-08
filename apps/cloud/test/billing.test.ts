@@ -45,31 +45,10 @@ type Raw = Record<string, unknown>;
 type FakePolar = {
   /** Every subscription of the organization. */
   subscriptions: Raw[];
-  /** Orders by subscription id. */
-  orders: Map<string, Raw[]>;
   /** Answers `POST /v1/checkouts/`. */
   checkout: (body: Raw) => Response | Promise<Response>;
-  /** Every refund created, with its current status. */
-  refunds: Raw[];
-  /** The status a new refund reaches at once: `pending` leaves it for `settleRefund`. */
-  refundStatus: "pending" | "succeeded" | "failed" | "canceled";
   revoked: string[];
 };
-
-function orderOf(fake: FakePolar, orderId: string): Raw | undefined {
-  return [...fake.orders.values()].flat().find((order) => order.id === orderId);
-}
-
-/** Moves a refund to `status`; a success takes its amount off the order. */
-function settleRefund(fake: FakePolar, refundId: string, status: string): void {
-  const refund = fake.refunds.find((r) => r.id === refundId)!;
-  refund.status = status;
-  if (status !== "succeeded") return;
-  const order = orderOf(fake, String(refund.order_id));
-  if (!order) return;
-  order.refundable_amount = Number(order.refundable_amount) - Number(refund.amount);
-  order.status = Number(order.refundable_amount) <= 0 ? "refunded" : "partially_refunded";
-}
 
 function page(items: Raw[], url: string): Response {
   const query = new URL(url).searchParams;
@@ -88,7 +67,6 @@ function fakePolar(context: TestContext): FakePolar {
   let checkouts = 0;
   const fake: FakePolar = {
     subscriptions: [],
-    orders: new Map(),
     checkout: () =>
       jsonResponse(
         {
@@ -98,8 +76,6 @@ function fakePolar(context: TestContext): FakePolar {
         },
         201,
       ),
-    refunds: [],
-    refundStatus: "succeeded",
     revoked: [],
   };
   context.routes.set(`GET ${POLAR}/v1/subscriptions/`, (_body, url) => {
@@ -122,35 +98,6 @@ function fakePolar(context: TestContext): FakePolar {
     fake.revoked.push(id);
     Object.assign(subscription, { status: "canceled", ended_at: iso(Date.now()) });
     return jsonResponse(subscription);
-  });
-  context.routes.set(`GET ${POLAR}/v1/orders/`, (_body, url) => {
-    const id = new URL(url).searchParams.get("subscription_id") ?? "";
-    return page(fake.orders.get(id) ?? [], url);
-  });
-  context.routes.set(`GET ${POLAR}/v1/refunds/`, (_body, url) => {
-    const id = new URL(url).searchParams.get("order_id");
-    return page(
-      fake.refunds.filter((refund) => refund.order_id === id),
-      url,
-    );
-  });
-  context.routes.set(`POST ${POLAR}/v1/refunds/`, (body) => {
-    const request = JSON.parse(body ?? "{}") as Raw;
-    const order = orderOf(fake, String(request.order_id));
-    if (order && Number(order.refundable_amount) <= 0) {
-      return jsonResponse({ error: "RefundedAlready", detail: "Already refunded" }, 403);
-    }
-    if (order && order.status !== "paid" && order.status !== "partially_refunded") {
-      return jsonResponse({ error: "PaymentError", detail: "The order is not paid" }, 422);
-    }
-    const refund: Raw = {
-      id: `refund-${fake.refunds.length + 1}`,
-      ...request,
-      status: "pending",
-    };
-    fake.refunds.push(refund);
-    settleRefund(fake, String(refund.id), fake.refundStatus);
-    return jsonResponse(refund, 201);
   });
   context.routes.set(`POST ${POLAR}/v1/checkouts/`, (body) =>
     fake.checkout(JSON.parse(body ?? "{}") as Raw),
@@ -682,6 +629,8 @@ describe("the refresh", () => {
           headers: { "retry-after": "120" },
         }),
     );
+    // Queued by the daily job as well.
+    run("INSERT INTO billing_revisions (user_id, last, check_due_at) VALUES (?, 0, 5)", userId);
     const now = Date.now();
     await expect(
       refreshBilling(context.env, userId, new PolarApi(context.env), now),
@@ -689,6 +638,86 @@ describe("the refresh", () => {
     expect(
       get("SELECT attempts, next_attempt_at FROM webhook_events WHERE id = 'msg_limited'"),
     ).toEqual({ attempts: 0, next_attempt_at: now + 120_000 });
+    // Its turn in the daily queue waits the same, instead of coming back at once.
+    expect(get("SELECT check_due_at FROM billing_revisions WHERE user_id = ?", userId)).toEqual({
+      check_due_at: now + 120_000,
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runBillingJobs(context.env, now + 60_000);
+    expect(polarCalls("GET", "/v1/subscriptions/")).toHaveLength(1);
+  });
+
+  it("sends an owed reconcile that fails to the back, so the others get their turn", async () => {
+    for (let i = 0; i < 11; i++) {
+      const id = `owed-${String(i).padStart(2, "0")}`;
+      addUser(id, 2000 + i);
+      run("INSERT INTO billing (user_id, revision, refreshed_at) VALUES (?, 1, 1)", id);
+      run(
+        "INSERT INTO billing_revisions (user_id, last, serving_due_at) VALUES (?, 1, ?)",
+        id,
+        1 + i,
+      );
+    }
+    // The reconciles of the 10 owed longest keep failing.
+    const failing = new Set(
+      Array.from({ length: 10 }, (_, i) => `owed-${String(i).padStart(2, "0")}`),
+    );
+    const db = context.env.DB;
+    const env = {
+      ...context.env,
+      DB: {
+        prepare: (sql: string) => db.prepare(sql),
+        batch: async (statements: D1PreparedStatement[]) => {
+          const params = statements.flatMap((s) => (s as unknown as { params: unknown[] }).params);
+          const sql = statements.map((s) => (s as unknown as { sql: string }).sql);
+          if (reconcileBatch(sql) && params.some((p) => failing.has(String(p)))) {
+            throw new Error("D1 refused the batch");
+          }
+          return db.batch(statements);
+        },
+      } as unknown as D1Database,
+    } as Env;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const owed = (id: string) =>
+      get<{ serving_due_at: number | null }>(
+        "SELECT serving_due_at FROM billing_revisions WHERE user_id = ?",
+        id,
+      ).serving_due_at;
+
+    const now = Date.now();
+    await runBillingJobs(env, now);
+    expect(owed("owed-10")).toBe(11);
+    expect(owed("owed-00")).toBe(now);
+    // The eleventh gets its turn on the next run, and the failing ones are still retried.
+    await runBillingJobs(env, now + 5 * 60 * 1000);
+    expect(owed("owed-10")).toBeNull();
+    expect(owed("owed-00")).toBe(now + 5 * 60 * 1000);
+  });
+
+  it("leaves its events pending while a serving reconcile is still owed", async () => {
+    const { userId, machineId, sub } = await servingUser();
+    run(
+      `INSERT INTO webhook_events (id, type, user_id, received_at, next_attempt_at)
+       VALUES ('msg_older', 'subscription.revoked', ?, 1, 1)`,
+      userId,
+    );
+    // The older refresh commits a revocation and stops after its reconcile read.
+    Object.assign(sub, { status: "canceled", ended_at: iso(Date.now()) });
+    const older = gatedDb(reconcileBatch, "hold");
+    const olderRefresh = refreshBilling(older.env, userId, new PolarApi(older.env));
+    await vi.waitFor(() => expect(older.held).toHaveLength(1));
+
+    // A newer one commits too, and its reconcile fails.
+    const newer = gatedDb(reconcileBatch, "fail");
+    await expect(refreshBilling(newer.env, userId, new PolarApi(newer.env))).rejects.toThrow(
+      /refused/,
+    );
+
+    // The older reconcile is now a no-op: the debt stays, and so does the event.
+    older.held[0]!();
+    expect(await olderRefresh).toBe("committed");
+    expect(servingState(userId, machineId).owed).not.toBeNull();
+    expect(events().find((event) => event.id === "msg_older")!.processed_at).toBeNull();
   });
 
   it("marks only the events at or below its watermark as processed", async () => {
@@ -794,11 +823,13 @@ describe("the refresh", () => {
     const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
       entitled: false,
     });
-    const sub = subscription(userId);
-    polar.orders.set(String(sub.id), [{ id: "order-1", status: "refunded", refundable_amount: 0 }]);
+    // Polar keeps the subscription active after refunding an order.
+    subscription(userId);
     await refresh(userId);
     expect(await plan(token)).toMatchObject({ status: "active", entitled: true });
+    // The refresh reads subscriptions only: orders and refunds play no part.
     expect(polarCalls("GET", "/v1/orders/")).toEqual([]);
+    expect(polarCalls("GET", "/v1/refunds/")).toEqual([]);
   });
 
   it("keeps past_due entitled until 7 days after Polar's past_due_at", async () => {
@@ -925,7 +956,22 @@ describe("the refresh", () => {
 // --- Duplicate subscriptions ---
 
 describe("duplicate Pro subscriptions", () => {
-  it("keep the one ending latest, revoke the other and refund it in full", async () => {
+  type Duplicate = { revoked_at: number | null; attempts: number; next_attempt_at: number | null };
+  function duplicateRow(id: string): Duplicate {
+    return get<Duplicate>(
+      "SELECT revoked_at, attempts, next_attempt_at FROM duplicate_subscriptions WHERE subscription_id = ?",
+      id,
+    );
+  }
+
+  /** No refund is ever made, or even looked at: that is an operator's. */
+  function expectNoRefundWork(): void {
+    expect(polarCalls("POST", "/v1/refunds/")).toEqual([]);
+    expect(polarCalls("GET", "/v1/refunds/")).toEqual([]);
+    expect(polarCalls("GET", "/v1/orders/")).toEqual([]);
+  }
+
+  it("keep the one ending latest, revoke the other, and never refund it", async () => {
     const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
       entitled: false,
     });
@@ -935,22 +981,6 @@ describe("duplicate Pro subscriptions", () => {
       recurring_interval: "year",
       current_period_end: iso(Date.now() + 360 * DAY),
     });
-    polar.orders.set(String(monthly.id), [
-      {
-        id: "order-paid",
-        status: "paid",
-        net_amount: 799,
-        refunded_amount: 0,
-        refundable_amount: 799,
-      },
-      {
-        id: "order-trial",
-        status: "paid",
-        net_amount: 0,
-        refunded_amount: 0,
-        refundable_amount: 0,
-      },
-    ]);
     const alerts = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await refresh(userId);
@@ -961,219 +991,122 @@ describe("duplicate Pro subscriptions", () => {
     expect(alerts.mock.calls.some((call) => String(call[0]).includes(String(monthly.id)))).toBe(
       true,
     );
-    expect(
-      get("SELECT subscription_id, revoked_at, refunded_at FROM duplicate_subscriptions"),
-    ).toEqual({
-      subscription_id: monthly.id,
+    expect(duplicateRow(String(monthly.id))).toEqual({
       revoked_at: null,
-      refunded_at: null,
+      attempts: 0,
+      next_attempt_at: null,
     });
     // Recorded before any call: the refresh itself revokes nothing.
     expect(polar.revoked).toEqual([]);
 
+    alerts.mockClear();
     await runBillingJobs(context.env, Date.now());
     expect(polar.revoked).toEqual([monthly.id]);
-    expect(polar.refunds).toMatchObject([
-      { order_id: "order-paid", reason: "duplicate", amount: 799, status: "succeeded" },
-    ]);
-    expect(get("SELECT order_id, refund_id, amount, status FROM duplicate_refunds")).toEqual({
-      order_id: "order-paid",
-      refund_id: "refund-1",
-      amount: 799,
-      status: "succeeded",
-    });
-    const row = get<{ revoked_at: number | null; refunded_at: number | null }>(
-      "SELECT revoked_at, refunded_at FROM duplicate_subscriptions",
-    );
-    expect(row.revoked_at).not.toBeNull();
-    expect(row.refunded_at).not.toBeNull();
+    expect(duplicateRow(String(monthly.id)).revoked_at).not.toBeNull();
+    // The revocation alerts again, pointing at the listing to refund from.
+    expect(
+      alerts.mock.calls.some((call) => String(call[0]).includes("pnpm cloud:admin duplicates")),
+    ).toBe(true);
 
     // Revoked, it is no duplicate any more, and the kept one still serves.
     await refresh(userId);
     expect(await plan(token)).toMatchObject({ status: "active", interval: "year", entitled: true });
     await runBillingJobs(context.env, Date.now() + DAY);
     expect(polar.revoked).toHaveLength(1);
-    expect(polar.refunds).toHaveLength(1);
+    expectNoRefundWork();
   });
 
-  /** A user with a duplicate, recorded by a refresh, whose orders are `orders`. */
-  async function withDuplicate(orders: Raw[]) {
+  it("retry a failed revocation after 5 minutes, doubling", async () => {
     const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
     const duplicate = subscription(userId, { current_period_end: iso(Date.now() + 10 * DAY) });
     subscription(userId, { current_period_end: iso(Date.now() + 20 * DAY) });
-    polar.orders.set(String(duplicate.id), orders);
     vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     await refresh(userId);
-    return { userId, duplicate };
-  }
-
-  type Duplicate = {
-    revoked_at: number | null;
-    refunded_at: number | null;
-    attempts: number;
-    next_attempt_at: number | null;
-  };
-  function duplicateRow(): Duplicate {
-    return get<Duplicate>(
-      "SELECT revoked_at, refunded_at, attempts, next_attempt_at FROM duplicate_subscriptions",
+    const revoke = context.routes.get(`DELETE ${POLAR}/v1/subscriptions/`)!;
+    context.routes.set(`DELETE ${POLAR}/v1/subscriptions/`, () =>
+      jsonResponse({ error: "SubscriptionLocked" }, 409),
     );
-  }
-  function refundRow(orderId: string) {
-    return get<{ refund_id: string | null; status: string; error: string | null }>(
-      "SELECT refund_id, status, error FROM duplicate_refunds WHERE order_id = ?",
-      orderId,
-    );
-  }
 
-  it("retry a failed step after 5 minutes, doubling, and count a refund already made as settled", async () => {
-    const { duplicate } = await withDuplicate([
-      { id: "order-1", status: "paid", refundable_amount: 799 },
-    ]);
-
-    // The refund fails once: 5 minutes.
-    context.routes.set(`POST ${POLAR}/v1/refunds/`, () => jsonResponse({ error: "Oops" }, 500));
     const now = Date.now();
     await runBillingJobs(context.env, now);
-    const failed = duplicateRow();
-    expect(failed.revoked_at).not.toBeNull();
-    expect(failed.refunded_at).toBeNull();
-    expect(failed).toMatchObject({ attempts: 1, next_attempt_at: now + 5 * 60 * 1000 });
-    expect(refundRow("order-1")).toMatchObject({ status: "failed", error: "500 Oops" });
-
-    // Twice: 10 minutes.
-    await runBillingJobs(context.env, failed.next_attempt_at!);
-    expect(duplicateRow()).toMatchObject({
-      attempts: 2,
-      next_attempt_at: failed.next_attempt_at! + 10 * 60 * 1000,
-    });
-
-    // Polar made it after all.
-    context.routes.set(`POST ${POLAR}/v1/refunds/`, () =>
-      jsonResponse({ error: "RefundedAlready", detail: "Already" }, 403),
-    );
-    await runBillingJobs(context.env, duplicateRow().next_attempt_at!);
-    expect(duplicateRow().refunded_at).not.toBeNull();
-    expect(polar.revoked).toEqual([duplicate.id]);
-  });
-
-  it("keep the obligation open while a refund is pending, until it succeeds", async () => {
-    await withDuplicate([{ id: "order-1", status: "paid", refundable_amount: 799 }]);
-    polar.refundStatus = "pending";
-    const now = Date.now();
-    await runBillingJobs(context.env, now);
-    expect(polar.refunds).toMatchObject([{ id: "refund-1", status: "pending" }]);
-    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "pending" });
-    // Waiting is no failure: looked at again in 5 minutes.
-    expect(duplicateRow()).toMatchObject({
-      refunded_at: null,
-      attempts: 0,
+    const id = String(duplicate.id);
+    expect(duplicateRow(id)).toEqual({
+      revoked_at: null,
+      attempts: 1,
       next_attempt_at: now + 5 * 60 * 1000,
     });
-
-    // Still pending: nothing new.
+    // Not due yet: left alone.
+    await runBillingJobs(context.env, now + 60_000);
+    expect(duplicateRow(id).attempts).toBe(1);
     await runBillingJobs(context.env, now + 5 * 60 * 1000);
-    expect(polar.refunds).toHaveLength(1);
-    expect(duplicateRow().refunded_at).toBeNull();
-
-    settleRefund(polar, "refund-1", "succeeded");
-    await runBillingJobs(context.env, now + 10 * 60 * 1000);
-    expect(polar.refunds).toHaveLength(1);
-    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "succeeded" });
-    expect(duplicateRow().refunded_at).not.toBeNull();
-  });
-
-  it("retry a refund that ends failed, after the backoff", async () => {
-    await withDuplicate([{ id: "order-1", status: "paid", refundable_amount: 799 }]);
-    polar.refundStatus = "pending";
-    const now = Date.now();
-    await runBillingJobs(context.env, now);
-    settleRefund(polar, "refund-1", "failed");
-
-    // Seen failed: recorded, and retried after 5 minutes.
-    const seen = now + 5 * 60 * 1000;
-    await runBillingJobs(context.env, seen);
-    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "failed" });
-    expect(duplicateRow()).toMatchObject({ attempts: 1, next_attempt_at: seen + 5 * 60 * 1000 });
-    expect(polar.refunds).toHaveLength(1);
-
-    polar.refundStatus = "succeeded";
-    await runBillingJobs(context.env, seen + 5 * 60 * 1000);
-    expect(polar.refunds).toMatchObject([
-      { id: "refund-1", status: "failed" },
-      { id: "refund-2", status: "succeeded", amount: 799 },
-    ]);
-    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-2", status: "succeeded" });
-    expect(duplicateRow().refunded_at).not.toBeNull();
-  });
-
-  it("never refund twice after a crash between the refund and its record", async () => {
-    await withDuplicate([
-      { id: "order-1", status: "paid", refundable_amount: 799 },
-      { id: "order-2", status: "paid", refundable_amount: 799 },
-    ]);
-    polar.refundStatus = "pending";
-    // Polar makes the refund of order-1, and the answer never arrives.
-    const create = context.routes.get(`POST ${POLAR}/v1/refunds/`)!;
-    context.routes.set(`POST ${POLAR}/v1/refunds/`, (body, url) => {
-      const answer = create(body, url);
-      if (JSON.parse(body ?? "{}").order_id === "order-1") throw new Error("connection reset");
-      return answer;
+    expect(duplicateRow(id)).toMatchObject({
+      attempts: 2,
+      next_attempt_at: now + 15 * 60 * 1000,
     });
+
+    context.routes.set(`DELETE ${POLAR}/v1/subscriptions/`, revoke);
+    await runBillingJobs(context.env, now + 15 * 60 * 1000);
+    expect(duplicateRow(id)).toMatchObject({ attempts: 0, next_attempt_at: null });
+    expect(duplicateRow(id).revoked_at).not.toBeNull();
+    expectNoRefundWork();
+  });
+
+  it("revoke a new duplicate first, however many old ones keep failing or refreshes wait", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
     const now = Date.now();
+    // 20 old duplicates Polar no longer knows, all due again.
+    for (let i = 0; i < 20; i++) {
+      run(
+        `INSERT INTO duplicate_subscriptions (subscription_id, user_id, attempts, next_attempt_at, created_at)
+         VALUES (?, ?, 3, ?, ?)`,
+        `old-${String(i).padStart(2, "0")}`,
+        userId,
+        now - 1000 + i,
+        i,
+      );
+    }
+    // And a refresh queue full enough to spend the refreshes' whole budget.
+    for (let i = 0; i < 30; i++) {
+      addUser(`waiting-${i}`, 1000 + i);
+      run(
+        "INSERT INTO billing_revisions (user_id, last, check_due_at) VALUES (?, 0, 1)",
+        `waiting-${i}`,
+      );
+    }
+    const fresh = subscription(userId, { current_period_end: iso(now + 10 * DAY) });
+    subscription(userId, { current_period_end: iso(now + 20 * DAY) });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await refresh(userId);
+
+    const attempted = () =>
+      polarCalls("DELETE", "/v1/subscriptions/").map((call) =>
+        call.url.slice(`${POLAR}/v1/subscriptions/`.length),
+      );
     await runBillingJobs(context.env, now);
-    expect(polar.refunds.map((refund) => refund.order_id)).toEqual(["order-1", "order-2"]);
-    expect(refundRow("order-1")).toMatchObject({ refund_id: null, status: "failed" });
+    const first = attempted();
+    // The new one first, then the old ones due longest.
+    expect(first[0]).toBe(fresh.id);
+    expect(first).toHaveLength(10);
+    expect(duplicateRow(String(fresh.id)).revoked_at).not.toBeNull();
 
-    // A worker that died after writing `creating` leaves the same trace.
-    run("UPDATE duplicate_refunds SET status = 'creating' WHERE order_id = 'order-1'");
-    context.routes.set(`POST ${POLAR}/v1/refunds/`, create);
-    await runBillingJobs(context.env, duplicateRow().next_attempt_at!);
-    // Found by looking the order's refunds up: adopted, not made again.
-    expect(polar.refunds).toHaveLength(2);
-    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "pending" });
-
-    settleRefund(polar, "refund-1", "succeeded");
-    settleRefund(polar, "refund-2", "succeeded");
-    await runBillingJobs(context.env, duplicateRow().next_attempt_at!);
-    expect(polar.refunds).toHaveLength(2);
-    expect(duplicateRow().refunded_at).not.toBeNull();
-  });
-
-  it("refund the paid orders only, past an unpaid renewal", async () => {
-    await withDuplicate([
-      // The newest first, as Polar lists them: a renewal not paid yet.
-      { id: "order-renewal", status: "pending", net_amount: 799, refundable_amount: 799 },
-      { id: "order-void", status: "void", refundable_amount: 799 },
-      { id: "order-paid", status: "paid", refundable_amount: 799 },
-    ]);
-    await runBillingJobs(context.env, Date.now());
-    expect(polar.refunds).toMatchObject([{ order_id: "order-paid", amount: 799 }]);
-    expect(duplicateRow().refunded_at).not.toBeNull();
-  });
-
-  it("record an error on its order without holding back the others", async () => {
-    await withDuplicate([
-      { id: "order-a", status: "paid", refundable_amount: 799 },
-      { id: "order-b", status: "partially_refunded", refundable_amount: 300 },
-    ]);
-    const create = context.routes.get(`POST ${POLAR}/v1/refunds/`)!;
-    context.routes.set(`POST ${POLAR}/v1/refunds/`, (body, url) =>
-      JSON.parse(body ?? "{}").order_id === "order-a"
-        ? jsonResponse({ error: "NotPermitted", detail: "No" }, 400)
-        : create(body, url),
-    );
-    await runBillingJobs(context.env, Date.now());
-    expect(polar.refunds).toMatchObject([{ order_id: "order-b", amount: 300 }]);
-    expect(refundRow("order-a")).toMatchObject({ status: "failed", error: "400 NotPermitted" });
-    expect(refundRow("order-b")).toMatchObject({ status: "succeeded" });
-    expect(duplicateRow()).toMatchObject({ refunded_at: null, attempts: 1 });
+    // The next run goes on with the old ones not tried yet.
+    context.calls.length = 0;
+    await runBillingJobs(context.env, now);
+    const second = attempted();
+    expect(second).toHaveLength(10);
+    expect(second.filter((id) => first.includes(id))).toEqual([]);
+    expectNoRefundWork();
   });
 
   it("wait out Polar's rate limit, which is no failure", async () => {
-    await withDuplicate([{ id: "order-1", status: "paid", refundable_amount: 799 }]);
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    const duplicate = subscription(userId, { current_period_end: iso(Date.now() + 10 * DAY) });
+    subscription(userId, { current_period_end: iso(Date.now() + 20 * DAY) });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await refresh(userId);
     context.routes.set(
-      `POST ${POLAR}/v1/refunds/`,
+      `DELETE ${POLAR}/v1/subscriptions/`,
       () =>
         new Response(JSON.stringify({ error: "TooManyRequests" }), {
           status: 429,
@@ -1182,8 +1115,8 @@ describe("duplicate Pro subscriptions", () => {
     );
     const now = Date.now();
     await runBillingJobs(context.env, now);
-    expect(duplicateRow()).toMatchObject({
-      refunded_at: null,
+    expect(duplicateRow(String(duplicate.id))).toEqual({
+      revoked_at: null,
       attempts: 0,
       next_attempt_at: now + 30_000,
     });
