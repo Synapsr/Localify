@@ -39,7 +39,7 @@ use crate::infrastructure::running_services::{
 };
 use localify::project_init::{
     apply_next_allowed_dev_origin, apply_vite_allowed_host, find_existing_next_config_path,
-    find_existing_vite_config_path,
+    find_existing_vite_config_path, next_dev_host,
 };
 
 const DEFAULT_URL_ENV_KEYS: &[&str] = &[
@@ -1548,18 +1548,15 @@ fn prepare_local_dev_command(
     let Some((runner, script_name)) = package_script_invocation(&command) else {
         return Ok(command);
     };
-    let Some(manifest) = read_package_manifest(workdir)? else {
+    let Some(script) = read_package_script(workdir, script_name)? else {
         return Ok(command);
     };
-    let Some(script) = manifest
-        .get("scripts")
-        .and_then(|scripts| scripts.get(script_name))
-        .and_then(serde_json::Value::as_str)
-    else {
-        return Ok(command);
+    let next_host = if script.contains("next dev") {
+        next_dev_host(workdir, project_root)
+    } else {
+        "127.0.0.1"
     };
-    let next_host = next_dev_host(&manifest, workdir, project_root)?;
-    let args = localify_dev_args_for_script(script, port, next_host);
+    let args = localify_dev_args_for_script(&script, port, next_host);
     if args.is_empty() {
         return Ok(command);
     }
@@ -1580,7 +1577,7 @@ fn package_script_invocation(command: &[String]) -> Option<(PackageScriptRunner,
     }
 }
 
-fn read_package_manifest(workdir: &Path) -> Result<Option<serde_json::Value>> {
+fn read_package_script(workdir: &Path, script_name: &str) -> Result<Option<String>> {
     let package_json_path = workdir.join("package.json");
     if !package_json_path.is_file() {
         return Ok(None);
@@ -1588,47 +1585,14 @@ fn read_package_manifest(workdir: &Path) -> Result<Option<serde_json::Value>> {
 
     let content = fs::read_to_string(&package_json_path)
         .with_context(|| format!("Failed to read '{}'", package_json_path.display()))?;
-    let manifest = serde_json::from_str(&content)
+    let manifest: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse '{}'", package_json_path.display()))?;
 
-    Ok(Some(manifest))
-}
-
-/// Next.js listening on 127.0.0.1 sends next-intl's locale rewrites back to
-/// itself over the network, as https, which fails with EPROTO
-/// (vercel/next.js#94745). On 0.0.0.0 the rewrite stays inside Next.js, but the
-/// dev server is open to the local network, so only next-intl apps get it.
-/// Go back to 127.0.0.1 for every app once Next.js ships a fix.
-///
-/// A monorepo can list next-intl in a parent package.json, up to the project
-/// root, instead of the app's own.
-fn next_dev_host(
-    manifest: &serde_json::Value,
-    workdir: &Path,
-    project_root: &Path,
-) -> Result<&'static str> {
-    if depends_on_next_intl(manifest) {
-        return Ok("0.0.0.0");
-    }
-    for dir in workdir
-        .ancestors()
-        .skip(1)
-        .take_while(|dir| dir.starts_with(project_root))
-    {
-        if read_package_manifest(dir)?.is_some_and(|parent| depends_on_next_intl(&parent)) {
-            return Ok("0.0.0.0");
-        }
-    }
-    Ok("127.0.0.1")
-}
-
-fn depends_on_next_intl(manifest: &serde_json::Value) -> bool {
-    ["dependencies", "devDependencies"].iter().any(|field| {
-        manifest
-            .get(field)
-            .and_then(|deps| deps.get("next-intl"))
-            .is_some()
-    })
+    Ok(manifest
+        .get("scripts")
+        .and_then(|scripts| scripts.get(script_name))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
 }
 
 fn localify_dev_args_for_script(script: &str, port: u16, next_host: &str) -> Vec<String> {
@@ -2761,6 +2725,40 @@ mod tests {
                 "run",
                 "dev",
                 "--host",
+                "127.0.0.1",
+                "--port",
+                "4010"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_local_dev_command_ignores_a_broken_parent_manifest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app_dir = temp_dir.path().join("apps/web");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(temp_dir.path().join("package.json"), "{ not json").unwrap();
+        std::fs::write(
+            app_dir.join("package.json"),
+            r#"{"scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let command = prepare_local_dev_command(
+            vec!["pnpm".into(), "run".into(), "dev".into()],
+            &app_dir,
+            temp_dir.path(),
+            4010,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            vec![
+                "pnpm",
+                "run",
+                "dev",
+                "--hostname",
                 "127.0.0.1",
                 "--port",
                 "4010"

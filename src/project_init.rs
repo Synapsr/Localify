@@ -281,7 +281,7 @@ pub fn detect_folder_init_plan(root: &Path, project_name: Option<&str>) -> Resul
             let can_update_dev_script = service
                 .dev_script
                 .as_ref()
-                .and_then(|script| plan_dev_script_update(script, &service.target))
+                .and_then(|script| plan_dev_script_update(script, &service.target, LOOPBACK_HOST))
                 .is_some();
 
             FolderInitServicePlan {
@@ -358,7 +358,7 @@ pub fn resolve_folder_init_selection(
         }
 
         let package_update = if selection.update_dev_script {
-            build_package_updates(blueprint, &target, &domain, policy)?
+            build_package_updates(blueprint, root, &target, &domain, policy)?
         } else {
             Vec::new()
         };
@@ -504,6 +504,7 @@ pub fn plan_current_dir_local_app_updates(
 
     let package_updates = build_package_updates(
         &blueprints[0],
+        root,
         &services[0].target,
         &services[0].domain,
         policy,
@@ -970,6 +971,7 @@ pub fn detect_current_dir_localify_target(root: &Path) -> Result<Option<String>>
 
 fn build_package_updates(
     blueprint: &FolderServiceBlueprint,
+    root: &Path,
     target: &str,
     domain: &str,
     policy: LocalAppUpdatePolicy,
@@ -1001,7 +1003,9 @@ fn build_package_updates(
         return Ok(Vec::new());
     }
 
-    let Some(script) = plan_dev_script_update(dev_script, target) else {
+    let package_dir = package_json_path.parent().unwrap_or(root);
+    let next_host = next_dev_host(package_dir, root);
+    let Some(script) = plan_dev_script_update(dev_script, target, next_host) else {
         bail!(
             "Cannot update the dev script for '{}': the current dev command is not supported",
             blueprint.display_path
@@ -1089,7 +1093,7 @@ fn build_vite_config_update(
         })
 }
 
-fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
+fn plan_dev_script_update(script: &str, port: &str, next_host: &str) -> Option<String> {
     let trimmed = script.trim();
     if is_next_dev_script(trimmed) {
         let normalized = strip_script_flags(
@@ -1099,7 +1103,7 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
         );
         let updated = normalized.replacen(
             "next dev",
-            &format!("next dev --hostname 127.0.0.1 --port {port}"),
+            &format!("next dev --hostname {next_host} --port {port}"),
             1,
         );
         return Some(updated);
@@ -1132,6 +1136,56 @@ fn plan_dev_script_update(script: &str, port: &str) -> Option<String> {
     }
 
     None
+}
+
+const LOOPBACK_HOST: &str = "127.0.0.1";
+
+/// The host a Next.js dev server should listen on behind Localify.
+///
+/// Next.js listening on 127.0.0.1 sends next-intl's locale rewrites back to
+/// itself over the network, as https, which fails with EPROTO
+/// (vercel/next.js#94745). On 0.0.0.0 the rewrite stays inside Next.js, but the
+/// dev server is open to the local network, so only next-intl apps get it.
+/// A monorepo can list next-intl in a parent package.json, up to the project
+/// root. Go back to 127.0.0.1 for every app once Next.js ships a fix.
+pub fn next_dev_host(package_dir: &Path, project_root: &Path) -> &'static str {
+    if uses_next_intl(package_dir, project_root) {
+        "0.0.0.0"
+    } else {
+        LOOPBACK_HOST
+    }
+}
+
+/// Detection only: a folder or package.json Localify cannot read counts as
+/// no next-intl, so it never stops a launch.
+fn uses_next_intl(package_dir: &Path, project_root: &Path) -> bool {
+    let (Ok(package_dir), Ok(project_root)) =
+        (package_dir.canonicalize(), project_root.canonicalize())
+    else {
+        return false;
+    };
+    if !package_dir.starts_with(&project_root) {
+        return lists_next_intl(&package_dir);
+    }
+    package_dir
+        .ancestors()
+        .take_while(|dir| dir.starts_with(&project_root))
+        .any(lists_next_intl)
+}
+
+fn lists_next_intl(dir: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    ["dependencies", "devDependencies"].iter().any(|field| {
+        manifest
+            .get(field)
+            .and_then(|deps| deps.get("next-intl"))
+            .is_some()
+    })
 }
 
 fn is_next_dev_script(script: &str) -> bool {
@@ -2564,31 +2618,124 @@ mod tests {
     #[test]
     fn plan_dev_script_update_supports_next_vite_and_react_scripts() {
         assert_eq!(
-            plan_dev_script_update("next dev", "4010").as_deref(),
+            plan_dev_script_update("next dev", "4010", LOOPBACK_HOST).as_deref(),
             Some("next dev --hostname 127.0.0.1 --port 4010")
         );
         assert_eq!(
-            plan_dev_script_update("vite", "4011").as_deref(),
+            plan_dev_script_update("vite", "4011", LOOPBACK_HOST).as_deref(),
             Some("vite --host 127.0.0.1 --port 4011")
         );
         assert_eq!(
-            plan_dev_script_update("react-scripts start", "4012").as_deref(),
+            plan_dev_script_update("react-scripts start", "4012", LOOPBACK_HOST).as_deref(),
             Some("HOST=127.0.0.1 PORT=4012 react-scripts start")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn next_dev_host_follows_a_symlinked_service_path() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path().join("repo");
+        let app_dir = repo.join("apps/web");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            repo.join("package.json"),
+            r#"{"dependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+        let alias = temp_dir.path().join("alias");
+        std::os::unix::fs::symlink(&repo, &alias).unwrap();
+
+        assert_eq!(next_dev_host(&alias.join("apps/web"), &repo), "0.0.0.0");
+    }
+
+    #[test]
+    fn next_dev_host_stops_at_the_project_root_for_escaped_paths() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path().join("repo");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(repo.join("apps")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"dependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            next_dev_host(&repo.join("apps/../../outside"), &repo),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn next_intl_apps_get_dev_scripts_on_every_interface() {
+        let temp_dir = tempdir().unwrap();
+        let package_json_path = temp_dir.path().join("package.json");
+        fs::write(
+            &package_json_path,
+            r#"{"scripts":{"dev":"next dev"},"dependencies":{"next-intl":"^4.14.9"}}"#,
+        )
+        .unwrap();
+        let mut scripts = Map::new();
+        scripts.insert("dev".into(), Value::String("next dev".into()));
+        let blueprint = FolderServiceBlueprint {
+            id: "web".into(),
+            label: "web".into(),
+            display_path: ".".into(),
+            service_name: "web".into(),
+            service_path: None,
+            package_command: Some(vec!["pnpm".into(), "run".into(), "dev".into()]),
+            script_name: "dev".into(),
+            domain: format!("demo{}", BRANDING.domain_suffix()),
+            target: "4010".into(),
+            enabled: true,
+            package_json_path: Some(package_json_path),
+            dev_script: Some("next dev".into()),
+            scripts: Some(scripts),
+            next_config_path: None,
+            vite_config_path: None,
+        };
+
+        let updates = build_package_updates(
+            &blueprint,
+            temp_dir.path(),
+            "4010",
+            &format!("demo{}", BRANDING.domain_suffix()),
+            LocalAppUpdatePolicy {
+                write_package_scripts: true,
+                promote_dev_script: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!updates.is_empty());
+        assert!(updates.iter().all(|update| {
+            update.script_name == "dev-localhost"
+                || update
+                    .script
+                    .ends_with("next dev --hostname 0.0.0.0 --port 4010")
+        }));
     }
 
     #[test]
     fn plan_dev_script_update_rewrites_existing_port_flags() {
         assert_eq!(
-            plan_dev_script_update("next dev --port 3000", "4010").as_deref(),
+            plan_dev_script_update("next dev --port 3000", "4010", LOOPBACK_HOST).as_deref(),
             Some("next dev --hostname 127.0.0.1 --port 4010")
         );
         assert_eq!(
-            plan_dev_script_update("vite dev --host 127.0.0.1 --port 55190", "61342").as_deref(),
+            plan_dev_script_update(
+                "vite dev --host 127.0.0.1 --port 55190",
+                "61342",
+                LOOPBACK_HOST
+            )
+            .as_deref(),
             Some("vite dev --host 127.0.0.1 --port 61342")
         );
         assert_eq!(
-            plan_dev_script_update("PORT=3000 react-scripts start", "4010").as_deref(),
+            plan_dev_script_update("PORT=3000 react-scripts start", "4010", LOOPBACK_HOST)
+                .as_deref(),
             Some("HOST=127.0.0.1 PORT=4010 react-scripts start")
         );
     }
@@ -3244,6 +3391,7 @@ mod tests {
 
         let updates = build_package_updates(
             &blueprint,
+            temp_dir.path(),
             "4010",
             &format!("demo{}", BRANDING.domain_suffix()),
             LocalAppUpdatePolicy {
