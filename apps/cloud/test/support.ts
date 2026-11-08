@@ -1,7 +1,8 @@
 /// <reference types="node" />
 // A D1 stand-in over node:sqlite with the real migrations, a test Env, a
-// fake `fetch` for GitHub, Cloudflare, Polar and the machines' tunnels, and an
-// ExecutionContext whose `waitUntil` work the tests can wait for.
+// fake `fetch` for GitHub, Cloudflare, Polar and the machines' tunnels, an
+// ExecutionContext whose `waitUntil` work the tests can wait for, and the
+// relay's objects over hibernatable WebSockets the tests hold.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import ts from "typescript";
 import { vi } from "vitest";
 
 import { D1_NOW_MS } from "../src/entitlement";
+import { RemoteRelay } from "../src/relay";
 import { QUIET_AFTER_STOP_MS } from "../src/tunnels";
 
 const MIGRATIONS = join(import.meta.dirname, "..", "migrations");
@@ -144,6 +146,151 @@ export function applyMigrations(sqlite: DatabaseSync, include: (file: string) =>
   }
 }
 
+/**
+ * One end of a WebSocket. The relay holds the server end: what it sends
+ * there is what the daemon receives, in `sent`.
+ */
+export class FakeSocket {
+  readonly sent: string[] = [];
+  readyState = 1;
+  closed: { code: number; reason: string } | null = null;
+  tags: string[] = [];
+  /** The other end of the pair. */
+  peer: FakeSocket | null = null;
+  private attachment: string | null = null;
+
+  send(message: string): void {
+    if (this.readyState !== 1) throw new TypeError("WebSocket send() after close");
+    this.sent.push(message);
+  }
+
+  close(code: number, reason: string): void {
+    if (new TextEncoder().encode(reason).byteLength > 123) throw new TypeError("Reason too long");
+    if (this.closed) return;
+    this.closed = { code, reason };
+    this.readyState = 3;
+  }
+
+  /** As workerd: structured data of at most 2 KiB. */
+  serializeAttachment(value: unknown): void {
+    const text = JSON.stringify(value);
+    if (text.length > 2048) throw new RangeError("Attachment over 2 KiB");
+    this.attachment = text;
+  }
+
+  deserializeAttachment(): unknown {
+    return this.attachment === null ? null : JSON.parse(this.attachment);
+  }
+
+  /** The frames received, parsed, `pong` as it is. */
+  frames(): Record<string, unknown>[] {
+    return this.sent.map((text) => (text === "pong" ? { pong: true } : JSON.parse(text)));
+  }
+
+  /** The frames received of type `t`. */
+  framesOf(t: string): Record<string, unknown>[] {
+    return this.frames().filter((frame) => frame.t === t);
+  }
+}
+
+/** A relay object's state: its hibernatable sockets, and a storage that refuses any use. */
+export class FakeState {
+  readonly sockets: FakeSocket[] = [];
+  autoResponse: { request: string; response: string } | null = null;
+  /** Set by any use of the storage, alarms included. */
+  storageUsed = false;
+
+  acceptWebSocket(ws: FakeSocket, tags: string[] = []): void {
+    ws.tags = tags;
+    this.sockets.push(ws);
+  }
+
+  getWebSockets(tag?: string): FakeSocket[] {
+    return this.sockets.filter(
+      (ws) => ws.readyState !== 3 && (tag === undefined || ws.tags.includes(tag)),
+    );
+  }
+
+  setWebSocketAutoResponse(pair: { request: string; response: string }): void {
+    this.autoResponse = { request: pair.request, response: pair.response };
+  }
+
+  get storage(): never {
+    this.storageUsed = true;
+    throw new Error("The relay must not touch its storage");
+  }
+}
+
+/**
+ * The relay's objects by name. `evict` drops an object's instance, as
+ * hibernation does: the next call builds a new one over the same sockets.
+ */
+export class RelayHarness {
+  readonly states = new Map<string, FakeState>();
+  readonly objects = new Map<string, RemoteRelay>();
+
+  constructor(private readonly env: () => Env) {}
+
+  object(userId: string): RemoteRelay {
+    const name = `user:${userId}`;
+    let object = this.objects.get(name);
+    if (!object) {
+      const state = this.state(userId);
+      object = new RemoteRelay(state as unknown as DurableObjectState, this.env());
+      this.objects.set(name, object);
+    }
+    return object;
+  }
+
+  state(userId: string): FakeState {
+    const name = `user:${userId}`;
+    let state = this.states.get(name);
+    if (!state) {
+      state = new FakeState();
+      this.states.set(name, state);
+    }
+    return state;
+  }
+
+  evict(userId: string): void {
+    this.objects.delete(`user:${userId}`);
+  }
+
+  namespace(): DurableObjectNamespace<RemoteRelay> {
+    return {
+      idFromName: (name: string) => ({ name }),
+      get: (id: { name: string }) => this.object(id.name.slice("user:".length)),
+    } as unknown as DurableObjectNamespace<RemoteRelay>;
+  }
+}
+
+/** workerd's Response, which also takes a 101 with the client end of a WebSocket. */
+class WorkerResponse extends Response {
+  constructor(body?: BodyInit | null, init: ResponseInit = {}) {
+    super(body, init.status === 101 ? { ...init, status: 200 } : init);
+    if (init.status === 101) Object.defineProperty(this, "status", { value: 101 });
+    Object.defineProperty(this, "webSocket", { value: init.webSocket ?? null });
+  }
+}
+
+class FakeWebSocketPair {
+  0: FakeSocket;
+  1: FakeSocket;
+  constructor() {
+    this[0] = new FakeSocket();
+    this[1] = new FakeSocket();
+    this[0].peer = this[1];
+    this[1].peer = this[0];
+  }
+}
+
+class FakeRequestResponsePair {
+  constructor(
+    readonly request: string,
+    readonly response: string,
+  ) {}
+}
+
 export type TestContext = {
   env: Env;
   ctx: ExecutionContext;
@@ -166,6 +313,9 @@ export type TestContext = {
   limiter: { allowed: boolean };
   deviceLimiter: { allowed: boolean };
   ownerLimiter: CountingLimiter;
+  remoteIpLimiter: CountingLimiter;
+  remoteConnectLimiter: CountingLimiter;
+  relays: RelayHarness;
 };
 
 /** The test Worker's webhook secret, Standard Webhooks style: `whsec_` and base64. */
@@ -176,11 +326,20 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
   const limiter = { allowed: true };
   const deviceLimiter = { allowed: true };
   const ownerLimiter = { limit: rateLimit("OWNER_LIMITER").limit, counts: new Map() };
+  const remoteIpLimiter = { limit: rateLimit("REMOTE_IP_LIMITER").limit, counts: new Map() };
+  const remoteConnectLimiter = {
+    limit: rateLimit("REMOTE_CONNECT_LIMITER").limit,
+    counts: new Map(),
+  };
+  const relays = new RelayHarness(() => env);
   const env = {
     DB: db,
     PASSWORD_LIMITER: { limit: async () => ({ success: limiter.allowed }) },
     DEVICE_LIMITER: { limit: async () => ({ success: deviceLimiter.allowed }) },
     OWNER_LIMITER: countingLimiter(ownerLimiter),
+    REMOTE_IP_LIMITER: countingLimiter(remoteIpLimiter),
+    REMOTE_CONNECT_LIMITER: countingLimiter(remoteConnectLimiter),
+    RELAY: relays.namespace(),
     GITHUB_CLIENT_ID: "client-123",
     SIGNUP: "allowlist",
     ALLOWED_GITHUB_IDS: "1, 2",
@@ -218,7 +377,13 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     limiter,
     deviceLimiter,
     ownerLimiter,
+    remoteIpLimiter,
+    remoteConnectLimiter,
+    relays,
   };
+  vi.stubGlobal("Response", WorkerResponse);
+  vi.stubGlobal("WebSocketPair", FakeWebSocketPair);
+  vi.stubGlobal("WebSocketRequestResponsePair", FakeRequestResponsePair);
   vi.stubGlobal("fetch", async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input instanceof Request ? input.url : input);
     const method = init.method ?? "GET";
@@ -290,7 +455,7 @@ export function fakeSignIn(
 
 /**
  * Signs `login` in on a machine. Unless `entitled` is false, the account
- * holds the override the old allowlist got (5 serving machines, 10 URLs).
+ * holds the team override (5 serving machines, 10 URLs, remote access).
  */
 export async function signIn(
   context: TestContext,
@@ -312,8 +477,9 @@ export async function signIn(
   if (entitled) {
     context.sqlite
       .prepare(
-        `INSERT OR IGNORE INTO plan_overrides (user_id, serving_machines, public_urls, reason, created_at)
-         VALUES (?, 5, 10, 'team', 1)`,
+        `INSERT OR IGNORE INTO plan_overrides (user_id, serving_machines, public_urls, remote_access,
+                                               reason, created_at)
+         VALUES (?, 5, 10, 1, 'team', 1)`,
       )
       .run(userId);
   }

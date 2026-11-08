@@ -148,12 +148,15 @@ E2E keeps Localify Cloud, and anyone who controls the relay, from reading or cha
 | `Authorization` | `Bearer <token>` |
 | `Sec-WebSocket-Protocol` | `localify-remote.1` |
 | `X-Localify-Version` | the daemon's Localify version |
+| `X-Localify-Proto` | optional: the session protocol versions it speaks, `<min>-<max>`; `1-1` when absent |
 
 The Worker, cheapest checks first:
 
 1. Before any D1 work: the token has the shape Localify issues (`lfy_` and 64 lowercase hex digits), the subprotocol is one it speaks, and two rate limiters let the request through: `REMOTE_IP_LIMITER`, keyed by client IP, and `REMOTE_CONNECT_LIMITER`, keyed by the token's SHA-256. Both are Cloudflare rate-limiting bindings: approximate counts kept per location, so they shed load from one place and do not cap how often a token is checked worldwide.
 2. Looks the token up, then checks the ban, the account's `remoteAccess` (see "Entitlement"), and that the machine has a remote key.
-3. Forwards the request to the account's `RemoteRelay`, `idFromName("user:" + userId)`, with the user id, machine id, version and the time it checked, in internal headers it sets itself after removing any the client sent.
+3. Forwards the request to the account's `RemoteRelay`, `idFromName("user:" + userId)`, with the user id, machine id, version, protocol range and the time it checked, in internal headers it sets itself after removing any the client sent.
+
+A refused upgrade carries the API's error shape. A `429` asks for a `Retry-After` of 30 to 59 seconds, chosen at random, so a storm comes back spread out. The `101` names `localify-remote.1` in its `Sec-WebSocket-Protocol`.
 
 The object accepts the socket with `ctx.acceptWebSocket(ws, [machineId])`, so it can hibernate while the socket is idle. A second socket for the same machine replaces the first, which is closed with `4001`. It then sends `welcome` to the new socket and `presence` to the others.
 
@@ -175,7 +178,7 @@ The object stores nothing: no storage calls, no alarms, no timers, no history. E
 
 Authorization is checked lazily, on both ends of every frame. Before forwarding a frame other than `ping`, the object looks at the `authorizedUntil` of the sender's socket and of the recipient's. For each one that has passed, it reads the account and the machine from D1, in one query for both: still entitled, not banned, machine active. A socket that passes gets `authorizedUntil` 60 seconds ahead. One that fails is closed with `4402`, `4403` or `4401`, and the frame is not forwarded. When D1 fails, the frame is dropped and the sender gets `error` `unavailable` with `retryAfter: 5`: the relay fails closed. A dropped frame ends its Noise session (see "Relay frames"). This bounds unauthorized relaying to a minute without a timer. It does not promise to close idle sockets: an idle socket of an account that lost access stays open until its next frame or a push (see "Entitlement"), and relays nothing in between.
 
-A frame for a machine with no socket gets `error` with `peer_offline` back. The object never queues.
+A frame for a machine with no socket gets `error` with `peer_offline` back, and so does a frame whose recipient the check just closed. The object never queues.
 
 ### Limits
 
@@ -184,11 +187,11 @@ A frame for a machine with no socket gets `error` with `peer_offline` back. The 
 | Frame | 64 KiB | close `1009` |
 | Application message, before encryption | 32 KiB | the sender splits it (pages, chunks); the receiver ends the session |
 | Sockets | one per active machine of the account, so at most 10 | the older one is closed with `4001` |
-| Frames from one socket | 50 a second on average over 10 seconds, bursts of 200 | `error` `rate_limited`, then close `4429` if it goes on |
+| Frames from one socket | 50 a second on average over 10 seconds, bursts of 200 | `error` `rate_limited` with `retryAfter`, then close `4429` with `{"retryAfter": 10}` at the 50th frame refused in a row |
 | Bytes from one socket | 512 KiB a second on average over 10 seconds | same |
 | Upgrades | `REMOTE_IP_LIMITER` 30 a minute per IP, `REMOTE_CONNECT_LIMITER` 6 a minute per token, both approximate and per location | `429` with `Retry-After` |
 
-The counters live in memory and start over after hibernation, which only makes them more permissive for a moment.
+The two budgets are token buckets: one of 200 frames refilled at 50 a second, one of 5 MiB refilled at 512 KiB a second. A refused frame takes nothing from them. The counters live in memory and start over after hibernation, which only makes them more permissive for a moment.
 
 **Send pacing.** Each daemon sends everything through one queue per relay socket, paced below the relay's budget: at most 40 frames and 384 KiB a second averaged over 10 seconds, for all its sessions together, whatever role it plays in each. Handshakes, heartbeats, pairing and control messages go first, then inventory pages, then output, taken round-robin between follows. Concurrent snapshots and follows therefore slow down instead of tripping the relay's limit, and a follow's window stops it from queuing more than it may.
 
@@ -216,7 +219,13 @@ What has to be measured is how much active time a frame costs, and so what a typ
 
 ### Relay frames
 
-Text frames of JSON, at most 64 KiB, plus the bare `ping` and `pong`. Field names are camelCase. The relay reads only the envelope.
+Text frames of JSON, at most 64 KiB of UTF-8, plus the bare `ping` and `pong`. Field names are camelCase. The relay reads only the envelope.
+
+What the relay refuses:
+
+- A frame that is not a JSON `send` object (not JSON, a binary frame, another `t`) closes the socket with `4000`.
+- A `send` frame with a malformed field is dropped with `error` `bad_frame`, which carries `sid` when the frame's own is valid. So is a frame to its own sender. `to` is 1 to 64 base64url characters, `sid` exactly 22, and `data` non-empty base64url, required for `hs` and `msg`.
+- Fields it does not know are ignored and never forwarded, and `data` on a `close` is dropped.
 
 From a daemon:
 
@@ -622,7 +631,7 @@ Added to the API of public-urls.md, with the same authentication, scoping and er
 | Method and path | Body | Response |
 |---|---|---|
 | `GET /v1/machines` | — | `{machines: [RosterMachine]}`, the account's active machines, this one included |
-| `PUT /v1/machines/self/remote-key` | `{publicKey}` | `204`, also when the machine already has this same key; `409 remote_key_set` when it has another one; `409 remote_key_taken` when another machine has this one; `422 invalid_key` |
+| `PUT /v1/machines/self/remote-key` | `{publicKey}` | `204`, also when the machine already has this same key; `409 remote_key_set` when it has another one; `409 remote_key_taken` when another machine has this one, a revoked one included; `403 quota_exceeded` past 10 linked machines; `422 invalid_key` |
 | `DELETE /v1/machines/{id}` | — | `204`. Signs that machine out as `POST /v1/auth/logout` does for the caller, and pushes `revoked` to the relay. Works at zero entitlement. On the caller's own id, it is a sign-out. |
 | `GET /v1/remote/connect` | WebSocket upgrade | see "Relay", "Connecting" |
 | `GET /v1/remote/lease` | — | `{ttl: 60, machines: [id]}`: a lifetime in seconds and the account's active machine ids. `402 subscription_required`; `403 banned`. |
@@ -639,7 +648,7 @@ A lease carries no absolute time. The client counts `ttl` from when it sent the 
 
 ### Data (D1)
 
-Migration `0005_remote_access.sql`, after PR #56's `0004_serving_state.sql`:
+Migration `0006_remote_access.sql`, after `0005_billing_follow_up.sql`:
 
 ```sql
 -- Remote machines (docs/remote-machines.md, "Trust" and "Entitlement").
@@ -660,9 +669,9 @@ No table holds sessions, presence, pairings, inventory or output. A revoked mach
 
 ### The relay object
 
-`wrangler.jsonc` gains a Durable Object binding `RELAY` for the class `RemoteRelay`, exported from `src/relay.ts`, with a `new_sqlite_classes` migration. It never touches its storage. Its RPC methods, called by the Worker only:
+`wrangler.jsonc` gains a Durable Object binding `RELAY` for the class `RemoteRelay`, exported from `src/relay.ts`, with a `new_sqlite_classes` migration. It never touches its storage. What it offers, to the Worker only:
 
-- `connect(request)`: the upgrade, after the Worker's checks;
+- `fetch(request)`: the upgrade, after the Worker's checks. It is `fetch` rather than an RPC method, since a stub's `connect` is its TCP socket method;
 - `revokeMachine(machineId)`: closes that machine's socket with `4401` and sends `revoked` to the others;
 - `revokeAccount(code)`: closes every socket with `4402` or `4403`.
 
@@ -839,7 +848,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 Each PR ships only once its gate passes in CI, on top of its own unit tests.
 
 1. **Local foundations.** Run identity (run ids, `--launch-id`); the run PTY in the app, with the shell-environment resolver and `Reload shell environment`, the exit view with `Restart` and `Open a terminal here`, Ctrl-Z disabled, and stop and restart by session and process group; one supervisor for every launch; the run lock in the executor and fatal atomic registration; native process identity, `lastAliveAt` and the end of a run (proven membership, interrupted capture, finalization locks); legacy runs; the per-run stream from run PTYs and background pipes, with bounded reads by `{runId, offset}`; `localify logs` and `service_logs` on it; removing the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT`; the inventory projection with its four states and HMAC revisions. Gate: capture isolation, shell environment, concurrent launches, end of a run, migration.
-2. **Trust and relay.** Keys, pins and settings files; Noise sessions, heartbeats and pairing with `snow`; the `RemoteRelay` object and routes, with the pre-auth guard and lazy checks; send pacing; migration 0005; `remoteAccess` in the entitlement, `/v1/me` and `cloud:admin`; leases and revocation pushes; reconnects; the management socket commands for status, roster and pairing; `localify machines`, `pair`, `unpair`, `remove` and `settings`; the cost measurement. Gate: pairing, replay, identity, leases, hibernation, reconnect storm.
+2. **Trust and relay.** Keys, pins and settings files; Noise sessions, heartbeats and pairing with `snow`; the `RemoteRelay` object and routes, with the pre-auth guard and lazy checks; send pacing; migration 0006; `remoteAccess` in the entitlement, `/v1/me` and `cloud:admin`; leases and revocation pushes; reconnects; the management socket commands for status, roster and pairing; `localify machines`, `pair`, `unpair`, `remove` and `settings`; the cost measurement. Gate: pairing, replay, identity, leases, hibernation, reconnect storm.
 3. **Desktop viewing,** the first useful release: the switcher, the pairing dialogs, Settings → Remote access, the remote Projects view, Output. Gate: revocation end to end.
 4. **Remote controls.** Launch fencing (`--launch-expires`, `--expect-rev`, `--remote-launch`) and launch records published with `link`; request entries and `control.status`; the app bridge, with `dev --in-app` on it; ownership-aware start, stop and restart; the control executor on the target, its state machine and reconcile; detached starts; the buttons and their states in the app. Gate: control races and launch outcomes.
 5. **CLI and MCP:** `--machine` on status, logs, dev, stop and restart; `list_machines` and the `machine` argument.

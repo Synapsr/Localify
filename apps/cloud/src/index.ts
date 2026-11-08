@@ -1,5 +1,6 @@
 // Localify Cloud: the JSON API on api.<MACHINE_DOMAIN>, public URLs on
-// *.<PUBLIC_BASE_DOMAIN>, and the scheduled jobs. One Worker, routed by host.
+// *.<PUBLIC_BASE_DOMAIN>, and the scheduled jobs. One Worker, routed by host,
+// and the relay between an account's machines.
 
 import { handleApi } from "./api";
 import { reconcileBilling, runBillingJobs } from "./billing";
@@ -7,6 +8,8 @@ import { purgeDeletedUrls, revokeStuckSignIns } from "./machines";
 import { isPublicHost } from "./names";
 import { handlePublic } from "./public";
 import { runSweep } from "./tunnels";
+
+export { RemoteRelay } from "./relay";
 
 /** The crons in wrangler.jsonc. */
 const EVERY_FIVE_MINUTES = "*/5 * * * *";

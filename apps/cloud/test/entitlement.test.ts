@@ -41,7 +41,7 @@ type Billing = Partial<{
 
 type Setup = {
   billing?: Billing;
-  override?: { machines: number; urls: number; expiresAt?: number | null };
+  override?: { machines: number; urls: number; remoteAccess?: boolean; expiresAt?: number | null };
   bannedAt?: number;
   trialUsedAt?: number;
 };
@@ -92,18 +92,24 @@ async function account(setup: Setup = {}, now = NOW) {
   if (setup.override) {
     sqlite
       .prepare(
-        `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, expires_at, created_at)
-         VALUES ('u', ?, ?, 'team', ?, 1)`,
+        `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, remote_access, reason,
+                                    expires_at, created_at)
+         VALUES ('u', ?, ?, ?, 'team', ?, 1)`,
       )
-      .run(setup.override.machines, setup.override.urls, setup.override.expiresAt ?? null);
+      .run(
+        setup.override.machines,
+        setup.override.urls,
+        setup.override.remoteAccess === false ? 0 : 1,
+        setup.override.expiresAt ?? null,
+      );
   }
   const result = await loadAccount(db, "u", now);
   if (!result) throw new Error("No account");
   return result;
 }
 
-const PRO = { servingMachines: 2, publicUrls: 10 };
-const NONE = { servingMachines: 0, publicUrls: 0 };
+const PRO = { servingMachines: 2, publicUrls: 10, remoteAccess: true };
+const NONE = { servingMachines: 0, publicUrls: 0, remoteAccess: false };
 const iso = (ms: number) => new Date(ms).toISOString();
 
 describe("the lifecycle table", () => {
@@ -215,7 +221,11 @@ describe("the lifecycle table", () => {
   it("adds the add-ons to an entitled plan only", async () => {
     const addons = { addon_machines: 2, addon_url_packs: 3 };
     const entitled = await account({ billing: { pro_status: "active", ...addons } });
-    expect(entitled.entitlement).toEqual({ servingMachines: 4, publicUrls: 40 });
+    expect(entitled.entitlement).toEqual({
+      servingMachines: 4,
+      publicUrls: 40,
+      remoteAccess: true,
+    });
     expect(entitled.plan.addons).toEqual({ machines: 2, urlPacks: 3 });
     const lapsed = await account({ billing: { pro_status: "unpaid", ...addons } });
     expect(lapsed.entitlement).toEqual(NONE);
@@ -229,15 +239,32 @@ describe("overrides and bans", () => {
       billing: { pro_status: "active", addon_machines: 3 },
       override: { machines: 1, urls: 3, expiresAt: NOW + DAY },
     });
-    expect(entitlement).toEqual({ servingMachines: 1, publicUrls: 3 });
+    expect(entitlement).toEqual({ servingMachines: 1, publicUrls: 3, remoteAccess: true });
     expect(plan).toMatchObject({
       status: "override",
       entitled: true,
       interval: null,
       renewsAt: null,
       endsAt: iso(NOW + DAY),
-      limits: { servingMachines: 1, publicUrls: 3 },
+      limits: { servingMachines: 1, publicUrls: 3, remoteAccess: true },
     });
+  });
+
+  it("takes remote access from the override alone, whatever the plan", async () => {
+    const without = await account({
+      billing: { pro_status: "active" },
+      override: { machines: 5, urls: 10, remoteAccess: false },
+    });
+    expect(without.entitlement).toEqual({
+      servingMachines: 5,
+      publicUrls: 10,
+      remoteAccess: false,
+    });
+    expect(without.plan.entitled).toBe(true);
+    // Remote access without any serving slot: `entitled` keeps meaning serving.
+    const only = await account({ override: { machines: 0, urls: 0 } });
+    expect(only.entitlement).toEqual({ servingMachines: 0, publicUrls: 0, remoteAccess: true });
+    expect(only.plan).toMatchObject({ status: "override", entitled: false });
   });
 
   it("falls back to the plan once the override expired", async () => {
@@ -282,7 +309,7 @@ describe("reconciling the serving URLs", () => {
     ...extra,
   });
   const urls = [url("a", "m1"), url("b", "m2"), url("c", "m2"), url("d", null)];
-  const two = { servingMachines: 2, publicUrls: 2 };
+  const two = { servingMachines: 2, publicUrls: 2, remoteAccess: true };
   /** What the statements write, by kind, with the URL ids each one covers. */
   const writes = (entitlement: typeof two, owned: OwnedUrl[]) =>
     reconcileStatements("u", entitlement, owned, NOW).map((statement) => [

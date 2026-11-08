@@ -28,19 +28,19 @@ Anyone with a GitHub account can sign in. Serving public URLs takes a paid plan:
 
 ## Plans
 
-| Plan | Price | Serving machines | Public URLs |
-|---|---|---|---|
-| None (signed in, no plan) | — | 0 | 0 |
-| Pro | $7.99 a month or $79 a year (€7.99 or €79), after a 7-day trial with a card | 2 | 10 |
-| Add-on: machine | $3 a month per unit, monthly only | +1 per unit | — |
-| Add-on: URLs | $2 a month per unit, monthly only | — | +10 per unit |
+| Plan | Price | Serving machines | Public URLs | Remote access |
+|---|---|---|---|---|
+| None (signed in, no plan) | — | 0 | 0 | no |
+| Pro | $7.99 a month or $79 a year (€7.99 or €79), after a 7-day trial with a card | 2 | 10 | yes |
+| Add-on: machine | $3 a month per unit, monthly only | +1 per unit | — | — |
+| Add-on: URLs | $2 a month per unit, monthly only | — | +10 per unit | — |
 
 Each Polar product has a USD and an EUR price. Polar picks the currency from the IP address that creates the checkout, so the Worker passes the buyer's (see "Billing").
 
 Add-ons ship after launch. The contract counts them from the start, so that adding them changes no table or response shape. An add-on counts only while the Pro plan is entitled. Add-ons have no trial. The Team plan appears on the pricing page as "contact us" and is not part of this contract.
 
-- **Entitlement:** what an account may use right now: `servingMachines` and `publicUrls`. It comes from its override when it has one that has not expired. Otherwise it comes from its Pro plan when the lifecycle table makes that plan entitled, plus its entitled add-ons. Otherwise it is zero. A banned account has none, whatever else it holds.
-- **Override:** a row in `plan_overrides` with its own limits, a reason and an optional expiry. It replaces the plan entirely. The team gets one each: 5 serving machines, 10 URLs, reason `team`, no expiry. The people on the old allowlist got it in a single migration, and an id in `TEAM_GITHUB_IDS` gets it when it signs in without an override (see "Device flow"). An operator sets or removes any override with `pnpm cloud:admin override` (see "Moderation"). Deleting the row ends that access, unless the id is still in `TEAM_GITHUB_IDS`: its next sign-in creates the row again.
+- **Entitlement:** what an account may use right now: `servingMachines`, `publicUrls`, and `remoteAccess`, the relay between its machines ([remote-machines.md](remote-machines.md), "Entitlement"). It comes from its override when it has one that has not expired. Otherwise it comes from its Pro plan when the lifecycle table makes that plan entitled, plus its entitled add-ons. Otherwise it is zero. A banned account has none, whatever else it holds.
+- **Override:** a row in `plan_overrides` with its own limits, remote access or not, a reason and an optional expiry. It replaces the plan entirely. The team gets one each: 5 serving machines, 10 URLs, remote access, reason `team`, no expiry. The people on the old allowlist got it in a single migration, and an id in `TEAM_GITHUB_IDS` gets it when it signs in without an override (see "Device flow"). An operator sets or removes any override with `pnpm cloud:admin override` (see "Moderation"). Deleting the row ends that access, unless the id is still in `TEAM_GITHUB_IDS`: its next sign-in creates the row again.
 - **Serving slot:** a machine whose tunnel state is anything but `none` (see "Tunnels"). An account uses at most `servingMachines` slots. Signing in uses none. A machine signed in with no slot can still list, create and change URLs. It just carries no traffic.
 - **Signed-in machines:** at most 10 per account, plan or not. They cost nothing: they hold no tunnel.
 - **Suspended:** a URL that exists but does not serve. It is kept with its slug and password. It is suspended when its owner's entitlement is zero, or when it is beyond `publicUrls` (see "Downgrades"). It is taken down when an operator removes it for abuse. A taken-down URL shows a removal page, its owner cannot bring it back, and its slug is never released.
@@ -231,17 +231,18 @@ type Plan = {
   renewsAt: string | null;     // next charge, when one is due
   endsAt: string | null;       // when "canceling" stops, or an override expires
   trialAvailable: boolean;     // false once trial_used_at is set
-  limits: { servingMachines: number; publicUrls: number };
+  // remoteAccess never moves `entitled`, which is about serving.
+  limits: { servingMachines: number; publicUrls: number; remoteAccess: boolean };
   usage: { servingMachines: number; publicUrls: number };
   addons: { machines: number; urlPacks: number };
 };
 ```
 
-**Device flow.** The Worker calls `POST https://github.com/login/device/code` with the client id and no scope, then polls `POST https://github.com/login/oauth/access_token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`, both with `Accept: application/json`, and maps GitHub's `authorization_pending`, `slow_down` (adding 5 seconds to the interval it returns), `access_denied` and `expired_token` to the responses above. With an access token, it reads `GET https://api.github.com/user` for the id and login and discards the GitHub token. It then refuses a banned user, and under `SIGNUP=allowlist` an id outside `ALLOWED_GITHUB_IDS`. When the id is in `TEAM_GITHUB_IDS`, it inserts the `team` override (5 serving machines, 10 URLs, no expiry) unless the account already has one or is banned, for a new account and an existing one alike. It never overwrites an override, so one an operator changed is kept. Both device routes are rate limited per client IP. The CLI refuses `login` while the machine is signed in.
+**Device flow.** The Worker calls `POST https://github.com/login/device/code` with the client id and no scope, then polls `POST https://github.com/login/oauth/access_token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`, both with `Accept: application/json`, and maps GitHub's `authorization_pending`, `slow_down` (adding 5 seconds to the interval it returns), `access_denied` and `expired_token` to the responses above. With an access token, it reads `GET https://api.github.com/user` for the id and login and discards the GitHub token. It then refuses a banned user, and under `SIGNUP=allowlist` an id outside `ALLOWED_GITHUB_IDS`. When the id is in `TEAM_GITHUB_IDS`, it inserts the `team` override (5 serving machines, 10 URLs, remote access, no expiry) unless the account already has one or is banned, for a new account and an existing one alike. It never overwrites an override, so one an operator changed is kept. Both device routes are rate limited per client IP. The CLI refuses `login` while the machine is signed in.
 
 **Signing in registers the machine.** In one D1 batch, the Worker inserts the machine as `active` with `tunnel_state` `none` and issues the token. It makes no Cloudflare call: the tunnel comes when the machine first has something to serve (see "Tunnels"). The `provisioning` machine status remains only for rows from before this contract, and the cleanup revokes such a row after 10 minutes. If the user already has an active machine with the same name, the new one replaces it: the old machine is revoked like a sign-out, its URLs move to the new one, and its tunnel is released. That covers signing in again on a machine whose credentials were lost. The machine name is the computer's name, with ` (dev)` added under the dev profile so that a dev build never replaces the installed app's machine, cut to 64 UTF-16 units. The ingress secret is `HMAC-SHA-256(INGRESS_KEY, machine id)` in hex; it is never stored.
 
-**Signing out.** In one D1 batch, the Worker deletes the token, marks the machine `revoked` and detaches its URLs (`machine: null`). Then, if there is a tunnel, it gives it a new secret, removes its connections and deletes it, and it deletes the DNS record if there is one. Whatever fails stays recorded on the revoked machine, and the 5-minute cleanup retries it. The Worker's own Cloudflare token does this work, so the user's revoked token is never needed again. A ban releases the user's tunnels the same way but keeps their tokens and URLs, so the API keeps answering `403 banned` and an unban restores everything.
+**Signing out.** In one D1 batch, the Worker deletes the token, marks the machine `revoked` and detaches its URLs (`machine: null`). It pushes `revoked` to the account's relay, which closes the machine's socket and tells its peers (remote-machines.md, "Unpairing, replacement, lost keys, revocation"); a same-name sign-in that replaces a machine pushes the same. Then, if there is a tunnel, it gives it a new secret, removes its connections and deletes it, and it deletes the DNS record if there is one. Whatever fails stays recorded on the revoked machine, and the 5-minute cleanup retries it. The Worker's own Cloudflare token does this work, so the user's revoked token is never needed again. A ban releases the user's tunnels the same way but keeps their tokens and URLs, so the API keeps answering `403 banned` and an unban restores everything.
 
 ### Tunnels
 
@@ -392,7 +393,7 @@ The payload is never trusted for state: it only names who to refresh.
    - copies Polar's `past_due_at`;
    - sets `trial_used_at` when any Pro subscription, past ones included, has a `trial_start`.
 5. Commits in one batch. First, each only when its revision is newer than `billing.revision`, the subscription it keeps is not recorded as a duplicate, and the one `billing` keeps is not among its duplicates: `serving_due_at`, when the snapshot differs from the one `billing` holds; the duplicates (below); and the upsert of `billing`. Then, each conditioned on `billing.revision` being its own: `trial_used_at`, and clearing `check_due_at` when it was set before the refresh started.
-6. When `serving_due_at` is set, by this refresh or one before it: the serving reconcile of the user (see "Downgrades"), whose rotations the sweep then releases (ADR 0027), and `forgetSite` for the user's slugs. Its batch reads the entitlement first, and every write in it, the clearing of `serving_due_at` included, holds only while `billing.revision` is still this refresh's. A refresh overtaken between that read and its batch therefore changes nothing, and leaves the debt to the newer one. A batch that fails fails the refresh.
+6. When `serving_due_at` is set, by this refresh or one before it: when the account has no `remoteAccess` left, `revokeAccount` on its relay, which closes its sockets (remote-machines.md, "Entitlement"); then the serving reconcile of the user (see "Downgrades"), whose rotations the sweep then releases (ADR 0027), and `forgetSite` for the user's slugs. Its batch reads the entitlement first, and every write in it, the clearing of `serving_due_at` included, holds only while `billing.revision` is still this refresh's. A refresh overtaken between that read and its batch therefore changes nothing, and leaves the debt to the newer one. A batch that fails fails the refresh.
 7. When steps 5 and 6 have committed, marks processed the user's events with `seq` at or below the watermark.
 
 Losing to a newer revision is not a failure: the newer refresh read Polar later, and marks the events. When the check of step 5 fails for its duplicates instead, another refresh recorded the subscription this one keeps, or keeps one this one would record: nothing was written, and the refresh starts again from step 1, three times at most. Events stored after the watermark stay pending and cause another refresh. A refresh that fails leaves its events pending for the retry, and sends the user to the back of the reconciliation queue. Polar's rate limit (`429`) is no failure: the events, and the user's turn in the reconciliation queue, wait what `Retry-After` asks, a minute at least, without counting an attempt. More than 5 pages of subscriptions for one user fails the refresh rather than reading half of them. Step 7 also waits for `serving_due_at` to be clear, read in the statement that marks: a refresh whose reconcile was a no-op because a newer one overtook it, or whose newer sibling's reconcile failed, leaves its events pending while the debt stands. The 5-minute job runs the serving reconciles still owed, every run, guarded by the revision `billing` then holds: those owed longest first, and one that fails goes to the back, so a few that keep failing cannot hold back the others.
@@ -417,7 +418,7 @@ Refunds are not automated. A duplicate takes a checkout opened from an old link,
 - `show <github-login>`: the ban, the override, the billing snapshot, the entitlement and each URL's state;
 - `ban <github-login> <reason>` and `unban <github-login>`;
 - `takedown <slug> <reason>` and `restore <slug>`, which undoes a takedown;
-- `override <github-login> <serving-machines> <urls> <reason> [--expires <date>]` and `override --remove <github-login>`;
+- `override <github-login> <serving-machines> <urls> <reason> [--expires <date>] [--no-remote-access]`, which gives remote access unless told otherwise, and `override --remove <github-login>`;
 - `refresh <github-login>`, which sets `check_due_at` so the next 5-minute run refreshes billing;
 - `duplicates`, which lists every recorded duplicate Pro subscription and its orders, live from Polar, for the operator to refund in Polar's dashboard (see "Billing"). It writes nothing, and calls Polar with the production `POLAR_ACCESS_TOKEN` from Infisical, or with `--local`, the sandbox and `POLAR_ACCESS_TOKEN` from the environment.
 

@@ -12,6 +12,7 @@ import {
   entitlementOf,
   isEntitled,
   loadAccount,
+  MAX_LINKED_MACHINES,
   servingUrlLimit,
   type Entitlement,
 } from "./entitlement";
@@ -27,6 +28,7 @@ import {
 } from "./names";
 import { generatePassword } from "./passwords";
 import { isRateLimited, PolarError } from "./polar";
+import { parseProto, RELAY_HEADER_PREFIX, RELAY_HEADERS, RELAY_PROTOCOL, relayOf } from "./relay";
 import { forgetSite } from "./sites";
 import { background, machineRuntime, reconcileOwner, releaseIfUnwanted } from "./tunnels";
 
@@ -36,6 +38,17 @@ const MAX_MACHINE_NAME_LENGTH = 64;
 const SLUG_ATTEMPTS = 5;
 /** GitHub asks for this much more time between polls after `slow_down`. */
 const SLOW_DOWN_SECONDS = 5;
+/** A lease's lifetime, counted by the client from when it sent the request. */
+const LEASE_TTL_SECONDS = 60;
+/**
+ * A refused relay upgrade waits at least this long, plus up to as much
+ * again at random, so a reconnect storm comes back spread out.
+ */
+const RELAY_RETRY_AFTER_SECONDS = 30;
+const TOKEN = /^lfy_[0-9a-f]{64}$/;
+/** An X25519 public key: 32 bytes, base64url without padding. */
+const REMOTE_KEY = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+const VERSION = /^[0-9A-Za-z.+-]{1,64}$/;
 
 /** Who calls, from the bearer token. */
 type Caller = {
@@ -44,6 +57,7 @@ type Caller = {
   banned: boolean;
   machineId: string;
   machineName: string;
+  remoteKey: string | null;
 };
 
 type Route = {
@@ -80,6 +94,19 @@ const ROUTES: Route[] = [
   { method: "POST", pattern: /^\/v1\/public-urls\/([^/]+)\/claim$/, handle: authed(claimUrl) },
   { method: "GET", pattern: /^\/v2\/machines\/self\/runtime$/, handle: authed(runtimeV2) },
   { method: "GET", pattern: /^\/v1\/machines\/self\/runtime$/, handle: authed(runtimeV1) },
+  // Remote machines (docs/remote-machines.md, "Cloud"). The roster, the key
+  // and removal need no entitlement, so a person can always clean up.
+  { method: "GET", pattern: /^\/v1\/machines$/, handle: authed(listMachines) },
+  { method: "PUT", pattern: /^\/v1\/machines\/self\/remote-key$/, handle: authed(setRemoteKey) },
+  // A sign-out of another machine, which a banned account keeps as its own.
+  {
+    method: "DELETE",
+    pattern: /^\/v1\/machines\/([^/]+)$/,
+    handle: authed(removeMachine, { banned: true }),
+  },
+  // Its own checks, the cheapest before any D1 work.
+  { method: "GET", pattern: /^\/v1\/remote\/connect$/, handle: remoteConnect },
+  { method: "GET", pattern: /^\/v1\/remote\/lease$/, handle: authed(remoteLease) },
 ];
 
 export async function handleApi(
@@ -168,38 +195,55 @@ function authed(
 }
 
 async function authenticate(request: Request, env: Env): Promise<Caller> {
+  const token = bearerToken(request);
+  if (token === null) throw signedOut();
+  return callerOf(env, await sha256Hex(token));
+}
+
+/** The bearer token when it has the shape Localify issues, without any D1 work. */
+function bearerToken(request: Request): string | null {
   const header = request.headers.get("authorization") ?? "";
-  const match = /^Bearer\s+(lfy_[0-9a-f]{64})$/.exec(header.trim());
-  const signedOut = new ApiError(
-    401,
-    "unauthorized",
-    "You are not signed in to Localify Cloud. Run `localify login`.",
-  );
-  if (!match?.[1]) throw signedOut;
+  const match = /^Bearer\s+(\S+)$/.exec(header.trim());
+  return match?.[1] && TOKEN.test(match[1]) ? match[1] : null;
+}
+
+/** The caller behind a token's SHA-256, or `401` for an unknown or revoked one. */
+async function callerOf(env: Env, tokenHash: string): Promise<Caller> {
   const row = await env.DB.prepare(
-    `SELECT u.id AS user_id, u.login, u.banned_at, m.id AS machine_id, m.name AS machine_name
+    `SELECT u.id AS user_id, u.login, u.banned_at, m.id AS machine_id, m.name AS machine_name,
+            m.remote_key
      FROM tokens t
      JOIN users u ON u.id = t.user_id
      JOIN machines m ON m.id = t.machine_id AND m.user_id = t.user_id
      WHERE t.hash = ?1 AND m.status = 'active'`,
   )
-    .bind(await sha256Hex(match[1]))
+    .bind(tokenHash)
     .first<{
       user_id: string;
       login: string;
       banned_at: number | null;
       machine_id: string;
       machine_name: string;
+      remote_key: string | null;
     }>();
   // The allowlist only gates sign-in: a signed-in account keeps its token.
-  if (!row) throw signedOut;
+  if (!row) throw signedOut();
   return {
     userId: row.user_id,
     login: row.login,
     banned: row.banned_at !== null,
     machineId: row.machine_id,
     machineName: row.machine_name,
+    remoteKey: row.remote_key,
   };
+}
+
+function signedOut(): ApiError {
+  return new ApiError(
+    401,
+    "unauthorized",
+    "You are not signed in to Localify Cloud. Run `localify login`.",
+  );
 }
 
 function bannedError(): ApiError {
@@ -336,15 +380,17 @@ async function deviceToken(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Gives a team member the override migration 0003 gave the first team: 5
- * serving machines, 10 URLs, no expiry. It only inserts: an override an
- * operator changed is kept, and leaving the team list removes nothing. It
- * skips a banned account, even one banned since the check above.
+ * Gives a team member the override migration 0003 gave the first team, with
+ * the remote access migration 0006 added: 5 serving machines, 10 URLs,
+ * remote access, no expiry. It only inserts: an override an operator
+ * changed is kept, and leaving the team list removes nothing. It skips a
+ * banned account, even one banned since the check above.
  */
 async function grantTeamOverride(env: Env, userId: string): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, reason, expires_at, created_at)
-     SELECT id, 5, 10, 'team', NULL, ?2 FROM users WHERE id = ?1 AND banned_at IS NULL
+    `INSERT INTO plan_overrides (user_id, serving_machines, public_urls, remote_access, reason,
+                                 expires_at, created_at)
+     SELECT id, 5, 10, 1, 'team', NULL, ?2 FROM users WHERE id = ?1 AND banned_at IS NULL
      ON CONFLICT (user_id) DO NOTHING`,
   )
     .bind(userId, Date.now())
@@ -398,7 +444,7 @@ async function portal(_request: Request, env: Env, caller: Caller): Promise<Resp
 }
 
 async function logout(_request: Request, env: Env, caller: Caller): Promise<Response> {
-  await signOutMachine(env, caller.machineId);
+  await signOutMachine(env, caller.userId, caller.machineId);
   return noContent();
 }
 
@@ -732,6 +778,202 @@ async function runtimeV1(
     ingressSecret: runtime.ingressSecret,
     publicUrls: runtime.publicUrls.filter((url) => url.state === "serving"),
   });
+}
+
+// --- Remote machines ---
+
+/** `GET /v1/machines`: the roster, the account's active machines, oldest first. */
+async function listMachines(_request: Request, env: Env, caller: Caller): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT id, name, created_at, remote_key FROM machines
+     WHERE user_id = ?1 AND status = 'active' ORDER BY created_at, id`,
+  )
+    .bind(caller.userId)
+    .all<{ id: string; name: string; created_at: number; remote_key: string | null }>();
+  return json({
+    machines: results.map((machine) => ({
+      id: machine.id,
+      name: machine.name,
+      createdAt: new Date(machine.created_at).toISOString(),
+      remoteKey: machine.remote_key,
+      self: machine.id === caller.machineId,
+    })),
+  });
+}
+
+/**
+ * `PUT /v1/machines/self/remote-key`: set once per machine id, so a new
+ * sign-in, with a new id, never inherits one. The same key again is a
+ * success; another key, or one another machine holds, revoked ones
+ * included, is refused.
+ */
+async function setRemoteKey(request: Request, env: Env, caller: Caller): Promise<Response> {
+  const { publicKey } = await readJson(request);
+  if (typeof publicKey !== "string" || !REMOTE_KEY.test(publicKey)) {
+    throw new ApiError(
+      422,
+      "invalid_key",
+      "publicKey must be an X25519 public key: 32 bytes, base64url without padding.",
+    );
+  }
+  try {
+    // The cap is part of the statement, so concurrent uploads cannot both pass it.
+    const set = await env.DB.prepare(
+      `UPDATE machines SET remote_key = ?2, remote_key_at = ?3
+       WHERE id = ?1 AND status = 'active' AND remote_key IS NULL
+         AND (SELECT COUNT(*) FROM machines
+              WHERE user_id = ?4 AND status = 'active' AND remote_key IS NOT NULL) < ?5`,
+    )
+      .bind(caller.machineId, publicKey, Date.now(), caller.userId, MAX_LINKED_MACHINES)
+      .run();
+    if (set.meta.changes > 0) return noContent();
+  } catch (error) {
+    if (isUniqueViolation(error, "machines.remote_key")) {
+      throw new ApiError(
+        409,
+        "remote_key_taken",
+        "Another machine already uses this remote key. Sign out and sign in again on this machine.",
+      );
+    }
+    throw error;
+  }
+  const current = await env.DB.prepare(`SELECT remote_key FROM machines WHERE id = ?1`)
+    .bind(caller.machineId)
+    .first<{ remote_key: string | null }>();
+  if (current?.remote_key === publicKey) return noContent();
+  if (current?.remote_key) {
+    throw new ApiError(
+      409,
+      "remote_key_set",
+      "This machine already has another remote key. Sign out and sign in again, then pair it again.",
+    );
+  }
+  throw new ApiError(
+    403,
+    "quota_exceeded",
+    `Your account already has ${MAX_LINKED_MACHINES} machines with remote access, the most it can have. Remove one with \`localify machines remove\`, then try again.`,
+  );
+}
+
+/**
+ * `DELETE /v1/machines/{id}`: signs that machine out as `logout` does, and
+ * pushes `revoked` to the relay. A machine already signed out answers 204
+ * too, and is pushed again.
+ */
+async function removeMachine(
+  _request: Request,
+  env: Env,
+  caller: Caller,
+  [id]: string[],
+): Promise<Response> {
+  const machine = await env.DB.prepare(`SELECT id FROM machines WHERE id = ?1 AND user_id = ?2`)
+    .bind(id ?? "", caller.userId)
+    .first<{ id: string }>();
+  if (!machine) {
+    throw new ApiError(
+      404,
+      "not_found",
+      "Your account has no machine with this id. Run `localify machines` to see yours.",
+    );
+  }
+  await signOutMachine(env, caller.userId, machine.id);
+  return noContent();
+}
+
+/**
+ * `GET /v1/remote/connect` (docs/remote-machines.md, "Connecting"). Before
+ * any D1 work: the token's shape, the subprotocol, and the two limiters.
+ * Then the token, the ban, remote access and the remote key. The account's
+ * relay gets the socket with who it is in headers set here, after removing
+ * any the client sent.
+ */
+async function remoteConnect(request: Request, env: Env): Promise<Response> {
+  const token = bearerToken(request);
+  if (token === null) throw signedOut();
+  const protocols = (request.headers.get("sec-websocket-protocol") ?? "")
+    .split(",")
+    .map((protocol) => protocol.trim());
+  if (
+    request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
+    !protocols.includes(RELAY_PROTOCOL)
+  ) {
+    throw new ApiError(
+      426,
+      "unsupported_protocol",
+      `Connect with a WebSocket and the ${RELAY_PROTOCOL} subprotocol. Update Localify and try again.`,
+    );
+  }
+  const proto = parseProto(request.headers.get("x-localify-proto"));
+  if (!proto) {
+    throw new ApiError(426, "unsupported_protocol", "X-Localify-Proto must be <min>-<max>.");
+  }
+  const tokenHash = await sha256Hex(token);
+  const clientIp = request.headers.get("cf-connecting-ip") ?? "unknown";
+  if (
+    !(await env.REMOTE_IP_LIMITER.limit({ key: clientIp })).success ||
+    !(await env.REMOTE_CONNECT_LIMITER.limit({ key: tokenHash })).success
+  ) {
+    const response = errorResponse(
+      new ApiError(
+        429,
+        "rate_limited",
+        "Too many relay connections from this network or machine. Wait, then try again.",
+      ),
+    );
+    const wait = RELAY_RETRY_AFTER_SECONDS + Math.floor(Math.random() * RELAY_RETRY_AFTER_SECONDS);
+    response.headers.set("retry-after", String(wait));
+    return response;
+  }
+
+  const caller = await callerOf(env, tokenHash);
+  if (caller.banned) throw bannedError();
+  const account = await loadAccount(env.DB, caller.userId);
+  if (!account?.entitlement.remoteAccess) throw remoteAccessRequired();
+  if (caller.remoteKey === null) {
+    throw new ApiError(
+      409,
+      "remote_key_missing",
+      "This machine has no remote key yet. Upload it with PUT /v1/machines/self/remote-key.",
+    );
+  }
+
+  const headers = new Headers();
+  for (const [name, value] of request.headers) {
+    if (name !== "authorization" && !name.startsWith(RELAY_HEADER_PREFIX)) {
+      headers.set(name, value);
+    }
+  }
+  const version = request.headers.get("x-localify-version") ?? "";
+  headers.set(RELAY_HEADERS.user, caller.userId);
+  headers.set(RELAY_HEADERS.machine, caller.machineId);
+  headers.set(RELAY_HEADERS.version, VERSION.test(version) ? version : "unknown");
+  headers.set(RELAY_HEADERS.proto, `${proto.min}-${proto.max}`);
+  headers.set(RELAY_HEADERS.checked, String(Date.now()));
+  return relayOf(env, caller.userId).fetch(new Request(request, { headers }));
+}
+
+/**
+ * `GET /v1/remote/lease`: a lifetime the client counts on its monotonic
+ * clock from when it sent the request, never an absolute time, and the
+ * account's active machines.
+ */
+async function remoteLease(_request: Request, env: Env, caller: Caller): Promise<Response> {
+  const account = await loadAccount(env.DB, caller.userId);
+  if (!account?.entitlement.remoteAccess) throw remoteAccessRequired();
+  const { results } = await env.DB.prepare(
+    `SELECT id FROM machines WHERE user_id = ?1 AND status = 'active' ORDER BY created_at, id`,
+  )
+    .bind(caller.userId)
+    .all<{ id: string }>();
+  return json({ ttl: LEASE_TTL_SECONDS, machines: results.map((machine) => machine.id) });
+}
+
+function remoteAccessRequired(): ApiError {
+  return new ApiError(
+    402,
+    "subscription_required",
+    "Remote access needs Localify Cloud Pro. Start a 7-day trial with `localify subscribe`.",
+  );
 }
 
 // --- Helpers ---

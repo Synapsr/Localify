@@ -3,7 +3,7 @@
 // webhooks, the refresh, the lifecycle, checkouts, the portal, duplicate
 // subscriptions and the reconciliation, against a fake Polar.
 
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { proCheckout, reconcileBilling, refreshBilling, runBillingJobs } from "../src/billing";
@@ -16,6 +16,7 @@ import {
   serve,
   settle,
   signIn,
+  type FakeSocket,
   type TestContext,
 } from "./support";
 
@@ -418,6 +419,34 @@ describe("the refresh", () => {
     held[0]!();
     expect(await older).toBe("superseded");
     expect(billingRow(userId)).toMatchObject({ pro_status: "canceled", revision: 2 });
+  });
+
+  it("closes the account's relay sockets with 4402 once a refresh ends remote access", async () => {
+    const { token, userId } = await signIn(context, "teo-goulois", 1, "laptop", {
+      entitled: false,
+    });
+    const sub = subscription(userId);
+    expect(await refresh(userId)).toBe("committed");
+    const publicKey = randomBytes(32).toString("base64url");
+    expect(
+      (await api(context, "PUT", "/v1/machines/self/remote-key", { token, body: { publicKey } }))
+        .status,
+    ).toBe(204);
+    const connected = await api(context, "GET", "/v1/remote/connect", {
+      token,
+      headers: { upgrade: "websocket", "sec-websocket-protocol": "localify-remote.1" },
+    });
+    expect(connected.status).toBe(101);
+    const socket = (connected as unknown as { webSocket: FakeSocket }).webSocket.peer!;
+
+    // A change that keeps remote access closes nothing.
+    Object.assign(sub, { current_period_end: iso(Date.now() + 40 * DAY) });
+    expect(await refresh(userId)).toBe("committed");
+    expect(socket.closed).toBeNull();
+
+    Object.assign(sub, { status: "canceled", ended_at: iso(Date.now()) });
+    expect(await refresh(userId)).toBe("committed");
+    expect(socket.closed?.code).toBe(4402);
   });
 
   it("lets a newer refresh overwrite an older one that finished first", async () => {

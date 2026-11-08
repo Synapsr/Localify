@@ -14,6 +14,7 @@ import { ConfigError, proProducts, webhookSecret } from "./config";
 import { constantTimeEqual } from "./crypto";
 import {
   ACCOUNT_SQL,
+  loadAccount,
   proPlan,
   type AccountRow,
   type ProFields,
@@ -29,6 +30,7 @@ import {
   type PolarSubscription,
 } from "./polar";
 import { meteredDb } from "./queries";
+import { CLOSE, pushToRelay } from "./relay";
 import { forgetSite } from "./sites";
 import { reconcileOwnerIf } from "./tunnels";
 
@@ -478,7 +480,10 @@ async function commit(
       `Duplicate Pro subscription ${String(row.subscription_id)} of user ${userId}: it is revoked, and an operator refunds it (pnpm cloud:admin duplicates)`,
     );
   }
-  if (owed?.results[0]?.serving_due_at != null) await applyEntitlement(env, userId, revision, now);
+  if (owed?.results[0]?.serving_due_at != null) {
+    await pushLostRemoteAccess(env, userId, now);
+    await applyEntitlement(env, userId, revision, now);
+  }
   if (watermark !== null) {
     await env.DB.prepare(
       // Only once no serving reconcile is owed: a reconcile this refresh
@@ -527,6 +532,19 @@ async function applyEntitlement(
     .bind(userId)
     .all<{ slug: string }>();
   for (const { slug } of results) forgetSite(slug);
+}
+
+/**
+ * A committed change of the snapshot that leaves the account without
+ * remote access closes its relay sockets at once (docs/remote-machines.md,
+ * "Entitlement"). The relay does nothing when none is open, and its lazy
+ * checks and the leases cover a push that fails.
+ */
+async function pushLostRemoteAccess(env: Env, userId: string, now: number): Promise<void> {
+  const account = await loadAccount(env.DB, userId, now);
+  if (!account || account.entitlement.remoteAccess) return;
+  const code = account.banned ? CLOSE.banned : CLOSE.lapsed;
+  await pushToRelay(env, userId, (relay) => relay.revokeAccount(code));
 }
 
 /**

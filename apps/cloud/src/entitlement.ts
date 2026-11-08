@@ -1,10 +1,15 @@
 // What an account may use right now (docs/public-urls.md, "Plans",
-// "Lifecycle" and "Downgrades"): its ban, its override, or its Pro plan from
-// the `billing` snapshot, plus its add-ons.
+// "Lifecycle" and "Downgrades", and docs/remote-machines.md, "Entitlement"):
+// its ban, its override, or its Pro plan from the `billing` snapshot, plus
+// its add-ons.
 //
 // No value imports: `scripts/admin.ts` runs this file in Node as it is.
 
-export type Entitlement = { servingMachines: number; publicUrls: number };
+/**
+ * `remoteAccess` is its own right, never inferred from the serving quotas:
+ * an account can reach its machines through the relay with no serving slot.
+ */
+export type Entitlement = { servingMachines: number; publicUrls: number; remoteAccess: boolean };
 
 export type PlanStatus = "none" | "trialing" | "active" | "past_due" | "canceling" | "override";
 
@@ -31,6 +36,7 @@ export type AccountRow = {
   override_machines: number | null;
   override_urls: number | null;
   override_expires_at: number | null;
+  override_remote_access: number | null;
   pro_status: string | null;
   pro_interval: string | null;
   cancel_at_period_end: number | null;
@@ -46,7 +52,7 @@ export type AccountRow = {
 const SELECT_ACCOUNTS = `
   SELECT u.id AS user_id, u.banned_at, u.trial_used_at,
          o.serving_machines AS override_machines, o.public_urls AS override_urls,
-         o.expires_at AS override_expires_at,
+         o.expires_at AS override_expires_at, o.remote_access AS override_remote_access,
          b.pro_status, b.pro_interval, b.cancel_at_period_end, b.current_period_end, b.trial_end,
          b.ends_at, b.ended_at, b.past_due_at, b.addon_machines, b.addon_url_packs
   FROM users u
@@ -56,9 +62,33 @@ const SELECT_ACCOUNTS = `
 /** `?1` is the user id. No row for an unknown user. */
 export const ACCOUNT_SQL = `${SELECT_ACCOUNTS} WHERE u.id = ?1`;
 
-export const NO_ENTITLEMENT: Entitlement = { servingMachines: 0, publicUrls: 0 };
+/** The row `REMOTE_CHECK_SQL` returns: the account, and a JSON array of machine ids. */
+export type RemoteCheckRow = AccountRow & { active_machines: string };
+
+/**
+ * The relay's check of both ends of a frame, in one query: `?1` is the
+ * user id, `?2` a JSON array of machine ids; `active_machines` holds those
+ * of them still active in that account. No row for an unknown user.
+ */
+export const REMOTE_CHECK_SQL = `
+  SELECT a.*,
+         (SELECT json_group_array(m.id) FROM machines m
+          WHERE m.user_id = ?1 AND m.status = 'active'
+            AND m.id IN (SELECT value FROM json_each(?2))) AS active_machines
+  FROM (${ACCOUNT_SQL}) a`;
+
+export const NO_ENTITLEMENT: Entitlement = {
+  servingMachines: 0,
+  publicUrls: 0,
+  remoteAccess: false,
+};
 /** What Pro includes before add-ons. */
-export const PRO: Entitlement = { servingMachines: 2, publicUrls: 10 };
+export const PRO: Entitlement = { servingMachines: 2, publicUrls: 10, remoteAccess: true };
+/**
+ * The most machines of one account with a remote key, which the 10
+ * signed-in machines already bound.
+ */
+export const MAX_LINKED_MACHINES = 10;
 /** Public URLs per URL add-on unit. */
 export const URLS_PER_PACK = 10;
 /** A `past_due` plan stays entitled this long after Polar's `past_due_at`. */
@@ -81,7 +111,11 @@ export function accountOf(row: AccountRow, now: number): Account {
     row.override_urls !== null &&
     (row.override_expires_at === null || row.override_expires_at > now)
   ) {
-    entitlement = { servingMachines: row.override_machines, publicUrls: row.override_urls };
+    entitlement = {
+      servingMachines: row.override_machines,
+      publicUrls: row.override_urls,
+      remoteAccess: row.override_remote_access === 1,
+    };
     plan = {
       status: "override",
       interval: null,
@@ -96,6 +130,7 @@ export function accountOf(row: AccountRow, now: number): Account {
       ? {
           servingMachines: PRO.servingMachines + addons.machines,
           publicUrls: PRO.publicUrls + URLS_PER_PACK * addons.urlPacks,
+          remoteAccess: PRO.remoteAccess,
         }
       : NO_ENTITLEMENT;
     plan = { ...pro.plan, trialAvailable, addons };

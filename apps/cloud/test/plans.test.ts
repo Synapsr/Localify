@@ -114,7 +114,7 @@ describe("/v1/me", () => {
       renewsAt: null,
       endsAt: null,
       trialAvailable: true,
-      limits: { servingMachines: 0, publicUrls: 0 },
+      limits: { servingMachines: 0, publicUrls: 0, remoteAccess: false },
       usage: { servingMachines: 0, publicUrls: 0 },
       addons: { machines: 0, urlPacks: 0 },
     });
@@ -146,7 +146,7 @@ describe("/v1/me", () => {
       renewsAt: new Date(renews).toISOString(),
       endsAt: null,
       trialAvailable: false,
-      limits: { servingMachines: 3, publicUrls: 20 },
+      limits: { servingMachines: 3, publicUrls: 20, remoteAccess: true },
       // A taken-down URL is not live.
       usage: { servingMachines: 1, publicUrls: 1 },
       addons: { machines: 1, urlPacks: 1 },
@@ -158,7 +158,7 @@ describe("/v1/me", () => {
     expect((await me(token)).body.plan).toMatchObject({
       status: "override",
       entitled: true,
-      limits: { servingMachines: 5, publicUrls: 10 },
+      limits: { servingMachines: 5, publicUrls: 10, remoteAccess: true },
       endsAt: null,
     });
   });
@@ -323,7 +323,7 @@ describe("TEAM_GITHUB_IDS", () => {
     expect((await me(token)).body.plan).toMatchObject({
       status: "override",
       entitled: true,
-      limits: { servingMachines: 5, publicUrls: 10 },
+      limits: { servingMachines: 5, publicUrls: 10, remoteAccess: true },
       endsAt: null,
     });
   });
