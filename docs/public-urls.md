@@ -300,7 +300,7 @@ The Worker sends that header on every forwarded request (see "Public traffic"). 
    - down or inactive, with `down_seen_at` empty: sets `down_seen_at`;
    - down or inactive again, with `down_seen_at` and `tunnel_ready_at` both more than 15 minutes old: releases it;
    - a failed read: changes nothing.
-3. Releases abandoned operations, machines that no longer want a tunnel, and `ready` machines whose `rotate_requested_at` is set, clearing it with the release.
+3. Releases abandoned operations, machines that no longer want a tunnel, and `ready` machines whose `rotate_requested_at` is set, clearing it with the release. A machine is found to want no tunnel from the URLs the run read at its start, so its release also requires, as it takes the row, that no live URL is on the machine: a URL created during the run keeps its new tunnel.
 4. Compares each `ready` machine's CNAME content with its `tunnel_id` and corrects it, since a generation check cannot stop a DNS call already on its way.
 5. Deletes `localify-*` tunnels no machine row holds, once they are more than an hour old.
 6. Logs an error when the database holds more than 800 slots.

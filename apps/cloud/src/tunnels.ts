@@ -422,6 +422,12 @@ type ReleaseOptions = {
   urgent?: boolean;
   /** The sweep's budget; API requests have none. */
   budget?: CallBudget | null;
+  /**
+   * Releases only while no live URL is on the machine, checked as the
+   * release takes the row: one created since the caller read the URLs
+   * keeps its new tunnel.
+   */
+  ifIdle?: boolean;
 };
 
 /**
@@ -435,7 +441,7 @@ async function releaseTunnel(
   env: Env,
   machineId: string,
   generation: number,
-  { now = Date.now(), urgent = false, budget = null }: ReleaseOptions = {},
+  { now = Date.now(), urgent = false, budget = null, ifIdle = false }: ReleaseOptions = {},
 ): Promise<ReleaseResult> {
   const op = newOp();
   const taken = await env.DB.prepare(
@@ -445,9 +451,11 @@ async function releaseTunnel(
      WHERE id = ?1 AND status = 'active' AND tunnel_generation = ?2
        AND (tunnel_state = 'ready'
             OR (tunnel_state IN ('provisioning', 'releasing') AND tunnel_op_at <= ?5))
+       AND (?7 = 0 OR NOT EXISTS (SELECT 1 FROM public_urls p WHERE p.machine_id = machines.id
+                                  AND p.deleted_at IS NULL AND p.taken_down_at IS NULL))
      RETURNING tunnel_id`,
   )
-    .bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0)
+    .bind(machineId, generation, op, now, now - OP_STALE_MS, urgent ? 1 : 0, ifIdle ? 1 : 0)
     .first<{ tunnel_id: string | null }>();
   if (!taken) return "skipped";
   try {
@@ -706,17 +714,26 @@ export async function runSweep(sweptEnv: Env, now = Date.now()): Promise<void> {
   // machines with nothing left to serve. A release that keeps failing backs off.
   reaps.sort((a, b) => (a.down_seen_at ?? 0) - (b.down_seen_at ?? 0));
   const serving = machinesWithServingUrls(owners);
+  // The run read the URLs at its start: an idle machine is released only
+  // while it still has no live URL, so a URL created since keeps its tunnel.
+  const idle = slots.filter((slot) => slot.tunnel_state === "ready" && !serving.has(slot.id));
   const regular = [
     ...reaps,
     ...slots.filter((slot) => slot.tunnel_state !== "ready" && isStale(slot.tunnel_op_at, now)),
-    ...slots.filter((slot) => slot.tunnel_state === "ready" && !serving.has(slot.id)),
+    ...idle,
   ];
   for (const slot of regular) {
     if (done.has(slot.id)) continue;
     done.add(slot.id);
     if (slot.next_cleanup_at !== null && slot.next_cleanup_at > now) continue;
     if (!budget.has(RELEASE_CALLS) || !queries.has(RELEASE_QUERIES + FINAL_QUERIES)) continue;
-    if ((await releaseTunnel(env, slot.id, slot.tunnel_generation, { now, budget })) === "failed") {
+    const ifIdle = !reaps.includes(slot) && idle.includes(slot);
+    const released = await releaseTunnel(env, slot.id, slot.tunnel_generation, {
+      now,
+      budget,
+      ifIdle,
+    });
+    if (released === "failed") {
       const attempts = slot.cleanup_attempts + 1;
       await env.DB.prepare(
         `UPDATE machines SET cleanup_attempts = ?2, next_cleanup_at = ?3 WHERE id = ?1`,

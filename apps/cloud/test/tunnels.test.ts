@@ -725,6 +725,35 @@ describe("the sweep", () => {
     });
   });
 
+  it("keeps the tunnel of a machine that got a URL after the run read them", async () => {
+    const { machineId, urlId, userId } = await servingMachine();
+    update("UPDATE public_urls SET deleted_at = 1 WHERE id = ?", urlId);
+    // The tunnel listing comes after the run read the URLs, and before the
+    // release of machines with nothing to serve: a URL is created then.
+    context.routes.set(`GET ${TUNNELS}?is_deleted=false`, () => {
+      update(
+        `INSERT INTO public_urls (id, user_id, slug, local_domain, wildcard, machine_id, protected,
+                                  password_version, created_at)
+         VALUES ('fresh', ?, 'fresh-url', 'fresh.localify', 0, ?, 0, 1, ?)`,
+        userId,
+        machineId,
+        Date.now(),
+      );
+      return cloudflareOk([
+        {
+          id: "tunnel-laptop",
+          name: `localify-${machineId}-1`,
+          status: "healthy",
+          created_at: new Date().toISOString(),
+        },
+      ]);
+    });
+    context.calls.length = 0;
+    await runSweep(context.env);
+    expect(row(machineId)).toMatchObject({ tunnel_state: "ready", tunnel_generation: 1 });
+    expect(count("DELETE")).toBe(0);
+  });
+
   it("points a drifted CNAME back at the machine's tunnel", async () => {
     const { machineId } = await servingMachine();
     listTunnels([
