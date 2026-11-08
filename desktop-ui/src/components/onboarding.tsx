@@ -19,7 +19,10 @@ import {
   CopyIcon,
   DangerTriangleIcon,
   LockIcon,
+  MonitorIcon,
   PowerIcon,
+  RefreshIcon,
+  ServersIcon,
   SparklesIcon,
   TerminalIcon,
   ZapIcon,
@@ -246,7 +249,7 @@ function WelcomeStep({
   const reduceMotion = useReducedMotion();
   const item = reduceMotion ? welcomeItemReduced : welcomeItem;
 
-  const subtitle = `Clean ${bootstrap.environment.fixedDomainSuffix} URLs for your agents, worktrees, and machines. Your agents run the dev servers; you open the URLs.`;
+  const subtitle = `Clean ${bootstrap.environment.fixedDomainSuffix} URLs for your agents, worktrees, and machines.`;
 
   return (
     <motion.div
@@ -298,11 +301,6 @@ function WhyStep({
   onContinue: () => void;
 }) {
   const suffix = bootstrap.environment.fixedDomainSuffix;
-  const httpsPort = bootstrap.config.daemon.httpsPort;
-
-  const paragraphs = [
-    `Several agents, several dev servers, all fighting over localhost:3000. Localify gives each project and worktree a fixed ${suffix} URL instead, with trusted HTTPS.`,
-  ];
 
   return (
     <div>
@@ -314,41 +312,23 @@ function WhyStep({
       >
         <h2 className="mb-3 text-3xl font-semibold tracking-tight">Why Localify</h2>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          The end of <span className="font-mono">localhost:3000</span>,{" "}
-          <span className="font-mono">:3001</span>, <span className="font-mono">:3002</span>…
+          Five agents on five worktrees, across your computers. Every one keeps a stable URL, and
+          hot reload shows up wherever you look from.
         </p>
       </motion.div>
-
-      <div className="mx-auto max-w-xl space-y-4 text-[15px] leading-relaxed text-foreground/90">
-        {paragraphs.map((p, i) => (
-          <motion.p
-            key={i}
-            initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{
-              duration: 0.55,
-              delay: 0.1 + i * 0.12,
-              ease: [0.22, 1, 0.36, 1],
-            }}
-          >
-            {p}
-          </motion.p>
-        ))}
-      </div>
 
       <motion.div
         initial={{ opacity: 0, y: 10, filter: "blur(6px)" }}
         animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-        transition={{ duration: 0.55, delay: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        className="mt-8"
+        transition={{ duration: 0.55, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
       >
-        <BrowserMock suffix={suffix} httpsPort={httpsPort} />
+        <MachinesMock suffix={suffix} />
       </motion.div>
 
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.7, ease: "easeOut" }}
+        transition={{ duration: 0.4, delay: 0.4, ease: "easeOut" }}
         className="mt-8 flex items-center justify-between"
       >
         <Button variant="ghost" size="lg" onClick={onBack}>
@@ -363,176 +343,88 @@ function WhyStep({
   );
 }
 
-type BrowserProject = {
-  name: string;
-  localPort: string;
-};
+const MACHINES = [
+  {
+    name: "Mac Studio",
+    worktrees: ["web--fix-auth.journal", "web--onboarding.journal", "api--onboarding.journal"],
+  },
+  { name: "Linux server", worktrees: ["web--dark-mode.journal", "web--search.journal"] },
+] as const;
 
-const browserEase = [0.22, 1, 0.36, 1] as const;
+const WORKTREES = MACHINES.flatMap((machine) => machine.worktrees);
 
-const browserIconVariants: Variants = {
-  initial: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
-  animate: { opacity: 1, scale: 1, filter: "blur(0px)" },
-  exit: { opacity: 0, scale: 0.25, filter: "blur(4px)" },
-};
-
-function BrowserMock({ suffix, httpsPort }: { suffix: string; httpsPort: number }) {
+/* Agents' worktrees on two machines; one at a time reloads, and the MacBook shows it. */
+function MachinesMock({ suffix }: { suffix: string }) {
   const reduceMotion = useReducedMotion();
-  const projects: BrowserProject[] = [
-    { name: "shop", localPort: "3000" },
-    { name: "admin", localPort: "3001" },
-    { name: "docs", localPort: "3002" },
-  ];
-
-  const cycleLength = projects.length + 1;
-  const [step, setStep] = useState(0);
+  const [active, setActive] = useState(0);
 
   useEffect(() => {
     if (reduceMotion) return;
-    const id = setInterval(() => {
-      setStep((s) => (s + 1) % cycleLength);
-    }, 1800);
+    const id = setInterval(() => setActive((i) => (i + 1) % WORKTREES.length), 1800);
     return () => clearInterval(id);
-  }, [reduceMotion, cycleLength]);
+  }, [reduceMotion]);
 
-  const tabModes: Array<"local" | "localify"> = projects.map((_, i) =>
-    i < step ? "localify" : "local",
-  );
-  const activeIndex = step === 0 ? 0 : step - 1;
-  const secure = tabModes[activeIndex] === "localify";
-  const active = projects[activeIndex]!;
-  const httpsPortSegment = httpsPort === 443 ? "" : `:${httpsPort}`;
-
-  const tabLabels = projects.map((p, i) =>
-    tabModes[i] === "local" ? `localhost:${p.localPort}` : `${p.name}${suffix}`,
-  );
-  const url = secure
-    ? `https://${active.name}${suffix}${httpsPortSegment}`
-    : `http://localhost:${active.localPort}`;
-  const label = secure ? "trusted" : "not secure";
+  const activeHost = WORKTREES[active]!;
+  const [label, project] = activeHost.split(".");
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-muted/30">
-      <div className="flex">
-        <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2">
-          <span className="size-2.5 rounded-full bg-[#FF5C5F]" />
-          <span className="size-2.5 rounded-full bg-[#FAC800]" />
-          <span className="size-2.5 rounded-full bg-[#34C759]" />
-        </div>
-
-        <div className="flex w-full items-end pt-1">
-          {tabLabels.map((lbl, i) => {
-            const isActive = i === activeIndex;
-            const tabSecure = tabModes[i] === "localify";
-            return (
-              <div
-                // biome-ignore lint/suspicious/noArrayIndexKey: tab position is stable
-                key={i}
-                className={cn(
-                  "relative flex min-w-0 flex-1 items-center gap-2 rounded-t-lg border-b border-border px-3 py-2.5 font-mono text-[11.5px]",
-                  isActive ? "border border-b-0 bg-card text-foreground" : "text-muted-foreground",
-                  i > 0 && !isActive
-                    ? "before:absolute before:top-1/2 before:left-0 before:h-4 before:w-px before:-translate-y-1/2 before:bg-border before:content-['']"
-                    : "",
-                )}
-              >
-                <span
-                  className={cn(
-                    "inline-block size-1.5 shrink-0 rounded-full transition-colors duration-300",
-                    tabSecure ? "bg-emerald-500" : "bg-muted-foreground/40",
-                  )}
-                />
-                <span className="relative min-w-0 flex-1 overflow-hidden">
-                  <MorphText className="truncate" delay={i * 0.04} value={lbl} />
-                </span>
-              </div>
-            );
-          })}
-        </div>
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        {MACHINES.map((machine) => (
+          <div key={machine.name} className="rounded-xl border border-border bg-card p-3">
+            <div className="mb-2.5 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <ServersIcon className="size-3.5" />
+              {machine.name}
+            </div>
+            <ul className="space-y-1.5">
+              {machine.worktrees.map((host) => {
+                const isActive = host === activeHost;
+                return (
+                  <li
+                    key={host}
+                    className={cn(
+                      "flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs transition-colors duration-300",
+                      isActive ? "border-foreground/25 bg-muted/60" : "border-border",
+                    )}
+                  >
+                    <span className="size-1.5 shrink-0 rounded-full bg-success" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {host}
+                      {suffix}
+                    </span>
+                    {isActive && (
+                      <RefreshIcon className="size-3 shrink-0 animate-spin text-muted-foreground [animation-duration:1.2s]" />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
       </div>
 
-      <div className="p-2">
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-          <span
-            aria-hidden
-            className={cn(
-              "relative grid size-4 shrink-0 place-items-center",
-              secure ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
-            )}
-          >
-            <AnimatePresence initial={false} mode="wait">
-              {secure ? (
-                <motion.span
-                  key="lock"
-                  variants={browserIconVariants}
-                  initial="initial"
-                  animate="animate"
-                  exit="exit"
-                  transition={{ type: "spring", duration: 0.3, bounce: 0 }}
-                  className="absolute inset-0 grid place-items-center"
-                >
-                  <LockIcon className="size-3.5" strokeWidth={2} />
-                </motion.span>
-              ) : (
-                <motion.span
-                  key="warn"
-                  variants={browserIconVariants}
-                  initial="initial"
-                  animate="animate"
-                  exit="exit"
-                  transition={{ type: "spring", duration: 0.3, bounce: 0 }}
-                  className="absolute inset-0 grid place-items-center"
-                >
-                  <DangerTriangleIcon className="size-3.5" strokeWidth={2} />
-                </motion.span>
-              )}
-            </AnimatePresence>
-          </span>
-
-          <span className="relative min-w-0 flex-1 overflow-hidden">
-            <MorphText
-              className="truncate font-mono text-[12px] text-muted-foreground"
-              delay={0.18}
-              value={url}
-            />
-          </span>
-
-          <span
-            className={cn(
-              "relative block min-w-[76px] overflow-hidden text-right font-mono text-[10.5px] tracking-wider uppercase transition-colors duration-300",
-              secure ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
-            )}
-          >
-            <MorphText delay={0.26} value={label} />
-          </span>
+      <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
+        <div className="flex shrink-0 items-center gap-2 text-xs font-medium text-muted-foreground">
+          <MonitorIcon className="size-3.5" />
+          MacBook
+        </div>
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-muted/60 px-3 py-1 text-xs">
+          <LockIcon className="size-3 shrink-0 text-muted-foreground" />
+          <AnimatePresence initial={false} mode="popLayout">
+            <motion.span
+              key={activeHost}
+              className="truncate"
+              initial={{ opacity: 0, filter: "blur(4px)", y: -3 }}
+              animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
+              exit={{ opacity: 0, filter: "blur(4px)", y: 3 }}
+              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {project}--{label}.localify.fyi
+            </motion.span>
+          </AnimatePresence>
         </div>
       </div>
     </div>
-  );
-}
-
-function MorphText({
-  className,
-  delay = 0,
-  value,
-}: {
-  className?: string;
-  delay?: number;
-  value: string;
-}) {
-  return (
-    <AnimatePresence initial={false} mode="popLayout">
-      <motion.span
-        key={value}
-        className={cn("block tabular-nums", className)}
-        initial={{ opacity: 0, filter: "blur(4px)", y: -3 }}
-        animate={{ opacity: 1, filter: "blur(0px)", y: 0 }}
-        exit={{ opacity: 0, filter: "blur(4px)", y: 3 }}
-        transition={{ duration: 0.3, ease: browserEase, delay }}
-      >
-        {value}
-      </motion.span>
-    </AnimatePresence>
   );
 }
 
@@ -652,7 +544,13 @@ function HowItWorksStep({
             <Switch checked={connectAgents} onCheckedChange={onConnectAgentsChange} />
             Connect my agents automatically
           </label>
-          <Button variant="outline" size="sm" onClick={() => void copyPrompt()}>
+          <span className="text-xs text-muted-foreground">or</span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full"
+            onClick={() => void copyPrompt()}
+          >
             {copied ? (
               <CheckIcon data-icon="inline-start" />
             ) : (
@@ -681,8 +579,7 @@ function HowItWorksStep({
       </ul>
 
       <motion.p {...enter(4)} className="mt-4 text-center text-xs text-muted-foreground">
-        Working without an agent? Pick a folder in the app, or run localify init-project.{" "}
-        <LearnMore anchor="quick-start" />
+        No agent? Add a project yourself from the app.
       </motion.p>
 
       <motion.div
@@ -798,15 +695,6 @@ function ActivateStep({
 
   return (
     <div className="mx-auto max-w-md text-center">
-      <motion.div
-        initial={{ opacity: 0, scale: 0.9, filter: "blur(6px)" }}
-        animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
-        transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        className="mx-auto mb-6 flex size-14 items-center justify-center rounded-2xl bg-foreground text-background"
-      >
-        <LockIcon className="size-6" />
-      </motion.div>
-
       <motion.div
         initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
         animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
