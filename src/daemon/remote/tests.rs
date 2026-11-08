@@ -38,7 +38,9 @@ fn fast() -> Timings {
         stable_after: ms(60_000),
         lease_renew: ms(800),
         lease_renew_jitter: ms(100),
-        lapsed_wait: ms(3_600_000),
+        lapsed_first: ms(200),
+        lapsed_spread: ms(100),
+        lapsed_recheck: ms(500),
         clock_check: ms(100),
         retry_after_drop: ms(300),
     }
@@ -849,6 +851,35 @@ async fn final_closes_and_refusals_stop_the_link() {
 
     cloud.set_remote_access(true);
     a.link.refresh();
+    wait_until("connected again", || {
+        a.link.status().relay == RelayState::Connected
+    })
+    .await;
+}
+
+/// `4402`: the link waits `random(30, 60)` s (here 200 to 300 ms), asks for
+/// a lease, asks again every 15 minutes (here 500 ms) while it is refused,
+/// and connects again on its own once one is granted.
+#[tokio::test]
+async fn a_lapsed_account_reconnects_once_a_lease_is_granted() {
+    let cloud = FakeCloud::start().await;
+    let a = daemon(&cloud, "mA", "laptop").await;
+    cloud.set_lease(402, 60);
+    cloud.close("mA", 4402, "remote access lapsed");
+    wait_until("blocked", || a.link.status().relay == RelayState::Blocked).await;
+    assert_eq!(
+        a.link.status().blocked.unwrap().code,
+        "subscription_required"
+    );
+    let connections = cloud.connections();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        cloud.connections(),
+        connections,
+        "no upgrade while leases are refused"
+    );
+
+    cloud.set_lease(200, 60);
     wait_until("connected again", || {
         a.link.status().relay == RelayState::Connected
     })

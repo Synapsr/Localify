@@ -87,7 +87,12 @@ pub struct Timings {
     pub stable_after: Duration,
     pub lease_renew: Duration,
     pub lease_renew_jitter: Duration,
-    pub lapsed_wait: Duration,
+    /// After `4402`, the first lease request waits this long, plus up to
+    /// `lapsed_spread`.
+    pub lapsed_first: Duration,
+    pub lapsed_spread: Duration,
+    /// While leases answer `402`, the link asks again this often.
+    pub lapsed_recheck: Duration,
     pub clock_check: Duration,
     pub retry_after_drop: Duration,
 }
@@ -114,7 +119,9 @@ impl Default for Timings {
             stable_after: seconds(60),
             lease_renew: seconds(45),
             lease_renew_jitter: seconds(5),
-            lapsed_wait: seconds(3600),
+            lapsed_first: seconds(30),
+            lapsed_spread: seconds(30),
+            lapsed_recheck: seconds(15 * 60),
             clock_check: seconds(20),
             retry_after_drop: seconds(5),
         }
@@ -485,6 +492,10 @@ enum Wait {
     Retry(Duration),
     /// `public_refresh`, or at most this long.
     Refresh(Option<Duration>),
+    /// Remote access lapsed: after this long, ask for a lease, and connect
+    /// again once one is granted; until then ask every `lapsed_recheck`.
+    /// `public_refresh` (a plan change) cuts any wait short.
+    Lapsed(Duration),
 }
 
 struct Ready {
@@ -549,18 +560,13 @@ async fn prepare(
                 shared,
                 "unsupported",
                 NO_REMOTE,
-                Some(shared.timings.lapsed_wait),
+                Some(shared.timings.lapsed_recheck),
             ));
         }
         Err(error) => return Err(cloud_refusal(shared, backoff, &error)),
     };
     if !account.remote_access {
-        return Err(block(
-            shared,
-            "subscription_required",
-            NEEDS_PRO,
-            Some(shared.timings.lapsed_wait),
-        ));
+        return Err(lapsed(shared, shared.timings.lapsed_recheck));
     }
     let identity = shared
         .store
@@ -589,7 +595,7 @@ async fn prepare(
                     shared,
                     "quota_exceeded",
                     TOO_MANY_LINKED,
-                    Some(shared.timings.lapsed_wait),
+                    Some(shared.timings.lapsed_recheck),
                 ));
             }
             Err(CloudError::Api {
@@ -622,18 +628,21 @@ fn block(shared: &Shared, code: &str, message: &str, recheck: Option<Duration>) 
     Wait::Refresh(recheck)
 }
 
+/// Remote access lapsed: blocked, until a lease is granted again.
+fn lapsed(shared: &Shared, first: Duration) -> Wait {
+    match block(shared, "subscription_required", NEEDS_PRO, None) {
+        Wait::Refresh(_) => Wait::Lapsed(first),
+        other => other,
+    }
+}
+
 fn cloud_refusal(shared: &Shared, backoff: &mut Backoff, error: &CloudError) -> Wait {
     match error {
         CloudError::Api { status: 401, .. } => block(shared, "signed_out", SIGNED_OUT, None),
         CloudError::Api {
             status: 403, code, ..
         } if code == "banned" => block(shared, "banned", BANNED, None),
-        CloudError::Api { status: 402, .. } => block(
-            shared,
-            "subscription_required",
-            NEEDS_PRO,
-            Some(shared.timings.lapsed_wait),
-        ),
+        CloudError::Api { status: 402, .. } => lapsed(shared, shared.timings.lapsed_recheck),
         _ => {
             let next = backoff.next(&Ending::Unreachable, Duration::ZERO, &shared.timings);
             match next {
@@ -711,11 +720,10 @@ fn plan(
             Wait::Retry(wait)
         }
         Next::Stop(Stop::SignedOut) => block(shared, "signed_out", SIGNED_OUT, None),
-        Next::Stop(Stop::Lapsed) => block(
+        // `random(30, 60)` s, so an account's machines do not all ask at once.
+        Next::Stop(Stop::Lapsed) => lapsed(
             shared,
-            "subscription_required",
-            NEEDS_PRO,
-            Some(shared.timings.lapsed_wait),
+            shared.timings.lapsed_first + up_to(shared.timings.lapsed_spread),
         ),
         Next::Stop(Stop::Banned) => block(shared, "banned", BANNED, None),
         Next::Stop(Stop::Outdated) => block(shared, "unsupported_protocol", OUTDATED, None),
@@ -764,6 +772,38 @@ async fn wait_before_next(shared: &Shared, wait: Wait, cancel: &CancellationToke
                 _ = shared.refresh.notified() => true,
                 _ = tokio::time::sleep(limit) => true,
             }
+        }
+        Wait::Lapsed(first) => {
+            let mut delay = first;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return false,
+                    _ = shared.refresh.notified() => return true,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                if lease_granted(shared).await {
+                    return true;
+                }
+                delay = shared.timings.lapsed_recheck;
+            }
+        }
+    }
+}
+
+/// Whether Localify Cloud grants a lease again. Without credentials there is
+/// nothing to wait for: the next pass says the machine is signed out.
+async fn lease_granted(shared: &Shared) -> bool {
+    let Ok(Some(credentials)) = shared.credentials.load() else {
+        return true;
+    };
+    let Ok(http) = CloudHttp::new(credentials.api_base, Some(credentials.token)) else {
+        return true;
+    };
+    match CloudClient::new(http).remote_lease().await {
+        Ok(_) => true,
+        Err(error) => {
+            info!(error = %error, "Remote access is still lapsed");
+            false
         }
     }
 }

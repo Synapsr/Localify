@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use super::backoff::Ending;
 use super::lease::LeaseKeeper;
 use super::machines::SessionState;
-use super::pacer::{self, BYTES_PER_SECOND, Bucket, FRAMES_PER_SECOND};
+use super::pacer::{self, Bucket};
 use super::socket::RelaySocket;
 use super::{Shared, View};
 use crate::daemon::public_tunnel::Clocks;
@@ -287,7 +287,7 @@ pub async fn run(
     let timings = shared.timings;
     let (sink, mut stream) = socket.split();
     let (out, queue) = mpsc::unbounded_channel();
-    let bucket = Bucket::new(FRAMES_PER_SECOND, BYTES_PER_SECOND, Instant::now());
+    let bucket = Bucket::paced(Instant::now());
     let writer = tokio::spawn(pacer::run(sink, queue, bucket));
     let mut actor = Actor {
         shared,
