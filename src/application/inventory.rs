@@ -551,6 +551,26 @@ fn sort_key(item: &InventoryItem) -> (&str, &str, bool, Option<&str>, &str, &str
     )
 }
 
+/// A snapshot's items as its pages: in order, each page with at most
+/// [`PAGE_BUDGET`] bytes of items, as [`Revisions::snapshot`] counted them.
+/// An empty snapshot is one empty page.
+pub fn pages(items: &[InventoryItem]) -> anyhow::Result<Vec<&[InventoryItem]>> {
+    let mut pages = Vec::new();
+    let mut start = 0;
+    let mut used = 0;
+    for (index, item) in items.iter().enumerate() {
+        let size = serde_json::to_vec(item)?.len() + 1;
+        if used + size > PAGE_BUDGET && index > start {
+            pages.push(&items[start..index]);
+            start = index;
+            used = 0;
+        }
+        used += size;
+    }
+    pages.push(&items[start..]);
+    Ok(pages)
+}
+
 /// Fills pages in order, each with at most [`PAGE_BUDGET`] bytes of items.
 /// An item too large for a page of its own, and every item past
 /// [`MAX_PAGES`], is left out. Returns what is kept, the page count, and
@@ -1071,6 +1091,20 @@ mod tests {
         assert!(snapshot.truncated);
         assert_eq!(snapshot.pages, MAX_PAGES);
         assert_eq!(snapshot.items.len(), per_page * MAX_PAGES);
+        let split = pages(&snapshot.items).unwrap();
+        assert_eq!(split.len(), snapshot.pages);
+        assert!(split.iter().all(|page| page.len() == per_page));
+    }
+
+    #[test]
+    fn an_empty_snapshot_is_one_empty_page() {
+        let snapshot = Revisions::new("epoch".into()).snapshot(Vec::new()).unwrap();
+
+        assert_eq!(snapshot.pages, 1);
+        assert_eq!(
+            pages(&snapshot.items).unwrap(),
+            vec![&[] as &[InventoryItem]]
+        );
     }
 
     #[test]

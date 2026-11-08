@@ -91,6 +91,12 @@ pub fn list(facts: &Facts<'_>) -> Vec<MachineView> {
         .map(|machine| view(facts, machine))
         .collect();
     views.sort_by_key(|view| !view.is_self);
+    // The roster is read while connected: until then, a pin missing from it
+    // says nothing about its machine.
+    let left = match relay_state(facts.relay) {
+        Some(state) => state,
+        None => MachineState::SignedOut,
+    };
     for (id, pin) in facts.pins {
         if facts.roster.iter().all(|machine| &machine.id != id) {
             views.push(MachineView {
@@ -98,7 +104,7 @@ pub fn list(facts: &Facts<'_>) -> Vec<MachineView> {
                 name: pin.name.clone(),
                 is_self: false,
                 paired: true,
-                state: MachineState::SignedOut,
+                state: left,
                 version: None,
                 sharing: None,
                 fingerprint: print(&pin.public_key),
@@ -128,12 +134,20 @@ fn view(facts: &Facts<'_>, machine: &RosterMachine) -> MachineView {
     }
 }
 
+/// What every machine shows while the relay is not connected; `None`
+/// once it is.
+fn relay_state(relay: RelayState) -> Option<MachineState> {
+    match relay {
+        RelayState::Connected => None,
+        RelayState::Connecting => Some(MachineState::Connecting),
+        RelayState::Reconnecting => Some(MachineState::Reconnecting),
+        RelayState::Off | RelayState::Blocked => Some(MachineState::Unavailable),
+    }
+}
+
 fn state(facts: &Facts<'_>, machine: &RosterMachine) -> MachineState {
-    match facts.relay {
-        RelayState::Connected => {}
-        RelayState::Connecting => return MachineState::Connecting,
-        RelayState::Reconnecting => return MachineState::Reconnecting,
-        RelayState::Off | RelayState::Blocked => return MachineState::Unavailable,
+    if let Some(state) = relay_state(facts.relay) {
+        return state;
     }
     if machine.is_self {
         return MachineState::Connected;
@@ -299,6 +313,29 @@ mod tests {
                 failures: &failures,
             };
             assert_eq!(list(&facts)[0].state, expected);
+        }
+    }
+
+    #[test]
+    fn a_pin_is_signed_out_only_once_the_roster_is_known() {
+        let pins: Pins = [("gone".to_string(), pin(KEY))].into_iter().collect();
+        let empty = HashMap::new();
+        let (sessions, settings, failures) = (HashMap::new(), HashMap::new(), HashMap::new());
+        for (relay, expected) in [
+            (RelayState::Connected, MachineState::SignedOut),
+            (RelayState::Blocked, MachineState::Unavailable),
+            (RelayState::Reconnecting, MachineState::Reconnecting),
+        ] {
+            let facts = Facts {
+                relay,
+                roster: &[],
+                pins: &pins,
+                presence: &empty,
+                sessions: &sessions,
+                settings: &settings,
+                failures: &failures,
+            };
+            assert_eq!(list(&facts)[0].state, expected, "{relay:?}");
         }
     }
 }

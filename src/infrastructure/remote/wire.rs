@@ -168,9 +168,65 @@ pub enum DeclineReason {
     Cancelled,
 }
 
-/// The session messages this build handles. The others of protocol 1
-/// (inventory, output, controls) come with later versions of the daemon and
-/// are answered `unsupported` (see [`is_later_message`]).
+/// The longest request id a viewer may pick.
+pub const MAX_ID: usize = 32;
+/// The most an `output.read` may ask for.
+pub const MAX_READ_BYTES: u32 = 16 * 1024;
+/// The largest window an `output.follow` may ask for.
+pub const MAX_WINDOW: u32 = 128 * 1024;
+
+/// A revision of a target's inventory.
+pub use crate::application::inventory::Have;
+
+/// On every inventory page: who the target is and what it allows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineSummary {
+    pub machine_id: String,
+    pub name: String,
+    pub version: String,
+    /// `macos` or `linux`.
+    pub os: String,
+    pub settings: TargetSettings,
+    pub app: AppPresence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputLine {
+    pub text: String,
+    /// The line goes on in the next item.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rotated {
+    pub first_offset: u64,
+}
+
+/// A run's lines, from `offset` to `next`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputData {
+    pub re: String,
+    pub run_id: String,
+    pub offset: u64,
+    pub next: u64,
+    pub lines: Vec<OutputLine>,
+    /// The asked offset was dropped; data starts there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated: Option<Rotated>,
+    /// The run ended and everything kept was sent.
+    pub ended: bool,
+    /// With `ended`: capture stopped early.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
+}
+
+/// The session messages this build handles. Controls (`control`,
+/// `control.status`) come with a later version of the daemon and are
+/// answered `unsupported` (see [`is_later_message`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all_fields = "camelCase")]
 pub enum SessionMessage {
@@ -191,6 +247,59 @@ pub enum SessionMessage {
     },
     #[serde(rename = "bye")]
     Bye { reason: ByeReason },
+    #[serde(rename = "inventory.get")]
+    InventoryGet {
+        id: String,
+        #[serde(default)]
+        have: Option<Have>,
+    },
+    #[serde(rename = "inventory.watch")]
+    InventoryWatch {
+        id: String,
+        #[serde(default)]
+        have: Option<Have>,
+    },
+    #[serde(rename = "inventory.unwatch")]
+    InventoryUnwatch { id: String },
+    #[serde(rename = "inventory.page")]
+    InventoryPage {
+        re: String,
+        epoch: String,
+        rev: u64,
+        page: u32,
+        pages: u32,
+        machine: MachineSummary,
+        /// `InventoryItem`s, handed to the app as they came.
+        items: Vec<serde_json::Value>,
+        truncated: bool,
+    },
+    #[serde(rename = "inventory.unchanged")]
+    InventoryUnchanged { re: String, epoch: String, rev: u64 },
+    #[serde(rename = "output.read")]
+    OutputRead {
+        id: String,
+        run_id: String,
+        offset: u64,
+        max_bytes: u32,
+    },
+    #[serde(rename = "output.follow")]
+    OutputFollow {
+        id: String,
+        run_id: String,
+        offset: u64,
+        window: u32,
+        /// An optional field this build adds: start at most this many bytes
+        /// before the end, instead of at `offset`, so a viewer opening a
+        /// long run reads its tail and not all of it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail: Option<u64>,
+    },
+    #[serde(rename = "output.ack")]
+    OutputAck { re: String, offset: u64 },
+    #[serde(rename = "output.unfollow")]
+    OutputUnfollow { re: String },
+    #[serde(rename = "output.data")]
+    OutputData(OutputData),
     #[serde(rename = "pair.commit")]
     PairCommit { c: String },
     #[serde(rename = "pair.nonce")]
@@ -217,22 +326,38 @@ impl SessionMessage {
             retry_after: None,
         }
     }
+
+    /// An error answering the request `re`: the session goes on.
+    pub fn refusal(re: &str, code: &str, message: impl Into<String>) -> Self {
+        Self::Error {
+            re: Some(re.to_string()),
+            code: code.to_string(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// Whether a viewer's request stays within the contract's bounds.
+    pub fn within_bounds(&self) -> bool {
+        let id_ok = |id: &str| !id.is_empty() && id.len() <= MAX_ID;
+        match self {
+            Self::InventoryGet { id, .. }
+            | Self::InventoryWatch { id, .. }
+            | Self::InventoryUnwatch { id } => id_ok(id),
+            Self::OutputRead { id, max_bytes, .. } => {
+                id_ok(id) && (1..=MAX_READ_BYTES).contains(max_bytes)
+            }
+            Self::OutputFollow { id, window, .. } => id_ok(id) && (1..=MAX_WINDOW).contains(window),
+            Self::OutputAck { re, .. } | Self::OutputUnfollow { re } => id_ok(re),
+            Self::Keep { ids } => ids.len() <= 16 && ids.iter().all(|id| id_ok(id)),
+            _ => true,
+        }
+    }
 }
 
 /// Message types of protocol 1 that this build does not handle yet.
 pub fn is_later_message(t: &str) -> bool {
-    matches!(
-        t,
-        "inventory.get"
-            | "inventory.watch"
-            | "inventory.unwatch"
-            | "output.read"
-            | "output.follow"
-            | "output.ack"
-            | "output.unfollow"
-            | "control"
-            | "control.status"
-    )
+    matches!(t, "control" | "control.status")
 }
 
 #[cfg(test)]

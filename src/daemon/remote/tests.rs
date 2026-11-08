@@ -1,6 +1,10 @@
 //! The link end to end, between daemons in this process and the fake relay:
 //! the Rust side of the PR 2 gates in `docs/remote-machines.md`, "Gates".
+//! Viewing, and the PR 3 gate, are in `viewing`.
 
+mod viewing;
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -9,7 +13,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::fake_relay::{FakeCloud, Route, is_message, opens};
+use super::fake_relay::{FakeCloud, FakeSource, Route, is_message, opens};
+use super::local::LocalSource;
 use super::machines::{MachineState, RelayState, SessionState};
 use super::{Event, PairEvent, RemoteLink, Timings, spawn};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -44,7 +49,20 @@ fn fast() -> Timings {
         lapsed_recheck: ms(500),
         clock_check: ms(100),
         retry_after_drop: ms(300),
+        watch_every: ms(100),
+        watch_expiry: ms(30_000),
+        follow_poll: ms(50),
     }
+}
+
+/// A link in `dir`, sharing what `source` holds.
+fn link_with(dir: &std::path::Path, source: &Arc<FakeSource>) -> RemoteLink {
+    let source: Arc<dyn LocalSource> = source.clone();
+    RemoteLink::with_timings(dir, source, fast())
+}
+
+fn link(dir: &std::path::Path) -> RemoteLink {
+    link_with(dir, &Arc::new(FakeSource::default()))
 }
 
 struct Daemon {
@@ -52,6 +70,7 @@ struct Daemon {
     link: RemoteLink,
     cancel: CancellationToken,
     id: String,
+    source: Arc<FakeSource>,
 }
 
 impl Drop for Daemon {
@@ -112,7 +131,8 @@ fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) ->
             machine_name: name.into(),
         })
         .unwrap();
-    let link = RemoteLink::with_timings(dir.path(), fast());
+    let source = Arc::new(FakeSource::default());
+    let link = link_with(dir.path(), &source);
     // As `LOCALIFY_CLOUD_API` makes a `wrangler dev` trusted.
     link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
@@ -122,6 +142,7 @@ fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) ->
         link,
         cancel,
         id: id.into(),
+        source,
     }
 }
 
@@ -359,7 +380,7 @@ async fn a_socket_that_stops_taking_frames_ends_the_connection() {
     let stream: Box<dyn super::socket::Io> = Box::new(client);
     let socket = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
     let dir = tempfile::tempdir().unwrap();
-    let link = RemoteLink::with_timings(dir.path(), fast());
+    let link = link(dir.path());
     let http =
         crate::infrastructure::cloud::http::CloudHttp::new("http://127.0.0.1:9", None).unwrap();
     let cloud = std::sync::Arc::new(crate::infrastructure::cloud::api::CloudClient::new(
@@ -367,6 +388,8 @@ async fn a_socket_that_stops_taking_frames_ends_the_connection() {
     ));
     let context = super::actor::Context {
         self_id: "mA".into(),
+        name: "laptop".into(),
+        source: Arc::new(FakeSource::default()),
         token: "lfy_t".into(),
         account: "u1".into(),
         keys: StaticKeys::generate().unwrap(),
@@ -1434,7 +1457,7 @@ async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
             machine_name: "laptop".into(),
         })
         .unwrap();
-    let link = RemoteLink::with_timings(dir.path(), fast());
+    let link = link(dir.path());
     let cancel = CancellationToken::new();
     spawn(link.clone(), cancel.clone());
     let daemon = Daemon {
@@ -1442,6 +1465,7 @@ async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
         link,
         cancel,
         id: "mU".into(),
+        source: Arc::new(FakeSource::default()),
     };
     share_on(&daemon);
     cloud.set_unauthorized(
@@ -1479,7 +1503,7 @@ async fn an_update_from_before_owner_json_keeps_the_key_pins_and_settings() {
     wait_until("A's socket closes", || !cloud.connected("mA")).await;
     std::fs::remove_file(a.dir.path().join("remote/owner.json")).unwrap();
 
-    let link = RemoteLink::with_timings(a.dir.path(), fast());
+    let link = link(a.dir.path());
     link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
     spawn(link.clone(), cancel.clone());

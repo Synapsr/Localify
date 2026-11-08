@@ -1,0 +1,725 @@
+//! The target's side of a session (`docs/remote-machines.md`, "Inventory"
+//! and "Output"): snapshots and output for a viewer that asked, while it
+//! keeps asking, and only while `share` is on. Nothing is computed or sent
+//! for a viewer that asked for nothing.
+//!
+//! Inventory pages and output wait here and go out only while the send
+//! queue has room (`pacer`), pages first, then output taken in turn between
+//! follows, each one within the window its viewer acknowledged.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use super::{Actor, Command, Key};
+use crate::application::inventory::{Snapshot, pages};
+use crate::daemon::remote::local::RunLookup;
+use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
+use crate::infrastructure::remote::wire::{
+    AppPresence, Have, MAX_MESSAGE_BYTES, MAX_READ_BYTES, MachineSummary, OutputData, OutputLine,
+    Purpose, Role, Rotated, SessionMessage,
+};
+use crate::infrastructure::runs::RunId;
+use crate::infrastructure::runs::output;
+
+/// At most this many follows per session, and per target.
+const FOLLOWS_PER_SESSION: usize = 2;
+const FOLLOWS_PER_TARGET: usize = 4;
+/// `inventory.get`s one session may have waiting for a build.
+const GETS_PER_SESSION: usize = 4;
+
+const NOT_SHARED: &str =
+    "This machine doesn't share its projects and output. Turn on sharing in Localify on it.";
+
+/// What one viewer asked this machine for.
+#[derive(Default)]
+pub(super) struct Served {
+    watch: Option<Watch>,
+    follows: Vec<Follow>,
+    /// `inventory.get`s waiting for the snapshot being built.
+    gets: Vec<(String, Option<Have>)>,
+    /// Pages and reads waiting for room in the send queue.
+    bulk: VecDeque<SessionMessage>,
+}
+
+struct Watch {
+    id: String,
+    /// The revision the viewer holds.
+    have: Option<Have>,
+    /// Whether it heard anything yet: a watch that starts with the current
+    /// revision is told so once.
+    answered: bool,
+    renewed: Instant,
+}
+
+struct Follow {
+    id: String,
+    run_id: String,
+    dir: PathBuf,
+    /// Sent up to here.
+    next: u64,
+    /// Acknowledged up to here.
+    acked: u64,
+    window: u64,
+    renewed: Instant,
+    /// The first `output.data` goes at once, even empty.
+    fresh: bool,
+    /// Worth a look: new output may be there.
+    ready: bool,
+}
+
+impl Follow {
+    fn unacked(&self) -> u64 {
+        self.next.saturating_sub(self.acked)
+    }
+}
+
+impl Served {
+    pub(super) fn is_empty(&self) -> bool {
+        self.watch.is_none()
+            && self.follows.is_empty()
+            && self.gets.is_empty()
+            && self.bulk.is_empty()
+    }
+
+    /// A watch or a follow nothing renewed in `after` ends.
+    pub(super) fn expire(&mut self, now: Instant, after: Duration) {
+        if self
+            .watch
+            .as_ref()
+            .is_some_and(|watch| now.duration_since(watch.renewed) >= after)
+        {
+            self.watch = None;
+        }
+        self.follows
+            .retain(|follow| now.duration_since(follow.renewed) < after);
+    }
+
+    fn renew(&mut self, ids: &[String], now: Instant) {
+        if let Some(watch) = self.watch.as_mut().filter(|watch| ids.contains(&watch.id)) {
+            watch.renewed = now;
+        }
+        for follow in &mut self.follows {
+            if ids.contains(&follow.id) {
+                follow.renewed = now;
+            }
+        }
+    }
+
+    /// Ends everything, and returns the ids that were open.
+    fn clear(&mut self) -> Vec<String> {
+        let mut ids: Vec<String> = self.gets.drain(..).map(|(id, _)| id).collect();
+        ids.extend(self.watch.take().map(|watch| watch.id));
+        ids.extend(self.follows.drain(..).map(|follow| follow.id));
+        self.bulk.clear();
+        ids
+    }
+}
+
+/// The target's state across sessions.
+#[derive(Default)]
+pub(super) struct Shelf {
+    /// A snapshot is being built: one at a time.
+    building: bool,
+    /// While watched, the next look for changes.
+    next_look: Option<Instant>,
+    /// Whose turn it is among the follows.
+    turn: usize,
+}
+
+impl Actor {
+    fn sharing(&self) -> bool {
+        self.shared
+            .store
+            .settings()
+            .map(|settings| settings.share)
+            .unwrap_or(false)
+    }
+
+    fn served_sessions(&self) -> Vec<Key> {
+        self.sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.role == Role::Target
+                    && session.purpose == Purpose::Session
+                    && !session.served.is_empty()
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    fn served(&mut self, key: &Key) -> Option<&mut Served> {
+        self.sessions
+            .get_mut(key)
+            .map(|session| &mut session.served)
+    }
+
+    fn refuse(&mut self, key: &Key, re: &str, code: &str, message: impl Into<String>) {
+        self.send_message(key, &SessionMessage::refusal(re, code, message));
+    }
+
+    /// A viewer's request: inventory or output.
+    pub(super) fn on_request(&mut self, key: &Key, request: SessionMessage) {
+        let now = Instant::now();
+        match request {
+            SessionMessage::InventoryUnwatch { id } => {
+                if let Some(served) = self.served(key)
+                    && served.watch.as_ref().is_some_and(|watch| watch.id == id)
+                {
+                    served.watch = None;
+                }
+            }
+            SessionMessage::OutputAck { re, offset } => {
+                let follow = self
+                    .served(key)
+                    .and_then(|served| served.follows.iter_mut().find(|follow| follow.id == re));
+                if let Some(follow) = follow {
+                    follow.acked = offset.clamp(follow.acked, follow.next);
+                    follow.renewed = now;
+                    follow.ready = true;
+                }
+            }
+            SessionMessage::OutputUnfollow { re } => {
+                if let Some(served) = self.served(key) {
+                    served.follows.retain(|follow| follow.id != re);
+                }
+            }
+            request => self.on_share_request(key, request),
+        }
+    }
+
+    /// A request for what `share` covers.
+    fn on_share_request(&mut self, key: &Key, request: SessionMessage) {
+        if !self.sharing() {
+            let id = match &request {
+                SessionMessage::InventoryGet { id, .. }
+                | SessionMessage::InventoryWatch { id, .. }
+                | SessionMessage::OutputRead { id, .. }
+                | SessionMessage::OutputFollow { id, .. } => id.clone(),
+                _ => return,
+            };
+            return self.refuse(key, &id, "not_shared", NOT_SHARED);
+        }
+        match request {
+            SessionMessage::InventoryGet { id, have } => self.get_inventory(key, id, have),
+            SessionMessage::InventoryWatch { id, have } => self.watch_inventory(key, id, have),
+            SessionMessage::OutputRead {
+                id,
+                run_id,
+                offset,
+                max_bytes,
+            } => self.read_output(key, &id, &run_id, offset, max_bytes),
+            SessionMessage::OutputFollow {
+                id,
+                run_id,
+                offset,
+                window,
+                tail,
+            } => self.follow_output(key, id, run_id, offset, window, tail),
+            _ => {}
+        }
+    }
+
+    // --- Inventory -----------------------------------------------------------
+
+    fn get_inventory(&mut self, key: &Key, id: String, have: Option<Have>) {
+        let Some(served) = self.served(key) else {
+            return;
+        };
+        if served.gets.len() >= GETS_PER_SESSION {
+            return self.refuse(key, &id, "too_many", "Too many inventory requests at once.");
+        }
+        served.gets.push((id, have));
+        self.build_snapshot();
+    }
+
+    fn watch_inventory(&mut self, key: &Key, id: String, have: Option<Have>) {
+        let Some(served) = self.served(key) else {
+            return;
+        };
+        if served.watch.as_ref().is_some_and(|watch| watch.id != id) {
+            return self.refuse(key, &id, "too_many", "This session already watches.");
+        }
+        served.watch = Some(Watch {
+            id,
+            have,
+            answered: false,
+            renewed: Instant::now(),
+        });
+        self.build_snapshot();
+    }
+
+    /// Builds a snapshot off this task; one at a time.
+    fn build_snapshot(&mut self) {
+        if self.shelf.building {
+            return;
+        }
+        self.shelf.building = true;
+        let source = Arc::clone(&self.ctx.source);
+        let commands = self.commands.clone();
+        self.spawn(async move {
+            let result = source
+                .snapshot()
+                .await
+                .map(Arc::new)
+                .map_err(|error| format!("{error:#}"));
+            let _ = commands.send(Command::Snapshot { result });
+        });
+    }
+
+    /// A snapshot is built: answers every waiting `get`, and sends each
+    /// watch what changed.
+    pub(super) fn on_snapshot(&mut self, result: Result<Arc<Snapshot>, String>) {
+        self.shelf.building = false;
+        self.shelf.next_look = Some(Instant::now() + self.shared.timings.watch_every);
+        if !self.sharing() {
+            return self.end_served("not_shared", NOT_SHARED);
+        }
+        let summary = self.summary();
+        for key in self.served_sessions() {
+            match &result {
+                Ok(snapshot) => self.answer_snapshot(&key, snapshot, &summary),
+                Err(message) => {
+                    let gets: Vec<String> = self
+                        .served(&key)
+                        .map(|served| served.gets.drain(..).map(|(id, _)| id).collect())
+                        .unwrap_or_default();
+                    for id in gets {
+                        self.refuse(&key, &id, "unavailable", message.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn answer_snapshot(&mut self, key: &Key, snapshot: &Snapshot, summary: &MachineSummary) {
+        let Some(served) = self.served(key) else {
+            return;
+        };
+        let current = Have {
+            epoch: snapshot.epoch.clone(),
+            rev: snapshot.rev,
+        };
+        let unchanged = |re: &str| SessionMessage::InventoryUnchanged {
+            re: re.to_string(),
+            epoch: current.epoch.clone(),
+            rev: current.rev,
+        };
+        let mut now = Vec::new();
+        let mut paged = Vec::new();
+        for (id, have) in served.gets.drain(..) {
+            if snapshot.is_held_by(have.as_ref()) {
+                now.push(unchanged(&id));
+            } else {
+                paged.push(id);
+            }
+        }
+        if let Some(watch) = served.watch.as_mut() {
+            if snapshot.is_held_by(watch.have.as_ref()) {
+                if !watch.answered {
+                    now.push(unchanged(&watch.id));
+                }
+            } else {
+                paged.push(watch.id.clone());
+            }
+            watch.have = Some(current.clone());
+            watch.answered = true;
+        }
+        for re in paged {
+            match pages_of(&re, snapshot, summary) {
+                Ok(pages) => {
+                    // Pages of an older revision still waiting are dropped.
+                    served.bulk.retain(|message| {
+                        !matches!(message, SessionMessage::InventoryPage { re: old, .. } if *old == re)
+                    });
+                    served.bulk.extend(pages);
+                }
+                Err(error) => now.push(SessionMessage::refusal(&re, "unavailable", error)),
+            }
+        }
+        for message in now {
+            self.send_message(key, &message);
+        }
+    }
+
+    fn summary(&self) -> MachineSummary {
+        MachineSummary {
+            machine_id: self.ctx.self_id.clone(),
+            name: self.ctx.name.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            os: if cfg!(target_os = "macos") {
+                "macos"
+            } else {
+                "linux"
+            }
+            .to_string(),
+            settings: self.shared.store.settings().unwrap_or(DEFAULT_SETTINGS),
+            // The app bridge comes with remote controls.
+            app: AppPresence::Absent,
+        }
+    }
+
+    // --- Output --------------------------------------------------------------
+
+    /// The output folder of a service's last run, or the refusal.
+    fn locate(&self, run_id: &str) -> Result<PathBuf, (&'static str, String)> {
+        let Ok(run_id) = RunId::parse(run_id) else {
+            return Err(("bad_request", format!("'{run_id}' is not a run id.")));
+        };
+        match self.ctx.source.run_output(&run_id) {
+            Ok(Ok(dir)) => Ok(dir),
+            Ok(Err(RunLookup::Gone)) => Err(gone()),
+            Ok(Err(RunLookup::Unavailable(reason))) => Err((
+                "output_unavailable",
+                format!("This run's output can't be read from another machine ({reason})."),
+            )),
+            Err(error) => Err(("output_unavailable", format!("{error:#}"))),
+        }
+    }
+
+    fn read_output(&mut self, key: &Key, id: &str, run_id: &str, offset: u64, max_bytes: u32) {
+        let read = self
+            .locate(run_id)
+            .and_then(|dir| read_fitting(&dir, id, run_id, offset, max_bytes as usize));
+        match read {
+            Ok(data) => {
+                if let Some(served) = self.served(key) {
+                    served.bulk.push_back(SessionMessage::OutputData(data));
+                }
+            }
+            Err((code, message)) => self.refuse(key, id, code, message),
+        }
+    }
+
+    fn follow_output(
+        &mut self,
+        key: &Key,
+        id: String,
+        run_id: String,
+        offset: u64,
+        window: u32,
+        tail: Option<u64>,
+    ) {
+        let total: usize = self
+            .sessions
+            .values()
+            .map(|session| session.served.follows.len())
+            .sum();
+        let Some(served) = self.served(key) else {
+            return;
+        };
+        served.follows.retain(|follow| follow.id != id);
+        if served.follows.len() >= FOLLOWS_PER_SESSION || total >= FOLLOWS_PER_TARGET {
+            return self.refuse(key, &id, "too_many", "Too many follows at once.");
+        }
+        let dir = match self.locate(&run_id) {
+            Ok(dir) => dir,
+            Err((code, message)) => return self.refuse(key, &id, code, message),
+        };
+        let start = match tail {
+            None => offset,
+            Some(tail) => match output::extent(&dir) {
+                Ok((first, total)) => first.max(total.saturating_sub(tail)),
+                Err(error) => {
+                    return self.refuse(key, &id, "output_unavailable", format!("{error:#}"));
+                }
+            },
+        };
+        let follow = Follow {
+            id,
+            run_id,
+            dir,
+            next: start,
+            acked: start,
+            window: u64::from(window),
+            renewed: Instant::now(),
+            fresh: true,
+            ready: true,
+        };
+        if let Some(served) = self.served(key) {
+            served.follows.push(follow);
+        }
+    }
+
+    /// Every follow is worth a look again.
+    pub(super) fn on_poll(&mut self) {
+        for session in self.sessions.values_mut() {
+            for follow in &mut session.served.follows {
+                follow.ready = true;
+            }
+        }
+    }
+
+    /// Fills the send queue with what waits, while it has room.
+    pub(super) fn pump(&mut self) {
+        while self.failed.is_none() && self.out.has_room_for_bulk() {
+            if let Some((key, message)) = self.next_bulk() {
+                self.send_message(&key, &message);
+                continue;
+            }
+            if !self.send_output() {
+                break;
+            }
+        }
+    }
+
+    fn next_bulk(&mut self) -> Option<(Key, SessionMessage)> {
+        let key = self
+            .sessions
+            .iter()
+            .find(|(_, session)| !session.served.bulk.is_empty())
+            .map(|(key, _)| key.clone())?;
+        let message = self.served(&key)?.bulk.pop_front()?;
+        Some((key, message))
+    }
+
+    /// Reads and sends for one follow, taken in turn. `false` when no
+    /// follow has anything to look at.
+    fn send_output(&mut self) -> bool {
+        let mut ready: Vec<(Key, String)> = self
+            .sessions
+            .iter()
+            .flat_map(|(key, session)| {
+                session
+                    .served
+                    .follows
+                    .iter()
+                    .filter(|follow| follow.ready && follow.unacked() < follow.window)
+                    .map(move |follow| (key.clone(), follow.id.clone()))
+            })
+            .collect();
+        if ready.is_empty() {
+            return false;
+        }
+        ready.sort_by(|left, right| {
+            (&left.0.0, left.0.1.bytes(), &left.1).cmp(&(&right.0.0, right.0.1.bytes(), &right.1))
+        });
+        let (key, id) = ready.swap_remove(self.shelf.turn % ready.len());
+        self.shelf.turn = self.shelf.turn.wrapping_add(1);
+        self.send_follow(&key, &id);
+        true
+    }
+
+    fn send_follow(&mut self, key: &Key, id: &str) {
+        let Some(served) = self.served(key) else {
+            return;
+        };
+        let Some(index) = served.follows.iter().position(|follow| follow.id == id) else {
+            return;
+        };
+        let follow = &mut served.follows[index];
+        let room = (follow.window - follow.unacked()).min(u64::from(MAX_READ_BYTES));
+        let room = usize::try_from(room).unwrap_or(0);
+        let data = match read_fitting(&follow.dir, id, &follow.run_id, follow.next, room) {
+            Ok(data) => data,
+            Err((code, message)) => {
+                served.follows.remove(index);
+                return self.refuse(key, id, code, message);
+            }
+        };
+        let progressed = follow.fresh
+            || data.next != follow.next
+            || !data.lines.is_empty()
+            || data.ended
+            || data.rotated.is_some();
+        if !progressed {
+            follow.ready = false;
+            return;
+        }
+        follow.fresh = false;
+        follow.acked = follow.acked.max(data.offset);
+        follow.next = data.next;
+        if data.ended {
+            served.follows.remove(index);
+        }
+        self.send_message(key, &SessionMessage::OutputData(data));
+    }
+
+    // --- Lifetimes -----------------------------------------------------------
+
+    /// A `keep` names the watches and follows its viewer still shows.
+    pub(super) fn renew(&mut self, key: &Key, ids: &[String]) {
+        if let Some(served) = self.served(key) {
+            served.renew(ids, Instant::now());
+        }
+    }
+
+    /// Each second: a look for changes while watched, and the end of what
+    /// `share` no longer allows.
+    pub(super) fn serve_tick(&mut self, now: Instant) {
+        let served = self.served_sessions();
+        if served.is_empty() {
+            return;
+        }
+        if !self.sharing() {
+            return self.end_served("not_shared", NOT_SHARED);
+        }
+        let watched = served.iter().any(|key| {
+            self.sessions
+                .get(key)
+                .is_some_and(|session| session.served.watch.is_some())
+        });
+        let due = self.shelf.next_look.is_none_or(|at| now >= at);
+        if watched && due {
+            self.build_snapshot();
+        }
+    }
+
+    /// Ends every watch, follow and waiting request, with `code`.
+    fn end_served(&mut self, code: &str, message: &str) {
+        for key in self.served_sessions() {
+            let ids = self.served(&key).map(Served::clear).unwrap_or_default();
+            for id in ids {
+                self.refuse(&key, &id, code, message);
+            }
+        }
+    }
+}
+
+fn gone() -> (&'static str, String) {
+    (
+        "gone",
+        "This run is no longer the service's last one.".to_string(),
+    )
+}
+
+/// The snapshot as pages answering `re`, each one within 32 KiB.
+fn pages_of(
+    re: &str,
+    snapshot: &Snapshot,
+    summary: &MachineSummary,
+) -> Result<Vec<SessionMessage>, String> {
+    let split = pages(&snapshot.items).map_err(|error| format!("{error:#}"))?;
+    let count = u32::try_from(split.len()).unwrap_or(u32::MAX);
+    split
+        .into_iter()
+        .enumerate()
+        .map(|(index, items)| {
+            let items = items
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            Ok(SessionMessage::InventoryPage {
+                re: re.to_string(),
+                epoch: snapshot.epoch.clone(),
+                rev: snapshot.rev,
+                page: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                pages: count,
+                machine: summary.clone(),
+                items,
+                truncated: snapshot.truncated,
+            })
+        })
+        .collect()
+}
+
+/// One bounded read, as `output.data`, trimmed until the message fits in
+/// 32 KiB: escaping and short lines can make the lines' JSON larger than
+/// the bytes they came from.
+fn read_fitting(
+    dir: &Path,
+    re: &str,
+    run_id: &str,
+    offset: u64,
+    max_bytes: usize,
+) -> Result<OutputData, (&'static str, String)> {
+    // The next run of the service deleted it.
+    if !dir.is_dir() {
+        return Err(gone());
+    }
+    let mut max_bytes = max_bytes.max(1);
+    loop {
+        let read = output::read(dir, offset, max_bytes).map_err(|error| {
+            if dir.is_dir() {
+                ("bad_request", format!("{error:#}"))
+            } else {
+                gone()
+            }
+        })?;
+        let data = OutputData {
+            re: re.to_string(),
+            run_id: run_id.to_string(),
+            offset: read.offset,
+            next: read.next,
+            lines: read
+                .lines
+                .into_iter()
+                .map(|line| OutputLine {
+                    text: line.text,
+                    cut: line.cut,
+                })
+                .collect(),
+            rotated: read.rotated.map(|first_offset| Rotated { first_offset }),
+            ended: read.ended,
+            interrupted: read.interrupted,
+        };
+        let size = serde_json::to_vec(&SessionMessage::OutputData(data.clone()))
+            .map(|json| json.len())
+            .unwrap_or(usize::MAX);
+        if size <= MAX_MESSAGE_BYTES || max_bytes <= 64 {
+            return Ok(data);
+        }
+        max_bytes /= 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::runs::output::{StreamWriter, create_run_dir};
+
+    fn stream(bytes: &[u8]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        create_run_dir(dir.path()).unwrap();
+        StreamWriter::create(dir.path())
+            .unwrap()
+            .append(bytes)
+            .unwrap();
+        dir
+    }
+
+    fn size(data: &OutputData) -> usize {
+        serde_json::to_vec(&SessionMessage::OutputData(data.clone()))
+            .unwrap()
+            .len()
+    }
+
+    /// Quotes double when escaped, and an empty line costs a dozen bytes of
+    /// JSON: a full read of either would not fit.
+    #[test]
+    fn a_read_is_trimmed_until_its_message_fits() {
+        for bytes in [
+            vec![b'\n'; 20_000],
+            [b"\"".repeat(16_000), vec![b'\n']].concat(),
+        ] {
+            let dir = stream(&bytes);
+            let data = read_fitting(dir.path(), "r1", "run", 0, 16 * 1024).unwrap();
+
+            assert!(size(&data) <= MAX_MESSAGE_BYTES, "{}", size(&data));
+            assert!(data.next > 0, "it makes progress");
+        }
+    }
+
+    #[test]
+    fn a_read_that_fits_is_sent_whole() {
+        let dir = stream(b"one\ntwo\n");
+        let data = read_fitting(dir.path(), "r1", "run", 0, 16 * 1024).unwrap();
+
+        assert_eq!((data.offset, data.next), (0, 8));
+        assert_eq!(data.lines.len(), 2);
+    }
+
+    #[test]
+    fn a_folder_that_went_away_is_gone() {
+        let dir = stream(b"one\n");
+        let path = dir.path().to_path_buf();
+        drop(dir);
+
+        let (code, _) = read_fitting(&path, "r1", "run", 0, 1024).unwrap_err();
+        assert_eq!(code, "gone");
+    }
+}

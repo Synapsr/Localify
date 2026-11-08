@@ -5,6 +5,12 @@
 //! from the relay, commands from the management socket and a once-a-second
 //! tick all arrive here in turn. When the connection ends, so does every
 //! session, and nothing is resent on the next one.
+//!
+//! As a target, it answers inventory and output requests (`target`); as a
+//! viewer, it carries the management socket's requests (`viewer`).
+
+mod target;
+mod viewer;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +28,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use self::viewer::Tap;
+pub use self::viewer::{TapEvent, TapRequest, WINDOW};
 use super::backoff::Ending;
 use super::lease::{LeaseError, LeaseKeeper};
+use super::local::LocalSource;
 use super::machines::SessionState;
 use super::pacer::{self, Bucket, Outbox};
 use super::socket::RelaySocket;
@@ -153,11 +162,37 @@ pub enum Command {
     },
     /// A lease asked for outside the actor found the token revoked.
     Revoked,
+    /// A viewer's request to a peer, carried until it ends.
+    Tap {
+        peer: String,
+        request: TapRequest,
+        events: mpsc::Sender<TapEvent>,
+        reply: oneshot::Sender<Result<String, Failure>>,
+    },
+    /// The client of a request went away: unwatch or unfollow.
+    Untap {
+        peer: String,
+        id: String,
+    },
+    /// The client showed a follow's output up to `offset`.
+    Ack {
+        peer: String,
+        id: String,
+        offset: u64,
+    },
+    /// A snapshot of this machine's inventory, built for a viewer.
+    Snapshot {
+        result: Result<Arc<crate::application::inventory::Snapshot>, String>,
+    },
 }
 
 /// What this connection is for.
 pub struct Context {
     pub self_id: String,
+    /// This machine's name, on inventory pages.
+    pub name: String,
+    /// What this machine shares, as a target.
+    pub source: Arc<dyn LocalSource>,
     /// The token this connection signed in with: another one in `cloud.json`
     /// means this machine signed out, or in again.
     pub token: String,
@@ -209,6 +244,10 @@ struct Session {
     code_shown: bool,
     paired: bool,
     holder: Holder,
+    /// Target: what the viewer asked for.
+    served: target::Served,
+    /// Viewer: the requests carried over this session, by id.
+    taps: HashMap<String, Tap>,
 }
 
 impl Session {
@@ -235,6 +274,8 @@ impl Session {
             code_shown: false,
             paired: false,
             holder: Holder::None,
+            served: target::Served::default(),
+            taps: HashMap::new(),
         }
     }
 
@@ -244,6 +285,9 @@ impl Session {
 
     /// Whether something still uses the session, so it is not idle.
     fn is_held(&self) -> bool {
+        if !self.taps.is_empty() || !self.served.is_empty() {
+            return true;
+        }
         match &self.holder {
             Holder::Open { reply, hold } => *hold || reply.is_some(),
             Holder::Pair(_) => true,
@@ -283,6 +327,10 @@ struct Actor {
     failed: Option<Ending>,
     /// Lease and roster requests in flight, aborted with the connection.
     tasks: Vec<JoinHandle<()>>,
+    /// Target: the snapshot builds and the follows' turn.
+    shelf: target::Shelf,
+    /// Viewer: numbers the requests it carries.
+    taps_made: u64,
 }
 
 pub async fn run(
@@ -296,6 +344,7 @@ pub async fn run(
     let timings = shared.timings;
     let (sink, mut stream) = socket.split();
     let (out, queue) = pacer::queue();
+    let drained = out.drained();
     let bucket = Bucket::paced(Instant::now());
     let mut writer = tokio::spawn(pacer::run(sink, queue, bucket));
     let mut writer_done = false;
@@ -313,9 +362,13 @@ pub async fn run(
         next_clock_check: Instant::now() + timings.clock_check,
         failed: None,
         tasks: Vec::new(),
+        shelf: target::Shelf::default(),
+        taps_made: 0,
     };
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut poll = tokio::time::interval(timings.follow_poll);
+    poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut ping =
         tokio::time::interval_at(Instant::now() + timings.ping_every, timings.ping_every);
     let mut last_frame = Instant::now();
@@ -354,6 +407,9 @@ pub async fn run(
                 actor.on_tick();
             }
             _ = ping.tick() => actor.send_text("ping".to_string()),
+            _ = poll.tick() => actor.on_poll(),
+            // The writer took a frame: room for pages or output.
+            _ = drained.notified() => {}
             _ = refresh.refresh.notified() => {
                 if actor.signed_out_here() {
                     info!("This machine signed out; closing its relay connection");
@@ -365,6 +421,7 @@ pub async fn run(
                 break Ending::Lost;
             }
         }
+        actor.pump();
         if let Some(ending) = actor.failed.take() {
             break ending;
         }
@@ -563,6 +620,7 @@ impl Actor {
         view.presence.remove(machine_id);
         view.roster.retain(|machine| machine.id != machine_id);
         view.settings.remove(machine_id);
+        view.inventories.remove(machine_id);
         drop(view);
         self.shared.emit(Event::Revoked {
             machine_id: machine_id.to_string(),
@@ -758,9 +816,13 @@ impl Actor {
         }
     }
 
-    /// Opens a session as the viewer: the first handshake message.
-    fn initiate(&mut self, peer: &str, purpose: Purpose, holder: Holder) {
-        let failed = |holder: Holder, failure: Failure| notify_failure(holder, &failure);
+    /// Opens a session as the viewer: the first handshake message. Returns
+    /// the new session, or `None` when it could not start.
+    fn initiate(&mut self, peer: &str, purpose: Purpose, holder: Holder) -> Option<Key> {
+        let failed = |holder: Holder, failure: Failure| {
+            notify_failure(holder, &failure);
+            None
+        };
         let sid = match SessionId::random() {
             Ok(sid) => sid,
             Err(error) => return failed(holder, Failure::new("internal", format!("{error:#}"))),
@@ -789,6 +851,7 @@ impl Actor {
                 .insert(peer.to_string(), SessionState::Handshaking);
         }
         self.send_frame(peer, sid, FrameKind::Hs, Some(purpose), Some(&first));
+        Some((peer.to_string(), sid))
     }
 
     fn on_handshake(&mut self, key: &Key, message: &[u8]) {
@@ -1038,6 +1101,14 @@ impl Actor {
                 message,
                 SessionMessage::Error { .. } | SessionMessage::Bye { .. }
             );
+        if !message.within_bounds() {
+            return self.end(
+                key,
+                End::Error("bad_request", "A request is out of bounds.".into()),
+                &bad_request(),
+            );
+        }
+        let purpose = session.purpose;
         match message {
             SessionMessage::Hello(hello) if session.hello.is_none() => self.on_hello(key, hello),
             _ if !greeted => self.end(
@@ -1050,11 +1121,35 @@ impl Actor {
                 End::Error("bad_request", "hello came twice.".into()),
                 &bad_request(),
             ),
-            SessionMessage::Keep { .. } if role == Role::Target => {
+            SessionMessage::Keep { ids } if role == Role::Target => {
                 session.last_keep = Instant::now();
                 self.send_message(key, &SessionMessage::Kept);
+                self.renew(key, &ids);
             }
             SessionMessage::Kept if role == Role::Viewer => {}
+            message @ (SessionMessage::InventoryPage { .. }
+            | SessionMessage::InventoryUnchanged { .. }
+            | SessionMessage::OutputData(_))
+                if role == Role::Viewer && purpose == Purpose::Session =>
+            {
+                self.deliver(key, message);
+            }
+            message @ SessionMessage::Error { re: Some(_), .. }
+                if role == Role::Viewer && purpose == Purpose::Session =>
+            {
+                self.deliver(key, message);
+            }
+            message @ (SessionMessage::InventoryGet { .. }
+            | SessionMessage::InventoryWatch { .. }
+            | SessionMessage::InventoryUnwatch { .. }
+            | SessionMessage::OutputRead { .. }
+            | SessionMessage::OutputFollow { .. }
+            | SessionMessage::OutputAck { .. }
+            | SessionMessage::OutputUnfollow { .. })
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_request(key, message);
+            }
             SessionMessage::Bye { reason } => {
                 if reason == ByeReason::Unpaired {
                     self.forget_pin(&key.0);
@@ -1134,13 +1229,14 @@ impl Actor {
                 let Some(session) = self.sessions.get_mut(key) else {
                     return;
                 };
-                let mut hold = true;
+                let mut hold = !session.taps.is_empty();
                 if let Holder::Open { reply, hold: keep } = &mut session.holder {
-                    hold = *keep;
+                    hold |= *keep;
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(Ok(hello));
                     }
                 }
+                self.send_taps(key);
                 if !hold {
                     self.end(
                         key,
@@ -1371,6 +1467,7 @@ impl Actor {
             warn!(error = %format!("{error:#}"), "Could not delete an unpaired machine's pin");
         }
         self.view().settings.remove(peer);
+        self.view().inventories.remove(peer);
         if removed {
             self.shared.emit(Event::Unpaired {
                 machine_id: peer.to_string(),
@@ -1390,10 +1487,24 @@ impl Actor {
                 if let Some(failure) = self.cannot_open(&peer, Purpose::Session) {
                     return notify_failure(holder, &failure);
                 }
+                let Some(holder) = self.join(&peer, holder) else {
+                    return;
+                };
                 // One session per target: a new one replaces the old.
                 self.end_peer_sessions(&peer, Role::Viewer, Purpose::Session);
                 self.initiate(&peer, Purpose::Session, holder);
             }
+            Command::Tap {
+                peer,
+                request,
+                events,
+                reply,
+            } => {
+                let _ = reply.send(self.on_tap(&peer, request, events));
+            }
+            Command::Untap { peer, id } => self.untap(&peer, &id),
+            Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
+            Command::Snapshot { result } => self.on_snapshot(result),
             Command::Pair { peer, events } => {
                 let holder = Holder::Pair(events);
                 if let Some(failure) = self.cannot_open(&peer, Purpose::Pair) {
@@ -1519,6 +1630,7 @@ impl Actor {
         for key in keys {
             self.check(&key, now);
         }
+        self.serve_tick(now);
     }
 
     fn renew_lease(&mut self) {
@@ -1601,12 +1713,13 @@ impl Actor {
             Role::Viewer => self.check_viewer(key, now),
             Role::Target => {
                 if now.duration_since(session.last_keep) >= timings.target_gives_up_after {
-                    self.end(
+                    return self.end(
                         key,
                         End::Close,
                         &Failure::new("not_responding", "No keep from the viewer."),
                     );
                 }
+                session.served.expire(now, timings.watch_expiry);
             }
         }
     }
@@ -1646,7 +1759,9 @@ impl Actor {
         if session.hello.is_some() && now.duration_since(due) >= timings.keep_every {
             session.keep_sent = Some(now);
             session.unanswered.get_or_insert(now);
-            self.send_message(key, &SessionMessage::Keep { ids: Vec::new() });
+            // Renews the watches and follows on the target.
+            let ids = viewer::kept_ids(&session.taps);
+            self.send_message(key, &SessionMessage::Keep { ids });
         }
     }
 
@@ -1671,10 +1786,13 @@ impl Actor {
                 );
             }
         }
-        let Some(session) = self.sessions.remove(key) else {
+        let Some(mut session) = self.sessions.remove(key) else {
             return;
         };
         debug!(peer = %key.0, code = %failure.code, "Session ended");
+        for (_, tap) in session.taps.drain() {
+            tap.end(failure);
+        }
         if session.role == Role::Viewer && session.purpose == Purpose::Session {
             let mut view = self.view();
             let current = !self.sessions.iter().any(|(other, s)| {

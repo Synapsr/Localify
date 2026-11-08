@@ -24,6 +24,7 @@ use super::mgmt_socket::MachineServices;
 use super::proxy::{ClientAddr, Scheme};
 use super::public_ingress::{self, IngressAccess};
 use super::public_tunnel::{self, PublicTunnel, TunnelFiles};
+use super::remote::local::DaemonSource;
 use super::remote::{self, RemoteLink};
 use super::router::{DomainAccessLog, RuntimeState, SharedState, create_router};
 use super::tls::create_tls_acceptor;
@@ -159,7 +160,8 @@ impl Server {
             cancel.clone(),
         )
         .await;
-        let remote = RemoteLink::new(&self.data_dir);
+        let source = DaemonSource::new(Arc::clone(&inventory), tunnel.clone());
+        let remote = RemoteLink::new(&self.data_dir, Arc::new(source));
         remote::spawn(remote.clone(), cancel.clone());
         public_tunnel::spawn(
             tunnel.clone(),

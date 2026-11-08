@@ -11,9 +11,11 @@
 mod actor;
 mod backoff;
 mod lease;
+pub mod local;
 pub mod machines;
 mod pacer;
 mod socket;
+mod viewing;
 
 #[cfg(test)]
 mod fake_relay;
@@ -33,11 +35,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use self::actor::{Command, Failure};
+pub use self::actor::Failure;
+use self::actor::{Command, TapEvent, TapRequest};
 pub use self::actor::{Event, PairEvent};
 use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
+use self::local::LocalSource;
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
+pub use self::viewing::{FollowEvent, Following, RemoteInventory};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -136,6 +141,13 @@ pub struct Timings {
     pub lapsed_recheck: Duration,
     pub clock_check: Duration,
     pub retry_after_drop: Duration,
+    /// While a viewer watches, the target looks for changes this often.
+    pub watch_every: Duration,
+    /// A watch or a follow ends this long after the last `keep` or `ack`
+    /// that names it.
+    pub watch_expiry: Duration,
+    /// While a follow is open, the target looks for new output this often.
+    pub follow_poll: Duration,
 }
 
 impl Default for Timings {
@@ -166,6 +178,9 @@ impl Default for Timings {
             lapsed_recheck: seconds(15 * 60),
             clock_check: seconds(20),
             retry_after_drop: seconds(5),
+            watch_every: seconds(2),
+            watch_expiry: seconds(120),
+            follow_poll: Duration::from_millis(250),
         }
     }
 }
@@ -200,6 +215,9 @@ pub(super) struct View {
     sessions: HashMap<String, SessionState>,
     settings: HashMap<String, TargetSettings>,
     failures: HashMap<String, String>,
+    /// The last whole snapshot of each peer, so a request can say which
+    /// revision it holds.
+    inventories: HashMap<String, RemoteInventory>,
 }
 
 impl Default for View {
@@ -213,6 +231,7 @@ impl Default for View {
             sessions: HashMap::new(),
             settings: HashMap::new(),
             failures: HashMap::new(),
+            inventories: HashMap::new(),
         }
     }
 }
@@ -238,6 +257,8 @@ struct Conn {
 struct Shared {
     store: RemoteStore,
     credentials: CredentialsStore,
+    /// What this machine shares as a target.
+    source: Arc<dyn LocalSource>,
     timings: Timings,
     view: Mutex<View>,
     conn: Mutex<Option<Conn>>,
@@ -352,16 +373,17 @@ impl Drop for Subscription {
 }
 
 impl RemoteLink {
-    pub fn new(data_dir: &Path) -> Self {
-        Self::with_timings(data_dir, Timings::default())
+    pub fn new(data_dir: &Path, source: Arc<dyn LocalSource>) -> Self {
+        Self::with_timings(data_dir, source, Timings::default())
     }
 
-    pub fn with_timings(data_dir: &Path, timings: Timings) -> Self {
+    pub fn with_timings(data_dir: &Path, source: Arc<dyn LocalSource>, timings: Timings) -> Self {
         let (events, _) = broadcast::channel(64);
         Self {
             shared: Arc::new(Shared {
                 store: RemoteStore::in_data_dir(data_dir),
                 credentials: CredentialsStore::in_data_dir(data_dir),
+                source,
                 timings,
                 view: Mutex::new(View::default()),
                 conn: Mutex::new(None),
@@ -558,6 +580,7 @@ impl RemoteLink {
         })?;
         self.shared.view().failures.remove(peer);
         self.shared.view().settings.remove(peer);
+        self.shared.view().inventories.remove(peer);
         if let Some(conn) = self.shared.conn() {
             let _ = conn.commands.send(Command::Unpair {
                 peer: peer.to_string(),
@@ -844,6 +867,8 @@ async fn connect_and_serve(
     }
     let context = actor::Context {
         self_id: ready.credentials.machine_id,
+        name: ready.credentials.machine_name,
+        source: Arc::clone(&shared.source),
         token: ready.credentials.token,
         account: ready.account.user_id,
         keys: ready.keys,
@@ -953,6 +978,11 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
                         let _ = lapsed(shared, Duration::ZERO);
                         delay = shared.timings.lapsed_recheck;
                     }
+                    // Suspended meanwhile: stopped, as a `4403` stops it.
+                    Granted::Banned => {
+                        let wait = block(shared, "banned", BANNED, None);
+                        return Box::pin(wait_for_change(shared, wait, cancel)).await;
+                    }
                     // No answer of the cloud's own: not a lapse. Asked
                     // again sooner, with backoff, up to the usual interval.
                     Granted::Unreachable => {
@@ -982,8 +1012,10 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
 
 enum Granted {
     Yes,
-    /// Refused by the plan: `402`, or `403`.
+    /// Refused by the plan: `402`, or a `403` other than a ban.
     No,
+    /// `403 banned`: the account is suspended.
+    Banned,
     /// No answer, a 5xx, or a `401` that is not the cloud's revocation.
     Unreachable,
     /// The token is revoked; the token it was.
@@ -1006,6 +1038,12 @@ async fn lease_granted(shared: &Shared) -> Granted {
     match CloudClient::new(http).remote_lease().await {
         Ok(_) => Granted::Yes,
         Err(error) if revocation.revokes(&error) => Granted::Revoked(credentials.token.clone()),
+        Err(CloudError::Api {
+            status: 403, code, ..
+        }) if code == "banned" => {
+            info!("Localify Cloud suspended this account");
+            Granted::Banned
+        }
         Err(CloudError::Api {
             status: 402 | 403, ..
         }) => {

@@ -5,6 +5,8 @@
 //! rewrite frames the way a misbehaving relay could.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures_util::{SinkExt, StreamExt};
@@ -22,8 +24,11 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+use super::local::{LocalSource, RunLookup, SnapshotFuture};
+use crate::application::inventory::{InventoryItem, Revisions};
 use crate::infrastructure::remote::noise::{Handshake, SessionContext, SessionId, StaticKeys};
 use crate::infrastructure::remote::wire::{FrameKind, Purpose, Send};
+use crate::infrastructure::runs::RunId;
 
 /// What the relay does with one frame.
 pub enum Route {
@@ -708,4 +713,54 @@ pub fn is_message(frame: &Send) -> bool {
 /// Whether a frame opens a session.
 pub fn opens(frame: &Send, purpose: Purpose) -> bool {
     frame.kind == FrameKind::Hs && frame.purpose == Some(purpose)
+}
+
+/// What a target shares in tests: the items its snapshots hold, numbered as
+/// the daemon numbers them, and the output folders of its runs.
+#[derive(Default)]
+pub struct FakeSource {
+    items: Mutex<Vec<InventoryItem>>,
+    revisions: Mutex<Option<Revisions>>,
+    runs: Mutex<HashMap<String, Result<PathBuf, RunLookup>>>,
+    builds: AtomicUsize,
+}
+
+impl FakeSource {
+    pub fn set_items(&self, items: Vec<InventoryItem>) {
+        *self.items.lock().unwrap() = items;
+    }
+
+    /// `run_id` is its service's last run, with its output in `dir`.
+    pub fn set_run(&self, run_id: &str, found: Result<PathBuf, RunLookup>) {
+        self.runs.lock().unwrap().insert(run_id.into(), found);
+    }
+
+    /// How many snapshots were built.
+    pub fn builds(&self) -> usize {
+        self.builds.load(Ordering::SeqCst)
+    }
+}
+
+impl LocalSource for FakeSource {
+    fn snapshot(&self) -> SnapshotFuture {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        let items = self.items.lock().unwrap().clone();
+        let snapshot = self
+            .revisions
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| Revisions::new("epoch-1".into()))
+            .snapshot(items);
+        Box::pin(async move { snapshot })
+    }
+
+    fn run_output(&self, run_id: &RunId) -> anyhow::Result<Result<PathBuf, RunLookup>> {
+        Ok(self
+            .runs
+            .lock()
+            .unwrap()
+            .get(run_id.as_str())
+            .cloned()
+            .unwrap_or(Err(RunLookup::Gone)))
+    }
 }

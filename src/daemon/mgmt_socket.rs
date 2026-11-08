@@ -11,15 +11,14 @@ use tracing::{error, info, warn};
 
 use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
-use super::remote::{PairEvent, RemoteLink};
+use super::remote::local::build_snapshot;
+use super::remote::{Failure, FollowEvent, Following, PairEvent, RemoteLink};
 use super::router::SharedState;
 use crate::application::inventory::Have;
 use crate::infrastructure::cloud::credentials::CredentialsStore;
-use crate::infrastructure::cloud::types::TunnelState;
-use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
+use crate::infrastructure::inventory::LocalInventory;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 use crate::infrastructure::remote::store::SettingsChange;
-use localify::desktop::ProjectRootStore;
 
 /// Management commands sent over the Unix socket.
 #[derive(Debug, Deserialize)]
@@ -84,7 +83,36 @@ enum MgmtCommand {
     /// Streaming: pairing requests, presence, revocations.
     #[serde(rename = "remote_events")]
     RemoteEvents,
+    /// Another machine's inventory: one snapshot, every page.
+    #[serde(rename = "remote_inventory", rename_all = "camelCase")]
+    RemoteInventory { machine_id: String },
+    /// Streaming: another machine's snapshots while the client stays.
+    #[serde(rename = "remote_watch", rename_all = "camelCase")]
+    RemoteWatch { machine_id: String },
+    /// One bounded read of a run's output on another machine.
+    #[serde(rename = "remote_output_read", rename_all = "camelCase")]
+    RemoteOutputRead {
+        machine_id: String,
+        run_id: String,
+        offset: u64,
+        max_bytes: u32,
+    },
+    /// Streaming: a run's output on another machine, from `offset`, or
+    /// without one from its last `tail` bytes.
+    #[serde(rename = "remote_output_follow", rename_all = "camelCase")]
+    RemoteOutputFollow {
+        machine_id: String,
+        run_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        tail: Option<u64>,
+    },
 }
+
+/// Without an offset, a follow starts this far before the end: a few
+/// thousand lines, not a whole run.
+const DEFAULT_TAIL: u64 = 256 * 1024;
 
 /// Response sent back to the management client.
 #[derive(Debug, Serialize)]
@@ -227,6 +255,19 @@ pub async fn serve(
                 Some(MgmtCommand::RemoteEvents) => {
                     return stream_events(&remote, reader, writer).await;
                 }
+                Some(MgmtCommand::RemoteWatch { machine_id }) => {
+                    return stream_watch(&remote, &machine_id, reader, writer).await;
+                }
+                Some(MgmtCommand::RemoteOutputFollow {
+                    machine_id,
+                    run_id,
+                    offset,
+                    tail,
+                }) => {
+                    let tail = tail.unwrap_or(DEFAULT_TAIL);
+                    let follow = remote.follow(&machine_id, &run_id, offset, tail).await;
+                    return stream_follow(follow, reader, writer).await;
+                }
                 _ => {}
             }
             let mut exit_after_reply = None;
@@ -367,6 +408,21 @@ async fn remote_answer(remote: &RemoteLink, command: MgmtCommand) -> MgmtRespons
         MgmtCommand::RemoteUnpair { machine_id } => remote
             .unpair(&machine_id)
             .map(|removed| serde_json::json!({ "ok": true, "removed": removed })),
+        MgmtCommand::RemoteInventory { machine_id } => remote
+            .inventory(&machine_id)
+            .await
+            .map_err(failure_error)
+            .and_then(|inventory| Ok(serde_json::to_value(inventory)?)),
+        MgmtCommand::RemoteOutputRead {
+            machine_id,
+            run_id,
+            offset,
+            max_bytes,
+        } => remote
+            .read_output(&machine_id, &run_id, offset, max_bytes)
+            .await
+            .map_err(failure_error)
+            .and_then(|data| Ok(serde_json::to_value(data)?)),
         _ => return MgmtResponse::error("Not a remote command"),
     };
     match answer {
@@ -453,35 +509,88 @@ async fn stream_events(
     }
 }
 
-/// A fresh snapshot, built off the async threads: it reads the config and
-/// the run records, scans processes and connects to every service's port.
+fn failure_error(failure: Failure) -> anyhow::Error {
+    anyhow::anyhow!("{}", failure.message)
+}
+
+/// `remote_watch`: one line per snapshot or loss, until the client closes
+/// its end, which ends the watch.
+async fn stream_watch(
+    remote: &RemoteLink,
+    machine_id: &str,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+) {
+    let mut events = remote.watch(machine_id);
+    loop {
+        tokio::select! {
+            _ = client_gone(&mut reader) => return,
+            event = events.recv() => {
+                let Some(event) = event else { return };
+                let Ok(data) = serde_json::to_value(&event) else { return };
+                if !write_line(&mut writer, &MgmtResponse::success(data)).await {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `remote_output_follow`: one line per `output.data`, acknowledged once
+/// written, then `ended` when the follow stops before its run did. Closing
+/// the connection unfollows.
+async fn stream_follow(
+    follow: Result<Following, Failure>,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+) {
+    let mut follow = match follow {
+        Ok(follow) => follow,
+        Err(failure) => {
+            let ended = FollowEvent::Ended {
+                code: failure.code,
+                message: failure.message,
+            };
+            if let Ok(data) = serde_json::to_value(&ended) {
+                write_line(&mut writer, &MgmtResponse::success(data)).await;
+            }
+            return;
+        }
+    };
+    loop {
+        tokio::select! {
+            _ = client_gone(&mut reader) => return,
+            event = follow.next() => {
+                let Some(event) = event else { return };
+                let last = match &event {
+                    FollowEvent::Data(data) => data.ended,
+                    FollowEvent::Ended { .. } => true,
+                };
+                let next = match &event {
+                    FollowEvent::Data(data) => Some(data.next),
+                    FollowEvent::Ended { .. } => None,
+                };
+                let Ok(data) = serde_json::to_value(&event) else { return };
+                if !write_line(&mut writer, &MgmtResponse::success(data)).await || last {
+                    return;
+                }
+                if let Some(next) = next {
+                    follow.shown(next);
+                }
+            }
+        }
+    }
+}
+
+/// A fresh snapshot of this machine.
 async fn inventory_answer(
     inventory: &Arc<LocalInventory>,
     tunnel: &PublicTunnel,
     have: Option<Have>,
 ) -> MgmtResponse {
-    let (urls, machine_id) = tunnel.known_urls();
-    let public = PublicFacts {
-        urls,
-        machine_id,
-        tunnel_connected: tunnel.status().await.tunnel == TunnelState::Connected,
-    };
-    let inventory = Arc::clone(inventory);
-    let built = tokio::task::spawn_blocking(move || {
-        // The checkouts the app knows, as `localify dev` reads them.
-        let project_roots = ProjectRootStore::new_default()
-            .and_then(|store| store.load())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(project_id, root)| (project_id, PathBuf::from(root)))
-            .collect();
-        inventory.snapshot(&public, &project_roots)
-    })
-    .await;
-    let snapshot = match built {
-        Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(error)) => return MgmtResponse::error(format!("{error:#}")),
-        Err(error) => return MgmtResponse::error(error.to_string()),
+    let snapshot = match build_snapshot(inventory, tunnel).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return MgmtResponse::error(format!("{error:#}")),
     };
     if snapshot.is_held_by(have.as_ref()) {
         return MgmtResponse::success(serde_json::json!({
@@ -499,6 +608,7 @@ async fn inventory_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::remote::local::DaemonSource;
     use crate::daemon::router::RuntimeState;
     use crate::domain::{DomainName, DomainPattern, DomainRegistration, Route};
     use arc_swap::ArcSwap;
@@ -540,6 +650,8 @@ mod tests {
                 .with_services_dir(dir.path().join("services")),
         );
         let data_dir = dir.path().join("data");
+        let tunnel = PublicTunnel::new(1);
+        let source = DaemonSource::new(Arc::clone(&inventory), tunnel.clone());
         let test_ports = DaemonPorts {
             http: 80,
             https: 443,
@@ -553,9 +665,9 @@ mod tests {
                 serve_shutdown,
                 test_ports,
                 MachineServices {
-                    tunnel: PublicTunnel::new(1),
+                    tunnel,
                     inventory,
-                    remote: RemoteLink::new(&data_dir),
+                    remote: RemoteLink::new(&data_dir, Arc::new(source)),
                 },
             )
             .await;
