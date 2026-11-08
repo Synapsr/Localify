@@ -42,7 +42,7 @@ Not covered here: typing into a service from another machine, attaching to a ter
 - **Peer:** a machine this one has paired with, by machine id and pinned key.
 - **Viewer:** the machine a person looks from. **Target:** the machine looked at. Any paired machine can be either.
 - **Session:** a Noise channel between a viewer and a target, through the relay.
-- **Run:** one execution of a service by `localify dev`, known by its run id. The `localify dev` process that executes it is the run's **executor**, and the leader of the run's session and process group. A run ends when every process of that session is gone and its output has reached its end, not when the executor exits.
+- **Run:** one execution of a service by `localify dev`, known by its run id. The `localify dev` process that executes it is the run's **executor**, and the leader of the run's session and process group. A run ends when no process of that session is left and its stream is finalized, complete or interrupted, not when the executor exits.
 - **Legacy run:** a service started from a shell tab by an app from before PR 1, whose record has no run id. It keeps running as it is.
 - **Launch:** a request to start a run, from a **dispatcher** (the app, the daemon, `dev --detach`). The dispatcher picks a launch id, which becomes the run id, and an expiry after which the launch can no longer start. What happened to it is decided once, in its launch record.
 - **Run PTY:** the pseudo-terminal the desktop app creates for one run, with `localify dev` as its only child. A service tab shows a run PTY; a shell tab shows an ordinary shell.
@@ -323,7 +323,8 @@ type OutputData = {
   next: number;                        // where to read on from
   lines: { text: string; cut?: true }[];  // cut: the line goes on in the next item
   rotated?: { firstOffset: number };   // the asked offset was dropped; data starts there
-  ended: boolean;                      // the run ended and everything was sent
+  ended: boolean;                      // the run ended and everything kept was sent
+  interrupted?: true;                  // with ended: capture stopped early (see "The end of a run")
 };
 type ControlProgress = { t: "control.progress"; re: string; phase: "dispatched" | "started" };
 type ControlResult = {
@@ -372,6 +373,7 @@ The `code` of a `SessionError`, or of a `ControlResult` that is not `done`:
 | `unauthorized` | the target could not get a fresh lease, or the viewer is not in it | "Remote access is not available right now." |
 | `output_unavailable` | no output stream for that run, with the reason | see "Output" |
 | `gone` | the run id is not the service's last run | the viewer moves to the current run |
+| `request_mismatch` | a `requestId` the target already has, sent with another action, service or expected revision | "This request doesn't match the one B recorded." |
 | `unknown_request` | `control.status` names a request id the target does not have, or no longer has after 24 hours | "B has no record of that request." |
 | `too_many` | over a watch, follow or session bound | — |
 | `unsupported` | a message the peer's version does not know | "Update Localify on B." |
@@ -402,7 +404,7 @@ type InventoryItem = {
     legacy: boolean; startedAt: string; profile: string | null; profileDanger: boolean;
     exit: { at: string; code: number | null } | null;
   } | null;                         // the service's last recorded run
-  process: "running" | "stopped";   // whether the run's process is alive
+  process: "running" | "stopped";   // whether any process of the run's session is alive
   port: { number: number; reachable: boolean };
   output: { available: true; runId: string }
         | { available: false; reason: "terminal" | "unknown_owner" | "no_run" | "legacy_run" };
@@ -413,7 +415,7 @@ type InventoryItem = {
 ```
 
 - **Sources:** the configured projects, environments and services (the config the daemon loads, polled every 2 seconds); the checkouts' `localify.toml`; the running-service records in `services/`; a TCP connect to each service's port on `127.0.0.1`, 200 ms timeout; the daemon's own runtime for public URLs and the tunnel (public-urls.md, "Tunnel").
-- **Four states:** `process` comes from the record's PID and start time; `port.reachable` from the connect; `output.available` from the run's stream; `publicUrl.serving` from the URL's state, the machine that serves it, and this machine's tunnel being connected. They disagree often, and the UI shows each one: a process running with its port not reachable yet is "Starting"; a reachable port with no running record is `owner: "unknown"`.
+- **Four states:** `process` comes from the run's session, running while any process proven to belong to the run is alive (see "The end of a run"); `port.reachable` from the connect; `output.available` from the run's stream; `publicUrl.serving` from the URL's state, the machine that serves it, and this machine's tunnel being connected. They disagree often, and the UI shows each one: a process running with its port not reachable yet is "Starting"; a reachable port with no running record is `owner: "unknown"`.
 - **`configRev`:** the first 16 hex digits of HMAC-SHA-256, under a per-machine secret, over the canonical JSON of what a launch of this service would use: the service's entry as the daemon loaded it (command, folder, port, domains, environment) and the full effective profile definitions of its checkout as `LaunchProfiles::load` gives them (each profile's name, sources, `danger`, `max_duration`, `browser_indicator`, and its inline `[profiles.<name>.env]` values). It changes whenever any of them does. The HMAC keeps a low-entropy inline value from being guessed from a revision. The secret is 32 random bytes in `<data dir>/launch-rev.key` (0600), made on first need. The executor computes the revision from the definition it loaded and runs from that same definition (see "Controls").
 - **`controls`:** what this viewer may do right now, with the code a refusal would carry, so the UI disables a button and says why before anyone clicks.
 - **`share` off:** the target sends `machine` and no items.
@@ -430,10 +432,10 @@ type InventoryItem = {
 Output shown remotely is everything one run's own channel carried, and nothing else. Today an app-owned service tab is an interactive shell: the app types the service's command into it, copies every byte of the shell into the service's output file, and stops the service by writing Ctrl-C into the tab. The file then holds the prompt and any command typed after the service exits, and a Ctrl-C can land in an editor or a REPL that took the foreground. Telling service bytes from shell bytes after the fact does not work either: a service suspended, a command run, and the service resumed, all before the reader catches up, interleave in one byte stream. So the channel itself carries the provenance. That old file is never exported. PR 1 replaces the model:
 
 - **A dedicated PTY per run.** To launch a service, the app spawns the pinned Localify executable directly as the only child of a new PTY: `localify --config <path> dev <service> --project <id> [--env <slug>] [--profile <name>] --launch-id <launchId>`, in the service's folder. It gets the shell environment below, plus `LOCALIFY_SERVICE_ORIGIN=app` and the variables that select the app's own installation (the installed app or a dev build), so a run always uses the app's config and state. There is no interactive shell in it, and nothing is ever typed into an existing shell. `localify dev` is the PTY's session leader, so the run has its own session and process group. Every launch, a restart included, creates a fresh run PTY. Ctrl-Z is disabled in it (`VSUSP` is cleared in the PTY's termios): with no shell, nothing could resume a suspended service.
-- **The shell environment.** Without a shell, a service would lose what the person's shell init sets up: `PATH` entries, `nvm`, `asdf`, profile CLIs. So the app resolves the user's interactive login-shell environment outside any captured PTY, as editors do. It runs `$SHELL -ilc '"<pinned localify>" shell-env <nonce>'` with stdin closed, stderr discarded and a 10-second timeout, after which the shell's process group is killed. The hidden `shell-env` command prints the nonce, then each variable as `KEY=VALUE`, all separated by NUL bytes, then the nonce again. The app keeps only what lies between the two nonces, so whatever the shell init prints is ignored. The result is cached for the app session; `Reload shell environment`, in the terminal panel's menu, resolves it again. When resolution fails or times out, runs start with the app's own environment, and the panel shows "Couldn't read your shell environment (timed out after 10 s). Services start without what your shell config sets up." with `Reload shell environment`. Background runs use the same resolver (see "Detached starts").
+- **The shell environment.** Without a shell, a service would lose what the person's shell init sets up: `PATH` entries, `nvm`, `asdf`, profile CLIs. So the app resolves the user's interactive login-shell environment outside any captured PTY, as editors do, through the hidden command `"<pinned localify>" shell-env <nonce>`, quoted in the syntax of the shell that runs it. The invocation depends on `$SHELL`: `zsh -ilc`, `bash -ilc` and `fish -ilc` with that command; `nu -l -i -c` with `^"<path>" shell-env <nonce>`, Nushell's form for an external command; and `/bin/sh -lc` for any other shell, which reads only the POSIX profile files. The nonce is 128 random bits, new each time. `shell-env` prints the nonce, then each variable as `KEY=VALUE`, all separated by NUL bytes, then the nonce again. The app accepts the result only when both nonces frame it, nothing but valid `KEY=VALUE` entries lie between them, and the capture stays under 1 MiB; whatever the shell init prints outside the frame is ignored. Anything malformed, interleaved or oversized counts as a failure. Stdin is closed and stderr discarded. One 10-second deadline covers the spawn, the reading and the cleanup; when it expires, the app kills the resolver's process group. Closed stdin does not stop a prompt that opens `/dev/tty`, so the deadline is what guarantees the app never waits on one. The result is cached for the app session; `Reload shell environment`, in the terminal panel's menu, resolves it again. On failure, runs start with the app's own environment, and the panel shows "Couldn't read your shell environment. Services start without what your shell config sets up." with the reason and `Reload shell environment`. Background runs use the same resolver (see "Detached starts").
 - **The service tab is the run.** It shows the run PTY, interactive and resizable, so the service sees a real terminal: colors, prompts, keys and window size behave as they do today. When the run has ended (see "The end of a run"), the tab shows "Exited with code 1 at 10:42" (or "Stopped" for a signal), stops taking input, and offers `Restart` and `Open a terminal here`. The latter opens a separate, ordinary shell tab in the service's folder.
 - **Stop and restart** signal the run's own session and process group, each process checked against its start time (TERM, then KILL after 10 seconds, with the process tree as `localify stop` handles it today), and never write a Ctrl-C into a tab. A Ctrl-C the person types into a running service tab still reaches the service, as in any terminal.
-- **The end of a run.** Profiled or not, every service runs under the same supervisor in `localify dev`. The run record stores the run's session id and process group id, with the executor's start time. When the executor exits, or dies, the run is not over: descendants may ignore signals or still be starting. Whoever watches the run finishes it: the app for a run PTY; for a background run, the daemon's inventory pass, or the next dispatcher of that service. The finisher signals what remains of the run's session and process group (TERM, then KILL after 10 seconds), checking each process's start time, and verifies that nothing is left. It drains the output to its end and finalizes the stream. Only then does the tab show "Exited", the launch record get its exit, and the service become free. A new launch refuses while any process of a previous run of that service is alive, identified by its session or process group and its start time.
+- **The end of a run.** Profiled or not, every service runs under the same supervisor in `localify dev`. When the executor exits, or dies, the run is not over: descendants may ignore signals or still be starting. A finisher ends it, as "The end of a run" below describes, and only then does the tab show "Exited", the launch record get its exit, and the service become free.
 - **The stream:** the app reads the run PTY's master and appends every byte, and only those bytes, to the run's stream. It is the only writer. Shell tabs are never written to a stream and never exported.
 - **Typed input is part of the output.** Keystrokes a person types into a running service tab are echoed by the terminal into the stream, so `localify logs` and paired machines see them. That is accepted. The tab says it in its footer while `share` is on: "What you type here appears in this service's output." Input with echo turned off, such as a password prompt, is not echoed.
 - **Run id:** the launch id the dispatcher chose: the app for a run PTY, `dev --detach` for a background run, the daemon for a remote launch. A person's own `localify dev` picks one itself. It is 16 random bytes, base64url, recorded as `runId` in the run's record.
@@ -445,13 +447,32 @@ Output shown remotely is everything one run's own channel carried, and nothing e
 - **Locally,** `localify logs` and `service_logs` read the same stream, so an agent no longer reads shell prompts either. The whole-shell copy and `LOCALIFY_SERVICE_OUTPUT` go away. A record without a run id keeps its `logFile` for `localify logs` only.
 - **Retention:** as today, a run's stream is deleted when the next run of the same service registers, or when the service is forgotten.
 
+### The end of a run
+
+A run ends when no process of its session is left and its stream is finalized. A **finisher** ends it: the app for a run PTY; for a background run, the daemon's inventory pass, or the next launcher of that service (a dispatcher, or a person's own `localify dev`).
+
+**Identity.** A process is known by its PID and its start time, to the platform's resolution. On macOS, `proc_listpids(PROC_ALL_PIDS)` enumerates processes, `proc_pidinfo(PROC_PIDTBSDINFO)` gives each one's start time in seconds and microseconds (`pbi_start_tvsec`, `pbi_start_tvusec`) and its process group (`pbi_pgid`), and `getsid(pid)` its session. On Linux, `/proc/<pid>/stat` gives the process group (field 5), the session (field 6) and the start time in clock ticks since boot (field 22), which `btime` in `/proc/stat` turns into a time. PR 1 replaces the `ps -o lstart` call behind `process_started_at()`, which has a resolution of one second and spawns a process, with these native calls.
+
+**The run record** stores the run's session id and process group id, both equal to the executor's PID, and the executor's start time. The executor refreshes `lastAliveAt` in the record every 5 seconds: a wall-clock time written on a monotonic tick and never moved backwards.
+
+**Which processes belong to the run.** A session id is never adopted because its number matches. POSIX does not reuse a PID while any process still carries it as its process group or session id, so as long as one member of the run's session is alive, that session cannot have been replaced. A finisher scans for every process whose session is the run's session id, or whose process group is the run's process group id:
+
+1. If the first scan finds at least one member whose start time is at or before `lastAliveAt`, that member lived inside the session while the executor did. The session has therefore existed without a break since the run began, and every current member belongs to the run. The finisher signals them all (TERM, then KILL after 10 seconds), checking each one's start time before each signal, and scans again until none is left.
+2. If the first scan finds no such member, the session ended at some point, and whatever carries that id now is unrelated. The finisher signals nothing and finalizes.
+
+This leaves alone the processes that all started after the last heartbeat, in a session whose older members all died: nothing proves they belong to the run. A process still listening on the port then shows as `unknown`. A descendant that started its own session left the run; `localify stop` still follows the process tree while the executor lives.
+
+**Interrupted capture.** The reader of a run's output is the executor for a background run (its pipes) and the app for a run PTY (the master). When the executor of a run PTY dies, the app still reads: after the cleanup, the PTY reaches EOF and the stream is finalized `complete`. When the reader itself dies, the bytes still buffered in the pipe or the PTY die with it. The finisher then never waits for output nobody can reach. It finalizes the prefix already written by publishing `services/output/<runId>/end.json`, `{"reason": "complete" | "interrupted", "offset", "at"}`, and goes on with the process cleanup. A viewer reading an interrupted stream gets `interrupted: true` with `ended`, and shows "Output was cut off when Localify stopped on B."
+
+**One finalization at a time.** Each run has one finalization claim, `services/output/<runId>/claim.json`, shared by the app, the daemon and every launcher. It carries the claimant's identity (PID, start time, role) and is published like a launch record: written to a unique temporary file, `fsync`ed, then `link`ed to its name, which fails if a claim exists. A finisher that finds a claim takes it over only when the claimant is dead, by its identity: it renames the dead claim to a unique tombstone name, which only one finisher can do, then publishes its own. Every step of finalizing is idempotent, so a finisher that takes over simply does them again. No launch of that service is admitted until its previous run is finalized: the next launcher finalizes it first, or waits for the live claimant.
+
 ### Reads
 
 `output.read {runId, offset, maxBytes}`:
 
 - **Bounded:** the target opens the segment holding `offset`, seeks, and reads at most `maxBytes` (16 KiB at most), never to the end of the file. It trims what it sends so the encoded message stays within 32 KiB, and `next` says where it stopped.
 - **Lines:** bytes become plain lines as `plain_lines` makes them today (colors and cursor moves removed, a line redrawn with `\r` kept as its last state), and every remaining control character except tab is removed, C1 controls and the Unicode bidirectional overrides (`U+202A`–`U+202E`, `U+2066`–`U+2069`) included. Invalid UTF-8 becomes `U+FFFD`.
-- **Partial lines:** a line still being written is held back, and `next` stops before it. A line longer than 8 KiB is sent in 8 KiB pieces, each but the last with `cut: true`. Once the run has ended, its last unfinished line is sent as it is, and `ended` is true.
+- **Partial lines:** a line still being written is held back, and `next` stops before it. A line longer than 8 KiB is sent in 8 KiB pieces, each but the last with `cut: true`. Once the run has ended, its last unfinished line is sent as it is, and `ended` is true, with `interrupted` when the stream was finalized as interrupted.
 - **Rotation:** an `offset` older than the oldest segment kept gets `rotated: {firstOffset}`, with data from there, and the viewer shows "Earlier output was dropped."
 - **Another run:** a `runId` that is not the service's last run gets `gone`. The viewer reads the new run from offset 0 and shows "Restarted at 10:42".
 - **Offsets** are logical bytes from the start of the run, never reused. An offset past what was written is an error, `bad_request`.
@@ -474,39 +495,54 @@ A control carries explicit ids: the target machine (the session), the project, t
 
 The executor, the `localify dev` process that runs the service (in a person's terminal, in a run PTY, or detached), is the only owner of the service's lock. Dispatchers never hold it.
 
-1. Before it runs anything (profile sources, the service), the executor takes an exclusive, non-blocking `flock` on `services/<record name>.lock`, and holds it until it exits. The OS releases it even on a crash. If another executor holds it, or a process of a previous run is still alive (see "The end of a run"), it refuses: the service is already running.
+1. Before it runs anything (profile sources, the service), the executor takes an exclusive, non-blocking `flock` on `services/<record name>.lock`, and holds it until it exits. The OS releases it even on a crash. If another executor holds it, or the previous run of that service is not finalized (see "The end of a run"), it refuses: the service is already running.
 2. Under the lock, it loads the config and the launch profiles once and checks a launch with an id against that loaded definition: `--launch-expires` has not passed; with `--expect-rev`, the `configRev` of that definition is the expected one; with `--remote-launch`, the profile is allowed (see "What a control may name"). These checks run even inside a PTY, where a dangerous profile could otherwise be confirmed by hand. It then runs from that same definition, never from a second read.
-3. It records its decision in the launch record (below): `admitted`, or `refused` with its code. When it finds the record already decided as `expired`, it does not start.
+3. It publishes its decision in the launch record (below): `admitted`, or `refused` with its code. When it finds the record already decided as `expired`, it does not start.
 4. Still under the lock, it writes the run record atomically (a temporary file renamed over it). A failure to write is fatal: nothing starts, and the launch record gets an exit that says so.
 
 Dispatchers pass `--launch-id <id> --launch-expires <unix ms>`, and the daemon or the bridge, for a remote control, `--remote-launch <id>` in place of `--launch-id`, with `--expect-rev <configRev>` and `--request <machineId>:<requestId>`. A launch expires 15 seconds after it is dispatched. `--remote-launch` only adds restrictions, so it needs no authentication. A person's own `localify dev` takes the lock the same way, so a foreground run is fenced too.
 
 ### Launch records
 
-Each launch id has one durable record, `services/launches/<launchId>.json`, decided by an atomic create: it is created with `O_EXCL`, exactly once, by whichever side decides first.
+Each launch id has one durable record, `services/launches/<launchId>.json`, decided once, by whichever side decides first, and never seen half written.
 
-- **The executor,** after its checks and before running anything, creates `{"outcome": "admitted", "runId", "requestedBy", "at"}`, or `{"outcome": "refused", "code": "conflict" | "expired" | "refused_profile", "message", "at"}`.
-- **The reconciler** (the daemon, or the app for its own launches), once the expiry has passed with no record, creates `{"outcome": "expired", "at"}`.
-- **The side that loses** finds the file and obeys it. An executor that finds `expired` exits without starting, so a launch delayed between its expiry check and its admission cannot start after its dispatcher gave up.
-- **An admitted launch** keeps its record after the service's current record moves on to another run. When the run ends, its finisher adds `"exit": {"code", "signal", "at", "replacedBy"}` by writing a sibling temporary file and renaming it over the record. `replacedBy` is the launch that stopped it, for a restart. `requestedBy` is `{machineId, requestId}` for a remote control, from `--remote-launch`'s companion flag `--request <machineId>:<requestId>`, and `null` otherwise.
+- **Publishing:** the decider writes the complete JSON to a unique temporary file in the same directory, `fsync`s it, then `link(2)`s it to the record's name. `link` fails with `EEXIST` when a decision already exists, so a winner is never replaced. The temporary file is then unlinked. Readers ignore temporary files, and the daemon sweeps those older than an hour, which a crash between writing and linking can leave.
+- **The executor,** after its checks and before running anything, publishes `{"outcome": "admitted", "runId", "executor": {"pid", "startSec", "startUsec", "sid"}, "requestedBy", "at"}`, or `{"outcome": "refused", "code": "conflict" | "expired" | "refused_profile", "message", "at"}`. `startUsec` is the platform's resolution, converted (see "The end of a run").
+- **The reconciler** (the daemon, or the app for its own launches), once the expiry has passed with no record, publishes `{"outcome": "expired", "at"}`.
+- **The side that loses** finds the record and obeys it. An executor that finds `expired` exits without starting, so a launch delayed between its expiry check and its admission cannot start after its dispatcher gave up.
+- **An admitted launch** keeps its record after the service's current record moves on to another run. When the run ends, its finisher adds `"exit": {"code", "signal", "reason", "at", "replacedBy"}`: it writes the whole record to a temporary file, `fsync`s it, and renames it over the record, which changes nothing but the exit. `replacedBy` is the launch that stopped it, for a restart. `requestedBy` is `{machineId, requestId}` for a remote control, from `--request`, and `null` otherwise.
+- **Admitted, never registered:** an executor can die between its admission and its run record. A reconciler that finds `admitted` and no run record with that run id checks the executor's identity. Alive, the launch is `starting`. Dead, any finisher runs the session cleanup of "The end of a run" on the recorded session id, then adds the exit with reason `interrupted_before_registration`.
 - **Retention:** records are kept for 24 hours, and at least the last 100, and are removed by later launches and by the daemon.
 
-From a record, a reconciler reports exactly one of: admitted and running; admitted and exited, with its code; admitted and replaced; refused, with its reason; expired, not started. "Unknown" exists only while no record exists and the expiry has not passed.
+From a record, a reconciler reports exactly one of: admitted and starting; admitted and running; admitted and exited, with its code or reason; admitted and replaced; refused, with its reason; expired, not started. "Unknown" exists only while no record exists and the expiry has not passed.
+
+### Request entries
+
+Every control from a peer leaves a request entry, `services/requests/<peer machine id>/<requestId>.json`, published like a launch record before the target takes any step that changes something: before a dispatch, a plain stop, or the stop phase of a restart. It holds an immutable fingerprint of the control (its action, project, environment, service, profile and expected run and revision), and then links every outcome as it happens: the launch it dispatched (admitted, refused, expired, exited), and `stopped: {runId, at}` for a stop. Updates go through a temporary file renamed over the entry and never change the fingerprint. Entries are kept for 24 hours, so a stop's correlation survives a daemon restart as a start's does.
 
 ### Target checks
 
-In order; the first that fails answers the control:
+In order; the first that fails answers the control.
+
+Current authorization comes first:
 
 1. The session's peer is pinned, and `hello` has been exchanged.
 2. `share` and `control` are on.
-3. `expiresAt` has not passed in the target's clock and is at most 60 seconds ahead. The viewer learns the target's clock from its `hello`.
-4. A fresh lease: the target calls `GET /v1/remote/lease` now, and the viewer's machine id is among its active machines (see "Entitlement"). A failure refuses with `unauthorized`: the target fails closed.
-5. The ids name a configured service; the profile, when given, is allowed.
-6. No other control of this service is in flight on this target, or `busy`. The daemon runs one at a time per service.
-7. The state matches: for a start, no running run and a free port; for a stop or a restart, the running run is `expect.runId`. For a start or a restart, the service's `configRev` is `expect.configRev`; a stop ignores it. Otherwise `conflict`, with the fresh snapshot sent right after.
-8. The owner allows it (below). For a restart, the replacement start must be allowed too: the owner is still there, the profile is still permitted, and a replacement that would run in the background has `backgroundStarts`. All of it is decided before anything stops.
+3. A fresh lease: the target calls `GET /v1/remote/lease` now, and the viewer's machine id is among its active machines (see "Entitlement"). A failure refuses with `unauthorized`: the target fails closed.
 
-The executor checks the expiry, the revision and the profile again when the launch reaches it, so a change between these checks and execution refuses the launch. The target remembers each peer's `requestId`s for 24 hours: in the launch record for a start or a restart, so a daemon restart keeps them, and in memory for a stop. A control whose `requestId` it has already seen is not run again: it gets the current report of that launch. `control.status` asks for the same report without sending a control. That is correlation, not exactly-once: what keeps a restart repeated under a new `requestId` from running twice is `expect.runId`, which no longer matches once the first restart replaced the run.
+Then an existing request:
+
+4. When an entry exists for this peer and `requestId`, the control is not run again. With the same fingerprint, it gets that entry's current report; with a different one, `request_mismatch`.
+
+Then the checks of a fresh execution:
+
+5. `expiresAt` has not passed in the target's clock and is at most 60 seconds ahead. The viewer learns the target's clock from its `hello`.
+6. The ids name a configured service; the profile, when given, is allowed.
+7. No other control of this service is in flight on this target, or `busy`. The daemon runs one at a time per service.
+8. The state matches: for a start, no running run and a free port; for a stop or a restart, the running run is `expect.runId`. For a start or a restart, the service's `configRev` is `expect.configRev`; a stop ignores it. Otherwise `conflict`, with the fresh snapshot sent right after.
+9. The owner allows it (below). For a restart, the replacement start must be allowed too: the owner is still there, the profile is still permitted, and a replacement that would run in the background has `backgroundStarts`. All of it is decided before anything stops.
+
+The executor checks the expiry, the revision and the profile again when the launch reaches it, so a change between these checks and execution refuses the launch. When step 4 finds no entry, the target publishes one before step 5, so every outcome from there on, a refusal included, is linked to it, and nothing changes before it exists. A viewer that tries again after a refusal sends a new `requestId`. `control.status` asks for an entry's report without sending a control. That is correlation, not exactly-once: what keeps a restart repeated under a new `requestId` from running twice is `expect.runId`, which no longer matches once the first restart replaced the run.
 
 ### Who acts
 
@@ -556,8 +592,8 @@ received ──▶ checked ──▶ matched ──▶ dispatched ──▶ star
 
 - **Dispatched:** for a start or the second half of a restart, the launch is handed to the bridge or spawned detached, with its id and expiry. For a stop, the signal is sent; a stop is `done` once the run has ended (see "The end of a run").
 - **Started:** the launch record says `admitted`. `refused` there ends the control with its code (`conflict` for a revision that changed or a run still alive, `expired`, `refused_profile`).
-- **Settling:** the run is `done` when it listens on its port, within 90 seconds. It is `failed` when it exits first, with its last 40 lines in the message. After 90 seconds without either, it is `starting` with "Started on B, not listening yet". The target answers `unknown` only while a launch has no record and its expiry has not passed.
-- **Reconciling:** when the bridge drops, does not acknowledge within 5 seconds, or the app quits, the target does not know whether the app spawned the run. It never falls back to a background start for a launch it handed to the app. It waits until the launch's expiry has passed, creates the `expired` record if none exists, and answers from the record, after which no run with that id can start: admitted and running (go on settling), admitted and exited (`failed`, with its code), admitted and replaced (`conflict`: another launch replaced it), refused (`refused`, with its code), or expired (`failed`: "The Localify app on B closed before starting web. Nothing was started.").
+- **Settling:** the run is `done` when it listens on its port within 90 seconds, counted on the target's monotonic clock from the launch's admission. That timer is separate from the cleanup after an executor dies. It is `failed` when it exits first, with its last 40 lines in the message. After 90 seconds without either, it is `starting` with "Started on B, not listening yet". The target answers `unknown` only while a launch has no record and its expiry has not passed.
+- **Reconciling:** when the bridge drops, does not acknowledge within 5 seconds, or the app quits, the target does not know whether the app spawned the run. It never falls back to a background start for a launch it handed to the app. It waits until the launch's expiry has passed, creates the `expired` record if none exists, and answers from the record, after which no run with that id can start: admitted and starting or running (go on settling), admitted and exited (`failed`, with its code or reason), admitted and replaced (`conflict`: another launch replaced it), refused (`refused`, with its code), or expired (`failed`: "The Localify app on B closed before starting web. Nothing was started.").
 - **Progress:** `control.progress` is sent at `dispatched` and `started`, so the viewer can say "Starting in the app on B…".
 
 On the viewer:
@@ -742,10 +778,16 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 | Versions do not overlap | "Update needed" before any session |
 | A handshake never completes | both sides drop it after 30 s |
 | The app quits while dispatching a start | the target waits for the launch's expiry, then answers from the launch record; never a background start in its place |
-| The executor dies, its descendants live on | the finisher kills the run's session and drains its output before "Exited"; a new launch refuses until then |
+| The executor dies, its descendants live on | the finisher signals the session's members once one is proven to belong to the run, finalizes the stream, then shows "Exited"; no launch is admitted until then |
+| The app or a background executor dies mid-run | the stream is finalized `interrupted` at what was written; the process cleanup goes on |
+| An executor dies after admission, before registering | `starting` is never reported for a dead executor; a finisher cleans up its session and records `interrupted_before_registration` |
+| A finisher dies while finalizing | another takes over its claim once it is dead, and repeats the idempotent steps |
+| A run's session id is reused by an unrelated process | no member started before `lastAliveAt`, so nothing is signalled |
+| A crash leaves a temporary launch or claim file | readers ignore it, and the daemon sweeps it after an hour |
+| A `requestId` comes back with another action | `request_mismatch`; nothing runs |
 | A launch pauses between its expiry check and its admission | the reconciler's `expired` record wins, and the executor does not start |
 | Ctrl-Z in a service tab | nothing: suspending is disabled, since no shell could resume it |
-| The shell init prompts, hangs or fails | the resolver gives up after 10 s; runs start with the app's environment and a warning |
+| The shell init prompts, hangs, fails, or prints malformed or oversized output | the resolver gives up (10 s deadline, 1 MiB cap, strict framing) and kills its process group; runs start with the app's environment and a warning |
 | A service runs from a shell tab of the previous version | a legacy run: kept, no remote output, remote controls disabled |
 | A launch reaches `localify dev` after its expiry | it refuses and writes a launch record with `expired` |
 | The profile or the config changes between the check and the launch | the executor refuses with `conflict`; the snapshot follows |
@@ -788,26 +830,30 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 
 Each PR ships only once its gate passes in CI, on top of its own unit tests.
 
-1. **Local foundations.** Run identity (run ids, `--launch-id`); the run PTY in the app, with the shell-environment resolver and `Reload shell environment`, the exit view with `Restart` and `Open a terminal here`, Ctrl-Z disabled, and stop and restart by session and process group; one supervisor for every launch, and the end of a run (kill what remains, drain, finalize); legacy runs; the per-run stream from run PTYs and background pipes, with bounded reads by `{runId, offset}`; `localify logs` and `service_logs` on it; removing the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT`; the inventory projection with its four states and HMAC revisions. Gate: capture isolation, shell environment, end of a run, migration.
+1. **Local foundations.** Run identity (run ids, `--launch-id`); the run PTY in the app, with the shell-environment resolver and `Reload shell environment`, the exit view with `Restart` and `Open a terminal here`, Ctrl-Z disabled, and stop and restart by session and process group; one supervisor for every launch; the run lock in the executor and fatal atomic registration; native process identity, `lastAliveAt` and the end of a run (proven membership, interrupted capture, finalization claims); legacy runs; the per-run stream from run PTYs and background pipes, with bounded reads by `{runId, offset}`; `localify logs` and `service_logs` on it; removing the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT`; the inventory projection with its four states and HMAC revisions. Gate: capture isolation, shell environment, concurrent launches, end of a run, migration.
 2. **Trust and relay.** Keys, pins and settings files; Noise sessions, heartbeats and pairing with `snow`; the `RemoteRelay` object and routes, with the pre-auth guard and lazy checks; send pacing; migration 0005; `remoteAccess` in the entitlement, `/v1/me` and `cloud:admin`; leases and revocation pushes; reconnects; the management socket commands for status, roster and pairing; `localify machines`, `pair`, `unpair`, `remove` and `settings`; the cost measurement. Gate: pairing, replay, identity, leases, hibernation, reconnect storm.
 3. **Desktop viewing,** the first useful release: the switcher, the pairing dialogs, Settings → Remote access, the remote Projects view, Output. Gate: revocation end to end.
-4. **Remote controls.** The run lock in the executor, atomic registration, launch fencing (`--launch-expires`, `--expect-rev`, `--remote-launch`) and launch records decided by `O_EXCL`; request ids and `control.status`; the app bridge, with `dev --in-app` on it; ownership-aware start, stop and restart; the control executor on the target, its state machine and reconcile; detached starts; the buttons and their states in the app. Gate: control races and launch outcomes.
+4. **Remote controls.** Launch fencing (`--launch-expires`, `--expect-rev`, `--remote-launch`) and launch records published with `link`; request entries and `control.status`; the app bridge, with `dev --in-app` on it; ownership-aware start, stop and restart; the control executor on the target, its state machine and reconcile; detached starts; the buttons and their states in the app. Gate: control races and launch outcomes.
 5. **CLI and MCP:** `--machine` on status, logs, dev, stop and restart; `list_machines` and the `machine` argument.
 
 ### Gates
 
 Against a real daemon, a real app process where it says so, and the relay in `wrangler dev` or its test harness.
 
-**PR 1, capture isolation, shell environment, end of a run, migration:**
+**PR 1, capture isolation, shell environment, concurrent launches, end of a run, migration:**
 
 - A service in a run PTY prints known lines and exits; the test opens `Open a terminal here` and types `echo secret-after-exit` there. The run's stream holds the service's lines only, and no shell tab's bytes are in any stream or in `localify logs`.
 - A suspended and resumed service with a delayed reader: the app's reader is held back by a test hook while the service receives `SIGTSTP`, a shell tab runs commands, and the service receives `SIGCONT` and prints more. Once the reader catches up, the stream holds exactly the run PTY's bytes and none of the shell's.
-- `localify dev` killed with `SIGKILL`: the stream ends with the PTY, and nothing is appended after.
+- Concurrent launches: the app's button pressed twice and a CLI `dev --detach` of the same service, at once, leave one run; the others refuse. A run record that cannot be written starts nothing.
 - Keystrokes typed into a running service tab appear in its stream, as documented.
 - Stop on a service that ignores `SIGINT` and has a child in its own process group: the whole tree ends, and no byte is written into the PTY.
 - A read of a 1 GiB stream, and of a 1 GiB line, never holds more than `maxBytes` plus a constant.
-- Shell environment: the app is started with a minimal environment (`env -i HOME=… PATH=/usr/bin:/bin`) and launches a service whose tool exists only through the test user's shell init. It runs. With a shell init that hangs, the warning shows within 10 s, the service starts with the app's environment, and no byte of the shell init reaches any stream.
-- End of a run: a service whose descendants ignore `SIGINT` and `SIGTERM` and have not opened their port yet is ended once with Ctrl-C typed into its tab and once by `SIGKILL` of the executor. Each time, every process of the session is gone, the output is drained to its end, "Exited" shows only after that, a launch attempted in between refuses, and a launch after it succeeds.
+- Shell environment: the app is started with a minimal environment (`env -i HOME=… PATH=/usr/bin:/bin`) and launches a service whose tool exists only through the test user's shell init, once each with zsh, bash, fish and Nushell. It runs. A shell init that hangs, one that opens `/dev/tty` and waits, one that prints more than 1 MiB, and one that prints a forged nonce or text inside the frame each end in the warning within 10 s, with the resolver's process group gone, the service on the app's environment, and no byte of the shell init in any stream.
+- End of a run: a service whose descendants ignore `SIGINT` and `SIGTERM` and have not opened their port yet is ended with Ctrl-C typed into its tab, and with `SIGKILL` of the executor in a run PTY. Each time, every process of the session is gone, the stream is finalized `complete` after EOF, "Exited" shows only after that, a launch attempted in between refuses, and a launch after it succeeds.
+- Interrupted capture: the same service, killed with `SIGKILL` of its executor in a background run, and with `SIGKILL` of the app during a run PTY. Each time, the descendants are gone, the stream is finalized `interrupted` at the prefix written before the kill, nothing waits for the lost bytes, and the next launch is admitted only after finalization.
+- Session reuse: after a run ended, an unrelated process carrying the run's session id, started after `lastAliveAt` (through a test enumerator), is never signalled.
+- Finalization: two finishers at once finalize a run once; a finisher killed mid-finalization is taken over by another once it is dead; a claim held by a live finisher is never taken.
+- Start times come from the native calls, with sub-second resolution, and no `ps` process is spawned.
 - Ctrl-Z typed into a running service tab suspends nothing.
 - Migration: a service started from a shell tab by the previous app version keeps running across the update, shows as a legacy run, exports no output (not even its old whole-shell file), and has its remote controls disabled with "Relaunch it on that machine to enable remote control."
 - Revisions: editing an inline `[profiles.<name>.env]` value changes the service's `configRev`.
@@ -832,9 +878,10 @@ Against a real daemon, a real app process where it says so, and the relay in `wr
 - A reconnect cannot repeat a restart: the viewer's socket is cut right after it sends a restart, and the test sends the same control again on a new session, with the same and with a new `requestId`. The service restarted once; the same `requestId` gets the report of the first restart, and the new one gets `conflict`.
 - A dropped frame during a control: the relay drops the frame carrying a control's result; the viewer reconciles with `control.status` on a new session, gets the exact outcome, and never sends the control again.
 - A late launch is fenced: a launch delivered to `localify dev` after its expiry refuses and starts nothing. With a test hook pausing the executor between its expiry check and its admission until the expiry passes, the reconciler's `expired` record wins and nothing starts.
+- Crashes: a temporary launch file left by a `SIGKILL` before its `link` is ignored by readers and swept; an executor stopped with `SIGSTOP` between its admission and its run record is reported `starting`; one killed with `SIGKILL` there has its session cleaned up and its record completed with `interrupted_before_registration`.
+- Request entries: a stop whose acknowledgement was lost is still correlated by `control.status` after a daemon restart; the same `requestId` sent with another action or service gets `request_mismatch` and runs nothing.
 - A lost acknowledgement is reported exactly: launch A starts and exits, a local launch B then replaces the service's record, and the bridge's acknowledgement of A was lost. The target still reports A as admitted and exited, with its code.
 - A profile changed between the target's check and execution, to dangerous or to other sources, is refused by the executor.
-- Two dispatchers (the app button and a remote control) launching one service at once leave one run.
 - A restart of a background run with `backgroundStarts` off is refused, and the run keeps running.
 - External starts and config changes converge: while a viewer watches, the service is started from a terminal, stopped with `localify stop`, and its config edited. Within 12 seconds, the viewer's snapshot shows each state, and a control built on the old one gets `conflict`.
 
