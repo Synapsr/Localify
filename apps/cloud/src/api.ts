@@ -26,7 +26,7 @@ import {
   SLUG_RULES,
 } from "./names";
 import { generatePassword } from "./passwords";
-import { PolarError } from "./polar";
+import { isRateLimited, PolarError } from "./polar";
 import { forgetSite } from "./sites";
 import { background, machineRuntime, reconcileOwner, releaseIfUnwanted } from "./tunnels";
 
@@ -123,6 +123,14 @@ function toApiError(error: unknown): ApiError {
       502,
       "cloudflare_unavailable",
       "Cloudflare did not answer as expected. Try again in a minute.",
+    );
+  }
+  if (isRateLimited(error)) {
+    console.warn("Polar's rate limit refused a call:", error.message);
+    return new ApiError(
+      503,
+      "billing_busy",
+      "Polar, which handles Localify Cloud billing, is busy. Try again in a minute.",
     );
   }
   if (error instanceof PolarError) {

@@ -343,6 +343,7 @@ export function reconcileStatements(
   entitlement: Entitlement,
   urls: OwnedUrl[],
   now: number,
+  guard: Statement | null = null,
 ): Statement[] {
   const within = withinLimitIds(entitlement, urls);
   const stopped = urls.filter((url) => !within.has(url.id) && url.suspended_at === null);
@@ -355,7 +356,24 @@ export function reconcileStatements(
   if (resumed.length > 0) {
     statements.push({ sql: RESUME_SQL, params: [JSON.stringify(resumed.map((url) => url.id))] });
   }
-  return statements;
+  return guard === null ? statements : statements.map((statement) => guarded(statement, guard));
+}
+
+/**
+ * `statement` with `guard` added to its WHERE clause: a condition whose
+ * `?1`, `?2`… are the guard's own params, as the entitlement read before
+ * the batch is valid only while it holds. A guarded rotation is no longer
+ * recognized by `isRotation`.
+ */
+function guarded(statement: Statement, guard: Statement): Statement {
+  const offset = statement.params.length;
+  const condition = guard.sql.replace(/\?(\d+)/g, (_, n: string) => `?${Number(n) + offset}`);
+  const returning = statement.sql.search(/\bRETURNING\b/);
+  const sql =
+    returning < 0
+      ? `${statement.sql} AND ${condition}`
+      : `${statement.sql.slice(0, returning)} AND ${condition}\n  ${statement.sql.slice(returning)}`;
+  return { sql, params: [...statement.params, ...guard.params] };
 }
 
 /** The ids of the oldest live URLs within the limit. */

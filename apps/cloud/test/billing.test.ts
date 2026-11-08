@@ -6,7 +6,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { reconcileBilling, refreshBilling, runBillingJobs } from "../src/billing";
+import { proCheckout, reconcileBilling, refreshBilling, runBillingJobs } from "../src/billing";
 import { PolarApi } from "../src/polar";
 import {
   api,
@@ -49,9 +49,27 @@ type FakePolar = {
   orders: Map<string, Raw[]>;
   /** Answers `POST /v1/checkouts/`. */
   checkout: (body: Raw) => Response | Promise<Response>;
+  /** Every refund created, with its current status. */
   refunds: Raw[];
+  /** The status a new refund reaches at once: `pending` leaves it for `settleRefund`. */
+  refundStatus: "pending" | "succeeded" | "failed" | "canceled";
   revoked: string[];
 };
+
+function orderOf(fake: FakePolar, orderId: string): Raw | undefined {
+  return [...fake.orders.values()].flat().find((order) => order.id === orderId);
+}
+
+/** Moves a refund to `status`; a success takes its amount off the order. */
+function settleRefund(fake: FakePolar, refundId: string, status: string): void {
+  const refund = fake.refunds.find((r) => r.id === refundId)!;
+  refund.status = status;
+  if (status !== "succeeded") return;
+  const order = orderOf(fake, String(refund.order_id));
+  if (!order) return;
+  order.refundable_amount = Number(order.refundable_amount) - Number(refund.amount);
+  order.status = Number(order.refundable_amount) <= 0 ? "refunded" : "partially_refunded";
+}
 
 function page(items: Raw[], url: string): Response {
   const query = new URL(url).searchParams;
@@ -81,6 +99,7 @@ function fakePolar(context: TestContext): FakePolar {
         201,
       ),
     refunds: [],
+    refundStatus: "succeeded",
     revoked: [],
   };
   context.routes.set(`GET ${POLAR}/v1/subscriptions/`, (_body, url) => {
@@ -108,13 +127,30 @@ function fakePolar(context: TestContext): FakePolar {
     const id = new URL(url).searchParams.get("subscription_id") ?? "";
     return page(fake.orders.get(id) ?? [], url);
   });
+  context.routes.set(`GET ${POLAR}/v1/refunds/`, (_body, url) => {
+    const id = new URL(url).searchParams.get("order_id");
+    return page(
+      fake.refunds.filter((refund) => refund.order_id === id),
+      url,
+    );
+  });
   context.routes.set(`POST ${POLAR}/v1/refunds/`, (body) => {
-    const refund = JSON.parse(body ?? "{}") as Raw;
-    if (fake.refunds.some((r) => r.order_id === refund.order_id)) {
+    const request = JSON.parse(body ?? "{}") as Raw;
+    const order = orderOf(fake, String(request.order_id));
+    if (order && Number(order.refundable_amount) <= 0) {
       return jsonResponse({ error: "RefundedAlready", detail: "Already refunded" }, 403);
     }
+    if (order && order.status !== "paid" && order.status !== "partially_refunded") {
+      return jsonResponse({ error: "PaymentError", detail: "The order is not paid" }, 422);
+    }
+    const refund: Raw = {
+      id: `refund-${fake.refunds.length + 1}`,
+      ...request,
+      status: "pending",
+    };
     fake.refunds.push(refund);
-    return jsonResponse({ id: `refund-${fake.refunds.length}`, ...refund }, 201);
+    settleRefund(fake, String(refund.id), fake.refundStatus);
+    return jsonResponse(refund, 201);
   });
   context.routes.set(`POST ${POLAR}/v1/checkouts/`, (body) =>
     fake.checkout(JSON.parse(body ?? "{}") as Raw),
@@ -454,6 +490,207 @@ describe("the refresh", () => {
     expect(billingRow(userId)).toMatchObject({ pro_status: "canceled", revision: 2 });
   });
 
+  function duplicateIds(): string[] {
+    return (
+      context.sqlite
+        .prepare("SELECT subscription_id FROM duplicate_subscriptions ORDER BY subscription_id")
+        .all() as { subscription_id: string }[]
+    ).map((row) => row.subscription_id);
+  }
+
+  it("never records both subscriptions when two refreshes cross", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    const held = holdListings();
+    const x = subscription(userId, {
+      product_id: YEARLY,
+      recurring_interval: "year",
+      current_period_end: iso(Date.now() + 360 * DAY),
+    });
+    const y = subscription(userId, { current_period_end: iso(Date.now() + 20 * DAY) });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A reads both renewing: keeps X, whose period ends later, and records Y.
+    const a = refresh(userId);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    // X is canceled at its period end: B keeps Y, which renews, and would record X.
+    Object.assign(x, { cancel_at_period_end: true, ends_at: x.current_period_end });
+    const b = refresh(userId);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+
+    held[0]!();
+    expect(await a).toBe("committed");
+    held[1]!();
+    // B meets the record of the one it keeps, and starts again from Polar.
+    await vi.waitFor(() => expect(held).toHaveLength(3));
+    held[2]!();
+    expect(await b).toBe("committed");
+
+    expect(duplicateIds()).toEqual([y.id]);
+    expect(billingRow(userId)).toMatchObject({ pro_subscription_id: x.id, revision: 3 });
+  });
+
+  it("never records as a duplicate the subscription billing keeps", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    const held = holdListings();
+    const x = subscription(userId, {
+      product_id: YEARLY,
+      recurring_interval: "year",
+      current_period_end: iso(Date.now() + 360 * DAY),
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A sees X alone, and keeps it.
+    const a = refresh(userId);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    // X is canceled at its period end, and Y appears: B would keep Y and record X.
+    Object.assign(x, { cancel_at_period_end: true, ends_at: x.current_period_end });
+    const y = subscription(userId, { current_period_end: iso(Date.now() + 20 * DAY) });
+    const b = refresh(userId);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+
+    held[0]!();
+    expect(await a).toBe("committed");
+    held[1]!();
+    await vi.waitFor(() => expect(held).toHaveLength(3));
+    held[2]!();
+    expect(await b).toBe("committed");
+
+    // The one billing keeps stays kept while it is entitled.
+    expect(duplicateIds()).toEqual([y.id]);
+    expect(billingRow(userId)).toMatchObject({ pro_subscription_id: x.id });
+  });
+
+  /** A user whose Pro plan serves one URL from a machine with a ready tunnel. */
+  async function servingUser() {
+    const { token, userId, machineId } = await signIn(context, "teo-goulois", 1, "laptop", {
+      entitled: false,
+    });
+    const sub = subscription(userId);
+    await refresh(userId);
+    const created = await api(context, "POST", "/v1/public-urls", {
+      token,
+      body: {
+        localDomain: "journal.localify",
+        slug: "journal-race",
+        protection: { mode: "public" },
+      },
+    });
+    expect(created.status).toBe(201);
+    await settle(context);
+    await serve(context, token);
+    return { userId, machineId, sub };
+  }
+
+  function servingState(userId: string, machineId: string) {
+    return {
+      suspended: get<{ suspended_at: number | null }>(
+        "SELECT suspended_at FROM public_urls WHERE user_id = ?",
+        userId,
+      ).suspended_at,
+      rotation: get<{ rotate_requested_at: number | null }>(
+        "SELECT rotate_requested_at FROM machines WHERE id = ?",
+        machineId,
+      ).rotate_requested_at,
+      owed: get<{ serving_due_at: number | null }>(
+        "SELECT serving_due_at FROM billing_revisions WHERE user_id = ?",
+        userId,
+      ).serving_due_at,
+    };
+  }
+
+  /** The test D1, where each batch `matches` accepts is held until released, or fails. */
+  function gatedDb(matches: (sql: string[]) => boolean, mode: "hold" | "fail") {
+    const held: (() => void)[] = [];
+    const db = context.env.DB;
+    const gated = {
+      prepare: (sql: string) => db.prepare(sql),
+      batch: async (statements: D1PreparedStatement[]) => {
+        if (matches(statements.map((s) => (s as unknown as { sql: string }).sql))) {
+          if (mode === "fail") throw new Error("D1 refused the batch");
+          await new Promise<void>((resolve) => held.push(resolve));
+        }
+        return db.batch(statements);
+      },
+    } as unknown as D1Database;
+    return { env: { ...context.env, DB: gated } as Env, held };
+  }
+
+  /** The batch of a billing refresh's serving reconcile. */
+  const reconcileBatch = (sql: string[]) => sql.some((s) => s.includes("serving_due_at = NULL"));
+
+  it("lets no overtaken refresh suspend a URL that a newer one keeps serving", async () => {
+    const { userId, machineId, sub } = await servingUser();
+
+    // The older refresh reads a revocation, commits it, and stops after its reconcile read.
+    Object.assign(sub, { status: "canceled", ended_at: iso(Date.now()) });
+    const gate = gatedDb(reconcileBatch, "hold");
+    const older = refreshBilling(gate.env, userId, new PolarApi(gate.env));
+    await vi.waitFor(() => expect(gate.held).toHaveLength(1));
+
+    // Polar restores the plan, and a newer refresh commits it.
+    Object.assign(sub, { status: "active", ended_at: null });
+    expect(await refresh(userId)).toBe("committed");
+
+    gate.held[0]!();
+    expect(await older).toBe("committed");
+    expect(servingState(userId, machineId)).toEqual({
+      suspended: null,
+      rotation: null,
+      owed: null,
+    });
+  });
+
+  it("keeps the serving reconcile owed, and the events pending, until it commits", async () => {
+    const { userId, machineId, sub } = await servingUser();
+    run(
+      `INSERT INTO webhook_events (id, type, user_id, received_at, next_attempt_at)
+       VALUES ('msg_owed', 'subscription.revoked', ?, 1, 1)`,
+      userId,
+    );
+    Object.assign(sub, { status: "canceled", ended_at: iso(Date.now()) });
+    const gate = gatedDb(reconcileBatch, "fail");
+    await expect(refreshBilling(gate.env, userId, new PolarApi(gate.env))).rejects.toThrow(
+      /refused/,
+    );
+
+    // The snapshot is in, the reconcile owed, and the event pending.
+    expect(billingRow(userId)).toMatchObject({ pro_status: "canceled" });
+    expect(servingState(userId, machineId)).toMatchObject({ suspended: null });
+    expect(servingState(userId, machineId).owed).not.toBeNull();
+    expect(events().find((event) => event.id === "msg_owed")!.processed_at).toBeNull();
+
+    // The 5-minute job pays the debt.
+    await runBillingJobs(context.env, Date.now());
+    const state = servingState(userId, machineId);
+    expect(state.suspended).not.toBeNull();
+    expect(state.rotation).not.toBeNull();
+    expect(state.owed).toBeNull();
+  });
+
+  it("waits out Polar's rate limit without counting it as a failure", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    run(
+      `INSERT INTO webhook_events (id, type, user_id, received_at, next_attempt_at)
+       VALUES ('msg_limited', 'subscription.updated', ?, 1, 1)`,
+      userId,
+    );
+    context.routes.set(
+      `GET ${POLAR}/v1/subscriptions/`,
+      () =>
+        new Response(JSON.stringify({ error: "TooManyRequests" }), {
+          status: 429,
+          headers: { "retry-after": "120" },
+        }),
+    );
+    const now = Date.now();
+    await expect(
+      refreshBilling(context.env, userId, new PolarApi(context.env), now),
+    ).rejects.toThrow();
+    expect(
+      get("SELECT attempts, next_attempt_at FROM webhook_events WHERE id = 'msg_limited'"),
+    ).toEqual({ attempts: 0, next_attempt_at: now + 120_000 });
+  });
+
   it("marks only the events at or below its watermark as processed", async () => {
     const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
     subscription(userId);
@@ -736,7 +973,15 @@ describe("duplicate Pro subscriptions", () => {
 
     await runBillingJobs(context.env, Date.now());
     expect(polar.revoked).toEqual([monthly.id]);
-    expect(polar.refunds).toEqual([{ order_id: "order-paid", reason: "duplicate", amount: 799 }]);
+    expect(polar.refunds).toMatchObject([
+      { order_id: "order-paid", reason: "duplicate", amount: 799, status: "succeeded" },
+    ]);
+    expect(get("SELECT order_id, refund_id, amount, status FROM duplicate_refunds")).toEqual({
+      order_id: "order-paid",
+      refund_id: "refund-1",
+      amount: 799,
+      status: "succeeded",
+    });
     const row = get<{ revoked_at: number | null; refunded_at: number | null }>(
       "SELECT revoked_at, refunded_at FROM duplicate_subscriptions",
     );
@@ -751,38 +996,197 @@ describe("duplicate Pro subscriptions", () => {
     expect(polar.refunds).toHaveLength(1);
   });
 
-  it("retry a failed step with backoff, and count a refund already made as settled", async () => {
+  /** A user with a duplicate, recorded by a refresh, whose orders are `orders`. */
+  async function withDuplicate(orders: Raw[]) {
     const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
-    const older = subscription(userId, { current_period_end: iso(Date.now() + 10 * DAY) });
+    const duplicate = subscription(userId, { current_period_end: iso(Date.now() + 10 * DAY) });
     subscription(userId, { current_period_end: iso(Date.now() + 20 * DAY) });
-    polar.orders.set(String(older.id), [{ id: "order-1", refundable_amount: 799 }]);
+    polar.orders.set(String(duplicate.id), orders);
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     await refresh(userId);
+    return { userId, duplicate };
+  }
 
-    // The refund fails once.
+  type Duplicate = {
+    revoked_at: number | null;
+    refunded_at: number | null;
+    attempts: number;
+    next_attempt_at: number | null;
+  };
+  function duplicateRow(): Duplicate {
+    return get<Duplicate>(
+      "SELECT revoked_at, refunded_at, attempts, next_attempt_at FROM duplicate_subscriptions",
+    );
+  }
+  function refundRow(orderId: string) {
+    return get<{ refund_id: string | null; status: string; error: string | null }>(
+      "SELECT refund_id, status, error FROM duplicate_refunds WHERE order_id = ?",
+      orderId,
+    );
+  }
+
+  it("retry a failed step after 5 minutes, doubling, and count a refund already made as settled", async () => {
+    const { duplicate } = await withDuplicate([
+      { id: "order-1", status: "paid", refundable_amount: 799 },
+    ]);
+
+    // The refund fails once: 5 minutes.
     context.routes.set(`POST ${POLAR}/v1/refunds/`, () => jsonResponse({ error: "Oops" }, 500));
-    await runBillingJobs(context.env, Date.now());
-    const failed = get<{
-      revoked_at: number | null;
-      refunded_at: number | null;
-      attempts: number;
-      next_attempt_at: number;
-    }>("SELECT revoked_at, refunded_at, attempts, next_attempt_at FROM duplicate_subscriptions");
+    const now = Date.now();
+    await runBillingJobs(context.env, now);
+    const failed = duplicateRow();
     expect(failed.revoked_at).not.toBeNull();
     expect(failed.refunded_at).toBeNull();
-    expect(failed.attempts).toBe(1);
+    expect(failed).toMatchObject({ attempts: 1, next_attempt_at: now + 5 * 60 * 1000 });
+    expect(refundRow("order-1")).toMatchObject({ status: "failed", error: "500 Oops" });
+
+    // Twice: 10 minutes.
+    await runBillingJobs(context.env, failed.next_attempt_at!);
+    expect(duplicateRow()).toMatchObject({
+      attempts: 2,
+      next_attempt_at: failed.next_attempt_at! + 10 * 60 * 1000,
+    });
 
     // Polar made it after all.
     context.routes.set(`POST ${POLAR}/v1/refunds/`, () =>
       jsonResponse({ error: "RefundedAlready", detail: "Already" }, 403),
     );
-    await runBillingJobs(context.env, failed.next_attempt_at);
-    expect(
-      get<{ refunded_at: number | null }>("SELECT refunded_at FROM duplicate_subscriptions")
-        .refunded_at,
-    ).not.toBeNull();
-    expect(polar.revoked).toEqual([older.id]);
+    await runBillingJobs(context.env, duplicateRow().next_attempt_at!);
+    expect(duplicateRow().refunded_at).not.toBeNull();
+    expect(polar.revoked).toEqual([duplicate.id]);
+  });
+
+  it("keep the obligation open while a refund is pending, until it succeeds", async () => {
+    await withDuplicate([{ id: "order-1", status: "paid", refundable_amount: 799 }]);
+    polar.refundStatus = "pending";
+    const now = Date.now();
+    await runBillingJobs(context.env, now);
+    expect(polar.refunds).toMatchObject([{ id: "refund-1", status: "pending" }]);
+    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "pending" });
+    // Waiting is no failure: looked at again in 5 minutes.
+    expect(duplicateRow()).toMatchObject({
+      refunded_at: null,
+      attempts: 0,
+      next_attempt_at: now + 5 * 60 * 1000,
+    });
+
+    // Still pending: nothing new.
+    await runBillingJobs(context.env, now + 5 * 60 * 1000);
+    expect(polar.refunds).toHaveLength(1);
+    expect(duplicateRow().refunded_at).toBeNull();
+
+    settleRefund(polar, "refund-1", "succeeded");
+    await runBillingJobs(context.env, now + 10 * 60 * 1000);
+    expect(polar.refunds).toHaveLength(1);
+    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "succeeded" });
+    expect(duplicateRow().refunded_at).not.toBeNull();
+  });
+
+  it("retry a refund that ends failed, after the backoff", async () => {
+    await withDuplicate([{ id: "order-1", status: "paid", refundable_amount: 799 }]);
+    polar.refundStatus = "pending";
+    const now = Date.now();
+    await runBillingJobs(context.env, now);
+    settleRefund(polar, "refund-1", "failed");
+
+    // Seen failed: recorded, and retried after 5 minutes.
+    const seen = now + 5 * 60 * 1000;
+    await runBillingJobs(context.env, seen);
+    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "failed" });
+    expect(duplicateRow()).toMatchObject({ attempts: 1, next_attempt_at: seen + 5 * 60 * 1000 });
+    expect(polar.refunds).toHaveLength(1);
+
+    polar.refundStatus = "succeeded";
+    await runBillingJobs(context.env, seen + 5 * 60 * 1000);
+    expect(polar.refunds).toMatchObject([
+      { id: "refund-1", status: "failed" },
+      { id: "refund-2", status: "succeeded", amount: 799 },
+    ]);
+    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-2", status: "succeeded" });
+    expect(duplicateRow().refunded_at).not.toBeNull();
+  });
+
+  it("never refund twice after a crash between the refund and its record", async () => {
+    await withDuplicate([
+      { id: "order-1", status: "paid", refundable_amount: 799 },
+      { id: "order-2", status: "paid", refundable_amount: 799 },
+    ]);
+    polar.refundStatus = "pending";
+    // Polar makes the refund of order-1, and the answer never arrives.
+    const create = context.routes.get(`POST ${POLAR}/v1/refunds/`)!;
+    context.routes.set(`POST ${POLAR}/v1/refunds/`, (body, url) => {
+      const answer = create(body, url);
+      if (JSON.parse(body ?? "{}").order_id === "order-1") throw new Error("connection reset");
+      return answer;
+    });
+    const now = Date.now();
+    await runBillingJobs(context.env, now);
+    expect(polar.refunds.map((refund) => refund.order_id)).toEqual(["order-1", "order-2"]);
+    expect(refundRow("order-1")).toMatchObject({ refund_id: null, status: "failed" });
+
+    // A worker that died after writing `creating` leaves the same trace.
+    run("UPDATE duplicate_refunds SET status = 'creating' WHERE order_id = 'order-1'");
+    context.routes.set(`POST ${POLAR}/v1/refunds/`, create);
+    await runBillingJobs(context.env, duplicateRow().next_attempt_at!);
+    // Found by looking the order's refunds up: adopted, not made again.
+    expect(polar.refunds).toHaveLength(2);
+    expect(refundRow("order-1")).toMatchObject({ refund_id: "refund-1", status: "pending" });
+
+    settleRefund(polar, "refund-1", "succeeded");
+    settleRefund(polar, "refund-2", "succeeded");
+    await runBillingJobs(context.env, duplicateRow().next_attempt_at!);
+    expect(polar.refunds).toHaveLength(2);
+    expect(duplicateRow().refunded_at).not.toBeNull();
+  });
+
+  it("refund the paid orders only, past an unpaid renewal", async () => {
+    await withDuplicate([
+      // The newest first, as Polar lists them: a renewal not paid yet.
+      { id: "order-renewal", status: "pending", net_amount: 799, refundable_amount: 799 },
+      { id: "order-void", status: "void", refundable_amount: 799 },
+      { id: "order-paid", status: "paid", refundable_amount: 799 },
+    ]);
+    await runBillingJobs(context.env, Date.now());
+    expect(polar.refunds).toMatchObject([{ order_id: "order-paid", amount: 799 }]);
+    expect(duplicateRow().refunded_at).not.toBeNull();
+  });
+
+  it("record an error on its order without holding back the others", async () => {
+    await withDuplicate([
+      { id: "order-a", status: "paid", refundable_amount: 799 },
+      { id: "order-b", status: "partially_refunded", refundable_amount: 300 },
+    ]);
+    const create = context.routes.get(`POST ${POLAR}/v1/refunds/`)!;
+    context.routes.set(`POST ${POLAR}/v1/refunds/`, (body, url) =>
+      JSON.parse(body ?? "{}").order_id === "order-a"
+        ? jsonResponse({ error: "NotPermitted", detail: "No" }, 400)
+        : create(body, url),
+    );
+    await runBillingJobs(context.env, Date.now());
+    expect(polar.refunds).toMatchObject([{ order_id: "order-b", amount: 300 }]);
+    expect(refundRow("order-a")).toMatchObject({ status: "failed", error: "400 NotPermitted" });
+    expect(refundRow("order-b")).toMatchObject({ status: "succeeded" });
+    expect(duplicateRow()).toMatchObject({ refunded_at: null, attempts: 1 });
+  });
+
+  it("wait out Polar's rate limit, which is no failure", async () => {
+    await withDuplicate([{ id: "order-1", status: "paid", refundable_amount: 799 }]);
+    context.routes.set(
+      `POST ${POLAR}/v1/refunds/`,
+      () =>
+        new Response(JSON.stringify({ error: "TooManyRequests" }), {
+          status: 429,
+          headers: { "retry-after": "30" },
+        }),
+    );
+    const now = Date.now();
+    await runBillingJobs(context.env, now);
+    expect(duplicateRow()).toMatchObject({
+      refunded_at: null,
+      attempts: 0,
+      next_attempt_at: now + 30_000,
+    });
   });
 });
 
@@ -858,6 +1262,52 @@ describe("checkout", () => {
     // Reused, whichever interval, while it is open.
     expect((await checkout(token, "pro_yearly")).body.url).toBe(`${POLAR}/checkout/1`);
     expect(polarCalls("POST", "/v1/checkouts/")).toHaveLength(1);
+  });
+
+  it("returns the checkout its row stores when another request took the row over", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    const held: (() => void)[] = [];
+    const create = polar.checkout;
+    polar.checkout = (body) =>
+      new Promise((resolve) => held.push(() => resolve(create(body) as Response)));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const start = Date.now();
+    const a = proCheckout(context.env, userId, "month", null, start);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    // A's call takes more than 30 seconds: B takes the row over.
+    const b = proCheckout(context.env, userId, "year", null, start + 31_000);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+
+    held[1]!();
+    expect(await b).toEqual({ kind: "checkout", url: `${POLAR}/checkout/1` });
+    held[0]!();
+    // A's own checkout, the second one Polar made, is never given out.
+    expect(await a).toEqual({ kind: "checkout", url: `${POLAR}/checkout/1` });
+    expect(get("SELECT checkout_id, url FROM checkouts WHERE user_id = ?", userId)).toEqual({
+      checkout_id: "checkout-1",
+      url: `${POLAR}/checkout/1`,
+    });
+  });
+
+  it("answers 409 to a request that lost its row before the winner is ready", async () => {
+    const { userId } = await signIn(context, "teo-goulois", 1, "laptop", { entitled: false });
+    const held: (() => void)[] = [];
+    const create = polar.checkout;
+    polar.checkout = (body) =>
+      new Promise((resolve) => held.push(() => resolve(create(body) as Response)));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const start = Date.now();
+    const a = proCheckout(context.env, userId, "month", null, start);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    const b = proCheckout(context.env, userId, "month", null, start + 31_000);
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+
+    held[0]!();
+    await expect(a).rejects.toMatchObject({ status: 409, code: "checkout_in_progress" });
+    held[1]!();
+    expect(await b).toEqual({ kind: "checkout", url: `${POLAR}/checkout/2` });
   });
 
   it("replaces a checkout about to expire, and one stuck creating", async () => {
@@ -992,8 +1442,7 @@ describe("the reconciliation", () => {
     expect(polarCalls("GET", "/v1/subscriptions/").length).toBeLessThanOrEqual(40);
 
     // The next runs take the rest.
-    await runBillingJobs(context.env, Date.now());
-    await runBillingJobs(context.env, Date.now());
+    for (let run = 0; run < 5; run++) await runBillingJobs(context.env, Date.now());
     expect(
       get("SELECT COUNT(*) AS n FROM billing_revisions WHERE check_due_at IS NOT NULL"),
     ).toEqual({ n: 0 });

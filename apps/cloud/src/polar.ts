@@ -12,15 +12,28 @@ export const POLAR_VERSION = "2026-10";
 /** Results per page of Polar's listings, its maximum. */
 const PAGE_SIZE = 100;
 
+/** How long to wait after a 429 that says nothing. */
+const DEFAULT_RETRY_AFTER_MS = 60 * 1000;
+
 /** A failed Polar API call. `code` is Polar's error name. The message never contains the token. */
 export class PolarError extends Error {
   constructor(
     readonly status: number,
     readonly code: string | null,
     message: string,
+    /** For a 429, when to try again. */
+    readonly retryAfterMs: number | null = null,
   ) {
     super(message);
   }
+}
+
+/**
+ * Polar refused the call for its rate limit, the refunds' own included:
+ * a reason to wait, not a failure.
+ */
+export function isRateLimited(error: unknown): error is PolarError & { retryAfterMs: number } {
+  return error instanceof PolarError && error.status === 429;
 }
 
 /** A subscription as the list gives it. Times are Unix milliseconds. */
@@ -58,8 +71,15 @@ export type CheckoutRequest = {
 
 export type Checkout = { id: string; url: string; expiresAt: number };
 
-/** An order of a subscription, and what can still be refunded of it, in cents before tax. */
-export type PolarOrder = { id: string; refundableAmount: number };
+/**
+ * An order of a subscription: its payment status (`paid`,
+ * `partially_refunded`, `refunded`, `pending`, `draft`, `void`), and what
+ * can still be refunded of it, in cents before tax.
+ */
+export type PolarOrder = { id: string; status: string; refundableAmount: number };
+
+/** A refund: `pending`, then `succeeded`, `failed` or `canceled`. */
+export type PolarRefund = { id: string; status: string; amount: number };
 
 export class PolarApi {
   private readonly base: string;
@@ -136,14 +156,32 @@ export class PolarApi {
     return listing(result, "order", toOrder);
   }
 
-  /** Refunds `amount` of an order as a duplicate. An order already refunded counts as done. */
-  async refundDuplicate(orderId: string, amount: number): Promise<void> {
+  /** Every refund of an order, whatever its status. */
+  async listRefunds(orderId: string): Promise<PolarRefund[]> {
+    const query = new URLSearchParams({ order_id: orderId, limit: String(PAGE_SIZE) });
+    const result = await this.call("GET", `/v1/refunds/?${query}`);
+    return listing(result, "refund", toRefund).items;
+  }
+
+  /**
+   * Refunds `amount` of an order as a duplicate. Polar may answer while the
+   * refund is still `pending`. Null when the order is already fully refunded.
+   */
+  async refundDuplicate(orderId: string, amount: number): Promise<PolarRefund | null> {
+    let result: unknown;
     try {
-      await this.call("POST", "/v1/refunds/", { order_id: orderId, reason: "duplicate", amount });
+      result = await this.call("POST", "/v1/refunds/", {
+        order_id: orderId,
+        reason: "duplicate",
+        amount,
+      });
     } catch (error) {
-      if (error instanceof PolarError && error.code === "RefundedAlready") return;
+      if (error instanceof PolarError && error.code === "RefundedAlready") return null;
       throw error;
     }
+    const refund = typeof result === "object" && result !== null ? toRefund(result as never) : null;
+    if (refund === null) throw new PolarError(502, null, "The refund Polar created has no id");
+    return refund;
   }
 
   private async call(method: string, path: string, body?: unknown): Promise<unknown> {
@@ -175,10 +213,16 @@ export class PolarApi {
         typeof (parsed as { error?: unknown } | null)?.error === "string"
           ? (parsed as { error: string }).error
           : null;
+      const retryAfter = Number(response.headers.get("retry-after"));
       throw new PolarError(
         response.status,
         code,
         `${method} ${path} answered ${response.status}${code ? ` ${code}` : ""}`,
+        response.status === 429
+          ? Number.isFinite(retryAfter) && retryAfter > 0
+            ? retryAfter * 1000
+            : DEFAULT_RETRY_AFTER_MS
+          : null,
       );
     }
     return parsed;
@@ -232,7 +276,7 @@ function toSubscription(item: Record<string, unknown>): PolarSubscription | null
 }
 
 function toOrder(item: Record<string, unknown>): PolarOrder | null {
-  if (typeof item.id !== "string") return null;
+  if (typeof item.id !== "string" || typeof item.status !== "string") return null;
   // Without `refundable_amount`, what was paid before tax, less what was refunded.
   const refundable =
     typeof item.refundable_amount === "number"
@@ -240,7 +284,16 @@ function toOrder(item: Record<string, unknown>): PolarOrder | null {
       : typeof item.net_amount === "number"
         ? item.net_amount - (typeof item.refunded_amount === "number" ? item.refunded_amount : 0)
         : 0;
-  return { id: item.id, refundableAmount: Math.max(0, refundable) };
+  return { id: item.id, status: item.status, refundableAmount: Math.max(0, refundable) };
+}
+
+function toRefund(item: Record<string, unknown>): PolarRefund | null {
+  if (typeof item.id !== "string" || typeof item.status !== "string") return null;
+  return {
+    id: item.id,
+    status: item.status,
+    amount: typeof item.amount === "number" ? item.amount : 0,
+  };
 }
 
 /** An RFC 3339 time in Unix milliseconds; null when missing or unreadable. */

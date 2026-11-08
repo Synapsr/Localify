@@ -27,6 +27,7 @@ import {
   ALL_OWNED_URLS_SQL,
   entitlementOf,
   isEntitled,
+  NO_ENTITLEMENT,
   OWNED_URLS_SQL,
   reconcileStatements,
   servingUrlIds,
@@ -667,6 +668,38 @@ export async function reconcileServing(
 /** Reconciles one owner, after a change of their URLs. */
 export async function reconcileOwner(env: Env, userId: string, now = Date.now()): Promise<void> {
   await reconcileServing(env, await loadOwners(env, [userId], now), now);
+}
+
+/**
+ * Reconciles one owner in one batch in which every write also meets
+ * `guard`, followed by `after`. A billing refresh passes its revision as
+ * the guard, so a refresh overtaken by a newer one changes nothing. Unlike
+ * `reconcileServing`, a batch that fails throws, so the caller keeps what
+ * it owes.
+ */
+export async function reconcileOwnerIf(
+  env: Env,
+  userId: string,
+  guard: Statement,
+  after: Statement[],
+  now = Date.now(),
+): Promise<void> {
+  const owners = await loadOwners(env, [userId], now);
+  const statements = [
+    ...reconcileStatements(
+      userId,
+      owners.entitlements.get(userId) ?? NO_ENTITLEMENT,
+      owners.urls.get(userId) ?? [],
+      now,
+      guard,
+    ),
+    ...after,
+  ];
+  await stampingBatch(
+    env,
+    "reconcile",
+    statements.map(({ sql, params }) => env.DB.prepare(sql).bind(...params)),
+  );
 }
 
 /** Runs work after the response, logging what fails. */
