@@ -1,4 +1,4 @@
-> **Amended.** [ADR 0031](0031-remote-controls-respect-service-ownership.md) lets another paired machine start, stop and restart a service through a local bridge to the app. The app still owns every PTY, and no terminal is attached remotely ([ADR 0030](0030-remote-access-shows-service-output-not-terminals.md)).
+> **Amended.** [ADR 0030](0030-remote-access-shows-service-output-not-terminals.md) makes a service tab the run itself, not a shell: the app spawns `localify dev` in a dedicated PTY, the tab offers `Restart` and `Open a terminal here` once it exits, and nothing is typed into a shell to start a service. [ADR 0031](0031-remote-controls-respect-service-ownership.md) stops and restarts a service by signalling its process group instead of writing Ctrl-C into a tab, and lets another paired machine start one through a local bridge to the app. The app still owns every PTY, and no terminal is attached remotely.
 
 # Terminal Sessions Are Desktop-Owned
 

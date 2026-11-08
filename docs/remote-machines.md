@@ -1,6 +1,6 @@
 # Remote machines
 
-The contract for remote machines: what the cloud, the relay, the daemon, the desktop app, the CLI and the MCP server each do, and the messages between them. The decisions behind it are ADRs 0028 to 0032; ADR 0031 amends ADR 0012. It builds on [public-urls.md](public-urls.md) for accounts, machines, plans and the Worker, and on the entitlement model of PR #56.
+The contract for remote machines: what the cloud, the relay, the daemon, the desktop app, the CLI and the MCP server each do, and the messages between them. The decisions behind it are ADRs 0028 to 0032; ADRs 0030 and 0031 amend ADR 0012. It builds on [public-urls.md](public-urls.md) for accounts, machines, plans and the Worker, and on the entitlement model of PR #56.
 
 ## What it does
 
@@ -30,7 +30,7 @@ Goals:
 - the same from the CLI and, within limits, from an agent over MCP;
 - nothing streams and nothing costs while nobody looks.
 
-Not covered here: typing into a service, attaching to a terminal, resizing one; opening a target's `.localify` URL from the viewer; editing a target's projects, domains, profiles or files; running arbitrary commands; a web or phone viewer; machines of another account or a team; serving a target's dev server to the viewer outside public URLs; message history.
+Not covered here: typing into a service from another machine, attaching to a terminal, resizing one; opening a target's `.localify` URL from the viewer; editing a target's projects, domains, profiles or files; running arbitrary commands; a web or phone viewer; machines of another account or a team; serving a target's dev server to the viewer outside public URLs; message history.
 
 ## Names
 
@@ -42,7 +42,10 @@ Not covered here: typing into a service, attaching to a terminal, resizing one; 
 - **Peer:** a machine this one has paired with, by machine id and pinned key.
 - **Viewer:** the machine a person looks from. **Target:** the machine looked at. Any paired machine can be either.
 - **Session:** a Noise channel between a viewer and a target, through the relay.
-- **Run:** one start of a service by `localify dev`, known by its run id. **Owner:** who holds a run: the desktop app's terminal panel (`app`), a detached process (`background`), a terminal Localify does not own (`terminal`), or a process listening on the port with no run record (`unknown`).
+- **Run:** one execution of a service by `localify dev`, known by its run id. The `localify dev` process that executes it is the run's **executor**.
+- **Launch:** a request to start a run, from a **dispatcher** (the app, the daemon, `dev --detach`). The dispatcher picks a launch id, which becomes the run id, and an expiry after which the launch can no longer start.
+- **Run PTY:** the pseudo-terminal the desktop app creates for one run, with `localify dev` as its only child. A service tab shows a run PTY; a shell tab shows an ordinary shell.
+- **Owner:** who holds a run: a run PTY of the desktop app (`app`), a detached executor (`background`), a terminal Localify does not own (`terminal`), or a process listening on the port with no run record (`unknown`).
 - **Linked machine:** an active machine that has uploaded a remote key. An account has at most 10, the same limit as signed-in machines.
 
 ## Target settings
@@ -53,9 +56,9 @@ Three switches on each machine, set only on that machine, in the app's Settings 
 |---|---|---|
 | `share` | Paired machines see this machine's name, version and connection state only. | Paired machines see projects, environments, services, run states, public URLs and output. |
 | `control` | No start, stop or restart from another machine. | Paired machines may start, stop and restart services this machine owns (see "Controls"). Needs `share`. |
-| `backgroundStarts` | A start needs the desktop app running here. | When the app is closed, a start runs detached in the background. Needs `control`. |
+| `backgroundStarts` | A remote start needs the desktop app running here, and a background run cannot be restarted remotely. | A remote start runs detached in the background when the app is closed, and a background run can be restarted in the background. Needs `control`. |
 
-Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already past their checks finish, but no new one starts.
+Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already dispatched finish, but no new one starts.
 
 ## Trust
 
@@ -75,10 +78,10 @@ The roster's keys are never the root of trust. They tell a viewer which machines
 
 ### Pairing
 
-Pairing runs over the relay as a Noise session with purpose `pair` (see "Sessions"), followed by a commit and reveal that makes the short code safe against a relay in the middle. Without the commitment, a relay running two handshakes could try ephemeral keys until both codes match; with it, each attempt succeeds with probability 10⁻⁶ and costs a person's click.
+Pairing runs over the relay as a Noise session with purpose `pair` (see "Sessions"), followed by a commit and reveal that makes the short code safe against a relay in the middle. Without the commitment, a relay running two handshakes could try ephemeral keys until both codes match. With it, the responder is bound to its nonce before it sees the initiator's, both nonces and the final handshake hash go into the code, and each attempt succeeds with probability 10⁻⁶ and costs a person's click.
 
 1. On the viewer A, the switcher lists B as "Not paired" with a `Pair` button. `localify machines pair <B>` does the same.
-2. A sends a pairing request: the three Noise XX handshake messages with purpose `pair`. Both now hold the other's static key and the handshake hash `h`.
+2. A sends a pairing request: the three Noise XX handshake messages, the first one's envelope carrying purpose `pair`. Both now hold the other's static key and the final handshake hash `h`.
 3. B's daemon checks that a person can answer: the desktop app is subscribed to its events, or `localify machines pair --accept` is waiting. Otherwise it answers `pair.declined` with `nobody_to_confirm`, and A shows: "Nobody can confirm on B. Open Localify on B, or run `localify machines pair --accept` there, then try again."
 4. B picks a random 32-byte `nB` and sends `pair.commit` with `c = BLAKE2s("localify-pair-commit" ‖ h ‖ nB)`.
 5. A picks a random 32-byte `nA` and sends `pair.nonce` with it.
@@ -88,20 +91,34 @@ Pairing runs over the relay as a Noise session with purpose `pair` (see "Session
    - A: title "Pair with B", body "Check that B shows this code: **482 913**", buttons `Codes match` and `Cancel`.
    - B: title "A wants to pair with this Mac" (or "this computer" on Linux), body "Pair only if A shows the same code: **482 913**. A will then see this Mac's name. It sees projects and output, or controls services, only after you turn that on in Settings → Remote access.", buttons `Codes match, pair` and `Cancel`.
    - CLI: `A wants to pair. Code: 482 913. Type yes if A shows the same code:`.
-9. Each side sends `pair.confirm` with `accept` once its person answers. A side writes its pin only when its own person accepted and the peer's `accept: true` arrived. A cancel, a mismatch, a closed session or 2 minutes without both answers pins nothing, and both show "Pairing cancelled. Nothing was saved."
+9. Each side sends `pair.confirm` with `accept` once its person answers. A side writes its pin only when its own person accepted and the peer's `accept: true` arrived. A cancel, a mismatch, a message out of order or repeated, a closed session or 2 minutes without both answers pins nothing, and both show "Pairing cancelled. Nothing was saved."
 10. After pairing, B shows "Paired with A" and a link to Settings → Remote access, with the three switches still off. A shows B as "Paired · not sharing" until B turns `share` on.
 
-A target accepts one pairing at a time and at most 5 pairing attempts an hour; more answer `busy` with `retryAfter`. Pairing is symmetric: both machines pin each other, and each one's own settings decide what the other may see or do.
+The pairing messages come in exactly that order, each once: commit, nonce, reveal, then the two confirms. Anything else abandons the pairing. A target accepts one pairing at a time and at most 5 pairing attempts an hour; more answer `busy` with `retryAfter`. Pairing is symmetric: both machines pin each other, and each one's own settings decide what the other may see or do.
 
 ### Sessions
 
 Every session, pairing included, uses `Noise_XX_25519_ChaChaPoly_BLAKE2s`, through the `snow` crate. The viewer is always the initiator.
 
-- **Prologue:** `"localify-remote/1"`, the purpose (`pair` or `session`), the account's user id, the initiator's machine id, the responder's machine id, and the session id, each length-prefixed. A handshake replayed into another session, account, direction or purpose fails.
-- **Session id:** 16 random bytes from the initiator, base64url, carried by every relay frame of the session.
+- **Opening:** the first relay frame of a session is a `send` with `kind: "hs"`, a new session id, and `purpose`, `pair` or `session`, in its envelope. The responder uses the purpose to choose the prologue and nothing else. A relay that changes it only makes the handshake fail, since the purpose is in the prologue too. A frame for an unknown session id without a purpose is dropped.
+- **Prologue,** byte for byte:
+
+  ```text
+  "localify-remote/1"                 17 bytes, ASCII
+  purpose                              1 byte: 0x01 session, 0x02 pair
+  len ‖ account user id                1-byte length, then UTF-8
+  len ‖ initiator machine id           same
+  len ‖ responder machine id           same
+  session id                          16 bytes, raw
+  ```
+
+  A handshake replayed into another session, account, direction or purpose fails.
+- **Session id:** 16 random bytes from the initiator, base64url (22 characters) in the envelope.
+- **Handshake expiry:** each side drops a handshake that is not complete 30 seconds after its first message, measured on its monotonic clock.
 - **Peer check:** once the handshake gives the peer's static key, each side compares it with the pin of the machine id the relay says the frame came from. A missing pin or a different key ends the session with `not_paired` or `key_mismatch`, and the UI says so. Pairing is the only purpose that accepts an unpinned key, and it pins nothing without the code.
 - **Hello:** the first transport message each way is `hello` (see "Session messages"). Neither side sends anything else before it, and the target sends no inventory before it has checked the viewer's pin.
 - **Replay:** each session uses fresh ephemeral keys, and each direction has a 64-bit nonce counter. Frames arrive in order over one WebSocket, so a frame that fails to decrypt, is repeated or is missing ends the session. Nothing from an earlier session decrypts in a later one.
+- **Heartbeat:** while a session is open, the viewer sends `keep` every 30 seconds and the target answers `kept` at once. Both are encrypted, so they prove the peer itself is there, not only the relay. On its monotonic clock, the viewer marks the target `not_responding` when no authenticated message arrives within 15 seconds of a `keep`, and ends the session after 60 seconds without one. The target ends a session after 90 seconds without a `keep`.
 - **Lifetime:** a session ends after 1 hour, after 100,000 messages, or after 120 seconds with no watch, follow or request open. The viewer opens a new one if the person is still looking.
 - **Limits:** a target handles at most 4 handshakes at once and one session per viewer; a new session from the same viewer replaces the old one.
 
@@ -131,18 +148,18 @@ E2E keeps Localify Cloud, and anyone who controls the relay, from reading or cha
 | `Sec-WebSocket-Protocol` | `localify-remote.1` |
 | `X-Localify-Version` | the daemon's Localify version |
 
-The Worker:
+The Worker, cheapest checks first:
 
-1. Checks the token, the ban and the account's `remoteAccess` (see "Entitlement"), and that the machine has a remote key.
-2. Applies `REMOTE_CONNECT_LIMITER`, keyed by machine id: 6 upgrades a minute.
+1. Before any D1 work: the token has the shape Localify issues (`lfy_` and 64 lowercase hex digits), the subprotocol is one it speaks, and two rate limiters let the request through: `REMOTE_IP_LIMITER`, keyed by client IP, and `REMOTE_CONNECT_LIMITER`, keyed by the token's SHA-256. Both are Cloudflare rate-limiting bindings: approximate counts kept per location, so they shed load from one place and do not cap how often a token is checked worldwide.
+2. Looks the token up, then checks the ban, the account's `remoteAccess` (see "Entitlement"), and that the machine has a remote key.
 3. Forwards the request to the account's `RemoteRelay`, `idFromName("user:" + userId)`, with the user id, machine id, version and the time it checked, in internal headers it sets itself after removing any the client sent.
 
-The object accepts the socket with `ctx.acceptWebSocket(ws, [machineId])`, so it hibernates while the socket is idle. A second socket for the same machine replaces the first, which is closed with `4001`. It then sends `welcome` to the new socket and `presence` to the others.
+The object accepts the socket with `ctx.acceptWebSocket(ws, [machineId])`, so it can hibernate while the socket is idle. A second socket for the same machine replaces the first, which is closed with `4001`. It then sends `welcome` to the new socket and `presence` to the others.
 
 | Answer | Meaning |
 |---|---|
 | `101` | connected |
-| `401` | unknown or revoked token |
+| `401` | malformed, unknown or revoked token |
 | `402 subscription_required` | the account has no `remoteAccess` |
 | `403 banned` | the account is banned |
 | `409 remote_key_missing` | upload a key first |
@@ -153,9 +170,9 @@ The object accepts the socket with `ctx.acceptWebSocket(ws, [machineId])`, so it
 
 The object stores nothing: no storage calls, no alarms, no timers, no history. Each socket's attachment (`serializeAttachment`, at most 2 KiB) holds the machine id, a connection id, the version and protocol range, the connection time, and `authorizedUntil`. After hibernation, the constructor rebuilds the map from machine id to socket from `ctx.getWebSockets()` and those attachments. Everything else, inventory and output included, lives on the endpoints and is asked for again.
 
-`ctx.setWebSocketAutoResponse` answers the text frame `ping` with `pong` without waking the object. Clients send `ping` every 30 seconds and treat 75 seconds without `pong` or any frame as a lost connection.
+`ctx.setWebSocketAutoResponse` answers the text frame `ping` with `pong` without waking the object. Clients send `ping` every 30 seconds and treat 75 seconds without `pong` or any frame as a lost relay connection.
 
-On every frame other than `ping`, the object compares `authorizedUntil` with the clock. When it has passed, it reads the account and the machine from D1 (one query): still entitled, not banned, machine active. It then sets `authorizedUntil` 60 seconds ahead, or closes the socket with `4402`, `4403` or `4401`. That bounds unauthorized relaying to a minute without a timer.
+Authorization is checked lazily, on both ends of every frame. Before forwarding a frame other than `ping`, the object looks at the `authorizedUntil` of the sender's socket and of the recipient's. For each one that has passed, it reads the account and the machine from D1, in one query for both: still entitled, not banned, machine active. A socket that passes gets `authorizedUntil` 60 seconds ahead. One that fails is closed with `4402`, `4403` or `4401`, and the frame is not forwarded. When D1 fails, the frame is dropped and the sender gets `error` `unavailable` with `retryAfter: 5`: the relay fails closed. This bounds unauthorized relaying to a minute without a timer. It does not promise to close idle sockets: an idle socket of an account that lost access stays open until its next frame or a push (see "Entitlement"), and relays nothing in between.
 
 A frame for a machine with no socket gets `error` with `peer_offline` back. The object never queues.
 
@@ -168,27 +185,31 @@ A frame for a machine with no socket gets `error` with `peer_offline` back. The 
 | Sockets | one per active machine of the account, so at most 10 | the older one is closed with `4001` |
 | Frames from one socket | 50 a second on average over 10 seconds, bursts of 200 | `error` `rate_limited`, then close `4429` if it goes on |
 | Bytes from one socket | 512 KiB a second on average over 10 seconds | same |
-| Upgrades | 6 a minute per machine (`REMOTE_CONNECT_LIMITER`) | `429` with `Retry-After` |
+| Upgrades | `REMOTE_IP_LIMITER` 30 a minute per IP, `REMOTE_CONNECT_LIMITER` 6 a minute per token, both approximate and per location | `429` with `Retry-After` |
 
 The counters live in memory and start over after hibernation, which only makes them more permissive for a moment.
 
+**Send pacing.** Each daemon sends everything through one queue per relay socket, paced below the relay's budget: at most 40 frames and 384 KiB a second averaged over 10 seconds, for all its sessions together, whatever role it plays in each. Handshakes, heartbeats, pairing and control messages go first, then inventory pages, then output, taken round-robin between follows. Concurrent snapshots and follows therefore slow down instead of tripping the relay's limit, and a follow's window stops it from queuing more than it may.
+
 ### Reconnects
 
-The daemon keeps one connection while it is signed in, holds a key, and its account has `remoteAccess`. It has at most one connection attempt in flight.
+The daemon keeps one connection while it is signed in, holds a key, and its account has `remoteAccess`.
 
+- **One attempt at a time:** a daemon never has two connection attempts in flight.
 - **Backoff:** full jitter, `sleep = random(0, min(300, 1 × 2^attempt))` seconds. A connection that stayed up 60 seconds resets the attempt count.
 - **Server hints:** a `Retry-After`, or a close reason carrying `{"retryAfter": n}`, sets the least wait; jitter adds up to 20% on top.
 - **Deploys:** a close with `1012` or `1001` waits `random(0, 10)` seconds first, so a deploy that drops every socket does not bring them all back in the same second.
 - **Wake and network change:** one immediate attempt after a wake from sleep (the wall clock moved more than a minute past the monotonic one, as in public-urls.md, "Tunnel"), with `random(0, 2)` seconds of jitter, then the backoff.
 - **Final closes:** `4401` signs the machine out locally, as a `401` does. `4403` stops and says the account is suspended. `4402` waits for `public_refresh` or a plan change, or 1 hour. `4002` waits for an update.
-- **Bounded authentication:** each daemon has one connection attempt in flight; the Worker checks a token once per upgrade, at most 6 times a minute per machine; a target runs at most 4 Noise handshakes at once.
 - **After a reconnect:** every session is new. The viewer asks for fresh snapshots and offsets, and never resends a control that had no answer (see "Controls").
 
 ### Cost
 
-The relay costs Durable Object requests and duration. Duration dominates: an object is billed at 128 MB for as long as it is in memory, and a viewer following a busy service keeps it there. At the published Workers Paid prices ($12.50 per million GB-s past 400,000 included each month, and $0.15 per million requests past one million, where 20 incoming WebSocket messages count as one request), an object kept awake for an hour costs 0.125 GB × 3,600 s = 450 GB-s, about $0.0056. Someone watching output two hours a working day costs about $0.25 a month, against $7.99 for Pro. A hibernated object costs nothing, and auto-answered pings do not wake it.
+The relay costs Durable Object requests and duration. An object is billed duration at 128 MB while it is active: running an event handler, or kept from hibernating. An idle object whose sockets are all hibernatable and which has no event in progress is eligible for hibernation and incurs no duration charge, whether or not it has been evicted yet. Auto-answered pings do not wake it. So an account nobody watches costs nothing, and a watched one costs about the time spent handling its frames.
 
-What is not known is how long an object stays billable after its last event before it hibernates, and so what a chatty but slow output stream costs. PR 2 measures it on staging: two daemons, one viewer following a service that prints a line a second for an hour, then ten lines a second, read from the Durable Object analytics in Cloudflare's GraphQL API. The result goes in `apps/cloud/README.md` with an alert on the namespace's monthly duration. Machine tunnels (`m-<id>.localify.dev`) are not used: they exist only while a machine serves public URLs (ADR 0025) and each one past 1,000 costs $4.50 a month.
+At the published Workers Paid prices ($12.50 per million GB-s past 400,000 included each month, and $0.15 per million requests past one million, where 20 incoming WebSocket messages count as one request), the worst case is a viewer following output that never pauses, which could keep the object active all the time. An hour of that is 0.125 GB × 3,600 s = 450 GB-s, about $0.0056. Two hours of it each working day cost about $0.25 a month, against $7.99 for Pro.
+
+What has to be measured is how much active time a frame costs, and so what a typical session costs. PR 2 measures it on staging: two daemons, one viewer following a service that prints a line a second for an hour, then ten lines a second, read from the Durable Object analytics in Cloudflare's GraphQL API. The result goes in `apps/cloud/README.md` with an alert on the namespace's monthly duration. Machine tunnels (`m-<id>.localify.dev`) are not used: they exist only while a machine serves public URLs (ADR 0025) and each one past 1,000 costs $4.50 a month.
 
 ## Wire protocol
 
@@ -204,6 +225,7 @@ type Send = {
   to: string;               // machine id
   sid: string;              // session id, 22 characters
   kind: "hs" | "msg" | "close";
+  purpose?: "pair" | "session";  // on the first "hs" frame of a session only
   data?: string;            // base64url Noise message; absent for "close"
 };
 ```
@@ -219,10 +241,13 @@ type Presence = {
   t: "presence"; machineId: string; state: "online" | "offline";
   version: string; proto: { min: number; max: number }; since: string;  // RFC 3339
 };
-type Recv = { t: "recv"; from: string; sid: string; kind: "hs" | "msg" | "close"; data?: string };
+type Recv = {
+  t: "recv"; from: string; sid: string; kind: "hs" | "msg" | "close";
+  purpose?: "pair" | "session"; data?: string;
+};
 type Revoked = { t: "revoked"; machineId: string };   // removed from the account: delete its pin
 type RelayError = {
-  t: "error"; code: "peer_offline" | "rate_limited" | "bad_frame";
+  t: "error"; code: "peer_offline" | "rate_limited" | "bad_frame" | "unavailable";
   sid?: string; message: string; retryAfter?: number;
 };
 ```
@@ -265,7 +290,7 @@ type OutputRead   = { t: "output.read"; id: string; runId: string; offset: numbe
 type OutputFollow = { t: "output.follow"; id: string; runId: string; offset: number; window: number }; // ≤ 131,072
 type OutputAck    = { t: "output.ack"; re: string; offset: number };
 type OutputUnfollow = { t: "output.unfollow"; re: string };
-type Keep = { t: "keep"; ids: string[] };        // renews watches and follows
+type Keep = { t: "keep"; ids: string[] };   // heartbeat; also renews these watches and follows
 type Control = {
   t: "control"; id: string;
   action: "start" | "stop" | "restart";
@@ -276,6 +301,7 @@ type Control = {
 };
 
 // Target → viewer.
+type Kept = { t: "kept" };             // answers every keep, at once
 type InventoryPage = {
   t: "inventory.page"; re: string; epoch: string; rev: number;
   page: number; pages: number;         // 1-based; pages ≤ 32
@@ -292,7 +318,7 @@ type OutputData = {
   rotated?: { firstOffset: number };   // the asked offset was dropped; data starts there
   ended: boolean;                      // the run ended and everything was sent
 };
-type ControlProgress = { t: "control.progress"; re: string; phase: "dispatched" | "accepted" | "registered" };
+type ControlProgress = { t: "control.progress"; re: string; phase: "dispatched" | "started" };
 type ControlResult = {
   t: "control.result"; re: string;
   outcome: "done" | "refused" | "conflict" | "failed" | "unknown";
@@ -305,7 +331,7 @@ type ControlResult = {
 type SessionError = { t: "error"; re?: string; code: string; message: string; retryAfter?: number };
 type Bye = { t: "bye"; reason: "done" | "unpaired" | "lifetime" | "idle" | "not_shared" | "lease_expired" };
 
-// Pairing session only.
+// Pairing session only, in this order.
 type PairCommit = { t: "pair.commit"; c: string };      // base64url
 type PairNonce = { t: "pair.nonce"; n: string };
 type PairReveal = { t: "pair.reveal"; n: string };
@@ -324,16 +350,16 @@ The `code` of a `SessionError`, or of a `ControlResult` that is not `done`:
 | `not_paired`, `key_mismatch` | the peer check failed | pair again; for a mismatch, "Don't trust this machine until you pair it again." |
 | `not_shared` | `share` is off on the target | "B doesn't share its projects. Turn on sharing in Localify on B." |
 | `control_disabled` | `control` is off | "B doesn't allow remote controls." |
-| `background_disabled` | the app is closed on the target and `backgroundStarts` is off | "Localify isn't open on B, and B doesn't allow background starts." |
+| `background_disabled` | the start or the restart would run in the background, and `backgroundStarts` is off | "Localify isn't open on B, and B doesn't allow background starts." |
 | `not_owned` | the run is in a terminal Localify does not own, or an unknown process holds the port | "This runs in a terminal on B. Stop it there." |
-| `owner_gone` | an app run whose app has quit is still alive: stop is allowed, restart is not | "Stop it, then start it again." |
+| `owner_gone` | an app run outlived its app: stop is allowed, restart is not | "Stop it, then start it again." |
 | `refused_profile` | a dangerous, unknown or removed profile | "Start it on B to use this profile." |
 | `refused_argument` | a command, path, env value or option a remote control never takes | — (the CLI and the MCP server refuse these before sending; only a modified client gets here) |
 | `unknown_service` | the ids name nothing in the target's config | "This service no longer exists on B." |
-| `conflict` | the run or the config changed since the viewer looked | "B changed in the meantime." with the fresh state |
-| `expired` | received after `expiresAt`, or `expiresAt` more than 60 s ahead | "The request took too long to reach B. Nothing was done." |
-| `busy` | the service's lock is held, or too many handshakes or pairings | "Something else is starting or stopping it on B." |
-| `unauthorized` | the target's lease is missing, stale or refused | "Remote access is not available right now." |
+| `conflict` | the run, the config or the profile changed since the viewer looked, or another launch won | "B changed in the meantime." with the fresh state |
+| `expired` | the control arrived after `expiresAt` or with `expiresAt` more than 60 s ahead, or the launch reached `localify dev` after its own expiry | "The request took too long to reach B. Nothing was started." |
+| `busy` | another control of this service is in flight on the target, or too many handshakes or pairings | "Something else is starting or stopping it on B." |
+| `unauthorized` | the target could not get a fresh lease, or the viewer is not in it | "Remote access is not available right now." |
 | `output_unavailable` | no output stream for that run, with the reason | see "Output" |
 | `gone` | the run id is not the service's last run | the viewer moves to the current run |
 | `too_many` | over a watch, follow or session bound | — |
@@ -342,7 +368,7 @@ The `code` of a `SessionError`, or of a `ControlResult` that is not `done`:
 
 ### Versioning
 
-Two versions move separately. The relay protocol is the WebSocket subprotocol, `localify-remote.1`; a Worker that drops one closes its sockets with `4002`. The session protocol is `proto` in `hello` and in `presence`. Peers use the highest version both support; when their ranges do not overlap, the viewer shows "Update needed" before opening a session. A new optional field is added without a new version, and a receiver ignores fields it does not know, except in `control`, where an unknown field is refused so that no argument is ever silently dropped. A new message type, or a change in meaning, takes a new version, and a sender never sends a type the peer's version lacks.
+Two versions move separately. The relay protocol is the WebSocket subprotocol, `localify-remote.1`; a Worker that drops one closes its sockets with `4002`. The session protocol is `proto` in `hello` and in `presence`, and its version is also in the prologue. Peers use the highest version both support; when their ranges do not overlap, the viewer shows "Update needed" before opening a session. A new optional field is added without a new version, and a receiver ignores fields it does not know, except in `control`, where an unknown field is refused so that no argument is ever silently dropped. A new message type, or a change in meaning, takes a new version, and a sender never sends a type the peer's version lacks.
 
 ## Inventory
 
@@ -374,33 +400,35 @@ type InventoryItem = {
 };
 ```
 
-- **Sources:** the configured projects, environments and services (the config the daemon loads, polled every 2 seconds); the running-service records in `services/`; a TCP connect to each service's port on `127.0.0.1`, 200 ms timeout; the daemon's own runtime for public URLs and the tunnel (public-urls.md, "Tunnel").
+- **Sources:** the configured projects, environments and services (the config the daemon loads, polled every 2 seconds); the checkouts' `localify.toml`; the running-service records in `services/`; a TCP connect to each service's port on `127.0.0.1`, 200 ms timeout; the daemon's own runtime for public URLs and the tunnel (public-urls.md, "Tunnel").
 - **Four states:** `process` comes from the record's PID and start time; `port.reachable` from the connect; `output.available` from the run's stream; `publicUrl.serving` from the URL's state, the machine that serves it, and this machine's tunnel being connected. They disagree often, and the UI shows each one: a process running with its port not reachable yet is "Starting"; a reachable port with no running record is `owner: "unknown"`.
-- **`configRev`:** the first 16 hex digits of SHA-256 over the canonical JSON of the service's entry as the daemon loaded it: command, folder, port, domains and environment. It changes whenever the entry does.
+- **`configRev`:** the first 16 hex digits of SHA-256 over the canonical JSON of what a launch of this service would use: the service's entry as the daemon loaded it (command, folder, port, domains, environment) and the effective launch-profile definitions of its checkout (each profile's name, source addresses, `danger` and `max_duration`, or the implicit Infisical profile's settings), never a value. It changes whenever any of them does. The executor recomputes it at execution (see "Controls").
 - **`controls`:** what this viewer may do right now, with the code a refusal would carry, so the UI disables a button and says why before anyone clicks.
 - **`share` off:** the target sends `machine` and no items.
 - **Epoch and revision:** `epoch` is random, chosen at daemon start; `rev` starts at 1 and goes up whenever the snapshot's content changes. A request whose `have` matches gets `inventory.unchanged`.
 - **Pages:** items sorted by project name, environment and service; split so each page fits 32 KiB; at most 32 pages. A viewer replaces its copy only once it holds every page of one revision; pages of an older revision are dropped.
 - **When it is sent:** on `inventory.get`; while a watch is open, whenever the content changes, checked every 2 seconds for config and records and every 10 seconds for ports; right after every control's result; and on a 30-second reconcile while watched. Unchanged snapshots are never sent.
-- **Watches:** at most one per session. A watch ends with `inventory.unwatch`, with the session, or 120 seconds after the last `keep`. The viewer sends `keep` every 60 seconds while the machine is on screen, and stops when the window is hidden. With no watch open, the target computes nothing and sends nothing.
+- **Watches:** at most one per session. A watch ends with `inventory.unwatch`, with the session, or 120 seconds after the last `keep` that names it. The viewer names it in its `keep` while the machine is on screen, and stops when the window is hidden. With no watch open, the target computes nothing and sends nothing.
 - **Deltas,** if they come later, carry the epoch and the revision they apply to. A gap or another epoch makes the viewer ask for a snapshot.
 
 ## Output
 
-### A per-run service stream
+### A run PTY, and a stream per run
 
-Output shown remotely is the service's own output for one run, never a terminal. Today an app-owned service tab copies every byte of its shell into the service's output file (`src-tauri/src/terminal.rs`), including the prompt and any command typed after the service exits. That file is never exported. PR 1 replaces it with a per-run stream that both owners write:
+Output shown remotely is everything one run's own channel carried, and nothing else. Today an app-owned service tab is an interactive shell: the app types the service's command into it, copies every byte of the shell into the service's output file, and stops the service by writing Ctrl-C into the tab. The file then holds the prompt and any command typed after the service exits, and a Ctrl-C can land in an editor or a REPL that took the foreground. Telling service bytes from shell bytes after the fact does not work either: a service suspended, a command run, and the service resumed, all before the reader catches up, interleave in one byte stream. So the channel itself carries the provenance. That old file is never exported. PR 1 replaces the model:
 
-- **Run id:** `localify dev` picks 16 random bytes, base64url, when it registers a run, and records it as `runId` in the run's record.
-- **Location:** `<state dir>/services/output/<runId>/`, made of 4 MiB segments named by their index (`0.log`, `1.log`, …), segment `k` holding logical bytes `[k × 4 MiB, (k + 1) × 4 MiB)`. The writer keeps the two newest, so between 4 and 8 MiB of the end of a run stay readable. Both writers derive the path from the run id; neither ever reads a path from the output.
-- **Background runs:** `localify dev --detach` gives the service pipes for stdout and stderr, stdin closed, and copies them into the stream. That is what the service printed and nothing else.
-- **App runs:** `localify dev`, when `LOCALIFY_SERVICE_ORIGIN=app`, writes a start marker to its terminal after it registers and an end marker before it exits: `ESC ] 7731 ; localify-run ; start ; <runId> BEL`, and the same with `end`. xterm.js ignores unknown OSC sequences, so nothing shows. The app's output thread recognizes the markers in the PTY's bytes, across read boundaries. It writes to the stream only between a start marker and the matching end, and only while the PTY's foreground process group (`tcgetpgrp` on the master) is led by the run's PID. It starts only for a run id whose record exists, belongs to this tab's service, has `origin: app` and is running. A marker printed by the service itself can therefore only end its own stream early. A run killed before its end marker loses the foreground, which closes the stream.
+- **A dedicated PTY per run.** To launch a service, the app spawns the pinned Localify executable directly as the only child of a new PTY: `localify dev <service> --project <id> [--env <slug>] [--profile <name>] --launch-id <launchId>`, with `LOCALIFY_SERVICE_ORIGIN=app`, in the service's folder. There is no interactive shell in it, and nothing is ever typed into an existing shell. `localify dev` is the PTY's session leader, so the run has its own process group. Every launch, a restart included, creates a fresh run PTY.
+- **The service tab is the run.** It shows the run PTY, interactive and resizable, so the service sees a real terminal: colors, prompts, keys and window size behave as they do today. When the run exits, the tab shows "Exited with code 1 at 10:42" (or "Stopped" for a signal), stops taking input, and offers `Restart` and `Open a terminal here`. The latter opens a separate, ordinary shell tab in the service's folder.
+- **Stop and restart** signal the run's own process group, validated by PID and start time (TERM, then KILL after 10 seconds, with the process tree as `localify stop` handles it today), and never write a Ctrl-C into a tab. A Ctrl-C the person types into a running service tab still reaches the service, as in any terminal.
+- **The stream:** the app reads the run PTY's master and appends every byte, and only those bytes, to the run's stream. It is the only writer. Shell tabs are never written to a stream and never exported.
+- **Typed input is part of the output.** Keystrokes a person types into a running service tab are echoed by the terminal into the stream, so `localify logs` and paired machines see them. That is accepted. The tab says it in its footer while `share` is on: "What you type here appears in this service's output." Input with echo turned off, such as a password prompt, is not echoed.
+- **Run id:** the launch id the dispatcher chose: the app for a run PTY, `dev --detach` for a background run, the daemon for a remote launch. A person's own `localify dev` picks one itself. It is 16 random bytes, base64url, recorded as `runId` in the run's record.
+- **Location:** `<state dir>/services/output/<runId>/`, made of 4 MiB segments named by their index (`0.log`, `1.log`, …), segment `k` holding logical bytes `[k × 4 MiB, (k + 1) × 4 MiB)`. The writer keeps the two newest, so between 4 and 8 MiB of the end of a run stay readable. Writers derive the path from the run id they chose; nothing ever reads a path from the output.
+- **Background runs:** the detached executor gives the service pipes for stdout and stderr, stdin closed, and copies them into the stream itself.
 - **Terminal runs** have no stream: `output.reason` is `terminal`.
-- **Until both sides support it,** an app run whose record has no `runId`, or whose app does not announce `runOutput` over the bridge, has no stream: `app_output_unsupported` or `older_run_record`. The old whole-shell file is never a fallback.
-- **Locally,** `localify logs` and `service_logs` read the same stream, so an agent no longer reads shell prompts either, and the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT` go away. A record without a run id, from an older version, keeps its `logFile` for `localify logs` only.
+- **Records** say where their output is: `output: "pty"` for a run PTY, `"pipe"` for a background run, `null` otherwise. An app run without `output: "pty"`, from an app that still types into a shell, reports `app_output_unsupported`; a record without `runId`, from an older version, reports `older_run_record`. The old whole-shell file is never a fallback.
+- **Locally,** `localify logs` and `service_logs` read the same stream, so an agent no longer reads shell prompts either. The whole-shell copy and `LOCALIFY_SERVICE_OUTPUT` go away. A record without a run id keeps its `logFile` for `localify logs` only.
 - **Retention:** as today, a run's stream is deleted when the next run of the same service registers, or when the service is forgotten.
-
-What the stream contains for an app run is what the terminal displayed while the run held the foreground. Keystrokes echoed during the run are part of it, as they are in any terminal log. Input with echo turned off, such as a password prompt, is not.
 
 ### Reads
 
@@ -415,7 +443,7 @@ What the stream contains for an app run is what the terminal displayed while the
 
 ### Following
 
-`output.follow {runId, offset, window}` sends `output.data` as lines arrive, the first one at once. The target never has more than `window` bytes sent and not acknowledged; the viewer sends `output.ack` with the `next` it has shown. The target looks for new bytes every 250 ms while a follow is open, locally. A follow ends with `output.unfollow`, at the end of the run once everything was sent, with the session, or 120 seconds after the last `ack` or `keep`. At most 2 follows per session, 4 per target. The viewer stops following when the Output panel closes or the window is hidden for 60 seconds, so an output nobody looks at costs nothing.
+`output.follow {runId, offset, window}` sends `output.data` as lines arrive, the first one at once. The target never has more than `window` bytes sent and not acknowledged; the viewer sends `output.ack` with the `next` it has shown. The target looks for new bytes every 250 ms while a follow is open, locally. A follow ends with `output.unfollow`, at the end of the run once everything was sent, with the session, or 120 seconds after the last `ack` or `keep` that names it. At most 2 follows per session, 4 per target. The viewer stops following when the Output panel closes or the window is hidden for 60 seconds, so an output nobody looks at costs nothing.
 
 ### Showing it
 
@@ -427,6 +455,17 @@ The panel is labelled "Output", never "Terminal". It shows plain lines with sele
 
 A control carries explicit ids: the target machine (the session), the project, the environment slug (`null` for the primary checkout), the service, and for a start an optional profile name. It carries nothing else. A remote control never takes a command, a folder, a path, an env file, an env value, a domain, a port, `confirm_profile`, or anything that would create a project or an environment. A message with an unknown field in `control` is refused with `refused_argument`. A profile must exist in the checkout's `localify.toml` and not be `danger = true`.
 
+### The run lock and launch fencing
+
+The executor, the `localify dev` process that runs the service (in a person's terminal, in a run PTY, or detached), is the only owner of the service's lock. Dispatchers never hold it.
+
+1. Before it runs anything (profile sources, the service), the executor takes an exclusive, non-blocking `flock` on `services/<record name>.lock`, and holds it until it exits. The OS releases it even on a crash. If another executor holds it, it refuses: the service is already running.
+2. Under the lock, a launch with an id is checked again: `--launch-expires` has not passed; with `--expect-rev`, the `configRev` it recomputes from the config and `localify.toml` is the expected one; with `--remote-launch`, the profile is neither dangerous nor unknown. These checks run even inside a PTY, where a dangerous profile could otherwise be confirmed by hand.
+3. Still under the lock, it writes the run record atomically (a temporary file renamed over it). A failure to write is fatal: nothing starts.
+4. A launch with an id that fails a check, or the lock, writes `services/launches/<launchId>.json`, `{"outcome": "refused", "code": "conflict" | "expired" | "refused_profile", "message", "at"}`, and exits non-zero without starting anything. Launch records are kept for an hour and removed by later launches. A run that starts carries its launch id as its run id, so a dispatcher knows exactly whether its own launch ran.
+
+Dispatchers pass `--launch-id <id> --launch-expires <unix ms>`, and the daemon or the bridge, for a remote control, `--remote-launch <id>` in place of `--launch-id`, with `--expect-rev <configRev>`. A launch expires 15 seconds after it is dispatched. A launch that arrives late, after a timeout the dispatcher already reported, therefore refuses instead of starting. `--remote-launch` only adds restrictions, so it needs no authentication. A person's own `localify dev` takes the lock the same way, so a foreground run is fenced too.
+
 ### Target checks
 
 In order; the first that fails answers the control:
@@ -436,34 +475,30 @@ In order; the first that fails answers the control:
 3. `expiresAt` has not passed in the target's clock and is at most 60 seconds ahead. The viewer learns the target's clock from its `hello`.
 4. A fresh lease: the target calls `GET /v1/remote/lease` now, and the viewer's machine id is among its active machines (see "Entitlement"). A failure refuses with `unauthorized`: the target fails closed.
 5. The ids name a configured service; the profile, when given, is allowed.
-6. The per-service lock (below) is free within 2 seconds, or `busy`.
-7. Under the lock, the state matches: for a start, no running run and a free port; for a stop or a restart, the running run is `expect.runId`. For a start or a restart, the service's `configRev` is `expect.configRev`; a stop ignores it. Otherwise `conflict`, with the fresh snapshot sent right after.
-8. The owner allows it (below).
+6. No other control of this service is in flight on this target, or `busy`. The daemon runs one at a time per service.
+7. The state matches: for a start, no running run and a free port; for a stop or a restart, the running run is `expect.runId`. For a start or a restart, the service's `configRev` is `expect.configRev`; a stop ignores it. Otherwise `conflict`, with the fresh snapshot sent right after.
+8. The owner allows it (below). For a restart, the replacement start must be allowed too: the owner is still there, the profile is still permitted, and a replacement that would run in the background has `backgroundStarts`. All of it is decided before anything stops.
 
-A control whose `id` was already answered in this session gets the same answer again without running anything. That is correlation, not exactly-once: what keeps a repeated restart from running twice is `expect.runId`, which no longer matches once the first restart replaced the run.
-
-### The per-service lock
-
-`services/<record name>.lock`, an exclusive `flock`. It serializes whoever decides to start or stop a service: the remote control executor in the daemon, the app's launch and stop actions (button, deep link, bridge), and the CLI's `dev --in-app`, `dev --detach`, `stop` and `restart` before they act. The decider holds it from its check until the new run registers, the old one stops, or 15 seconds pass. The `localify dev` process that registers a run never takes it; `register` refusing a second live run stays the final guard.
+The executor checks the expiry, the revision and the profile again when the launch reaches it, so a change between these checks and execution refuses the launch. A control whose `id` was already answered in this session gets the same answer again without running anything. That is correlation, not exactly-once: what keeps a repeated restart from running twice is `expect.runId`, which no longer matches once the first restart replaced the run.
 
 ### Who acts
 
 | Action | Owner now | App on the target | What the target does |
 |---|---|---|---|
-| start | none | running | bridge `launch`: the app opens the service's tab in its terminal panel and runs it there |
-| start | none | absent, `backgroundStarts` on | a detached start, as `localify dev --detach` with the ids and the profile |
+| start | none | running | bridge `launch`: the app opens a new service tab on a fresh run PTY |
+| start | none | absent, `backgroundStarts` on | a detached start (below) |
 | start | none | absent, `backgroundStarts` off | refuses `background_disabled` |
 | start | `app` or `background`, running | — | `conflict`: the viewer thought nothing ran |
-| stop | `app` | running | bridge `stop`: interrupts the foreground command and keeps the shell (ADR 0012) |
-| stop | `app` | absent | the process outlived its terminal: stops its process tree |
-| stop | `background` | — | stops its process tree, as `localify stop` does |
-| restart | `app` | running | bridge `restart`: stops it, then runs it again in the same tab on the run's profile |
+| stop | `app` or `background` | — | signals the run's process group and tree, validated by PID and start time |
+| restart | `app` | running | stops it as above, then bridge `launch` with `replaces`, so the new run PTY takes the same tab |
 | restart | `app` | absent | refuses `owner_gone` |
-| restart | `background` | — | stops it, then starts it detached on the run's profile |
+| restart | `background` | — | refuses `background_disabled` unless `backgroundStarts` is on; otherwise stops it, then starts it detached |
 | restart | any | — | refuses `refused_profile` when the run's profile is now dangerous, unknown or removed |
 | any | `terminal`, `unknown` | — | refuses `not_owned`; the status stays visible |
 
-A detached start from the daemon runs `localify dev <service> --project <id> [--env <slug>] [--profile <name>] --detach` through the user's login shell (`$SHELL -l -c`), every argument quoted, so the service finds the same `PATH` and version managers it finds in a terminal. The daemon itself runs under launchd or systemd, with a minimal environment.
+A restart keeps the run's profile. Its stop waits for the old executor to exit, which releases the lock, before the new launch is dispatched.
+
+**Detached starts.** The daemon resolves its own executable once at start, canonicalized, and never looks `localify` up on `PATH`. It runs `$SHELL -l -c 'exec "$0" "$@"' <that path> dev <service> --project <id> [--env <slug>] [--profile <name>] --remote-launch <id> --launch-expires <t> --expect-rev <rev> --detach`, so the service gets the `PATH` and version managers a terminal gives it, while no argument passes through shell parsing. Stdin is `/dev/null` and the process gets its own group. Startup is bounded: when neither a run record nor a launch record with that id exists once the launch has expired, the daemon kills the group and answers `failed`. A run that started then has 90 seconds to listen.
 
 ### The app bridge
 
@@ -471,30 +506,31 @@ The desktop app listens on `<data dir>/app-bridge.sock`, a Unix socket only its 
 
 | Request | Answer |
 |---|---|
-| `{"cmd": "hello"}` | `{"ok": true, "data": {"version": "…", "bridge": 1, "runOutput": true}}` |
-| `{"cmd": "launch", "requestId", "service": {projectId, environment, serviceId}, "profile", "requestedBy": {machineId, name}}` | `{"ok": true, "data": {"accepted": true, "sessionId": "terminal-7"}}` once the command is written into a PTY, within 5 s |
-| `{"cmd": "stop", "requestId", "service", "runId", "requestedBy"}` | `accepted` once the interrupt is sent |
-| `{"cmd": "restart", "requestId", "service", "runId", "requestedBy"}` | `accepted` once the stop is under way |
+| `{"cmd": "hello"}` | `{"ok": true, "data": {"version": "…", "bridge": 1}}` |
+| `{"cmd": "launch", "launchId", "expiresAt", "service": {projectId, environment, serviceId}, "profile", "expectRev", "replaces", "requestedBy": {machineId, name}}` | `{"ok": true, "data": {"accepted": true}}` once the run PTY is spawned, within 5 s |
 
-Errors are `{"ok": false, "error": {"code", "message"}}`, with the codes of "Errors". The app opens the tab without taking focus and shows "Started by A" (or stopped, restarted) for 5 seconds. `localify dev --in-app` uses the bridge too when the app answers, and keeps the deep link only to open an app that is not running.
+`replaces` is the run id whose tab the new run takes, or `null` for a new tab. The app spawns `localify dev` with `--remote-launch`, `--launch-expires` and `--expect-rev` from the request, so the executor fences it. Errors are `{"ok": false, "error": {"code", "message"}}`, with the codes of "Errors". The app opens the tab without taking focus and shows "Started by A" for 5 seconds. Stops need no bridge: the target signals the run itself, and the tab shows the exit. The app's own launch button and `dev --detach` pass launch ids the same way, and `localify dev --in-app` uses the bridge when the app answers, keeping the deep link only to open an app that is not running.
 
 ### State machine
 
 On the target, for one control:
 
 ```text
-received ──▶ checked ──▶ locked ──▶ matched ──▶ dispatched ──▶ accepted ──▶ settling ──▶ done
-               │           │          │           │                           │
-               ▼           ▼          ▼           ▼                           ├──▶ failed: the run exited
-            refused       busy     conflict   reconciling ──▶ done | unknown  └──▶ unknown: still starting after 90 s
-           or expired                         (no ack in 5 s, bridge closed, app quit)
+received ──▶ checked ──▶ matched ──▶ dispatched ──▶ started ──▶ settling ──▶ done
+                │           │            │                         │
+                ▼           ▼            ▼                         ├──▶ failed: the run exited
+             refused     conflict   reconciling                    └──▶ unknown: still starting after 90 s
+          expired, busy             (no ack, bridge closed, app quit)
+                                         │
+                                         ▼  once the launch has expired
+                              started | refused | failed: not started
 ```
 
-For a background start or a stop the target does itself, `dispatched` and `accepted` are one step: the process was spawned, or signalled.
-
-- **Settling:** a start is `done` when a run with a new run id has registered and listens on its port, within 90 seconds. It is `failed` when the run exits first, with its last 40 lines in the message. After 90 seconds without either, it is `unknown` with "Still starting on B". A stop is `done` when the process tree is gone. A restart is both.
-- **Reconciling:** when the bridge drops or does not acknowledge, the app may or may not have written the command. The target never falls back to a background start for a request it dispatched to the app. For 10 seconds it watches for a run of that service that registered after the dispatch, and for the port. It answers `done` if one appears and `unknown` otherwise: "The Localify app on B closed while starting web. Nothing else was started."
-- **Progress:** `control.progress` is sent at `dispatched`, `accepted` and `registered`, so the viewer can say "Starting in the app on B…".
+- **Dispatched:** for a start or the second half of a restart, the launch is handed to the bridge or spawned detached, with its id and expiry. For a stop, the signal is sent; a stop is `done` when the process tree is gone.
+- **Started:** a run record with the launch id exists. A launch record instead means `refused`, with its code (`conflict` for a revision that changed, `expired`, `refused_profile`).
+- **Settling:** the run is `done` when it listens on its port, within 90 seconds. It is `failed` when it exits first, with its last 40 lines in the message. After 90 seconds without either, it is `unknown` with "Still starting on B".
+- **Reconciling:** when the bridge drops, does not acknowledge within 5 seconds, or the app quits, the target does not know whether the app spawned the run. It never falls back to a background start for a launch it handed to the app. It waits until the launch's expiry has passed, after which no run with that id can start, and answers from what exists: the run record (go on settling), the launch record (`refused`), or nothing (`failed`: "The Localify app on B closed before starting web. Nothing was started.").
+- **Progress:** `control.progress` is sent at `dispatched` and `started`, so the viewer can say "Starting in the app on B…".
 
 On the viewer:
 
@@ -506,7 +542,7 @@ idle ─▶ sent ─▶ (progress) ─▶ result: done | refused | conflict | fa
 
 - **Lost acknowledgement:** the viewer shows "Outcome unknown. Checking B…", opens a new session when it can, and shows the snapshot the target sends. It never sends the control again by itself.
 - **Queued controls:** the viewer sends a control only on an open session. A control the person asked for while the session was down is not queued; the button is disabled with the connection state.
-- **One at a time:** the viewer allows one control per service at a time; the target's lock enforces it across viewers and local paths.
+- **One at a time:** the viewer allows one control per service at a time; the target's per-service queue and the run lock enforce it across viewers and local launches.
 
 ## Cloud
 
@@ -520,7 +556,7 @@ Added to the API of public-urls.md, with the same authentication, scoping and er
 | `PUT /v1/machines/self/remote-key` | `{publicKey}` | `204`, also when the machine already has this same key; `409 remote_key_set` when it has another one; `409 remote_key_taken` when another machine has this one; `422 invalid_key` |
 | `DELETE /v1/machines/{id}` | — | `204`. Signs that machine out as `POST /v1/auth/logout` does for the caller, and pushes `revoked` to the relay. Works at zero entitlement. On the caller's own id, it is a sign-out. |
 | `GET /v1/remote/connect` | WebSocket upgrade | see "Relay", "Connecting" |
-| `GET /v1/remote/lease` | — | `{until, machines: [id]}`: `until` is 60 seconds from now, `machines` the account's active machine ids. `402 subscription_required`; `403 banned`. |
+| `GET /v1/remote/lease` | — | `{ttl: 60, machines: [id]}`: a lifetime in seconds and the account's active machine ids. `402 subscription_required`; `403 banned`. |
 
 ```ts
 type RosterMachine = {
@@ -530,7 +566,7 @@ type RosterMachine = {
 };
 ```
 
-`GET /v1/me` reports `plan.limits.remoteAccess` (see "Entitlement"). Whether a machine is online is never in the API: only the relay knows, through `presence`.
+A lease carries no absolute time. The client counts `ttl` from when it sent the request, on its monotonic clock, so a skewed local clock can neither extend nor shorten it (see "Entitlement"). `GET /v1/me` reports `plan.limits.remoteAccess`. Whether a machine is online is never in the API: only the relay knows, through `presence`.
 
 ### Data (D1)
 
@@ -561,7 +597,7 @@ No table holds sessions, presence, pairings, inventory or output. A revoked mach
 - `revokeMachine(machineId)`: closes that machine's socket with `4401` and sends `revoked` to the others;
 - `revokeAccount(code)`: closes every socket with `4402` or `4403`.
 
-New configuration: the rate-limit binding `REMOTE_CONNECT_LIMITER` (6 per 60 seconds). Nothing else: the relay needs no secret, since it authenticates nothing itself.
+New configuration: two rate-limit bindings, `REMOTE_IP_LIMITER` (30 per 60 seconds, keyed by client IP) and `REMOTE_CONNECT_LIMITER` (6 per 60 seconds, keyed by the token's SHA-256), both load shedding as described in "Connecting". Nothing else: the relay needs no secret, since it authenticates nothing itself.
 
 ## Entitlement
 
@@ -573,25 +609,27 @@ New configuration: the rate-limit binding `REMOTE_CONNECT_LIMITER` (6 per 60 sec
 - **`/v1/me`:** `plan.limits` becomes `{servingMachines, publicUrls, remoteAccess}`. `plan.entitled` keeps its meaning (serving), so the public URL paywall does not move. PR 2 updates public-urls.md's `Plan` and "Plans" with it.
 - **Linked machines:** at most 10 per account, which the 10 signed-in machines already bound.
 
+**Leases.** An endpoint holds a lease while it has a session open, as viewer or target, and renews it every 45 seconds with up to 5 seconds of jitter. A lease lasts `ttl` seconds from the moment its request was sent, measured on the monotonic clock; the endpoint never compares a time from the cloud with its wall clock. The monotonic clock may not count sleep (`Instant` on macOS does not), so a detected wake (the wall clock moved more than a minute past the monotonic one) expires the lease at once. Sessions then end until a renewal succeeds. A refused renewal, a lease that has run out, or a peer missing from the lease's `machines` ends the session with `bye` `lease_expired`.
+
 **Losing it.** When the account loses `remoteAccess`, through a lapse, a ban or an override that ends, or a machine is removed or signs out:
 
 1. New operations are refused: the connect route answers `402` or `403`, and each lease request too.
 2. The Worker pushes at once where it makes the change: a billing refresh that leaves the account without `remoteAccess` calls `revokeAccount`, which does nothing when no socket is open; sign-out, roster removal and a same-name sign-in that replaces a machine call `revokeMachine`. Open sessions and output follows end with their sockets.
-3. Where the Worker does not see the change (an override expiring, the end of a canceled period or of the `past_due` grace, a `cloud:admin` command, which writes D1 only), the lease is the fallback. The relay re-reads the account on the first frame after `authorizedUntil`. Each endpoint holds a lease while it has a session open, renewed every 45 seconds with up to 5 seconds of jitter. A refused renewal, a lease that has passed, or a peer missing from the lease's `machines` ends the session with `bye` `lease_expired`. Either way, open streams stop within about a minute.
+3. Where the Worker does not see the change (an override expiring, the end of a canceled period or of the `past_due` grace, a `cloud:admin` command, which writes D1 only), two lazy checks take over. The relay checks the sender and the recipient of each frame once their `authorizedUntil` has passed, and fails closed when D1 does not answer. Each endpoint's lease ends its sessions when renewal fails. An open output stream keeps sending frames, so it stops within about a minute. An idle socket may stay open longer, relaying nothing.
 4. Before each control, the target asks for a fresh lease (see "Target checks").
 
 Nothing local stops. Services keep running, the target's settings and pins are kept, and the app shows "Remote access needs Localify Cloud Pro" with the plan's action. ADR 0027 still applies separately to public traffic. Roster removal, sign-out, `/v1/me` and billing keep working without the entitlement.
 
 ## Daemon
 
-The daemon is the only relay endpoint on a machine, for both roles: one key, one connection, one lease. The app, the CLI and the MCP server view other machines through it.
+The daemon is the only relay endpoint on a machine, for both roles: one key, one connection, one send queue, one lease. The app, the CLI and the MCP server view other machines through it.
 
 New management socket commands. The streaming ones keep the connection open and send one JSON line per event until the client closes it, which ends the watch or follow:
 
 | Command | Answer |
 |---|---|
 | `remote_status` | `{relay: "off" \| "connecting" \| "connected" \| "reconnecting" \| "blocked", blocked: {code, message} \| null, retryAt, settings, fingerprint}` |
-| `remote_machines` | the roster merged with pins and presence: `[{id, name, self, paired, state, version, fingerprint}]`, `state` as in "Desktop app" |
+| `remote_machines` | the roster merged with pins, presence and sessions: `[{id, name, self, paired, state, version, fingerprint}]`, `state` as in "Desktop app" |
 | `remote_settings {share?, control?, backgroundStarts?}` | the settings after the change |
 | `remote_pair {machineId}` | streaming: `code`, then `paired` or `cancelled` |
 | `remote_pair_answer {pairingId, accept}` | `{ok}` |
@@ -607,14 +645,15 @@ The daemon opens a session only when one of these asks for it, and closes it whe
 
 ## Desktop app
 
-- **Machine switcher,** at the top of the sidebar: "This Mac" first, then every machine of the roster with its name and a state, using T3 Code's distinct states plus Localify's own:
+- **Service tabs,** on every machine, change with PR 1, whether or not remote access is used. A service tab is the run, not a shell: it opens when the service starts, shows the service's terminal interactively, and when the run exits shows its exit code with `Restart` and `Open a terminal here`. Typing a command after the service stops now happens in a shell tab, which `Open a terminal here` or the terminal button opens. Stop signals the service instead of pressing Ctrl-C in the tab. While `share` is on, the footer of a service tab says "What you type here appears in this service's output."
+- **Machine switcher,** at the top of the sidebar. Its header shows this machine's relay connection, which says whether anything about the others is known: "Remote access: connected", "Connecting…", "Reconnecting… (in 8 s)" with `Retry now`, or "Off" with the reason. While it is not connected, the targets below show no state of their own. Then "This Mac" first, and every machine of the roster with its name and a state, using T3 Code's distinct states plus Localify's own:
 
   | State | Shows |
   |---|---|
-  | `connecting` | "Connecting…": this machine's relay connection or the session handshake is in progress |
-  | `connected` | the name, with no badge |
-  | `reconnecting` | "Reconnecting… (in 8 s)" with a `Retry now` button |
   | `offline` | "Offline", and "since 10:42" when the relay saw it leave |
+  | `connecting` | "Connecting…": the session handshake is in progress |
+  | `connected` | the name, with no badge |
+  | `not_responding` | "Not responding": on the relay, but its answers stopped (see "Sessions", heartbeat) |
   | `incompatible` | "Update needed: B runs a version of Localify that can't talk to this one." with the version that needs updating |
   | `not_paired` | "Not paired" with `Pair` |
   | `key_mismatch` | "Key mismatch: don't trust this machine until you pair it again." with `Unpair` |
@@ -625,7 +664,7 @@ The daemon opens a session only when one of these asks for it, and closes it whe
 - **A remote machine's view** is the Projects screen of that machine, read-only: no editor, no domain or profile editing, no terminal. A banner says "You're viewing B. Its .localify URLs open only on B." Each service row shows its owner ("In the app", "In the background", "In a terminal", "Unknown process"), and four chips: Process, Port, Output, Public URL. The Start, Stop and Restart buttons follow `controls`; a disabled one says why in its tooltip. A control in flight shows its progress, and `unknown` shows "Outcome unknown. Checking B…".
 - **URLs:** a remote `.localify` URL is shown as "web.louez.localify · on B", with a copy button and never an open button. When the service has a public URL that serves, `Open public URL` opens it.
 - **Output** opens in the bottom panel as a tab "Output · web · B", with search, Follow / Pause and selectable text (see "Output").
-- **Settings → Remote access,** on every machine: the three switches with one line each ("Share projects and output with paired machines", "Allow paired machines to start, stop and restart services", "Allow starts when the app is closed"), a note that output can contain secrets the services print, this machine's fingerprint, and the paired machines with `Unpair` and `Remove from account`.
+- **Settings → Remote access,** on every machine: the three switches with one line each ("Share projects and output with paired machines", "Allow paired machines to start, stop and restart services", "Allow background starts when the app is closed"), a note that output can contain secrets the services print and what is typed into service tabs, this machine's fingerprint, and the paired machines with `Unpair` and `Remove from account`.
 - **Pairing dialogs,** with the wording of "Pairing".
 
 All of it goes through `DesktopApi` and the management socket. The UI does no network.
@@ -649,6 +688,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - **Resolving `--machine`:** an exact machine id; otherwise an exact name, ignoring case, among the active machines of the roster. Active names are unique, since a same-name sign-in replaces the older machine; a name that still matches two, differing only in case, is an error that lists both with their ids. A name of no active machine lists the roster. This machine's own id or name acts locally, as without `--machine`.
 - **Resolving a service:** there is no folder to read on another machine, so a service name must be unique on the target, or come with `--project`, and `--env` names a non-primary checkout. An ambiguous name lists the matches.
 - **What `--machine` refuses:** with `dev`, every option but `--project`, `--env` and `--profile`: no command after `--`, no `--detach`, `--in-app`, `--env-file`, `--confirm-profile` or `--domain`. The target decides where the service runs.
+- **Launch flags:** `--launch-id`, `--launch-expires`, `--remote-launch` and `--expect-rev` are hidden flags for dispatchers, documented here and not in `--help`.
 - **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; `unknown` prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2.
 - `pair` and `remove` need a terminal: an agent cannot pair or remove machines.
 
@@ -666,27 +706,35 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 | Situation | What happens |
 |---|---|
 | The relay restarts (deploy) | sockets close with `1012`; daemons come back over 10 seconds; sessions are new; a control without an answer is `unknown` on the viewer |
-| Cloud unreachable | the relay connection backs off; sessions end once the lease passes; controls are refused at once (`unauthorized`); local work goes on |
-| The target sleeps or loses the network | its socket stops answering; the relay closes it after the platform's timeout, the viewer after 75 s without a frame; the switcher shows "Offline" |
+| Cloud unreachable | the relay connection backs off; sessions end once the lease runs out; controls are refused at once (`unauthorized`); local work goes on |
+| D1 fails during the relay's check | the frame is dropped with `unavailable`; the sender retries after 5 s |
+| This machine wakes from sleep | its leases expire at once; sessions end until a renewal succeeds; the relay connection is retried right away |
+| The target sleeps or loses the network | the viewer shows `not_responding` within 15 s of a `keep`, then `offline` once the relay drops its socket |
+| The target's daemon hangs while its socket stays up | `not_responding`; the session ends after 60 s |
 | Versions do not overlap | "Update needed" before any session |
-| The app quits while dispatching a start | `unknown` after a 10-second reconcile; never a background start in its place |
-| The app quits while its service runs | the run usually dies with the shell; if it lives, stop works and restart is refused `owner_gone` |
+| A handshake never completes | both sides drop it after 30 s |
+| The app quits while dispatching a start | the target waits for the launch's expiry, then answers from the records: started, refused, or not started; never a background start in its place |
+| A launch reaches `localify dev` after its expiry | it refuses and writes a launch record with `expired` |
+| The profile or the config changes between the check and the launch | the executor refuses with `conflict`; the snapshot follows |
+| Two launches of one service race | the run lock lets one executor run; the other refuses |
+| The app quits while its service runs | closing the run PTY hangs up the run, which usually ends it; if it lives on, stop works and restart is refused `owner_gone` |
 | The viewer drops during a control | the target finishes it; the viewer shows `unknown`, then the next snapshot |
-| The same request arrives twice | the recorded answer is sent again; a restart repeated under a new id fails `expect.runId` |
-| Someone starts the service locally meanwhile | `conflict`, or `busy` while the other launch holds the lock |
-| The config changes during a control | `conflict` on `configRev`; the snapshot follows |
+| The same request arrives twice | the recorded answer is sent again within the session; a restart repeated in a new session fails `expect.runId` |
+| A restart of a background run without `backgroundStarts` | refused before anything stops |
 | A background start fails to find a tool | `failed` with the last lines; the person fixes the login shell |
+| A login shell that prompts or hangs | killed once the launch has expired; `failed` |
 | Output rotates while following | `rotated` with the new first offset |
 | The service restarts while following | `gone`; the viewer follows the new run from 0 |
 | A huge config | inventory pages, `truncated` past 32 |
+| Snapshots and follows at once | the send queue paces them under the relay's budget |
 | A peer floods | `rate_limited`, then `4429`; the target's own bounds on watches, follows and handshakes |
 | The plan lapses | `4402`; "Remote access needs Localify Cloud Pro"; nothing local stops |
 | A machine is removed from the account | `4401` on it, `revoked` to the others, which delete its pin |
 | A same-name new sign-in | a new id, not paired; the old one is revoked and its pin dropped |
 | The identity file is lost | "remote key is missing", until a new sign-in |
 | The roster shows a key other than the pin | `key_mismatch`; no session |
-| Clocks differ | controls use the target's clock from `hello`; nothing else depends on clocks |
-| Every daemon reconnects at once | jitter spreads them; `REMOTE_CONNECT_LIMITER` and `Retry-After` bound the Worker's load |
+| Clocks differ | controls use the target's clock from `hello`; leases use monotonic lifetimes; nothing else depends on clocks |
+| Every daemon reconnects at once | jitter spreads them; the pre-auth guard and the limiters shed what still piles up, approximately and per location |
 
 ## Security considerations
 
@@ -694,38 +742,65 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - **A stolen token** lets its holder connect as that machine and see presence and sizes, but not open a session: it lacks the private key. Removing the machine ends the token.
 - **A paired machine is trusted with what its peer shares.** Each target decides with its own switches, off by default, and checks them itself on every request. The cloud's view of permissions is never consulted for that.
 - **The management socket and the app bridge** are Unix sockets only their owner can open, so a local process can use them only as the user, who could already read the key.
+- **Output provenance** comes from the channel: a run PTY holds only `localify dev` and its service, so no shell's bytes can reach a stream, and shell tabs are never exported. What a person types into a running service tab is echoed into its output; the tab says so.
 - **Output can hold secrets** that a service prints. Settings says so next to `share`. Output is never written to the daemon log, analytics or error reports, on either machine.
 - **Untrusted text.** Output and names come from another machine. The viewer shows plain text with control characters and bidirectional overrides removed, never HTML or raw escape sequences.
-- **No remote code.** A control names ids. It cannot carry a command, a path, a variable or a new project, and a dangerous profile is refused. The worst a paired machine with `control` can do is start, stop and restart configured services on permitted profiles.
-- **Replay and delay.** Noise nonces stop replays within a session, fresh ephemeral keys across sessions, `expiresAt` a delayed control, and `expect.runId` a repeated one.
+- **No remote code.** A control names ids. It cannot carry a command, a path, a variable or a new project, and a dangerous profile is refused, by the target and again by the executor under `--remote-launch`. The worst a paired machine with `control` can do is start, stop and restart configured services on permitted profiles.
+- **Replay and delay.** Noise nonces stop replays within a session, fresh ephemeral keys across sessions, `expiresAt` a delayed control, the launch expiry a late launch, and `expect.runId` a repeated one.
 - **The pairing code** resists a relay in the middle through the commitment, at 10⁻⁶ per attempt, with attempts bounded by the target and by a person's click.
 - **Metadata** stays visible to the relay: who talks to whom, when, and how much. The relay logs errors only, without payloads.
 - **Denial of service** by a peer is bounded by the relay's limits and the target's own bounds.
 
 ## PR plan
 
-1. **Local foundations.** Run ids in run records; the per-run output stream with segments, written by background runs through pipes and by the app between run markers; `localify logs` and `service_logs` on it; removing the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT`; bounded reads by `{runId, offset}`; the inventory projection with its four states; the per-service lock in every launch path; the app bridge, used by `dev --in-app`; ownership-aware start, stop and restart as a local use case that the controls will call.
-2. **Trust and relay.** Keys, pins and settings files; Noise sessions and pairing with `snow`; the `RemoteRelay` object and routes; migration 0005; `remoteAccess` in the entitlement, `/v1/me` and `cloud:admin`; leases and revocation pushes; reconnects; the management socket commands for status, roster and pairing; `localify machines`, `pair`, `unpair`, `remove` and `settings`; the cost measurement.
-3. **Desktop viewing,** the first useful release: the switcher, the pairing dialogs, Settings → Remote access, the remote Projects view, Output.
-4. **Remote controls:** the control executor on the target, its state machine and reconcile; the buttons and their states in the app.
+Each PR ships only once its gate passes in CI, on top of its own unit tests.
+
+1. **Local foundations.** Run identity (run ids, `--launch-id`); the run PTY in the app: launch, the exit view with `Restart` and `Open a terminal here`, stop and restart by process group; the per-run stream from run PTYs and background pipes, with bounded reads by `{runId, offset}`; `localify logs` and `service_logs` on it; removing the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT`; the inventory projection with its four states. Gate: capture isolation.
+2. **Trust and relay.** Keys, pins and settings files; Noise sessions, heartbeats and pairing with `snow`; the `RemoteRelay` object and routes, with the pre-auth guard and lazy checks; send pacing; migration 0005; `remoteAccess` in the entitlement, `/v1/me` and `cloud:admin`; leases and revocation pushes; reconnects; the management socket commands for status, roster and pairing; `localify machines`, `pair`, `unpair`, `remove` and `settings`; the cost measurement. Gate: pairing, replay, identity, leases, hibernation, reconnect storm.
+3. **Desktop viewing,** the first useful release: the switcher, the pairing dialogs, Settings → Remote access, the remote Projects view, Output. Gate: revocation end to end.
+4. **Remote controls.** The run lock in the executor, atomic registration, launch fencing (`--launch-expires`, `--expect-rev`, `--remote-launch`) and launch records; the app bridge, with `dev --in-app` on it; ownership-aware start, stop and restart; the control executor on the target, its state machine and reconcile; detached starts; the buttons and their states in the app. Gate: control races.
 5. **CLI and MCP:** `--machine` on status, logs, dev, stop and restart; `list_machines` and the `machine` argument.
 
-### Acceptance tests
+### Gates
 
-Controls do not ship (PR 4) until each of these passes in CI, against a real daemon and a relay running in `wrangler dev` or its test harness:
+Against a real daemon, a real app process where it says so, and the relay in `wrangler dev` or its test harness.
 
-- **Shell input is never exported.** An app tab runs a service that prints known lines and exits; the test then types `echo secret-after-exit` into the same shell. The stream holds the service's lines and not `secret-after-exit`. Variants: the service killed with `SIGKILL` before its end marker; a service that prints a fake end marker, then a fake start marker for another run id.
-- **A desktop disconnect cannot double-start.** A start is dispatched to an app that is killed before acknowledging, and once after acknowledging. In both, at most one run exists afterwards, no background run was started, and the viewer got `done` or `unknown`.
-- **A reconnect cannot repeat a restart.** The viewer's socket is cut right after it sends a restart, and the test sends the same control again on a new session, with the same and with a new request id. The service restarted once, and both second attempts get `conflict`: a request id is only remembered within its session.
-- **Revocation cuts an open output stream.** With a follow open: `revokeAccount`, `revokeMachine`, and a D1 change with no push (an expired override) each end it, the first two within 2 seconds, the last within 75 seconds.
-- **External starts and config changes converge.** While a viewer watches, the service is started from a terminal, stopped with `localify stop`, and its config edited. Within 12 seconds, the viewer's snapshot shows each state, and a control built on the old one gets `conflict`.
-- **A reconnect storm stays bounded.** 200 simulated daemons across 20 accounts are disconnected at once with `1012`. Upgrades reach the Worker spread over at least 10 seconds, no machine exceeds the rate limit, every daemon is connected again within 60 seconds, and no control is replayed.
+**PR 1, capture isolation:**
+
+- A service in a run PTY prints known lines and exits; the test opens `Open a terminal here` and types `echo secret-after-exit` there. The run's stream holds the service's lines only, and no shell tab's bytes are in any stream or in `localify logs`.
+- A suspended and resumed service with a delayed reader: the app's reader is held back by a test hook while the service receives `SIGTSTP`, a shell tab runs commands, and the service receives `SIGCONT` and prints more. Once the reader catches up, the stream holds exactly the run PTY's bytes and none of the shell's.
+- `localify dev` killed with `SIGKILL`: the stream ends with the PTY, and nothing is appended after.
+- Keystrokes typed into a running service tab appear in its stream, as documented.
+- Stop on a service that ignores `SIGINT` and has a child in its own process group: the whole tree ends, and no byte is written into the PTY.
+- A read of a 1 GiB stream, and of a 1 GiB line, never holds more than `maxBytes` plus a constant.
+
+**PR 2, trust and relay:**
+
+- Pairing: a nonce sent before the commit, a duplicated commit, a reveal that does not match the commit, a handshake hash altered by a test relay that substitutes a key, a cancel on either side, and a 2-minute timeout each pin nothing. A test relay running two handshakes cannot make both codes match except by chance.
+- Replay: a recorded session's frames replayed into a new session fail; a duplicated or reordered transport message ends the session; a forced nonce reuse is rejected.
+- Identity substitution: a relay that rewrites `from`, a roster key that differs from the pin, a purpose rewritten in the envelope, and a same-name sign-in all fail to open a session.
+- Handshakes: an incomplete one is dropped after 30 s; more than 4 at once get `busy`.
+- Leases: a lease not renewed ends its sessions; a refused renewal ends them at once; after a simulated wake, sessions end until renewal succeeds; a wall clock moved by hours changes nothing else.
+- Heartbeat: a target that stops answering while its socket stays up is `not_responding` within 15 s of a `keep`.
+- Hibernation: with the object hibernated between frames, it routes correctly, re-checks authorization on both ends, fails closed on a simulated D1 error, and uses no storage or alarm.
+- Reconnect storm: 200 simulated daemons across 20 accounts are disconnected at once with `1012`. Upgrades reach the Worker spread over at least 10 seconds, malformed tokens never reach D1, every daemon is connected again within 60 seconds, and no control is replayed.
+
+**PR 3, revocation end to end:** with the desktop app following a remote service's output, `revokeAccount` and `revokeMachine` end the stream within 2 seconds, and a D1 change with no push (an expired override) within 75 seconds, on screen.
+
+**PR 4, control races:**
+
+- A desktop disconnect cannot double-start: a start is dispatched to an app killed before it spawns the run PTY, and once after. In both, at most one run exists afterwards, no background run was started, and the answer comes after the launch's expiry.
+- A reconnect cannot repeat a restart: the viewer's socket is cut right after it sends a restart, and the test sends the same control again on a new session, with the same and with a new request id. The service restarted once, and both second attempts get `conflict`: a request id is only remembered within its session.
+- A late launch is fenced: a launch delivered to `localify dev` after its expiry refuses and starts nothing.
+- A profile changed between the target's check and execution, to dangerous or to other sources, is refused by the executor.
+- Two dispatchers (the app button and a remote control) launching one service at once leave one run.
+- A restart of a background run with `backgroundStarts` off is refused, and the run keeps running.
+- External starts and config changes converge: while a viewer watches, the service is started from a terminal, stopped with `localify stop`, and its config edited. Within 12 seconds, the viewer's snapshot shows each state, and a control built on the old one gets `conflict`.
 
 ## Open questions
 
-- **Bans reaching open sessions.** `cloud:admin` writes D1 only, so a ban reaches open sessions through the lease, within about a minute, not at once. An authenticated admin route that calls `revokeAccount` would make it immediate, against the choice of having no admin route on the Worker.
+- **Bans reaching open sessions.** `cloud:admin` writes D1 only, so a ban reaches open sessions through the lazy checks and the lease, within about a minute, not at once. An authenticated admin route that calls `revokeAccount` would make it immediate, against the choice of having no admin route on the Worker.
 - **Login shell flags.** `$SHELL -l -c` misses what `.zshrc` sets, such as `nvm` set up for interactive shells only, and `-i` can print or prompt. Which one background starts use is decided with measurements on common setups in PR 4.
-- **The billable time after a wake,** and so the cost of a slow output stream; measured in PR 2.
+- **The active time a frame costs,** and so the cost of a typical session; measured in PR 2.
 - **Sharing by project** rather than by machine: v1 shares a machine's whole inventory or nothing.
-- **Echoed input.** Keystrokes typed into an app tab while its service runs are in the stream. Nothing reliable tells them apart from output.
 - **A browser or phone viewer** would need its own keys and pairing, which v1 does not cover.
