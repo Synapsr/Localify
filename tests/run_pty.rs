@@ -753,6 +753,12 @@ fn the_daemon_finishes_a_run_pty_whose_app_and_executor_both_died() {
     assert!(process::send_signal(executor, Signal::Kill));
     app.kill();
     assert!(!output::reader_alive(&dir).unwrap());
+    // A SIGKILL takes effect asynchronously: the pass skips an executor still
+    // exiting, as the daemon would until its next pass.
+    wait_until(Duration::from_secs(10), || {
+        process::process_info(executor).is_none().then_some(())
+    })
+    .expect("the executor outlived SIGKILL");
     assert!(
         !session_alive(executor).is_empty(),
         "the children died with their terminal"
