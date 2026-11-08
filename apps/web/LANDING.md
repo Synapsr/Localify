@@ -108,6 +108,7 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 ### Facts copy can use
 
 - **License**: everything that runs on the user's machines is free and open source under AGPL-3.0-only. No account, and no limit on projects, domains, or worktrees. Public URLs are the only paid part (4.9).
+- **Localify Cloud**: public URLs (`https://<slug>.localify.fyi`, served from the user's machine) are the one paid part. Pro costs $7.99 a month or $79 a year, after a 7-day free trial that asks for a card and charges nothing before it ends, one trial per GitHub account. It includes 2 machines serving at the same time and 10 public URLs, a password on every URL by default, and wildcard URLs. Add-ons (+1 serving machine $3 a month, +10 URLs $2 a month) come after launch, and Team is "coming later" with a mailto. Polar (polar.sh) is the merchant of record. Sign-up opens later, so copy must stay true before and after: never say invite-only, never say anyone can buy today. Say "Start a 7-day trial from the app or with `localify subscribe`". The [pricing page](app/pricing/page.tsx), the Terms and the Privacy Policy carry the details.
 - **Platforms**: the desktop app runs on macOS on Apple Silicon for now. The CLI and daemon install on macOS on Apple Silicon and Linux x86_64 with `curl -fsSL https://localify.dev/install.sh | sh` (`public/install.sh`, which downloads the GitHub release and checks its SHA-256), and build from source elsewhere. Windows and a Linux desktop app are planned for later, with no date to promise.
 - **For agents**: `public/llms.txt` sums up install, first steps, MCP and public URLs. Keep it in step with this file and `docs/README.md`.
 - **Architecture**: Rust daemon plus Tauri desktop UI.
@@ -139,6 +140,10 @@ Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
 | Pricing | `app/_sections/pricing.tsx` | Free, Localify Cloud Pro with its add-ons, and Team (4.9). The Pro action asks for an invite by email while sign-in is invite-only; Team asks to be contacted |
 | FAQ | `app/_sections/faq.tsx` | |
 | Final CTA | `app/_sections/final-cta.tsx` | Install prompt, download and source actions, requirements |
+
+The pricing page, [`app/pricing/page.tsx`](app/pricing/page.tsx), is a separate route: Free, Pro with a monthly/yearly toggle (`app/_components/pro-plan-card.tsx`), Team, the add-ons line, and its own FAQ. The prices are constants at the top of that file.
+
+Polar sends people back to two `noindex` pages, named in [`docs/public-urls.md`](../../docs/public-urls.md) ("Billing"): `app/cloud/subscribed/page.tsx` after checkout, which never says the plan is active (it starts when Localify Cloud sees the subscription), and `app/cloud/page.tsx` from the customer portal, with an overview and how to manage billing. Neither is in the navigation or the sitemap.
 
 ## 9. Visuals
 
