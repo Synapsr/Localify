@@ -2,27 +2,27 @@ import { getTranslations } from "next-intl/server";
 import Image from "next/image";
 
 import { FadeIn, SectionHeading, sectionClass } from "@/app/site-ui";
-import { CommandIcon, ExternalLinkIcon, HomeIcon } from "@/components/icons";
+import { FileTextSolidIcon, HexagonSolidIcon, LockIcon } from "@/components/icons";
 
-const cardKeys = ["urls", "ui", "agents"] as const;
+const cardKeys = ["https", "profiles", "stack"] as const;
 
 const cardIcons = {
-  urls: ExternalLinkIcon,
-  ui: HomeIcon,
-  agents: CommandIcon,
+  https: LockIcon,
+  profiles: FileTextSolidIcon,
+  stack: HexagonSolidIcon,
 } as const;
 
 const cardImages = {
-  urls: "/sky/urls.jpg",
-  ui: "/sky/ui.jpg",
-  agents: "/sky/agents.jpg",
+  https: "/sky/ui.jpg",
+  profiles: "/sky/agents.jpg",
+  stack: "/sky/urls.jpg",
 } as const;
 
-export const Problem = async () => {
-  const t = await getTranslations("Problem");
+export const Features = async () => {
+  const t = await getTranslations("Features");
 
   return (
-    <section className={sectionClass} id="problem">
+    <section className={sectionClass} id="features">
       <SectionHeading
         align="center"
         title={

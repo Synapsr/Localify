@@ -1,20 +1,24 @@
 {
   "Metadata": {
-    "title": "Localify - 面向开发者的本地域名和可信 HTTPS",
-    "description": "Localify 是一款免费开源应用，为本地项目提供稳定的 .localify 域名、可信 HTTPS、DNS 路由和原生 macOS 应用，无需 mkcert，无需编辑 /etc/hosts，也无需设置隧道。"
+    "title": "Localify - 为每个智能体、worktree 和机器提供干净的 URL",
+    "description": "Localify 为每个项目、Git worktree 和机器提供稳定的 HTTPS URL。编程智能体通过 MCP 完成配置，你在桌面应用里看清它们运行的一切。免费开源。"
   },
   "Navigation": {
+    "useCases": "使用场景",
     "howItWorks": "工作方式",
+    "pricing": "价格",
     "faq": "FAQ",
     "source": "源代码",
     "cta": "下载"
   },
   "Hero": {
-    "titleLine1": "你的项目，",
-    "titleLine2": "不止于 :3000",
-    "description": "给项目起个名字，别再为端口纠结。.localify URL、本地 DNS、浏览器信任的 HTTPS。",
+    "eyebrow": "智能体优先，由你把关",
+    "titleLine1": "智能体负责运行，",
+    "titleLine2": "你只管打开 URL。",
+    "description": "每个项目、worktree 和机器都有一个干净的 HTTPS URL。编程智能体通过 MCP 搞定全部配置。你在一个应用里观察和掌控。",
     "download": "下载 macOS 版",
     "source": "查看源代码",
+    "terminal": "或安装命令行工具",
     "availability": "免费开源，采用 AGPL 许可。桌面应用支持 macOS。"
   },
   "DemoDialog": {
@@ -23,54 +27,141 @@
     "later": "以后再说",
     "download": "立即下载"
   },
-  "Agents": {
-    "title": "让智能体搞定一切。",
-    "description": "把 Claude Code、Codex 或 Cursor 连接到 Localify。智能体会配置项目、运行服务，完成后还会清理自己的 worktree。你只需要和它说话。"
+  "AgentStrip": {
+    "label": "通过 MCP 与你的智能体协作",
+    "more": "以及任何 MCP 客户端"
   },
-  "Problem": {
-    "titleLine1": "真正改变的",
-    "titleLine2": "是这些。",
+  "UseCases": {
+    "titleLine1": "智能体干活，",
+    "titleLine2": "你尽收眼底。",
+    "description": "为如今与智能体一起写代码的方式而生：同时用好几个，而且不止一台电脑。",
+    "items": {
+      "agent": {
+        "title": "智能体帮你配好。",
+        "body": "只需连接一次 Claude Code、Codex 或 Cursor。应用的每个操作都是一个 MCP 工具，所以智能体会创建项目、挑选空闲端口、修改 Next.js 或 Vite 配置，并在各自的 URL 上启动每个服务。你只需开口。"
+      },
+      "worktrees": {
+        "title": "一个 worktree，一个 URL。",
+        "body": "每个 Git worktree 都会成为一个环境，有自己的域名和端口，与主检出目录并存。五个智能体在五个分支上，得到五个永不冲突的 URL。智能体完成后，会删除 worktree 及其域名。"
+      },
+      "app": {
+        "title": "在应用里一目了然。",
+        "body": "智能体启动的一切都在 Localify 应用的终端里运行，清清楚楚。项目、worktree、日志和请求都在一个窗口里：打开 URL、查看输出、重启或停止服务。"
+      },
+      "machines": {
+        "title": "你的每台机器都行。",
+        "body": "让智能体在台式机或闲置的 Mac 上工作，你在笔记本或手机上测试。每个项目一个公开 URL，即可访问其下所有服务和 worktree，默认受密码保护。"
+      }
+    },
+    "agentDemo": {
+      "prompt": "在 fix-auth worktree 里启动 web 应用，然后把链接发给我。",
+      "reply": "好了，已运行在"
+    },
+    "worktreeDemo": {
+      "title": "环境",
+      "primary": "main",
+      "running": "运行中",
+      "stopped": "已停止",
+      "removed": "合并后删除"
+    },
+    "appDemo": {
+      "terminal": "终端",
+      "checkouts": "检出目录"
+    },
+    "machinesDemo": {
+      "studio": "Mac Studio",
+      "studioRole": "智能体在这里工作",
+      "laptop": "MacBook",
+      "laptopRole": "你在这里审查",
+      "phone": "iPhone",
+      "phoneRole": "你在这里测试",
+      "password": "密码保护"
+    }
+  },
+  "Features": {
+    "titleLine1": "不只是",
+    "titleLine2": "URL。",
     "cards": {
-      "urls": {
-        "title": "有意义的 URL。",
-        "body": "studio.localify、admin.localify、docs.localify。不用再在 :3000、:3001、:5173 之间纠结。"
+      "https": {
+        "title": "可信 HTTPS，无需配置。",
+        "body": "安装时输入一次密码，即可配置本地 DNS、证书颁发机构和 Node.js 信任。无需编辑 /etc/hosts，无需 mkcert，无需 NODE_EXTRA_CA_CERTS。"
       },
-      "ui": {
-        "title": "一个应用，不是 CLI。",
-        "body": "你的项目、URL、日志 — 全在一个地方。没有配置文件需要修改。"
+      "profiles": {
+        "title": "密钥留在原处。",
+        "body": "localify.toml 声明服务的变量从哪里来：.env 文件、Infisical 或 Proton Pass。来自 Infisical 和 Proton Pass 的值，在智能体读取的输出中会被遮盖。"
       },
-      "agents": {
-        "title": "多个代理，零冲突。",
-        "body": "Cursor、Claude Code 和你自己的 dev server 并排运行。每个项目都保持自己稳定的 URL。"
+      "stack": {
+        "title": "任意技术栈，包括 Docker。",
+        "body": "Localify 按 hostname 路由，所以任何监听端口的服务都能用。Next.js 和 Vite 的配置会自动修改，Docker 和 Compose 服务会被自动发现。"
       }
     }
   },
   "HowItWorks": {
-    "titleLine1": "它是如何运作的，",
-    "titleLine2": "具体来说。",
-    "description": "安装时一次授权。一个文件夹或一次 localify init-project。每个应用一个 HTTPS 域名。就这么简单。",
+    "titleLine1": "三步走，",
+    "titleLine2": "之后只管开口。",
     "steps": [
       {
-        "title": "一次密码，零设置。",
-        "body": "首次启动时，Localify 会询问一次管理员密码。之后它会自行配置证书颁发机构、DNS 和守护进程。首次在浏览器中需要 HTTPS 时，macOS 会请你确认一次证书。"
+        "title": "下载应用。",
+        "body": "首次启动时，它只会询问一次管理员密码，然后配置 HTTPS、DNS 和后台服务。此后 Localify 不再以 root 身份运行任何东西。"
       },
       {
-        "title": "选择文件夹，Localify 自动补全。",
-        "body": "Localify 扫描文件夹，识别其中的应用，并为每个应用建议一个 hostname。你检查并确认即可。"
+        "title": "连接你的智能体。",
+        "body": "在 Settings → AI agents 中，或运行 localify agent install，即可把 MCP 服务器注册到 Claude Code、Codex 和 Cursor。"
       },
       {
-        "title": "localify init-project，直接从你的编辑器运行。",
-        "body": "已经在编辑器里？从终端运行 localify init-project。同样的自动补全流程，同样的确认。项目会出现在应用中。"
-      },
-      {
-        "title": "按名称管理项目，而不是按端口。",
-        "body": "每个项目都有带可信 HTTPS 的 .localify hostnames。标签页清晰可读，演示更像真实产品，端口变化不再破坏环境。"
-      },
-      {
-        "title": "启动、监控，无需打开编辑器。",
-        "body": "Localify 同时是你的本地 dashboard：一键启动任何项目，一眼看清谁在运行。完美适合 vibecoding，无需打开 IDE。"
+        "title": "要一个 URL。",
+        "body": "“在这个 worktree 里运行应用。”智能体会在应用中启动它，并把 URL 交给你。"
       }
-    ]
+    ],
+    "diagram": {
+      "you": "你",
+      "youDetail": "桌面应用",
+      "agents": "你的智能体",
+      "agentsDetail": "MCP 服务器",
+      "machine": "每台 Mac 上的 Localify",
+      "machineDetail": "DNS · HTTPS · 路由",
+      "servers": "开发服务器",
+      "serversDetail": "每个 worktree 一个 URL",
+      "devices": "你的其他设备",
+      "devicesDetail": "笔记本、手机",
+      "cloud": "Localify Cloud",
+      "cloudDetail": "密码 · 隧道"
+    }
+  },
+  "Pricing": {
+    "titleLine1": "本机免费，",
+    "titleLine2": "跨机用 Pro。",
+    "description": "在你电脑上运行的一切都免费开源。Localify Cloud Pro 增加公开 URL，让你随时随地访问它们。",
+    "free": {
+      "name": "Localify",
+      "price": "$0",
+      "period": "永久",
+      "tagline": "本机上的一切。",
+      "features": [
+        "项目、域名和 worktree 不限数量",
+        "可信的本地 HTTPS",
+        "桌面应用、CLI 和 MCP 服务器",
+        "服务终端和请求日志",
+        "采用 AGPL 许可开源"
+      ],
+      "cta": "下载 macOS 版"
+    },
+    "pro": {
+      "name": "Localify Cloud Pro",
+      "price": "$7.99",
+      "period": "/ 月",
+      "yearly": "或 $79 / 年",
+      "tagline": "随时随地访问你的机器。",
+      "features": [
+        "localify.fyi 上的 10 个公开 URL",
+        "一个 URL 覆盖项目的所有服务和 worktree",
+        "最多由 2 台机器提供服务",
+        "默认密码保护，外加自动登录链接",
+        "7 天免费试用"
+      ],
+      "cta": "申请邀请",
+      "note": "目前仅限邀请。使用 GitHub 登录。"
+    }
   },
   "Faq": {
     "titleLine1": "常见问题，",
@@ -80,27 +171,31 @@
     "items": [
       {
         "question": "Localify 是什么？",
-        "answer": "Localify 为每个本地项目提供带可信 HTTPS 的稳定 .localify URL。不用再在 localhost:3000、localhost:5173 和 localhost:8080 之间来回切换，直接在浏览器中打开 app.localify 或 admin.localify。"
+        "answer": "Localify 为每个本地项目、Git worktree 和机器提供带可信 HTTPS 的稳定 URL，比如用 https://web.journal.localify 代替 localhost:3000。编程智能体通过 MCP 驱动它，你在桌面应用里查看它们运行的内容。"
       },
       {
         "question": "它免费吗？",
-        "answer": "免费。Localify 是采用 AGPL 许可的免费开源软件，无需账户，项目和域名数量不受限制。公开 URL 也免费，但需要受邀账户，目前每人最多 10 个。源代码在 GitHub 上。"
+        "answer": "在你机器上运行的一切都免费开源，采用 AGPL 许可，无需账户，项目、域名和 worktree 数量不受限制。要从其他设备访问你的机器，公开 URL 需要 Localify Cloud Pro：7 天免费试用后，每月 $7.99 或每年 $79。Localify Cloud 目前仅限邀请。"
       },
       {
-        "question": "它适合谁？",
-        "answer": "适合在本地运行多个应用、在不同技术栈间切换，或者让 AI agent 并行工作的开发者 — 而不必管理端口冲突。"
+        "question": "它支持哪些智能体？",
+        "answer": "Claude Code、Codex 和 Cursor，通过 Localify 内置的 MCP 服务器。在 Settings → AI agents 中或用 localify agent install 连接它们。有两件事始终由你来做：登录 Localify Cloud，以及把公开 URL 开放给所有人。"
+      },
+      {
+        "question": "每个 worktree 如何拥有自己的 URL？",
+        "answer": "当智能体在 Git worktree 中启动服务时，Localify 会把该 worktree 作为一个环境挂到项目上，拥有自己的端口和域名，例如 web--fix-auth.journal.localify。主检出目录保留原有的 URL。工作完成后，智能体会删除该环境、它的域名以及 worktree 文件夹。"
+      },
+      {
+        "question": "能打开另一台电脑上运行的东西吗？",
+        "answer": "可以，用公开 URL。为项目创建一个，其下的每个服务和 worktree 都能在笔记本或手机上通过 https://<slug>--<label>.localify.fyi 打开，受密码保护。用 localify public-url claim 可以把 URL 转到你的另一台机器上。"
       },
       {
         "question": "它会把我的工作放到网上吗？",
-        "answer": "只有你主动开启时才会。你的本地服务仍在你的机器上，应用流量和请求日志都不会发送给 Localify。例外是公开 URL：这是一个仅限受邀用户的选项，你一次为一个域名开启。对该 URL 的请求经由 Cloudflare 到达你的机器，默认受密码保护。"
+        "answer": "只有你要求时才会。本地服务留在你的机器上，应用流量和请求日志都不会发送给 Localify。公开 URL 是例外，需要你自己开启：对它的请求经由 Cloudflare 到达你的机器，默认受密码保护。"
       },
       {
-        "question": "Localify 会收集 analytics 吗？",
-        "answer": "官方桌面应用会收集：产品流程（onboarding、导航、项目创建）、使用计数和错误报告。这些事件不包含请求日志、项目名称、域名、本地路径或流量内容。错误报告在发送前会经过过滤，移除 URL、文件路径、.localify 域名和引号中的名称，但不能保证捕获所有情况。CLI 和守护进程不发送分析数据。"
-      },
-      {
-        "question": "它支持哪些平台？",
-        "answer": "桌面应用目前运行在 Apple Silicon 的 macOS 上。CLI 和守护进程也可以在 Linux x86_64 上用 curl -fsSL https://localify.dev/install.sh | sh 安装，其他平台可从源代码构建。Windows 和 Linux 桌面应用计划在以后提供。"
+        "question": "它和 ngrok 或 Cloudflare Tunnel 有什么不同？",
+        "answer": "隧道把一个端口放到互联网上。Localify 从你的机器出发：每个项目和 worktree 都有一个命名的 HTTPS URL，由智能体配置，在一个应用里一览无余。需要从别处访问时，一个公开 URL 就能覆盖整个项目，包括所有 worktree。"
       },
       {
         "question": "需要编辑 /etc/hosts 或安装 mkcert 吗？",
@@ -111,17 +206,17 @@
         "answer": "支持。Localify 按 hostname 路由，所以任何监听本地端口的服务都能工作。Docker、Next.js、Vite、Rails、你自己写的服务器 — 不限技术栈。"
       },
       {
-        "question": "它和 ngrok 或 Cloudflare Tunnel 有什么不同？",
-        "answer": "ngrok 和 Cloudflare Tunnel 的设计目的是把服务放到互联网上。Localify 为本地开发而设计：在你的机器上提供干净的 URL 和可信 HTTPS，不依赖云服务。需要在手机或另一台电脑上打开 dev server 时，公开 URL 可以做到，默认受密码保护。公开 URL 目前仅限受邀用户使用。"
+        "question": "它支持哪些平台？",
+        "answer": "桌面应用目前运行在 Apple Silicon 的 macOS 上。CLI 和守护进程也可以在 Linux x86_64 上用 curl -fsSL https://localify.dev/install.sh | sh 安装，其他平台可从源代码构建。Windows 和 Linux 桌面应用计划在以后提供。"
       },
       {
-        "question": "可以和 Cursor、Claude Code 或多个 AI 代理同时使用吗？",
-        "answer": "是的——这其实是核心用例。在任何项目中运行 /localify，你的智能体就会配置好一切：每个应用一个域名、受信任的 HTTPS 以及 dev 脚本。之后多个智能体可以并行处理不同的应用，完全不会有端口冲突。"
+        "question": "Localify 会收集 analytics 吗？",
+        "answer": "官方桌面应用会收集：产品流程（onboarding、导航、项目创建）、使用计数和错误报告。这些事件不包含请求日志、项目名称、域名、本地路径或流量内容。错误报告在发送前会经过过滤，移除 URL、文件路径、.localify 域名和引号中的名称，但不能保证捕获所有情况。CLI 和守护进程不发送分析数据。"
       }
     ]
   },
   "FinalCta": {
-    "description": "别再和 localhost 较劲。Localify 是采用 AGPL 许可的免费开源软件。",
+    "description": "让智能体去跑 dev server。你按名字打开每一个。",
     "download": "下载 macOS 版",
     "source": "查看源代码",
     "terminal": "或在终端中安装（macOS 和 Linux）：",

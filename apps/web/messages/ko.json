@@ -1,20 +1,24 @@
 {
   "Metadata": {
-    "title": "Localify - 개발자를 위한 로컬 도메인과 신뢰되는 HTTPS",
-    "description": "Localify는 로컬 프로젝트에 안정적인 .localify 도메인, 신뢰되는 HTTPS, DNS 라우팅, 네이티브 macOS 앱을 제공하는 무료 오픈 소스 앱입니다. mkcert도, /etc/hosts 편집도, 터널 설정도 필요 없습니다."
+    "title": "Localify - 모든 에이전트, 워크트리, 머신을 위한 깔끔한 URL",
+    "description": "Localify는 모든 프로젝트, Git 워크트리, 머신에 안정적인 HTTPS URL을 제공합니다. 설정은 코딩 에이전트가 MCP로 처리하고, 에이전트가 실행하는 모든 것은 데스크톱 앱에서 확인할 수 있습니다. 무료 오픈 소스입니다."
   },
   "Navigation": {
+    "useCases": "사용 사례",
     "howItWorks": "작동 방식",
+    "pricing": "가격",
     "faq": "FAQ",
     "source": "소스 코드",
     "cta": "다운로드"
   },
   "Hero": {
-    "titleLine1": ":3000으로는",
-    "titleLine2": "부족합니다",
-    "description": "포트를 돌려쓰지 말고 프로젝트에 이름을 붙이세요. .localify URL, 로컬 DNS, 신뢰받는 HTTPS.",
+    "eyebrow": "에이전트 우선, 최종 판단은 사람이",
+    "titleLine1": "실행은 에이전트가.",
+    "titleLine2": "URL은 열기만 하세요.",
+    "description": "모든 프로젝트, 워크트리, 머신에 깔끔한 HTTPS URL을. 설정은 코딩 에이전트가 MCP로 전부 처리합니다. 앱 하나에서 지켜보며 방향만 잡으세요.",
     "download": "macOS용 다운로드",
     "source": "소스 코드 보기",
+    "terminal": "또는 명령줄 도구 설치",
     "availability": "AGPL 기반의 무료 오픈 소스입니다. 데스크톱 앱은 macOS용입니다."
   },
   "DemoDialog": {
@@ -23,54 +27,141 @@
     "later": "나중에",
     "download": "지금 다운로드"
   },
-  "Agents": {
-    "title": "에이전트에게 전부 맡기세요.",
-    "description": "Claude Code, Codex, Cursor를 Localify에 연결하세요. 에이전트가 프로젝트를 설정하고 서비스를 실행하며, 작업이 끝나면 워크트리도 정리합니다. 말만 하면 됩니다."
+  "AgentStrip": {
+    "label": "MCP로 내 에이전트와 함께 작동",
+    "more": "그 밖의 모든 MCP 클라이언트"
   },
-  "Problem": {
-    "titleLine1": "정말로 바뀌는",
-    "titleLine2": "것들.",
+  "UseCases": {
+    "titleLine1": "일은 에이전트가.",
+    "titleLine2": "모든 과정은 눈앞에.",
+    "description": "요즘 에이전트와 코딩하는 방식에 맞춰 만들었습니다. 여러 에이전트를 동시에, 여러 대의 컴퓨터에서.",
+    "items": {
+      "agent": {
+        "title": "설정은 에이전트가.",
+        "body": "Claude Code, Codex, Cursor를 한 번만 연결하세요. 앱의 모든 동작이 MCP 도구로 제공되므로, 에이전트가 프로젝트를 만들고, 빈 포트를 고르고, Next.js나 Vite 설정을 패치하고, 각 서비스를 해당 URL로 실행합니다. 요청만 하면 됩니다."
+      },
+      "worktrees": {
+        "title": "워크트리 하나, URL 하나.",
+        "body": "각 Git 워크트리는 메인 체크아웃 옆에서 고유한 도메인과 포트를 가진 환경이 됩니다. 다섯 브랜치에서 다섯 에이전트가 일해도 절대 겹치지 않는 URL 다섯 개가 생깁니다. 작업이 끝나면 에이전트가 워크트리와 그 도메인을 삭제합니다."
+      },
+      "app": {
+        "title": "앱에서 지켜보세요.",
+        "body": "에이전트가 시작한 것은 Localify 앱의 터미널에서 실행되어 그대로 보입니다. 프로젝트, 워크트리, 로그, 요청을 한 창에서. URL을 열고, 출력을 읽고, 서비스를 재시작하거나 중지하세요."
+      },
+      "machines": {
+        "title": "가진 모든 머신에서.",
+        "body": "데스크톱이나 남는 Mac에서 에이전트가 일하게 두고, 노트북이나 휴대폰으로 테스트하세요. 프로젝트마다 공개 URL 하나로 그 아래의 모든 서비스와 워크트리에 접속할 수 있으며, 기본적으로 비밀번호로 보호됩니다."
+      }
+    },
+    "agentDemo": {
+      "prompt": "fix-auth 워크트리에서 web 앱 실행하고 링크 보내 줘.",
+      "reply": "완료했습니다. 실행 중인 주소:"
+    },
+    "worktreeDemo": {
+      "title": "환경",
+      "primary": "main",
+      "running": "실행 중",
+      "stopped": "중지됨",
+      "removed": "병합 시 삭제"
+    },
+    "appDemo": {
+      "terminal": "터미널",
+      "checkouts": "체크아웃"
+    },
+    "machinesDemo": {
+      "studio": "Mac Studio",
+      "studioRole": "에이전트가 일하는 곳",
+      "laptop": "MacBook",
+      "laptopRole": "리뷰하는 곳",
+      "phone": "iPhone",
+      "phoneRole": "테스트하는 곳",
+      "password": "비밀번호 보호"
+    }
+  },
+  "Features": {
+    "titleLine1": "URL이",
+    "titleLine2": "전부가 아닙니다.",
     "cards": {
-      "urls": {
-        "title": "의미 있는 URL.",
-        "body": "studio.localify, admin.localify, docs.localify. :3000, :3001, :5173 사이를 오가는 일은 이제 끝."
+      "https": {
+        "title": "신뢰되는 HTTPS, 설정 없이.",
+        "body": "설치할 때 비밀번호 한 번이면 로컬 DNS, 인증 기관, Node.js 신뢰 설정이 끝납니다. /etc/hosts 편집도, mkcert도, NODE_EXTRA_CA_CERTS도 필요 없습니다."
       },
-      "ui": {
-        "title": "CLI가 아니라, 앱.",
-        "body": "프로젝트, URL, 로그 — 모두 한 곳에. 편집할 설정 파일은 없습니다."
+      "profiles": {
+        "title": "시크릿은 있던 자리에.",
+        "body": "서비스의 변수를 어디서 가져올지는 localify.toml에 적습니다. .env 파일, Infisical, Proton Pass 중 하나입니다. Infisical과 Proton Pass의 값은 에이전트가 읽는 출력에서 가려진 채로 유지됩니다."
       },
-      "agents": {
-        "title": "여러 에이전트, 충돌 제로.",
-        "body": "Cursor, Claude Code, 그리고 직접 띄우는 dev server가 나란히 돌아갑니다. 각 프로젝트는 안정된 URL을 유지합니다."
+      "stack": {
+        "title": "어떤 스택이든, Docker까지.",
+        "body": "Localify는 호스트명으로 라우팅하므로 포트에 listen하는 것은 무엇이든 작동합니다. Next.js와 Vite는 설정을 패치하고, Docker와 Compose 서비스는 자동으로 찾아냅니다."
       }
     }
   },
   "HowItWorks": {
-    "titleLine1": "어떻게 작동하는지,",
-    "titleLine2": "구체적으로.",
-    "description": "설치 시 권한 한 번. 폴더 하나 또는 localify init-project 한 번. 앱마다 HTTPS 도메인 하나. 그게 전부입니다.",
+    "titleLine1": "세 단계만 거치면,",
+    "titleLine2": "이제 요청만 하세요.",
     "steps": [
       {
-        "title": "비밀번호 한 번, 설정 제로.",
-        "body": "처음 실행할 때 Localify가 관리자 비밀번호를 한 번 묻습니다. 그다음 인증 기관, DNS, 데몬을 알아서 설정합니다. 브라우저에서 HTTPS가 처음 필요할 때 macOS가 인증서 확인을 한 번 요청합니다."
+        "title": "앱을 다운로드하세요.",
+        "body": "처음 실행할 때 관리자 비밀번호를 한 번 묻고, HTTPS, DNS, 백그라운드 서비스를 설정합니다. 그 후로 Localify는 root 권한으로 아무것도 실행하지 않습니다."
       },
       {
-        "title": "폴더를 선택하면 Localify가 자동완성합니다.",
-        "body": "Localify가 폴더를 스캔해 앱을 감지하고 각각에 호스트명을 제안합니다. 검토하고 확인하면 됩니다."
+        "title": "에이전트를 연결하세요.",
+        "body": "Settings → AI agents 또는 localify agent install로 MCP 서버를 Claude Code, Codex, Cursor에 등록합니다."
       },
       {
-        "title": "localify init-project, 에디터에서 바로.",
-        "body": "이미 에디터에 있나요? 터미널에서 localify init-project를 실행하세요. 같은 자동완성 흐름, 같은 확인 절차. 프로젝트가 앱에 나타납니다."
-      },
-      {
-        "title": "포트가 아니라 이름으로 부르는 프로젝트.",
-        "body": "각 프로젝트는 신뢰되는 HTTPS와 함께 .localify 호스트명을 갖습니다. 의미 있는 탭, 제품처럼 보이는 데모, 포트가 바뀌어도 깨지지 않는 환경."
-      },
-      {
-        "title": "실행하고 확인하기, 에디터 없이.",
-        "body": "Localify는 로컬 대시보드 역할을 합니다. 어떤 프로젝트든 클릭 한 번으로 시작하고, 한눈에 어떤 게 살아 있는지 확인하세요. IDE를 열지 않고 vibecoding하기에 딱입니다."
+        "title": "URL을 요청하세요.",
+        "body": "“이 워크트리에서 앱 실행해 줘.” 에이전트가 앱에서 실행하고 URL을 건네줍니다."
       }
-    ]
+    ],
+    "diagram": {
+      "you": "나",
+      "youDetail": "데스크톱 앱",
+      "agents": "내 에이전트",
+      "agentsDetail": "MCP 서버",
+      "machine": "각 Mac의 Localify",
+      "machineDetail": "DNS · HTTPS · 라우터",
+      "servers": "개발 서버",
+      "serversDetail": "워크트리마다 URL 하나",
+      "devices": "다른 기기",
+      "devicesDetail": "노트북, 휴대폰",
+      "cloud": "Localify Cloud",
+      "cloudDetail": "비밀번호 · 터널"
+    }
+  },
+  "Pricing": {
+    "titleLine1": "내 머신에서는 무료.",
+    "titleLine2": "머신을 넘나들 땐 Pro.",
+    "description": "내 컴퓨터에서 실행되는 모든 것은 무료 오픈 소스입니다. Localify Cloud Pro는 어디서든 접속할 수 있는 공개 URL을 더합니다.",
+    "free": {
+      "name": "Localify",
+      "price": "$0",
+      "period": "평생 무료",
+      "tagline": "내 머신의 모든 것.",
+      "features": [
+        "프로젝트, 도메인, 워크트리 무제한",
+        "신뢰되는 로컬 HTTPS",
+        "데스크톱 앱, CLI, MCP 서버",
+        "서비스 터미널과 요청 로그",
+        "AGPL 기반 오픈 소스"
+      ],
+      "cta": "macOS용 다운로드"
+    },
+    "pro": {
+      "name": "Localify Cloud Pro",
+      "price": "$7.99",
+      "period": "/ 월",
+      "yearly": "또는 연 $79",
+      "tagline": "어디서든 내 머신에 접속.",
+      "features": [
+        "localify.fyi 공개 URL 10개",
+        "URL 하나로 프로젝트의 모든 서비스와 워크트리에 접속",
+        "최대 2대의 머신에서 제공",
+        "기본 비밀번호 보호, 자동으로 로그인되는 링크",
+        "7일 무료 체험"
+      ],
+      "cta": "초대 요청하기",
+      "note": "현재는 초대 전용입니다. GitHub로 로그인합니다."
+    }
   },
   "Faq": {
     "titleLine1": "질문에,",
@@ -80,27 +171,31 @@
     "items": [
       {
         "question": "Localify는 무엇인가요?",
-        "answer": "Localify는 모든 로컬 프로젝트에 신뢰되는 HTTPS가 적용된 안정적인 .localify URL을 제공합니다. localhost:3000, localhost:5173, localhost:8080을 오가는 대신 app.localify 또는 admin.localify를 브라우저에서 바로 열 수 있습니다."
+        "answer": "Localify는 모든 로컬 프로젝트, Git 워크트리, 머신에 신뢰되는 HTTPS가 적용된 안정적인 URL을 제공합니다. localhost:3000 대신 https://web.journal.localify 같은 주소를 쓰는 식입니다. 코딩 에이전트가 MCP로 제어하고, 에이전트가 실행하는 것은 데스크톱 앱에서 확인할 수 있습니다."
       },
       {
         "question": "무료인가요?",
-        "answer": "네. Localify는 AGPL 기반의 무료 오픈 소스이며, 계정이 필요 없고 프로젝트나 도메인 수에 제한이 없습니다. 공개 URL도 무료이지만 초대받은 계정이 필요하며, 현재는 1인당 10개로 제한됩니다. 소스 코드는 GitHub에 있습니다."
+        "answer": "내 머신에서 실행되는 모든 것은 AGPL 기반의 무료 오픈 소스이며, 계정이 필요 없고 프로젝트, 도메인, 워크트리 수에도 제한이 없습니다. 다른 기기에서 내 머신에 접속하는 공개 URL에는 Localify Cloud Pro가 필요합니다. 7일 무료 체험 후 월 $7.99 또는 연 $79입니다. Localify Cloud는 현재 초대 전용입니다."
       },
       {
-        "question": "누구를 위한 도구인가요?",
-        "answer": "여러 앱을 로컬에서 돌리거나 스택을 오가거나, AI 에이전트를 병렬로 작업하게 두는 개발자를 위한 도구입니다 — 포트 충돌을 관리하지 않고."
+        "question": "어떤 에이전트와 함께 쓸 수 있나요?",
+        "answer": "Localify에 내장된 MCP 서버를 통해 Claude Code, Codex, Cursor와 함께 작동합니다. Settings → AI agents 또는 localify agent install로 연결하세요. 두 가지는 직접 하셔야 합니다. Localify Cloud 로그인, 그리고 공개 URL을 모두에게 여는 일입니다."
+      },
+      {
+        "question": "워크트리마다 어떻게 별도의 URL이 생기나요?",
+        "answer": "에이전트가 Git 워크트리 안에서 서비스를 시작하면, Localify는 그 워크트리를 프로젝트의 환경으로 연결하고 전용 포트와 web--fix-auth.journal.localify 같은 도메인을 부여합니다. 메인 체크아웃의 URL은 그대로 유지됩니다. 작업이 끝나면 에이전트가 환경, 그 도메인, 워크트리 폴더를 삭제합니다."
+      },
+      {
+        "question": "다른 컴퓨터에서 실행 중인 것을 열 수 있나요?",
+        "answer": "네, 공개 URL로 가능합니다. 프로젝트에 공개 URL을 하나 만들면 그 아래의 모든 서비스와 워크트리를 노트북이나 휴대폰에서 https://<slug>--<label>.localify.fyi로 열 수 있으며, 비밀번호로 보호됩니다. URL을 내 다른 머신으로 옮기려면 localify public-url claim을 사용하세요."
       },
       {
         "question": "내 작업이 온라인에 공개되나요?",
-        "answer": "직접 원할 때만 공개됩니다. 로컬 서비스는 내 머신에 남아 있으며, 앱 트래픽과 요청 로그는 Localify로 보내지 않습니다. 예외는 공개 URL입니다. 초대 전용 옵션으로, 도메인마다 하나씩 직접 켭니다. 이 URL로 들어오는 요청은 Cloudflare를 거쳐 내 머신으로 전달되며, 기본적으로 비밀번호로 보호됩니다."
+        "answer": "요청할 때만 공개됩니다. 로컬 서비스는 내 머신에 남아 있으며, 앱 트래픽과 요청 로그는 Localify로 보내지 않습니다. 예외는 직접 켜는 공개 URL입니다. 이 URL로 들어오는 요청은 Cloudflare를 거쳐 내 머신으로 전달되며, 기본적으로 비밀번호로 보호됩니다."
       },
       {
-        "question": "Localify가 analytics를 수집하나요?",
-        "answer": "공식 데스크톱 앱은 수집합니다. 제품 흐름(온보딩, 탐색, 프로젝트 생성), 사용량 수치, 오류 보고가 대상입니다. 이 이벤트에는 요청 로그, 프로젝트 이름, 도메인, 로컬 경로, 트래픽 내용이 포함되지 않습니다. 오류 보고는 전송 전에 필터를 거쳐 URL, 파일 경로, .localify 도메인, 따옴표로 묶인 이름을 제거하지만, 모든 경우를 잡아내지는 못할 수 있습니다. CLI와 데몬은 분석 데이터를 보내지 않습니다."
-      },
-      {
-        "question": "어떤 플랫폼에서 실행되나요?",
-        "answer": "데스크톱 앱은 현재 Apple Silicon 기반 macOS에서 실행됩니다. CLI와 데몬은 Linux x86_64에도 curl -fsSL https://localify.dev/install.sh | sh 로 설치할 수 있고, 그 밖의 환경에서는 소스로 빌드할 수 있습니다. Windows와 Linux용 데스크톱 앱은 추후 지원할 계획입니다."
+        "question": "ngrok이나 Cloudflare Tunnel과 무엇이 다른가요?",
+        "answer": "터널은 포트 하나를 인터넷에 올립니다. Localify는 내 머신에서 시작합니다. 모든 프로젝트와 워크트리에 이름 붙은 HTTPS URL이 있고, 에이전트가 이를 설정하며, 앱 하나에서 모두 볼 수 있습니다. 다른 곳에서 접속해야 할 때는 공개 URL 하나가 모든 워크트리를 포함한 프로젝트 전체를 다룹니다."
       },
       {
         "question": "/etc/hosts를 수정하거나 mkcert를 설치해야 하나요?",
@@ -111,17 +206,17 @@
         "answer": "네. Localify는 hostname으로 라우팅하므로 로컬 포트에 listen하는 것은 무엇이든 작동합니다. Docker, Next.js, Vite, Rails, 직접 만든 서버 — 어떤 스택이든 상관없습니다."
       },
       {
-        "question": "ngrok이나 Cloudflare Tunnel과 무엇이 다른가요?",
-        "answer": "ngrok과 Cloudflare Tunnel은 서비스를 인터넷에 올리기 위해 만들어졌습니다. Localify는 로컬 개발을 위해 만들어졌습니다. 클라우드 없이 내 머신에서 깔끔한 URL과 신뢰되는 HTTPS를 제공합니다. 휴대폰이나 다른 컴퓨터에서 dev server를 열어야 할 때는 공개 URL로 열 수 있으며, 기본적으로 비밀번호로 보호됩니다. 공개 URL은 현재 초대 전용입니다."
+        "question": "어떤 플랫폼에서 실행되나요?",
+        "answer": "데스크톱 앱은 현재 Apple Silicon 기반 macOS에서 실행됩니다. CLI와 데몬은 Linux x86_64에도 curl -fsSL https://localify.dev/install.sh | sh 로 설치할 수 있고, 그 밖의 환경에서는 소스로 빌드할 수 있습니다. Windows와 Linux용 데스크톱 앱은 추후 지원할 계획입니다."
       },
       {
-        "question": "Cursor, Claude Code, 또는 여러 AI 에이전트를 병렬로 사용할 수 있나요?",
-        "answer": "네 — 오히려 핵심 사용 사례입니다. 어떤 프로젝트에서든 /localify를 실행하면 에이전트가 앱마다 도메인, 신뢰할 수 있는 HTTPS, dev 스크립트까지 모두 설정합니다. 그런 다음 여러 에이전트가 서로 다른 앱에서 동시에 작업해도 포트 충돌이 전혀 없습니다."
+        "question": "Localify가 analytics를 수집하나요?",
+        "answer": "공식 데스크톱 앱은 수집합니다. 제품 흐름(온보딩, 탐색, 프로젝트 생성), 사용량 수치, 오류 보고가 대상입니다. 이 이벤트에는 요청 로그, 프로젝트 이름, 도메인, 로컬 경로, 트래픽 내용이 포함되지 않습니다. 오류 보고는 전송 전에 필터를 거쳐 URL, 파일 경로, .localify 도메인, 따옴표로 묶인 이름을 제거하지만, 모든 경우를 잡아내지는 못할 수 있습니다. CLI와 데몬은 분석 데이터를 보내지 않습니다."
       }
     ]
   },
   "FinalCta": {
-    "description": "localhost와 싸우지 마세요. Localify는 AGPL 기반의 무료 오픈 소스입니다.",
+    "description": "dev server는 에이전트에게 맡기세요. 모두 이름으로 열 수 있습니다.",
     "download": "macOS용 다운로드",
     "source": "소스 코드 보기",
     "terminal": "또는 터미널에서 (macOS, Linux):",

@@ -8,20 +8,23 @@ For the full Rust and desktop picture (architecture, DNS, TLS, proxy behavior, c
 
 ## 1. Positioning
 
-- **One-liner**: stable local domains and trusted HTTPS for developers, free and open source.
+- **One-liner**: a clean HTTPS URL for every project, worktree, and machine. Your agents run it, you open the URL.
+- **Angle**: agent first, human in the loop. Coding agents set Localify up and drive it over MCP; the person watches and steers from the desktop app.
+- **Strongest point**: it scales with the way people code with agents now: several agents in parallel, one Git worktree each, on more than one computer. Every worktree gets its own URL, and one public URL per project reaches all of them from another device.
 - **Category**: local development proxy, HTTPS for localhost.
-- **Audience**: developers who run several projects at once and care about DX. AI coding tools (Claude Code, Codex, Cursor) make that workflow the default.
+- **Audience**: developers who let AI coding tools (Claude Code, Codex, Cursor) work in parallel, often on several machines.
 - **Tone**: pragmatic, technical, understated. Close to Linear, Raycast, or Arc in voice.
 - **Actions**: downloading the app is the primary action. Viewing the source at <https://github.com/Synapsr/Localify> is the secondary one.
 
 ## 2. The problem we solve
 
-Working with AI agents means running several dev servers in parallel. Each one wants port 3000 by default, and each one points its env (`BASE_URL`, OAuth callbacks) at `http://localhost:3000`.
+Working with AI agents means running several dev servers in parallel, often one per Git worktree, and sometimes on a machine you're not sitting at. Each one wants port 3000 by default, and each one points its env (`BASE_URL`, OAuth callbacks) at `http://localhost:3000`.
 
 - **Port collisions**: opening a second project bumps it to `:3001`, which silently breaks anything its env hard-coded to `:3000`.
 - **No mental map**: four tabs all say "localhost".
 - **Demos feel unfinished**: `http://localhost:3000` doesn't look like a product.
 - **Side effects compound**: webhooks and OAuth callbacks can't tolerate moving ports.
+- **You lose sight of what agents run**: servers start in terminals you never see, on a machine you may not be at.
 
 ## 3. How the app works
 
@@ -62,7 +65,18 @@ DNS, TLS, CA install, Node trust, and CLI install happen during onboarding. Ther
 
 ### 4.7 Set up by your AI agent
 
-Localify includes an MCP server for Claude Code, Codex, and Cursor (`localify agent install`, or **Connect agents** in the desktop **Settings → AI agents**). Every action of the app and the CLI is a tool. The agent sets the project up, starts and stops services behind their `.localify` URLs, and when its work in a Git worktree is done, removes that environment and the worktree folder. The site shows this as an inline step in **How it works** (`public/videos/agent.mp4`).
+Localify includes an MCP server for Claude Code, Codex, and Cursor (`localify agent install`, or **Connect agents** in the desktop **Settings → AI agents**). Every action of the app and the CLI is a tool. The agent sets the project up, starts and stops services behind their `.localify` URLs, and when its work in a Git worktree is done, removes that environment and the worktree folder. The site leads with this (use case 01).
+
+### 4.8 One URL per worktree
+
+A service started inside a Git worktree attaches the worktree to the project as an environment, with its own ports and domains: `environment.project.localify` for a single-service project, `service--environment.project.localify` otherwise (ADR 0009). The main checkout keeps its URLs. `remove_environment` with `delete_worktree` stops its services, unregisters its domains, and deletes the folder.
+
+### 4.9 Public URLs across machines (Localify Cloud Pro)
+
+`localify public-url create <project>.localify --wildcard` gives a project one `https://<slug>.localify.fyi` URL, and every service and worktree under it opens at `https://<slug>--<label>.localify.fyi`. It is protected by a password by default, with a link that signs a browser in by itself. One machine serves each URL; `claim` moves it to another of the user's machines. Agents can create, protect, and remove URLs; signing in and opening a URL to everyone stay the person's ([docs/public-urls.md](../../docs/public-urls.md)).
+
+- **Plan**: Localify Cloud Pro, $7.99 a month or $79 a year, after a 7-day free trial: 2 serving machines, 10 public URLs.
+- **Access**: sign-in is invite-only for now (`ALLOWED_GITHUB_IDS` in `apps/cloud`). Say so wherever the page sells Pro, and drop it when sign-up opens.
 
 ## 5. Technical snapshot
 
@@ -91,7 +105,7 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 
 ### Facts copy can use
 
-- **License**: free and open source under AGPL-3.0-only. No account, and no limit on projects or domains.
+- **License**: everything that runs on the user's machines is free and open source under AGPL-3.0-only. No account, and no limit on projects, domains, or worktrees. Public URLs are the only paid part (4.9).
 - **Platforms**: the desktop app runs on macOS on Apple Silicon for now. The CLI and daemon install on macOS on Apple Silicon and Linux x86_64 with `curl -fsSL https://localify.dev/install.sh | sh` (`public/install.sh`, which downloads the GitHub release and checks its SHA-256), and build from source elsewhere. Windows and a Linux desktop app are planned for later, with no date to promise.
 - **For agents**: `public/llms.txt` sums up install, first steps, MCP and public URLs. Keep it in step with this file and `docs/README.md`.
 - **Architecture**: Rust daemon plus Tauri desktop UI.
@@ -101,7 +115,9 @@ High-level anchor for copy decisions. Full detail in [TECHNICAL-REFERENCE.md](TE
 ## 6. Differentiators
 
 - **vs. `/etc/hosts` + `mkcert`**: Localify sets up DNS, the local CA, and Node trust in one permission prompt, with no manual `mkcert -install`, `NODE_EXTRA_CA_CERTS` exports, or per-project scripts.
-- **vs. ngrok, Cloudflare Tunnel**: Localify is local, not a tunnel. URLs don't expire, and nothing traverses the internet.
+- **vs. ngrok, Cloudflare Tunnel, zrok, Pinggy**: a tunnel puts one port on the internet. Localify starts on the machine: a named HTTPS URL per project and worktree, set up by agents and visible in one app. When the person needs them elsewhere, one public URL covers a whole project, every worktree included.
+- **vs. LocalCan**: the closest product (local domains, HTTPS, public URLs). Localify is open source, free for everything local, and built around agents and worktrees rather than sharing previews.
+- **vs. Portless**: named `.localhost` URLs for agents, CLI only. Localify adds trusted HTTPS, the desktop app, and public URLs across machines.
 - **vs. Caddy, nginx**: a different problem. They optimize for running production-shaped configs on a dev box. Localify optimizes for DX: a simple UI, no config files, and a natural flow for juggling many projects.
 
 ## 7. Proof
@@ -114,26 +130,17 @@ Keep in sync with [`app/[locale]/page.tsx`](app/[locale]/page.tsx).
 
 | Section | File | Notes |
 |---|---|---|
-| Hero | `app/_sections/hero.tsx` | Download and source actions, interactive mockup of the Projects view with a download dialog |
-| What changes | `app/_sections/problem.tsx` | Three cards |
-| How it works | `app/_sections/how-it-works.tsx` | Steps plus the inline agent row (see 4.7) |
+| Hero | `app/_sections/hero.tsx` | Eyebrow, download and source actions, CLI install command, interactive mockup of the Projects view with a download dialog, then the strip of supported agents |
+| Use cases | `app/_sections/use-cases.tsx` | Four numbered rows: agent setup (4.7), one URL per worktree (4.8), watching from the app, every machine (4.9). Visuals in `app/_components/use-case-visuals.tsx` |
+| Not just URLs | `app/_sections/features.tsx` | Three cards: HTTPS setup, launch profiles, any stack |
+| How it works | `app/_sections/how-it-works.tsx` | Three steps and a diagram of the pieces |
+| Pricing | `app/_sections/pricing.tsx` | Free and Localify Cloud Pro (4.9); the Pro action asks for an invite by email while sign-in is invite-only |
 | FAQ | `app/_sections/faq.tsx` | |
 | Final CTA | `app/_sections/final-cta.tsx` | Download and source actions, requirements |
 
-## 9. How it works videos
+## 9. Visuals
 
-`app/_sections/how-it-works.tsx` plays one muted, looping video per row, from `public/videos/`:
-
-| Row | File |
-|---|---|
-| Setup | `flow-1-web.mp4` |
-| Pick a folder | `flow-2-web.mp4` |
-| Agent | `agent.mp4` |
-| `localify init-project` | `flow-3-web.mp4` |
-| Projects by name | `flow-4-web.mp4` |
-| Launch and monitor | `flow-5-web.mp4` |
-
-Target a 4:3 aspect, 5 to 15 seconds, a clean loop, no audio, and under 2 MB: `ffmpeg -i in.mov -c:v libx264 -crf 30 -vf scale=1280:-2 -an out.mp4`.
+The use-case visuals are coded mockups, not videos, so they follow the product without re-recording. They reuse the sky backgrounds in `public/sky/` and the example project `journal` from the docs. Keep what they show true: tool names from `localify mcp`, domain shapes from ADR 0009 and 0022.
 
 ## 10. Copy conventions
 

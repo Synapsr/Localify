@@ -1,20 +1,24 @@
 {
   "Metadata": {
-    "title": "Localify - Dominios locales y HTTPS confiable para desarrolladores",
-    "description": "Localify es una app gratuita y de código abierto que da a tus proyectos locales dominios .localify estables, HTTPS confiable, enrutamiento DNS y una app nativa para macOS, sin mkcert, sin editar /etc/hosts y sin túneles."
+    "title": "Localify - URLs limpias para cada agente, worktree y máquina",
+    "description": "Localify da a cada proyecto, worktree de Git y máquina una URL HTTPS estable. Los agentes de código lo configuran por MCP, y tú sigues todo lo que ejecutan desde una app de escritorio. Gratis y open source."
   },
   "Navigation": {
+    "useCases": "Casos de uso",
     "howItWorks": "Cómo funciona",
+    "pricing": "Precios",
     "faq": "FAQ",
     "source": "Código fuente",
     "cta": "Descargar"
   },
   "Hero": {
-    "titleLine1": "Tus proyectos merecen",
-    "titleLine2": "más que :3000",
-    "description": "Pon nombre a tus proyectos en vez de hacer malabares con puertos. URLs .localify, DNS local, HTTPS reconocido.",
+    "eyebrow": "Primero los agentes, tú siempre al mando",
+    "titleLine1": "Tus agentes lo arrancan.",
+    "titleLine2": "Tú abres la URL.",
+    "description": "Cada proyecto, worktree y máquina tiene una URL HTTPS limpia. Los agentes de código lo configuran todo por MCP. Tú observas y diriges desde una sola app.",
     "download": "Descargar para macOS",
     "source": "Ver el código",
+    "terminal": "O instala la línea de comandos",
     "availability": "Gratis y open source bajo la AGPL. App de escritorio para macOS."
   },
   "DemoDialog": {
@@ -23,54 +27,141 @@
     "later": "Quizás más tarde",
     "download": "Descargar ahora"
   },
-  "Agents": {
-    "title": "Deja que tu agente se encargue de todo.",
-    "description": "Conecta Claude Code, Codex o Cursor a Localify. Tu agente configura el proyecto, arranca tus servicios y borra sus worktrees cuando termina. Tú solo hablas con él."
+  "AgentStrip": {
+    "label": "Funciona con tus agentes por MCP",
+    "more": "y cualquier cliente MCP"
   },
-  "Problem": {
-    "titleLine1": "Lo que cambia",
-    "titleLine2": "de verdad.",
+  "UseCases": {
+    "titleLine1": "Los agentes hacen el trabajo.",
+    "titleLine2": "Tú lo ves todo.",
+    "description": "Pensado para cómo programas hoy con agentes: varios a la vez, en más de un equipo.",
+    "items": {
+      "agent": {
+        "title": "Tu agente lo configura.",
+        "body": "Conecta Claude Code, Codex o Cursor una sola vez. Cada acción de la app es una herramienta MCP, así que tu agente crea el proyecto, elige puertos libres, ajusta la config de Next.js o Vite y arranca cada servicio detrás de su URL. Tú solo lo pides."
+      },
+      "worktrees": {
+        "title": "Un worktree, una URL.",
+        "body": "Cada worktree de Git se convierte en un entorno con sus propios dominios y puertos, junto a tu checkout principal. Cinco agentes en cinco ramas tienen cinco URLs que nunca chocan. Cuando un agente termina, elimina el worktree y sus dominios."
+      },
+      "app": {
+        "title": "Tú lo sigues desde la app.",
+        "body": "Lo que arranca un agente corre en el terminal de la app Localify, a la vista. Proyectos, worktrees, logs y peticiones en una sola ventana: abre una URL, lee la salida, reinicia o detén un servicio."
+      },
+      "machines": {
+        "title": "En todas tus máquinas.",
+        "body": "Deja que los agentes trabajen en un equipo de sobremesa o en un Mac que no uses mientras pruebas desde tu portátil o tu teléfono. Una URL pública por proyecto llega a cada servicio y worktree que contiene, con contraseña por defecto."
+      }
+    },
+    "agentDemo": {
+      "prompt": "Arranca la app web en el worktree fix-auth y mándame el enlace.",
+      "reply": "Listo. Está corriendo en"
+    },
+    "worktreeDemo": {
+      "title": "Entornos",
+      "primary": "main",
+      "running": "En marcha",
+      "stopped": "Detenido",
+      "removed": "Se elimina al hacer merge"
+    },
+    "appDemo": {
+      "terminal": "Terminal",
+      "checkouts": "Checkouts"
+    },
+    "machinesDemo": {
+      "studio": "Mac Studio",
+      "studioRole": "Aquí trabajan tus agentes",
+      "laptop": "MacBook",
+      "laptopRole": "Aquí revisas",
+      "phone": "iPhone",
+      "phoneRole": "Aquí pruebas",
+      "password": "Protegido con contraseña"
+    }
+  },
+  "Features": {
+    "titleLine1": "Mucho más",
+    "titleLine2": "que URLs.",
     "cards": {
-      "urls": {
-        "title": "URLs que significan algo.",
-        "body": "studio.localify, admin.localify, docs.localify. Se acabaron los malabares entre :3000, :3001, :5173."
+      "https": {
+        "title": "HTTPS confiable, sin configurar nada.",
+        "body": "Una sola contraseña al instalar configura el DNS local, una autoridad de certificación y la confianza de Node.js. Sin editar /etc/hosts, sin mkcert, sin NODE_EXTRA_CA_CERTS."
       },
-      "ui": {
-        "title": "Una app, no una CLI.",
-        "body": "Tus proyectos, sus URLs, sus logs — todo en el mismo lugar. Ningún archivo de configuración que editar."
+      "profiles": {
+        "title": "Los secretos se quedan donde están.",
+        "body": "Un localify.toml indica de dónde salen las variables de un servicio: un archivo .env, Infisical o Proton Pass. Los valores de Infisical y Proton Pass siguen enmascarados en la salida que lee tu agente."
       },
-      "agents": {
-        "title": "Varios agentes, cero conflictos.",
-        "body": "Cursor, Claude Code y tus propios dev servers corren lado a lado. Cada proyecto conserva su URL estable."
+      "stack": {
+        "title": "Cualquier stack, Docker incluido.",
+        "body": "Localify enruta por hostname, así que cualquier cosa que escuche en un puerto funciona. Next.js y Vite reciben su config ajustada, y los servicios de Docker y Compose se detectan solos."
       }
     }
   },
   "HowItWorks": {
-    "titleLine1": "Cómo funciona,",
-    "titleLine2": "concretamente.",
-    "description": "Un permiso al instalar. Una carpeta o un localify init-project. Un dominio por app, en HTTPS. Eso es todo.",
+    "titleLine1": "Tres pasos,",
+    "titleLine2": "y después solo pides.",
     "steps": [
       {
-        "title": "Una contraseña, cero config.",
-        "body": "En el primer arranque, Localify te pide una vez tu contraseña de administrador. Después configura por sí solo la autoridad de certificación, el DNS y el daemon. La primera vez que necesites HTTPS en un navegador, macOS te pide confirmar el certificado una vez."
+        "title": "Descarga la app.",
+        "body": "En el primer arranque te pide una vez tu contraseña de administrador y luego configura el HTTPS, el DNS y el servicio en segundo plano. A partir de ahí, nada de Localify se ejecuta como root."
       },
       {
-        "title": "Elige una carpeta. Localify autocompleta.",
-        "body": "Localify escanea la carpeta, detecta sus apps y propone un hostname para cada una. Revisas y confirmas."
+        "title": "Conecta tus agentes.",
+        "body": "Settings → AI agents, o localify agent install, registra el servidor MCP en Claude Code, Codex y Cursor."
       },
       {
-        "title": "localify init-project, directo desde tu editor.",
-        "body": "¿Ya estás en tu editor? Ejecuta localify init-project desde el terminal. Mismo flujo de autocompletado, misma confirmación. El proyecto aparece en la app."
-      },
-      {
-        "title": "Proyectos por nombre, no por puerto.",
-        "body": "Cada proyecto tiene sus hostnames .localify con HTTPS confiable. Tabs que dicen algo, demos que parecen producto, entornos que dejan de romperse cuando cambia un puerto."
-      },
-      {
-        "title": "Lanza, supervisa, sin editor.",
-        "body": "Localify se convierte en tu dashboard local: un clic para arrancar cualquier proyecto, un vistazo para ver cuáles están respondiendo. Ideal para vibecodear sin abrir nunca tu IDE."
+        "title": "Pide una URL.",
+        "body": "«Ejecuta la app en este worktree.» Tu agente la arranca en la app y te da su URL."
       }
-    ]
+    ],
+    "diagram": {
+      "you": "Tú",
+      "youDetail": "App de escritorio",
+      "agents": "Tus agentes",
+      "agentsDetail": "Servidor MCP",
+      "machine": "Localify en cada Mac",
+      "machineDetail": "DNS · HTTPS · router",
+      "servers": "Dev servers",
+      "serversDetail": "Una URL por worktree",
+      "devices": "Tus otros dispositivos",
+      "devicesDetail": "Portátil, teléfono",
+      "cloud": "Localify Cloud",
+      "cloudDetail": "Contraseña · túnel"
+    }
+  },
+  "Pricing": {
+    "titleLine1": "Gratis en tus máquinas.",
+    "titleLine2": "Pro para conectarlas.",
+    "description": "Todo lo que corre en tus equipos es gratis y open source. Localify Cloud Pro añade URLs públicas para acceder a ellos desde cualquier sitio.",
+    "free": {
+      "name": "Localify",
+      "price": "$0",
+      "period": "para siempre",
+      "tagline": "Todo en tus máquinas.",
+      "features": [
+        "Proyectos, dominios y worktrees ilimitados",
+        "HTTPS local confiable",
+        "App de escritorio, CLI y servidor MCP",
+        "Terminales de servicios y logs de peticiones",
+        "Open source bajo la AGPL"
+      ],
+      "cta": "Descargar para macOS"
+    },
+    "pro": {
+      "name": "Localify Cloud Pro",
+      "price": "$7.99",
+      "period": "al mes",
+      "yearly": "o $79 al año",
+      "tagline": "Accede a tus máquinas desde cualquier sitio.",
+      "features": [
+        "10 URLs públicas en localify.fyi",
+        "Una URL llega a todos los servicios y worktrees de un proyecto",
+        "Servidas desde hasta 2 máquinas",
+        "Contraseña por defecto, y un enlace que inicia sesión solo",
+        "7 días de prueba gratis"
+      ],
+      "cta": "Pedir una invitación",
+      "note": "Solo con invitación por ahora. Inicias sesión con GitHub."
+    }
   },
   "Faq": {
     "titleLine1": "Preguntas,",
@@ -80,27 +171,31 @@
     "items": [
       {
         "question": "¿Qué es Localify?",
-        "answer": "Localify da a cada proyecto local una URL estable en .localify con HTTPS confiable. En vez de hacer malabares con localhost:3000, localhost:5173 y localhost:8080, abres app.localify o admin.localify directamente en tu navegador."
+        "answer": "Localify da a cada proyecto local, worktree de Git y máquina una URL estable con HTTPS confiable, como https://web.journal.localify en vez de localhost:3000. Los agentes de código lo controlan por MCP, y tú sigues lo que ejecutan en la app de escritorio."
       },
       {
         "question": "¿Es gratis?",
-        "answer": "Sí. Localify es gratis y open source bajo la AGPL, sin cuenta y sin límite de proyectos o dominios. Las URLs públicas también son gratis, pero necesitan una cuenta con invitación y, por ahora, están limitadas a 10 por persona. El código fuente está en GitHub."
+        "answer": "Todo lo que corre en tus máquinas es gratis y open source bajo la AGPL, sin cuenta y sin límite de proyectos, dominios o worktrees. Las URLs públicas, para acceder a tus máquinas desde otro dispositivo, requieren Localify Cloud Pro: $7.99 al mes o $79 al año, tras 7 días de prueba gratis. Por ahora, Localify Cloud es solo con invitación."
       },
       {
-        "question": "¿Para quién es?",
-        "answer": "Para desarrolladores que corren varias apps en local, alternan entre stacks o dejan que agentes de IA trabajen en paralelo — sin gestionar conflictos de puerto."
+        "question": "¿Con qué agentes funciona?",
+        "answer": "Claude Code, Codex y Cursor, a través del servidor MCP integrado en Localify. Conéctalos en Settings → AI agents o con localify agent install. Dos cosas siguen siendo cosa tuya: iniciar sesión en Localify Cloud y abrir una URL pública a todo el mundo."
+      },
+      {
+        "question": "¿Cómo consigue cada worktree su propia URL?",
+        "answer": "Cuando un agente arranca un servicio dentro de un worktree de Git, Localify vincula el worktree al proyecto como un entorno, con sus propios puertos y un dominio como web--fix-auth.journal.localify. El checkout principal conserva sus URLs. Cuando termina el trabajo, el agente elimina el entorno, sus dominios y la carpeta del worktree."
+      },
+      {
+        "question": "¿Puedo abrir lo que corre en otro equipo?",
+        "answer": "Sí, con una URL pública. Crea una para un proyecto, y cada servicio y worktree que contiene se abre en https://<slug>--<label>.localify.fyi desde tu portátil o tu teléfono, con contraseña. Para mover una URL a otra de tus máquinas, usa localify public-url claim."
       },
       {
         "question": "¿Pone mi trabajo en internet?",
-        "answer": "Solo si lo pides. Tus servicios locales se quedan en tu máquina, y ni el tráfico de aplicación ni los logs de peticiones se envían a Localify. La excepción es una URL pública, una opción solo con invitación que activas para un dominio cada vez: las peticiones a esa URL pasan por Cloudflare hasta tu máquina, protegidas con contraseña por defecto."
+        "answer": "Solo si lo pides. Tus servicios locales se quedan en tu máquina, y ni el tráfico de aplicación ni los logs de peticiones se envían a Localify. La excepción es una URL pública, que activas tú: las peticiones a esa URL pasan por Cloudflare hasta tu máquina, con contraseña por defecto."
       },
       {
-        "question": "¿Localify recopila analytics?",
-        "answer": "La app de escritorio oficial sí: flujos de producto (onboarding, navegación, creación de proyecto), contadores de uso e informes de errores. Estos eventos no incluyen logs de peticiones, nombres de proyecto, dominios, rutas locales ni contenido de tráfico. Un filtro elimina URLs, rutas de archivo, dominios .localify y nombres entre comillas de los informes de errores antes de enviarlos, aunque no puede detectarlo todo. El CLI y el daemon no envían analytics."
-      },
-      {
-        "question": "¿En qué plataformas funciona?",
-        "answer": "Por ahora, la app de escritorio funciona en macOS con Apple Silicon. El CLI y el daemon también se instalan en Linux x86_64 con curl -fsSL https://localify.dev/install.sh | sh, y se compilan desde el código fuente en otros sistemas. Windows y una app de escritorio para Linux están previstos para más adelante."
+        "question": "¿En qué se diferencia de ngrok o Cloudflare Tunnel?",
+        "answer": "Un túnel pone un puerto en internet. Localify empieza en tu máquina: una URL HTTPS con nombre para cada proyecto y worktree, configurada por tus agentes y visible en una sola app. Cuando las necesitas desde otro sitio, una sola URL pública cubre un proyecto entero, con todos sus worktrees."
       },
       {
         "question": "¿Tengo que editar /etc/hosts o instalar mkcert?",
@@ -111,17 +206,17 @@
         "answer": "Sí. Localify enruta por hostname, así que cualquier cosa que escuche en un puerto local funciona. Docker, Next.js, Vite, Rails, tu propio servidor — sea cual sea tu stack."
       },
       {
-        "question": "¿En qué se diferencia de ngrok o Cloudflare Tunnel?",
-        "answer": "ngrok y Cloudflare Tunnel están hechos para poner servicios en internet. Localify está hecho para el desarrollo local: URLs limpias y HTTPS confiable en tu máquina, sin nube. Cuando necesitas abrir un dev server desde tu teléfono u otro equipo, una URL pública lo hace, con contraseña por defecto. Por ahora, las URLs públicas son solo con invitación."
+        "question": "¿En qué plataformas funciona?",
+        "answer": "Por ahora, la app de escritorio funciona en macOS con Apple Silicon. El CLI y el daemon también se instalan en Linux x86_64 con curl -fsSL https://localify.dev/install.sh | sh, y se compilan desde el código fuente en otros sistemas. Windows y una app de escritorio para Linux están previstos para más adelante."
       },
       {
-        "question": "¿Funciona con Cursor, Claude Code, o varios agentes de IA en paralelo?",
-        "answer": "Sí, de hecho es un caso de uso central. Ejecuta /localify en cualquier proyecto y tu agente lo configura todo: un dominio por app, HTTPS de confianza y tus scripts de dev. Varios agentes pueden trabajar después en apps distintas en paralelo, sin ningún conflicto de puertos."
+        "question": "¿Localify recopila analytics?",
+        "answer": "La app de escritorio oficial sí: flujos de producto (onboarding, navegación, creación de proyecto), contadores de uso e informes de errores. Estos eventos no incluyen logs de peticiones, nombres de proyecto, dominios, rutas locales ni contenido de tráfico. Un filtro elimina URLs, rutas de archivo, dominios .localify y nombres entre comillas de los informes de errores antes de enviarlos, aunque no puede detectarlo todo. El CLI y el daemon no envían analytics."
       }
     ]
   },
   "FinalCta": {
-    "description": "Deja de pelear con localhost. Localify es gratis y open source bajo la AGPL.",
+    "description": "Deja que tus agentes ejecuten los dev servers. Ábrelos todos por su nombre.",
     "download": "Descargar para macOS",
     "source": "Ver el código",
     "terminal": "O desde una terminal, en macOS y Linux:",
