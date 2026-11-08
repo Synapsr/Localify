@@ -1099,8 +1099,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        .manage(TerminalManager::new(api.binary_path().to_path_buf()))
         .manage(AppState::with_api(api))
-        .manage(TerminalManager::new())
         .manage(TrayState::default());
 
     #[cfg(target_os = "macos")]
@@ -1121,6 +1121,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title(&runtime_desktop_name());
             }
+            app.state::<TerminalManager>()
+                .warm_shell_environment(app.handle().clone());
             setup_app_menu(app.handle())?;
             setup_tray(app.handle())?;
             if !launched_from_autostart() {
@@ -1226,10 +1228,14 @@ pub fn run() {
             commands::terminal_list_sessions,
             commands::terminal_create_session,
             commands::terminal_launch_service,
+            commands::terminal_restart_service,
+            commands::terminal_stop_service,
             commands::terminal_write,
             commands::terminal_resize,
-            commands::terminal_interrupt,
             commands::terminal_close,
+            commands::stop_service_run,
+            commands::shell_environment_status,
+            commands::reload_shell_environment,
             commands::consume_pending_deep_link
         ])
         .run(tauri::generate_context!())

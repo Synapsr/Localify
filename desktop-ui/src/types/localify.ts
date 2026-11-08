@@ -276,18 +276,74 @@ export interface TerminalSessionRequest {
 
 export type TerminalSessionStatus = "running" | "exited";
 
+export interface TerminalRestartServiceRequest {
+  sessionId: string;
+  cols: number;
+  rows: number;
+}
+
 export interface TerminalSessionDto {
   id: string;
   title: string;
   workingDirectory: string;
   target: TerminalSessionTargetDto;
   status: TerminalSessionStatus;
+  /** Set for a service tab: the run it shows. A shell tab has none. */
+  run: TerminalRunDto | null;
+}
+
+export interface TerminalRunDto {
+  runId: string;
+  profile: string | null;
+  /** Set once the run ended and its output was finalized. */
+  ended: TerminalRunEndDto | null;
+}
+
+export interface TerminalRunEndDto {
+  code: number | null;
+  /** Ended by a signal (a stop, Ctrl-C) rather than on its own. */
+  stopped: boolean;
+  /** Unix seconds. */
+  at: number;
+  /** Why the run could not be ended or finalized. */
+  error: string | null;
 }
 
 export interface TerminalLaunchServiceResultDto {
   session: TerminalSessionDto;
-  created: boolean;
-  command: string[];
+  /** The ended service tab this run took over. */
+  replaced: string | null;
+}
+
+export type ShellEnvironmentState = "resolving" | "ready" | "failed";
+
+export interface ShellEnvironmentDto {
+  state: ShellEnvironmentState;
+  shell: string;
+  reason: string | null;
+}
+
+export interface ServiceRunRequest {
+  projectId: string;
+  environmentSlug: string;
+  serviceId: string;
+}
+
+export type ServiceRunState = "running" | "stopped" | "unknown";
+
+export interface ServiceRunDto {
+  projectId: string;
+  environment: string | null;
+  serviceId: string;
+  runId: string | null;
+  /** Started from a shell tab by an app from before run PTYs. */
+  legacy: boolean;
+  state: ServiceRunState;
+  origin: "app" | "background" | "terminal";
+  pid: number;
+  /** Unix seconds. */
+  startedAt: number;
+  outputRunId: string | null;
 }
 
 export interface TerminalOutputPayload {
@@ -333,6 +389,8 @@ export interface BootstrapDto {
   projectEnvironments: ProjectEnvironmentInfoDto[];
   /** Services currently running with a launch profile. */
   launchSessions: LaunchSessionDto[];
+  /** The last run of every service Localify started. */
+  serviceRuns: ServiceRunDto[];
 }
 
 export interface AutostartStatusDto {

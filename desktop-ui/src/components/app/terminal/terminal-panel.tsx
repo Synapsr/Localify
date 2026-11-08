@@ -53,6 +53,11 @@ import { useSharedProjectOrder } from "@/providers/project-order-provider";
 import { useTerminal } from "@/providers/terminal-provider";
 
 import { TerminalInstance } from "./terminal-instance";
+import {
+  ShellEnvironmentWarning,
+  TerminalPanelMenu,
+  TerminalRunEndBar,
+} from "./terminal-run-status";
 
 export const TerminalPanel = () => {
   const {
@@ -160,6 +165,7 @@ export const TerminalPanel = () => {
               </div>
             )}
 
+            <TerminalPanelMenu />
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -179,6 +185,8 @@ export const TerminalPanel = () => {
             </Tooltip>
           </div>
 
+          <ShellEnvironmentWarning />
+
           <div className="relative min-h-0 flex-1 bg-[#101010]">
             {sessions.length === 0 ? (
               <TerminalEmptyState />
@@ -192,6 +200,7 @@ export const TerminalPanel = () => {
                 />
               ))
             )}
+            {currentSession ? <TerminalRunEndBar session={currentSession} /> : null}
           </div>
         </div>
       </div>

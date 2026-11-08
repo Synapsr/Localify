@@ -28,6 +28,10 @@ pub mod project_marker;
 pub mod running_services;
 pub mod runs;
 pub mod service_sockets;
+// The binary prints the environment; the desktop app reads it, through the
+// library crate.
+#[allow(dead_code)]
+pub mod shell_env;
 pub mod system_service;
 pub mod target_probe;
 pub mod tracing;

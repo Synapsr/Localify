@@ -71,7 +71,6 @@ impl Sandbox {
             .env("PATH", &self.path)
             .env_remove("LOCALIFY_PROFILE")
             .env_remove("LOCALIFY_SERVICE_ORIGIN")
-            .env_remove("LOCALIFY_SERVICE_OUTPUT")
             .stdin(Stdio::null());
         command
     }
@@ -461,7 +460,9 @@ fn a_background_run_reads_by_run_id_and_offset_and_stops_complete() {
         sandbox.record().unwrap().run_id().map(RunId::as_str)
     );
 
-    let again = sandbox.run(&["logs", "web", "--project", "app", "--cursor", &cursor]);
+    // In one argument: a run id may start with `-`.
+    let cursor_arg = format!("--cursor={cursor}");
+    let again = sandbox.run(&["logs", "web", "--project", "app", &cursor_arg]);
     assert!(again.status.success(), "{}", stderr(&again));
     assert!(!String::from_utf8_lossy(&again.stdout).contains("hello-from-web"));
 

@@ -8,6 +8,9 @@ mod launcher_preferences;
 mod node_trust;
 mod port_conflicts;
 mod project_roots;
+pub mod pty;
+pub mod run_pty;
+pub mod shell_environment;
 
 pub use crate::infrastructure::editor::EditorPreference;
 pub use crate::infrastructure::local_dev::TerminalPreference;

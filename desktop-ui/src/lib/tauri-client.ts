@@ -91,6 +91,9 @@ import type {
   TerminalResizeRequest,
   TerminalSessionDto,
   TerminalSessionRequest,
+  TerminalRestartServiceRequest,
+  ServiceRunRequest,
+  ShellEnvironmentDto,
   TerminalWriteRequest,
   UpdateAutostartRequest,
   UnregisterDomainResultDto,
@@ -144,9 +147,11 @@ import {
 } from "./validators/validator.settings-transfer";
 import { stopLocalDevServerRequestSchema } from "./validators/validator.stop-local-dev-server";
 import {
+  serviceRunRequestSchema,
   terminalCreateSessionRequestSchema,
   terminalLaunchServiceRequestSchema,
   terminalResizeRequestSchema,
+  terminalRestartServiceRequestSchema,
   terminalSessionRequestSchema,
   terminalWriteRequestSchema,
 } from "./validators/validator.terminal";
@@ -290,8 +295,15 @@ export interface DesktopClient {
   ): Promise<TerminalLaunchServiceResultDto>;
   terminalWrite(request: TerminalWriteRequest): Promise<void>;
   terminalResize(request: TerminalResizeRequest): Promise<void>;
-  terminalInterrupt(request: TerminalSessionRequest): Promise<void>;
+  terminalRestartService(
+    request: TerminalRestartServiceRequest,
+  ): Promise<TerminalLaunchServiceResultDto>;
+  terminalStopService(request: TerminalSessionRequest): Promise<void>;
   terminalClose(request: TerminalSessionRequest): Promise<void>;
+  /** Stops a service's last run through its session; `false` when it was not running. */
+  stopServiceRun(request: ServiceRunRequest): Promise<boolean>;
+  shellEnvironmentStatus(): Promise<ShellEnvironmentDto>;
+  reloadShellEnvironment(): Promise<ShellEnvironmentDto>;
 }
 
 export function createDesktopClient(): DesktopClient {
@@ -495,14 +507,24 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("terminal_resize", {
         request: terminalResizeRequestSchema.parse(request),
       }),
-    terminalInterrupt: (request) =>
-      tauriInvoke("terminal_interrupt", {
+    terminalRestartService: (request) =>
+      tauriInvoke("terminal_restart_service", {
+        request: terminalRestartServiceRequestSchema.parse(request),
+      }),
+    terminalStopService: (request) =>
+      tauriInvoke("terminal_stop_service", {
         request: terminalSessionRequestSchema.parse(request),
       }),
     terminalClose: (request) =>
       tauriInvoke("terminal_close", {
         request: terminalSessionRequestSchema.parse(request),
       }),
+    stopServiceRun: (request) =>
+      tauriInvoke("stop_service_run", {
+        request: serviceRunRequestSchema.parse(request),
+      }),
+    shellEnvironmentStatus: () => tauriInvoke("shell_environment_status"),
+    reloadShellEnvironment: () => tauriInvoke("reload_shell_environment"),
   };
 }
 

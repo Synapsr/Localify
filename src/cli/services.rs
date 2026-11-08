@@ -33,8 +33,8 @@ use crate::infrastructure::project_marker::{
     ensure_marker_is_excluded, read_project_marker, write_project_marker,
 };
 use crate::infrastructure::running_services::{
-    NewRun, RunOutput, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, SERVICE_OUTPUT_ENV,
-    ServiceKey, ServiceOrigin,
+    NewRun, RunOutput, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
+    ServiceOrigin,
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::Finisher;
@@ -334,7 +334,7 @@ pub fn run(
     }
     eprintln!("$ {}", command.join(" "));
     trust_ios_simulators_for_dev(mode, &ca_cert_path);
-    let origin = ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref());
+    let origin = run_origin(launch_id.is_some());
     let background = origin == ServiceOrigin::Background;
     let record = store.register(
         &lock,
@@ -348,10 +348,11 @@ pub fn run(
                 .as_ref()
                 .and_then(|profile| profile.name())
                 .map(str::to_string),
-            log_file: env::var_os(SERVICE_OUTPUT_ENV)
-                .filter(|_| !background)
-                .map(PathBuf::from),
-            output: background.then_some(RunOutput::Pipe),
+            output: match origin {
+                ServiceOrigin::Background => Some(RunOutput::Pipe),
+                ServiceOrigin::App => Some(RunOutput::Pty),
+                ServiceOrigin::Terminal => None,
+            },
         },
     )?;
 
@@ -381,8 +382,19 @@ pub fn run(
     launch_outcome(profile.as_ref(), &service, end?.outcome)
 }
 
-/// A run whose record is written: whatever happens next, it is finalized
-/// before `localify dev` exits.
+/// Who started this `localify dev`. The app's run PTY, which reads the run's
+/// output, always passes the launch id it chose: without one, `app` comes
+/// from a shell tab of an app from before run PTYs, a terminal like any other.
+fn run_origin(dispatched: bool) -> ServiceOrigin {
+    match ServiceOrigin::from_env(env::var(SERVICE_ORIGIN_ENV).ok().as_deref()) {
+        ServiceOrigin::App if !dispatched => ServiceOrigin::Terminal,
+        origin => origin,
+    }
+}
+
+/// A run whose record is written: whatever happens next, its processes are
+/// ended before `localify dev` exits, and it is finalized unless the app
+/// reads its run PTY and finalizes it once it has read it all.
 struct RegisteredRun<'a> {
     store: &'a RunningServiceStore,
     record: &'a RunningService,
@@ -397,9 +409,10 @@ impl RegisteredRun<'_> {
     }
 
     /// The executor's own end of its run: the stream finalized, `complete`
-    /// unless some output could not be read, then the exit recorded.
-    /// A run whose processes outlived the cleanup stays unfinalized, so its
-    /// next launch is refused as for a live run.
+    /// unless some output could not be read, then the exit recorded. A run
+    /// PTY's stream is left to the app. A run whose processes outlived the
+    /// cleanup stays unfinalized, so its next launch is refused as for a live
+    /// run.
     fn finish(&self, end: Option<&LaunchEnd>) -> Result<()> {
         let Some(run_id) = self.record.run_id() else {
             return Ok(());
@@ -411,7 +424,12 @@ impl RegisteredRun<'_> {
             );
         }
         let dir = self.store.run_dir(run_id);
-        if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
+        // A run PTY's stream is the app's to finalize, once it has read it all.
+        let finalizing = match self.record.origin {
+            ServiceOrigin::App => None,
+            ServiceOrigin::Background | ServiceOrigin::Terminal => FinalizeLock::acquire(&dir)?,
+        };
+        if let Some(_finalizing) = finalizing {
             let offset = self.stream.as_ref().map_or(0, StreamSink::close);
             let capture = end.map_or(Capture::Complete, |end| end.capture.clone());
             let mut finished = match capture {

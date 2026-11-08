@@ -176,7 +176,8 @@ pub enum Finish {
     /// Processes proven to belong to the run are alive, and this finisher does
     /// not signal them.
     LiveMembers(Vec<u32>),
-    /// Another finisher holds the run's lock.
+    /// Another finisher holds the run's lock, or the run is a run PTY whose
+    /// reader, the app, still reads it and finalizes it itself.
     Busy,
     /// The run's folder is gone: nothing is left to finalize.
     Gone,
@@ -346,13 +347,16 @@ impl Finisher<'static> {
 impl Finisher<'_> {
     /// Finishes a run whose executor is gone, holding the run's finalization
     /// lock throughout, from what an earlier finisher proved if one did.
-    /// `captured_by_executor` says the executor read the run's output itself,
-    /// so its death lost what was still in the pipe.
+    /// `captured_elsewhere` says another process read the run's output: the
+    /// executor through pipes, or the app from a run PTY. Once that reader is
+    /// gone, what it had not read yet is lost, so the stream ends
+    /// `interrupted`. A run PTY whose reader still reads is left for it to
+    /// finalize, after its processes are ended.
     pub fn finish(
         &self,
         dir: &Path,
         session: &RunSession,
-        captured_by_executor: bool,
+        captured_elsewhere: bool,
         mode: FinishMode,
     ) -> Result<Finish> {
         let _lock = match mode {
@@ -373,7 +377,7 @@ impl Finisher<'_> {
             FinalizeState::discard(dir)?;
             return match finalized {
                 true => Ok(Finish::AlreadyFinalized),
-                false => self.publish_end(dir, captured_by_executor),
+                false => self.publish_end(dir, captured_elsewhere),
             };
         }
         let saved = FinalizeState::load(dir)?;
@@ -425,11 +429,15 @@ impl Finisher<'_> {
             };
             self.end_until(&mut journal, &session, members, escaped, Scope::Run)?;
         }
-        self.publish_end(dir, captured_by_executor)
+        self.publish_end(dir, captured_elsewhere)
     }
 
-    fn publish_end(&self, dir: &Path, captured_by_executor: bool) -> Result<Finish> {
-        let reason = if captured_by_executor {
+    fn publish_end(&self, dir: &Path, captured_elsewhere: bool) -> Result<Finish> {
+        // The app reads what is left in the PTY, then finalizes it itself.
+        if output::reader_alive(dir)? {
+            return Ok(Finish::Busy);
+        }
+        let reason = if captured_elsewhere {
             EndReason::Interrupted
         } else {
             EndReason::Complete
@@ -449,7 +457,7 @@ impl Finisher<'_> {
         &self,
         dir: &Path,
         session: &RunSession,
-        captured_by_executor: bool,
+        captured_elsewhere: bool,
     ) -> Result<Finish> {
         if session.same_boot(self.table)
             && let Proof::Proven(members, scan) = prove(self.table, session)
@@ -475,7 +483,7 @@ impl Finisher<'_> {
                 Scope::WhileExecutorLives,
             )?;
         }
-        self.finish(dir, session, captured_by_executor, FinishMode::End)
+        self.finish(dir, session, captured_elsewhere, FinishMode::End)
     }
 
     /// Signals SIGTERM to `members` and `tree`, SIGKILL to those left after

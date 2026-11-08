@@ -30,11 +30,11 @@ use crate::infrastructure::runs::finish::{
 use crate::infrastructure::runs::output::{self, plain_lines};
 use crate::infrastructure::runs::{RunId, run_dir};
 
-/// Where the app's terminal copies its whole shell, for a service it starts.
-/// Set on the shell by the app. Read only for app runs until they get a run PTY.
-pub const SERVICE_OUTPUT_ENV: &str = "LOCALIFY_SERVICE_OUTPUT";
 /// Who started `localify dev`: `app` or `background`. A terminal sets nothing.
 pub const SERVICE_ORIGIN_ENV: &str = "LOCALIFY_SERVICE_ORIGIN";
+/// How long `stop` waits for the reader of a run PTY, the desktop app, to read
+/// it to its end and finalize the run's stream.
+const READER_FINALIZE_WAIT: Duration = Duration::from_secs(15);
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How much of the end of an output file `tail` reads.
@@ -85,6 +85,22 @@ pub enum RunOutput {
     /// A background run: the executor copies the service's stdout and stderr
     /// from pipes into the run's stream.
     Pipe,
+    /// A run PTY: the desktop app reads every byte of the PTY `localify dev`
+    /// runs in into the run's stream, and finalizes it.
+    Pty,
+}
+
+/// Whether a run's output can be read, and why not: what another machine is
+/// told about it (docs/remote-machines.md, "Inventory").
+#[allow(dead_code)] // Used by the desktop app through the library crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputAvailability {
+    Available(RunId),
+    /// The run is in a terminal Localify does not own: its output is there.
+    Terminal,
+    /// Started from a shell tab by an app from before run PTYs. Its
+    /// whole-shell file is never a fallback.
+    LegacyRun,
 }
 
 /// How a run ended.
@@ -139,7 +155,8 @@ pub struct RunningService {
     pub profile: Option<String>,
     /// Unix seconds, for display.
     pub started_at: u64,
-    /// The app terminal's whole-shell copy, for an app or legacy run only.
+    /// A legacy app run's whole-shell copy, which only `localify logs` reads.
+    /// New runs never have one.
     pub log_file: Option<PathBuf>,
     pub exit: Option<ServiceExit>,
 }
@@ -149,11 +166,23 @@ impl RunningService {
         self.run.as_ref().map(|run| &run.run_id)
     }
 
-    /// The run's output stream, for a background run.
+    /// The run's output stream, for a background run or a run PTY.
     pub fn has_stream(&self) -> bool {
-        self.run
-            .as_ref()
-            .is_some_and(|run| run.output == Some(RunOutput::Pipe))
+        self.output().is_some()
+    }
+
+    fn output(&self) -> Option<RunOutput> {
+        self.run.as_ref().and_then(|run| run.output)
+    }
+
+    /// Where the run's output can be read, if anywhere.
+    #[allow(dead_code)] // Used by the desktop app through the library crate.
+    pub fn output_availability(&self) -> OutputAvailability {
+        match (&self.run, self.output()) {
+            (None, _) => OutputAvailability::LegacyRun,
+            (Some(run), Some(_)) => OutputAvailability::Available(run.run_id.clone()),
+            (Some(_), None) => OutputAvailability::Terminal,
+        }
     }
 
     fn session(&self) -> Option<RunSession> {
@@ -202,7 +231,7 @@ impl RunningService {
 }
 
 /// Whether a run is going.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RunState {
     Running,
@@ -220,7 +249,6 @@ pub struct NewRun {
     pub port: u16,
     pub origin: ServiceOrigin,
     pub profile: Option<String>,
-    pub log_file: Option<PathBuf>,
     pub output: Option<RunOutput>,
 }
 
@@ -257,28 +285,6 @@ impl RunningServiceStore {
             #[cfg(test)]
             before_forget: None,
         }
-    }
-
-    /// A new, empty output file for a service the app starts in its terminal,
-    /// never one that another service already writes to.
-    #[allow(dead_code)] // Used by the desktop app through the library crate.
-    pub fn new_log_file(&self, owner: &str) -> Result<PathBuf> {
-        let dir = self.dir.join("logs");
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create '{}'", dir.display()))?;
-        let stamp = unix_now();
-        for attempt in 0..1000 {
-            let path = dir.join(format!("{stamp}-{owner}-{attempt}.log"));
-            match File::create_new(&path) {
-                Ok(_) => return Ok(path),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("Failed to create '{}'", path.display()));
-                }
-            }
-        }
-        bail!("Failed to create a new output file in '{}'", dir.display())
     }
 
     /// `services/output/<runId>/`.
@@ -413,7 +419,7 @@ impl RunningServiceStore {
             origin: run.origin,
             profile: run.profile,
             started_at: unix_now(),
-            log_file: run.log_file,
+            log_file: None,
             exit: None,
         };
         if let Err(error) = self.write(&record) {
@@ -529,15 +535,6 @@ impl RunningServiceStore {
         Ok(services)
     }
 
-    /// Whether any record still points at this output file.
-    #[allow(dead_code)] // Used by the desktop app through the library crate.
-    pub fn log_in_use(&self, log_file: &Path) -> Result<bool> {
-        Ok(self
-            .list()?
-            .iter()
-            .any(|service| service.log_file.as_deref() == Some(log_file)))
-    }
-
     /// Whether the run is still going: its executor runs, or it is not
     /// finalized and a process proven to belong to it is alive.
     pub fn state(&self, service: &RunningService) -> RunState {
@@ -595,15 +592,36 @@ impl RunningServiceStore {
         } else {
             finisher.finish(&dir, &session, service.has_stream(), FinishMode::End)?
         };
-        if finish == Finish::ExecutorAlive {
-            bail!(
+        match finish {
+            Finish::ExecutorAlive => bail!(
                 "'{}' did not stop: its executor (PID {}) is still running.",
                 service.key.service_id,
                 service.pid
-            );
+            ),
+            // Its processes are gone, and the app reads what they left in the
+            // PTY before it finalizes.
+            Finish::Busy => wait_for_end(&service.key.service_id, &dir)?,
+            _ => {}
         }
         self.mark_ended(service)?;
         Ok(running)
+    }
+
+    /// The app's part in ending its own run PTY, once the executor exited:
+    /// what is left of the run's session is ended, as any finisher would.
+    /// The stream is not finalized: the app does that once it has read the
+    /// PTY to its end.
+    #[allow(dead_code)] // Used by the desktop app through the library crate.
+    pub fn end_after_executor(&self, service: &RunningService) -> Result<Finish> {
+        let (Some(run), Some(session)) = (&service.run, service.session()) else {
+            return Ok(Finish::Gone);
+        };
+        Finisher::native().finish(
+            &self.run_dir(&run.run_id),
+            &session,
+            service.has_stream(),
+            FinishMode::End,
+        )
     }
 
     /// The daemon's part in ending background runs: a run whose executor is
@@ -616,7 +634,8 @@ impl RunningServiceStore {
                 continue;
             };
             let dir = self.run_dir(&run.run_id);
-            if !service.has_stream()
+            // A run PTY is the app's, or its next launcher's.
+            if service.output() != Some(RunOutput::Pipe)
                 || output::read_end(&dir)?.is_some()
                 || session.executor_alive(&NativeProcesses)
             {
@@ -705,6 +724,26 @@ fn same_run(left: &RunningService, right: &RunningService) -> bool {
         (None, None) => left.pid == right.pid && left.started_at == right.started_at,
         _ => false,
     }
+}
+
+/// Waits for the reader of a run PTY to finalize its stream. It reads what
+/// the run's processes left in the PTY first, which takes a moment once they
+/// are gone.
+fn wait_for_end(service: &str, dir: &Path) -> Result<()> {
+    let deadline = Instant::now() + READER_FINALIZE_WAIT;
+    while output::read_end(dir)?.is_none() {
+        if !output::reader_alive(dir)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "'{service}' stopped, but the {} app has not finished reading its output yet. Try again in a moment.",
+                BRANDING.app_name
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 /// Why a legacy run is neither shown as running nor stopped.
@@ -862,7 +901,7 @@ mod tests {
         }
     }
 
-    fn run(service: &str, log_file: Option<PathBuf>) -> NewRun {
+    fn run(service: &str) -> NewRun {
         NewRun {
             key: key(service),
             run_id: RunId::generate().unwrap(),
@@ -870,7 +909,6 @@ mod tests {
             port: 3000,
             origin: ServiceOrigin::Background,
             profile: None,
-            log_file,
             output: None,
         }
     }
@@ -897,7 +935,7 @@ mod tests {
         let store = RunningServiceStore::new(dir.path().to_path_buf());
         let lock = store.lock(&key("web")).unwrap();
 
-        let record = store.register(&lock, run("web", None)).unwrap();
+        let record = store.register(&lock, run("web")).unwrap();
 
         let service = store.get(&key("web")).unwrap().unwrap();
         assert_eq!(service.pid, std::process::id());
@@ -1012,13 +1050,13 @@ mod tests {
         }));
         let store = RunningServiceStore::new(dir.path().to_path_buf());
         let lock = store.lock(&key("web")).unwrap();
-        let first = store.register(&lock, run("web", None)).unwrap();
+        let first = store.register(&lock, run("web")).unwrap();
 
         let second = thread::scope(|scope| {
             let finisher =
                 scope.spawn(|| late.mark_exited(&key("web"), first.run_id().unwrap(), Some(1)));
             wait_paused.recv().unwrap();
-            let registering = scope.spawn(|| store.register(&lock, run("web", None)));
+            let registering = scope.spawn(|| store.register(&lock, run("web")));
             thread::sleep(Duration::from_millis(300));
             resume.send(()).unwrap();
             finisher.join().unwrap().unwrap();
@@ -1046,12 +1084,8 @@ mod tests {
     fn a_new_run_deletes_the_previous_output() {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
-        let first_log = dir.path().join("first.log");
-        fs::write(&first_log, "old output").unwrap();
         let lock = store.lock(&key("web")).unwrap();
-        let first = store
-            .register(&lock, run("web", Some(first_log.clone())))
-            .unwrap();
+        let first = store.register(&lock, run("web")).unwrap();
         let first_dir = store.run_dir(first.run_id().unwrap());
         output::publish_end(
             &first_dir,
@@ -1059,10 +1093,33 @@ mod tests {
         )
         .unwrap();
 
-        store.register(&lock, run("web", None)).unwrap();
+        store.register(&lock, run("web")).unwrap();
 
-        assert!(!first_log.exists());
         assert!(!first_dir.exists());
+    }
+
+    #[test]
+    fn a_new_run_deletes_a_legacy_run_s_whole_shell_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let log = dir.path().join("legacy.log");
+        fs::write(&log, "old output").unwrap();
+        store
+            .write(&legacy_record(u32::MAX - 1, 0, Some(log.clone())))
+            .unwrap();
+        let lock = store.lock(&key("web")).unwrap();
+
+        store.register(&lock, run("web")).unwrap();
+
+        assert!(!log.exists());
+    }
+
+    #[test]
+    fn a_legacy_run_has_no_output_to_export() {
+        let record = legacy_record(u32::MAX - 1, 0, Some(PathBuf::from("/tmp/x.log")));
+
+        assert_eq!(record.output_availability(), OutputAvailability::LegacyRun);
+        assert!(!record.has_stream());
     }
 
     #[test]
@@ -1070,7 +1127,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
         let lock = store.lock(&key("web")).unwrap();
-        let record = store.register(&lock, run("web", None)).unwrap();
+        let record = store.register(&lock, run("web")).unwrap();
 
         store
             .mark_exited(&key("web"), record.run_id().unwrap(), Some(3))
@@ -1085,7 +1142,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RunningServiceStore::new(dir.path().to_path_buf());
         let lock = store.lock(&key("web")).unwrap();
-        let record = store.register(&lock, run("web", None)).unwrap();
+        let record = store.register(&lock, run("web")).unwrap();
         let before = record.run.unwrap();
         thread::sleep(Duration::from_millis(30));
 
@@ -1173,7 +1230,7 @@ mod tests {
         let mut forgetting = RunningServiceStore::new(dir.path().to_path_buf());
         let (store, held, registered) = (registering.clone(), lock.clone(), second.clone());
         forgetting.before_forget = Some(Box::new(move || {
-            let run = store.register(&held, run("web", None)).unwrap();
+            let run = store.register(&held, run("web")).unwrap();
             *registered.lock().unwrap() = Some(run);
         }));
 
@@ -1213,17 +1270,6 @@ mod tests {
                 .len(),
             0
         );
-    }
-
-    #[test]
-    fn each_new_output_file_is_its_own() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RunningServiceStore::new(dir.path().to_path_buf());
-
-        let first = store.new_log_file("app-1").unwrap();
-        let second = store.new_log_file("app-1").unwrap();
-
-        assert_ne!(first, second);
     }
 
     #[test]

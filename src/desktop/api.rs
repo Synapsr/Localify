@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -55,13 +56,14 @@ use crate::desktop::dto::{
     RegisterDomainResultDto, RegistrationDto, RegistrationMutationDto, RelinkProjectRootRequest,
     RemoveProjectEnvironmentRequest, RemoveProjectEnvironmentResultDto, RemoveProjectRequest,
     RemoveProjectResultDto, RemoveRouteRequest, RouteDto, RunLocalDevServerRequest,
-    SaveEnvironmentFileRequest, SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto,
-    SettingsExportRequest, SettingsExportResultDto, SettingsImportPreviewDto,
-    SettingsImportPreviewProjectDto, SettingsImportPreviewRequest, SettingsImportRequest,
-    SettingsImportResultDto, SettingsTransferDomainDto, SettingsTransferProjectDto,
-    SettingsTransferSettingsDto, SettingsTransferSnapshotDto, StartDaemonRequest, StepDto,
-    StopLocalDevServerRequest, UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto,
-    UpdateDomainRequest, UpdateLauncherPreferencesRequest, UpdateProjectRequest,
+    SaveEnvironmentFileRequest, ServiceRunCommand, ServiceRunDto, ServiceRunRequest,
+    SetProjectServiceDomainRequest, SetProjectServiceDomainResultDto, SettingsExportRequest,
+    SettingsExportResultDto, SettingsImportPreviewDto, SettingsImportPreviewProjectDto,
+    SettingsImportPreviewRequest, SettingsImportRequest, SettingsImportResultDto,
+    SettingsTransferDomainDto, SettingsTransferProjectDto, SettingsTransferSettingsDto,
+    SettingsTransferSnapshotDto, StartDaemonRequest, StepDto, StopLocalDevServerRequest,
+    UninstallPreviewDto, UninstallResultDto, UnregisterDomainResultDto, UpdateDomainRequest,
+    UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::dto::{
     CheckPublicUrlSlugRequest, CloudAccountDto, CloudBillingPageDto, CloudBillingPageKindDto,
@@ -105,6 +107,7 @@ use crate::infrastructure::port_check::{
 use crate::infrastructure::project_marker::{
     project_marker_relative_path, read_project_marker, write_project_marker,
 };
+use crate::infrastructure::running_services::RunningServiceStore;
 use crate::infrastructure::system_service;
 use crate::infrastructure::target_probe::is_route_target_reachable;
 use crate::infrastructure::{editor, local_dev};
@@ -193,6 +196,7 @@ impl DesktopApi {
             services: self.list_project_services()?,
             project_environments: self.list_project_environments()?,
             launch_sessions: self.launch_sessions(),
+            service_runs: self.service_runs(),
         };
         self.backfill_project_markers(&bootstrap.projects);
         Ok(bootstrap)
@@ -2894,35 +2898,77 @@ impl DesktopApi {
         LauncherPreferencesStore::new_default()
     }
 
-    /// Command the desktop terminal runs to launch a service. The launch
-    /// profile is passed through to `localify dev`, which owns resolution,
-    /// confirmation and guardrails, so the desktop duplicates none of it.
-    pub fn service_dev_command(
+    /// What a service's run PTY runs: the pinned executable, with this app's
+    /// config made explicit, so the run always uses the app's installation.
+    /// The launch profile is passed through to `localify dev`, which owns
+    /// resolution, confirmation and guardrails, so the desktop duplicates none
+    /// of it.
+    pub fn service_run_command(
         &self,
         project_id: &str,
         environment_slug: &str,
         service_id: &str,
         launch_profile: Option<&str>,
-    ) -> Vec<String> {
-        let mut command = Vec::new();
-        if let Some(profile) = BRANDING.active_profile() {
-            command.push(format!("{}={profile}", BRANDING.profile_env()));
-        }
-        command.extend([
-            self.binary_path.display().to_string(),
+    ) -> ServiceRunCommand {
+        let mut args: Vec<OsString> = vec![
             "--config".into(),
-            self.config_path.display().to_string(),
+            self.config_path.clone().into(),
             "dev".into(),
             "--project".into(),
-            project_id.to_string(),
+            project_id.into(),
             "--env".into(),
-            environment_slug.to_string(),
-        ]);
+            environment_slug.into(),
+        ];
         if let Some(profile) = launch_profile {
-            command.extend(["--profile".into(), profile.to_string()]);
+            args.extend(["--profile".into(), profile.into()]);
         }
-        command.push(service_id.to_string());
-        command
+        args.push(service_id.into());
+        ServiceRunCommand {
+            executable: self.binary_path.clone(),
+            args,
+        }
+    }
+
+    /// The pinned `localify` executable this app runs, never looked up on
+    /// `PATH`.
+    pub fn binary_path(&self) -> &Path {
+        &self.binary_path
+    }
+
+    /// The last run of every service, with what the app shows about it: a
+    /// service still running from a shell tab of a previous version is a
+    /// legacy run, kept as it is.
+    fn service_runs(&self) -> Vec<ServiceRunDto> {
+        let Ok(store) = RunningServiceStore::new_default() else {
+            return Vec::new();
+        };
+        store
+            .list()
+            .unwrap_or_default()
+            .iter()
+            .map(|record| ServiceRunDto::new(record, store.state(record)))
+            .collect()
+    }
+
+    /// Stops a service's last run through its own session and process group,
+    /// as `localify stop` does, never by writing Ctrl-C into a tab. Returns
+    /// whether it was running. A legacy run is stopped only when its process
+    /// is verified; otherwise it is refused, never signalled.
+    pub fn stop_service_run(&self, request: ServiceRunRequest) -> Result<bool> {
+        let store = RunningServiceStore::new_default()?;
+        let record = store.list()?.into_iter().find(|record| {
+            record.key.project_id == request.project_id
+                && record.key.service_id == request.service_id
+                && record
+                    .key
+                    .environment
+                    .as_deref()
+                    .is_none_or(|slug| slug == request.environment_slug)
+        });
+        match record {
+            Some(record) => store.stop(&record),
+            None => Ok(false),
+        }
     }
 
     fn launcher_preferences(&self) -> Result<crate::desktop::LauncherPreferences> {
@@ -7628,14 +7674,26 @@ mod tests {
     }
 
     #[test]
-    fn service_dev_command_passes_an_explicit_launch_profile() {
+    fn service_run_command_passes_an_explicit_launch_profile_and_the_app_s_config() {
         let (_temp_dir, api, _store) = temp_api();
 
-        let command = api.service_dev_command("acme", "main", "web", Some("prod"));
+        let command = api.service_run_command("acme", "main", "web", Some("prod"));
 
-        let flag = command.iter().position(|arg| arg == "--profile").unwrap();
-        assert_eq!(command[flag + 1], "prod");
-        assert_eq!(command.last().map(String::as_str), Some("web"));
+        assert_eq!(command.executable, api.binary_path);
+        assert_eq!(
+            command.args[..2],
+            ["--config".into(), api.config_path.clone().into_os_string()]
+        );
+        let flag = command
+            .args
+            .iter()
+            .position(|arg| arg == "--profile")
+            .unwrap();
+        assert_eq!(command.args[flag + 1], "prod");
+        assert_eq!(
+            command.args.last().and_then(|arg| arg.to_str()),
+            Some("web")
+        );
     }
 
     #[test]
@@ -7645,9 +7703,9 @@ mod tests {
         // `localify dev` falls back to `default`, never to a dangerous one.
         let (_temp_dir, api, _store) = temp_api();
 
-        let command = api.service_dev_command("acme", "main", "web", None);
+        let command = api.service_run_command("acme", "main", "web", None);
 
-        assert!(!command.iter().any(|arg| arg == "--profile"));
+        assert!(!command.args.iter().any(|arg| arg == "--profile"));
         let preferences =
             serde_json::to_string(&crate::desktop::LauncherPreferences::default()).unwrap();
         assert!(!preferences.to_ascii_lowercase().contains("profile"));
