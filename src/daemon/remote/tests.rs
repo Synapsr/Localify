@@ -1,6 +1,10 @@
 //! The link end to end, between daemons in this process and the fake relay:
 //! the Rust side of the PR 2 gates in `docs/remote-machines.md`, "Gates".
+//! Viewing, and the PR 3 gate, are in `viewing`.
 
+mod viewing;
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -9,7 +13,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::fake_relay::{FakeCloud, Route, is_message, opens};
+use super::fake_relay::{FakeCloud, FakeSource, Route, is_message, opens};
+use super::local::LocalSource;
 use super::machines::{MachineState, RelayState, SessionState};
 use super::{Event, PairEvent, RemoteLink, Timings, spawn};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -44,7 +49,23 @@ fn fast() -> Timings {
         lapsed_recheck: ms(500),
         clock_check: ms(100),
         retry_after_drop: ms(300),
+        watch_every: ms(100),
+        watch_expiry: ms(30_000),
+        follow_poll: ms(50),
+        // Long: the tests change the switches through the link, which must
+        // act on them by itself.
+        settings_recheck: ms(60_000),
     }
+}
+
+/// A link in `dir`, sharing what `source` holds.
+fn link_with(dir: &std::path::Path, source: &Arc<FakeSource>) -> RemoteLink {
+    let source: Arc<dyn LocalSource> = source.clone();
+    RemoteLink::with_timings(dir, source, fast())
+}
+
+fn link(dir: &std::path::Path) -> RemoteLink {
+    link_with(dir, &Arc::new(FakeSource::default()))
 }
 
 struct Daemon {
@@ -52,6 +73,7 @@ struct Daemon {
     link: RemoteLink,
     cancel: CancellationToken,
     id: String,
+    source: Arc<FakeSource>,
 }
 
 impl Drop for Daemon {
@@ -112,7 +134,8 @@ fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) ->
             machine_name: name.into(),
         })
         .unwrap();
-    let link = RemoteLink::with_timings(dir.path(), fast());
+    let source = Arc::new(FakeSource::default());
+    let link = link_with(dir.path(), &source);
     // As `LOCALIFY_CLOUD_API` makes a `wrangler dev` trusted.
     link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
@@ -122,6 +145,7 @@ fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) ->
         link,
         cancel,
         id: id.into(),
+        source,
     }
 }
 
@@ -359,7 +383,7 @@ async fn a_socket_that_stops_taking_frames_ends_the_connection() {
     let stream: Box<dyn super::socket::Io> = Box::new(client);
     let socket = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
     let dir = tempfile::tempdir().unwrap();
-    let link = RemoteLink::with_timings(dir.path(), fast());
+    let link = link(dir.path());
     let http =
         crate::infrastructure::cloud::http::CloudHttp::new("http://127.0.0.1:9", None).unwrap();
     let cloud = std::sync::Arc::new(crate::infrastructure::cloud::api::CloudClient::new(
@@ -367,6 +391,8 @@ async fn a_socket_that_stops_taking_frames_ends_the_connection() {
     ));
     let context = super::actor::Context {
         self_id: "mA".into(),
+        name: "laptop".into(),
+        source: Arc::new(FakeSource::default()),
         token: "lfy_t".into(),
         account: "u1".into(),
         keys: StaticKeys::generate().unwrap(),
@@ -633,7 +659,8 @@ async fn a_key_other_than_the_pin_never_opens_a_session() {
     // The cloud's roster swaps B's key: A refuses before it dials.
     let other = encode_key(&StaticKeys::generate().unwrap().public);
     cloud.set_roster_key("mB", &other);
-    a.link.machines(false).await.unwrap();
+    // A probe reads the roster again, as `localify machines` does.
+    a.link.machines(true).await.unwrap();
     let failure = a.link.open(&b.id, false).await.unwrap_err();
     assert_eq!(failure.code, "key_mismatch");
     let machines = a.link.machines(false).await.unwrap();
@@ -1068,6 +1095,7 @@ async fn a_revoked_machine_loses_its_pin_everywhere_and_signs_out() {
             share: Some(true),
             ..Default::default()
         })
+        .await
         .unwrap();
     let mut subscription = a.link.subscribe();
     cloud.revoke("mB");
@@ -1200,13 +1228,14 @@ const NOT_REVOCATIONS: [&str; 4] = [
 ];
 
 /// `settings.json` with share on, so a wipe would show.
-fn share_on(daemon: &Daemon) {
+async fn share_on(daemon: &Daemon) {
     daemon
         .link
         .change_settings(crate::infrastructure::remote::store::SettingsChange {
             share: Some(true),
             ..Default::default()
         })
+        .await
         .unwrap();
 }
 
@@ -1234,7 +1263,7 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_me_and_key() {
             let token = cloud.add_machine(&id, "laptop");
             cloud.set_unauthorized(route, Some(body));
             let daemon = launch(&cloud, &id, "laptop", &token, tempfile::tempdir().unwrap());
-            share_on(&daemon);
+            share_on(&daemon).await;
             wait_until("it says it can't reach the cloud", || {
                 daemon
                     .link
@@ -1264,7 +1293,7 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_the_upgrade() {
         let token = cloud.add_machine(&id, "laptop");
         cloud.set_unauthorized("connect", Some(body));
         let daemon = launch(&cloud, &id, "laptop", &token, tempfile::tempdir().unwrap());
-        share_on(&daemon);
+        share_on(&daemon).await;
         let upgrades = cloud.upgrades().len();
         wait_until("it says it can't reach the cloud", || {
             daemon
@@ -1297,7 +1326,7 @@ async fn a_401_that_is_not_a_revocation_keeps_the_sign_in_on_leases() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
     pair(&a, &b).await;
-    share_on(&a);
+    share_on(&a).await;
     a.link.open("mB", true).await.unwrap();
     for body in NOT_REVOCATIONS {
         cloud.set_unauthorized("lease", Some(body));
@@ -1434,7 +1463,7 @@ async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
             machine_name: "laptop".into(),
         })
         .unwrap();
-    let link = RemoteLink::with_timings(dir.path(), fast());
+    let link = link(dir.path());
     let cancel = CancellationToken::new();
     spawn(link.clone(), cancel.clone());
     let daemon = Daemon {
@@ -1442,8 +1471,9 @@ async fn a_revocation_from_an_untrusted_api_base_keeps_the_sign_in() {
         link,
         cancel,
         id: "mU".into(),
+        source: Arc::new(FakeSource::default()),
     };
-    share_on(&daemon);
+    share_on(&daemon).await;
     cloud.set_unauthorized(
         "me",
         Some(r#"{"error": "unauthorized", "message": "Signed out."}"#),
@@ -1467,7 +1497,7 @@ async fn an_update_from_before_owner_json_keeps_the_key_pins_and_settings() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
     pair(&a, &b).await;
-    share_on(&a);
+    share_on(&a).await;
     let key = a
         .store()
         .load_identity()
@@ -1479,7 +1509,7 @@ async fn an_update_from_before_owner_json_keeps_the_key_pins_and_settings() {
     wait_until("A's socket closes", || !cloud.connected("mA")).await;
     std::fs::remove_file(a.dir.path().join("remote/owner.json")).unwrap();
 
-    let link = RemoteLink::with_timings(a.dir.path(), fast());
+    let link = link(a.dir.path());
     link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
     spawn(link.clone(), cancel.clone());

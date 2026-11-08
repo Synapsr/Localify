@@ -11,9 +11,11 @@
 mod actor;
 mod backoff;
 mod lease;
+pub mod local;
 pub mod machines;
 mod pacer;
 mod socket;
+mod viewing;
 
 #[cfg(test)]
 mod fake_relay;
@@ -33,11 +35,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use self::actor::{Command, Failure};
+pub use self::actor::Failure;
+use self::actor::{Command, TapEvent, TapRequest};
 pub use self::actor::{Event, PairEvent};
 use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
+use self::local::LocalSource;
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
+pub use self::viewing::{FollowEvent, Following, RemoteInventory};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -64,6 +69,10 @@ const TOO_MANY_LINKED: &str = "This account already links 10 machines for remote
 const NO_REMOTE: &str = "Localify Cloud does not offer remote access yet.";
 /// How long `localify machines` waits for probed machines to say hello.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A listing reads the roster from Localify Cloud again once it is older
+/// than this, so the app can poll the listing without calling the cloud.
+/// Presence of an unknown machine and revocations read it at once.
+const ROSTER_FRESH: Duration = Duration::from_secs(30);
 /// A signed-out machine looks again this often, in case a sign-in did not
 /// say so.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(5 * 60);
@@ -136,6 +145,16 @@ pub struct Timings {
     pub lapsed_recheck: Duration,
     pub clock_check: Duration,
     pub retry_after_drop: Duration,
+    /// While a viewer watches, the target looks for changes this often.
+    pub watch_every: Duration,
+    /// A watch or a follow ends this long after the last `keep` or `ack`
+    /// that names it.
+    pub watch_expiry: Duration,
+    /// While a follow is open, the target looks for new output this often.
+    pub follow_poll: Duration,
+    /// How often a target reads its switches from the file, for a change
+    /// made without the management socket, which tells it at once.
+    pub settings_recheck: Duration,
 }
 
 impl Default for Timings {
@@ -166,6 +185,10 @@ impl Default for Timings {
             lapsed_recheck: seconds(15 * 60),
             clock_check: seconds(20),
             retry_after_drop: seconds(5),
+            watch_every: seconds(2),
+            watch_expiry: seconds(120),
+            follow_poll: Duration::from_millis(250),
+            settings_recheck: seconds(1),
         }
     }
 }
@@ -196,10 +219,15 @@ pub(super) struct View {
     retry_at: Option<String>,
     presence: HashMap<String, Presence>,
     roster: Vec<RosterMachine>,
+    /// When the roster was last read from Localify Cloud.
+    roster_read: Option<Instant>,
     /// This machine's sessions as a viewer, by peer.
     sessions: HashMap<String, SessionState>,
     settings: HashMap<String, TargetSettings>,
     failures: HashMap<String, String>,
+    /// The last whole snapshot of each peer, so a request can say which
+    /// revision it holds.
+    inventories: HashMap<String, RemoteInventory>,
 }
 
 impl Default for View {
@@ -210,14 +238,27 @@ impl Default for View {
             retry_at: None,
             presence: HashMap::new(),
             roster: Vec::new(),
+            roster_read: None,
             sessions: HashMap::new(),
             settings: HashMap::new(),
             failures: HashMap::new(),
+            inventories: HashMap::new(),
         }
     }
 }
 
 impl View {
+    fn set_roster(&mut self, roster: Vec<RosterMachine>) {
+        self.roster = roster;
+        self.roster_read = Some(Instant::now());
+    }
+
+    /// Whether the roster is older than [`ROSTER_FRESH`], or was never read.
+    fn roster_is_stale(&self) -> bool {
+        self.roster_read
+            .is_none_or(|read| read.elapsed() >= ROSTER_FRESH)
+    }
+
     fn name_of(&self, machine_id: &str) -> String {
         self.roster
             .iter()
@@ -238,6 +279,8 @@ struct Conn {
 struct Shared {
     store: RemoteStore,
     credentials: CredentialsStore,
+    /// What this machine shares as a target.
+    source: Arc<dyn LocalSource>,
     timings: Timings,
     view: Mutex<View>,
     conn: Mutex<Option<Conn>>,
@@ -250,6 +293,9 @@ struct Shared {
     refresh: Notify,
     #[cfg(test)]
     wake: std::sync::atomic::AtomicBool,
+    /// The most answers that ever waited to be sent as a target, in bytes.
+    #[cfg(test)]
+    pending_peak: AtomicUsize,
     /// The fake cloud's base, trusted for revocation as the override is.
     #[cfg(test)]
     trusted_base: Mutex<Option<String>>,
@@ -352,16 +398,17 @@ impl Drop for Subscription {
 }
 
 impl RemoteLink {
-    pub fn new(data_dir: &Path) -> Self {
-        Self::with_timings(data_dir, Timings::default())
+    pub fn new(data_dir: &Path, source: Arc<dyn LocalSource>) -> Self {
+        Self::with_timings(data_dir, source, Timings::default())
     }
 
-    pub fn with_timings(data_dir: &Path, timings: Timings) -> Self {
+    pub fn with_timings(data_dir: &Path, source: Arc<dyn LocalSource>, timings: Timings) -> Self {
         let (events, _) = broadcast::channel(64);
         Self {
             shared: Arc::new(Shared {
                 store: RemoteStore::in_data_dir(data_dir),
                 credentials: CredentialsStore::in_data_dir(data_dir),
+                source,
                 timings,
                 view: Mutex::new(View::default()),
                 conn: Mutex::new(None),
@@ -371,6 +418,8 @@ impl RemoteLink {
                 refresh: Notify::new(),
                 #[cfg(test)]
                 wake: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                pending_peak: AtomicUsize::new(0),
                 #[cfg(test)]
                 trusted_base: Mutex::new(None),
             }),
@@ -401,9 +450,21 @@ impl RemoteLink {
         }
     }
 
-    pub fn change_settings(&self, change: SettingsChange) -> Result<TargetSettings> {
+    /// Saves the switches, then waits until the connection acted on them:
+    /// with `share` off, every follow and waiting answer has ended before
+    /// this returns, so nothing read afterwards reaches a paired machine.
+    pub async fn change_settings(&self, change: SettingsChange) -> Result<TargetSettings> {
         let machine_id = self.shared.signed_in_as()?;
-        self.shared.store.update_settings(&machine_id, change)
+        let settings = self.shared.store.update_settings(&machine_id, change)?;
+        if let Some(conn) = self.shared.conn() {
+            let (reply, done) = oneshot::channel();
+            let command = Command::SettingsChanged { reply };
+            // A closed connection serves nothing; the next one reads the file.
+            if conn.commands.send(command).is_ok() {
+                let _ = done.await;
+            }
+        }
+        Ok(settings)
     }
 
     /// Lets the fake cloud's `401`s revoke, as `LOCALIFY_CLOUD_API` would.
@@ -418,10 +479,13 @@ impl RemoteLink {
 
     /// The roster with each machine's state. With `probe`, first opens a
     /// short session to each paired machine online, so the answer says
-    /// whether it shares and still answers.
+    /// whether it shares and still answers. The roster is read again when
+    /// probing, or once it is older than [`ROSTER_FRESH`].
     pub async fn machines(&self, probe: bool) -> Result<Vec<MachineView>> {
         let conn = self.shared.conn();
-        if let Some(conn) = &conn {
+        if let Some(conn) = &conn
+            && (probe || self.shared.view().roster_is_stale())
+        {
             self.refresh_roster(conn).await;
         }
         let mut views = self.list()?;
@@ -459,7 +523,7 @@ impl RemoteLink {
 
     async fn refresh_roster(&self, conn: &Conn) {
         match conn.cloud.machines().await {
-            Ok(roster) => self.shared.view().roster = roster,
+            Ok(roster) => self.shared.view().set_roster(roster),
             Err(error) => warn!(error = %error, "Could not read the account's machines"),
         }
     }
@@ -558,6 +622,7 @@ impl RemoteLink {
         })?;
         self.shared.view().failures.remove(peer);
         self.shared.view().settings.remove(peer);
+        self.shared.view().inventories.remove(peer);
         if let Some(conn) = self.shared.conn() {
             let _ = conn.commands.send(Command::Unpair {
                 peer: peer.to_string(),
@@ -840,10 +905,12 @@ async fn connect_and_serve(
     shared.set_conn(Some(conn.clone()));
     // The names pins are saved with.
     if let Ok(roster) = ready.cloud.machines().await {
-        shared.view().roster = roster;
+        shared.view().set_roster(roster);
     }
     let context = actor::Context {
         self_id: ready.credentials.machine_id,
+        name: ready.credentials.machine_name,
+        source: Arc::clone(&shared.source),
         token: ready.credentials.token,
         account: ready.account.user_id,
         keys: ready.keys,
@@ -953,6 +1020,11 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
                         let _ = lapsed(shared, Duration::ZERO);
                         delay = shared.timings.lapsed_recheck;
                     }
+                    // Suspended meanwhile: stopped, as a `4403` stops it.
+                    Granted::Banned => {
+                        let wait = block(shared, "banned", BANNED, None);
+                        return Box::pin(wait_for_change(shared, wait, cancel)).await;
+                    }
                     // No answer of the cloud's own: not a lapse. Asked
                     // again sooner, with backoff, up to the usual interval.
                     Granted::Unreachable => {
@@ -982,8 +1054,10 @@ async fn wait_for_change(shared: &Shared, wait: Wait, cancel: &CancellationToken
 
 enum Granted {
     Yes,
-    /// Refused by the plan: `402`, or `403`.
+    /// Refused by the plan: `402`, or a `403` other than a ban.
     No,
+    /// `403 banned`: the account is suspended.
+    Banned,
     /// No answer, a 5xx, or a `401` that is not the cloud's revocation.
     Unreachable,
     /// The token is revoked; the token it was.
@@ -1006,6 +1080,12 @@ async fn lease_granted(shared: &Shared) -> Granted {
     match CloudClient::new(http).remote_lease().await {
         Ok(_) => Granted::Yes,
         Err(error) if revocation.revokes(&error) => Granted::Revoked(credentials.token.clone()),
+        Err(CloudError::Api {
+            status: 403, code, ..
+        }) if code == "banned" => {
+            info!("Localify Cloud suspended this account");
+            Granted::Banned
+        }
         Err(CloudError::Api {
             status: 402 | 403, ..
         }) => {

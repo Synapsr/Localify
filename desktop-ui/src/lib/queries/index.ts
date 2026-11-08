@@ -5,4 +5,5 @@ export { daemonMutations, daemonQueries } from "./daemon.queries";
 export { domainMutations, domainQueries } from "./domain.queries";
 export { logsQueries, utilityMutations } from "./logs.queries";
 export { projectMutations, projectQueries } from "./project.queries";
+export { remoteMutations, remoteQueries } from "./remote.queries";
 export { systemMutations, systemQueries } from "./system.queries";

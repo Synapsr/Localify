@@ -69,6 +69,13 @@ import type {
   RemoveProjectEnvironmentResultDto,
   RemoveProjectResultDto,
   RemoveRouteRequest,
+  RemoteMachineDto,
+  RemoteMachineRequest,
+  RemotePairAnswerRequest,
+  RemoteSettingsDto,
+  RemoteSettingsRequest,
+  RemoteStatusDto,
+  RemoteStreamRequest,
   RunLocalDevServerRequest,
   SaveEnvironmentFileRequest,
   SetPublicUrlProtectionRequest,
@@ -138,6 +145,12 @@ import {
   environmentFileCopyRequestSchema,
 } from "./validators/validator.project-worktree";
 import { relinkProjectRootRequestSchema } from "./validators/validator.relink-project-root";
+import {
+  remoteMachineRequestSchema,
+  remotePairAnswerRequestSchema,
+  remoteSettingsRequestSchema,
+  remoteStreamRequestSchema,
+} from "./validators/validator.remote";
 import { removeProjectRequestSchema } from "./validators/validator.remove-project";
 import { removeProjectEnvironmentRequestSchema } from "./validators/validator.remove-project-environment";
 import { runLocalDevServerRequestSchema } from "./validators/validator.run-local-dev-server";
@@ -307,6 +320,18 @@ export interface DesktopClient {
   stopServiceRun(request: ServiceRunRequest): Promise<ServiceStopDto>;
   shellEnvironmentStatus(): Promise<ShellEnvironmentDto>;
   reloadShellEnvironment(): Promise<ShellEnvironmentDto>;
+  /** The relay link, this Mac's switches for paired machines and its fingerprint. */
+  getRemoteStatus(): Promise<RemoteStatusDto>;
+  /** The account's machines with their states, this Mac first. */
+  getRemoteMachines(): Promise<RemoteMachineDto[]>;
+  changeRemoteSettings(request: RemoteSettingsRequest): Promise<RemoteSettingsDto>;
+  answerRemotePairing(request: RemotePairAnswerRequest): Promise<void>;
+  unpairRemoteMachine(request: RemoteMachineRequest): Promise<boolean>;
+  /** Signs another machine out of the account. */
+  removeRemoteMachine(request: RemoteMachineRequest): Promise<void>;
+  /** Opens a streaming command; its lines come as `remote-stream` events with its id. */
+  openRemoteStream(request: RemoteStreamRequest): Promise<number>;
+  closeRemoteStream(streamId: number): Promise<void>;
 }
 
 export function createDesktopClient(): DesktopClient {
@@ -529,6 +554,29 @@ export function createDesktopClient(): DesktopClient {
       }),
     shellEnvironmentStatus: () => tauriInvoke("shell_environment_status"),
     reloadShellEnvironment: () => tauriInvoke("reload_shell_environment"),
+    getRemoteStatus: () => tauriInvoke("get_remote_status"),
+    getRemoteMachines: () => tauriInvoke("get_remote_machines"),
+    changeRemoteSettings: (request) =>
+      tauriInvoke("change_remote_settings", {
+        request: remoteSettingsRequestSchema.parse(request),
+      }),
+    answerRemotePairing: (request) =>
+      tauriInvoke("answer_remote_pairing", {
+        request: remotePairAnswerRequestSchema.parse(request),
+      }),
+    unpairRemoteMachine: (request) =>
+      tauriInvoke("unpair_remote_machine", {
+        request: remoteMachineRequestSchema.parse(request),
+      }),
+    removeRemoteMachine: (request) =>
+      tauriInvoke("remove_remote_machine", {
+        request: remoteMachineRequestSchema.parse(request),
+      }),
+    openRemoteStream: (request) =>
+      tauriInvoke("open_remote_stream", {
+        request: remoteStreamRequestSchema.parse(request),
+      }),
+    closeRemoteStream: (streamId) => tauriInvoke("close_remote_stream", { streamId }),
   };
 }
 

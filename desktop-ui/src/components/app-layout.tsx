@@ -2,6 +2,7 @@ import { useAppNavigationHotkeys } from "@/hooks/use-app-navigation-hotkeys";
 import { useTerminalHotkeys } from "@/hooks/use-terminal-hotkeys";
 import { useThemeShortcut } from "@/hooks/use-theme-shortcut";
 import { ProjectOrderProvider } from "@/providers/project-order-provider";
+import { RemoteProvider } from "@/providers/remote-provider";
 import { TerminalProvider, useTerminal } from "@/providers/terminal-provider";
 
 import { HttpsTrustNotice } from "./app/https-trust-notice";
@@ -16,7 +17,9 @@ export function AppLayout() {
   return (
     <ProjectOrderProvider>
       <TerminalProvider>
-        <AppLayoutContent />
+        <RemoteProvider>
+          <AppLayoutContent />
+        </RemoteProvider>
       </TerminalProvider>
     </ProjectOrderProvider>
   );

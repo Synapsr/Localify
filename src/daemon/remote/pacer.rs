@@ -10,16 +10,22 @@
 //! The queue in front of the pacer holds at most 24 frames and 256 KiB. A
 //! daemon that cannot hand over a frame treats the socket as stuck: the
 //! connection ends and the link reconnects. A write or a close that takes
-//! longer than 10 s ends the writer the same way. Today every frame is a handshake, a heartbeat, a
-//! pairing message or a ping, so one first-in first-out queue is enough;
-//! inventory pages and output, which go after those, arrive with PR 3.
+//! longer than 10 s ends the writer the same way.
+//!
+//! The queue itself is first-in first-out, since each session's messages
+//! must reach the wire in the order they were encrypted. Priority comes
+//! from what is let in: handshakes, heartbeats, pairing and errors go in at
+//! once, while inventory pages and output wait in the actor and go in only
+//! while the queue holds less than [`BULK_FRAMES`] and [`BULK_BYTES`], so
+//! the others always find room, and never wait behind more than that. The
+//! writer says when it took a frame, so the actor tops the queue up.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::{Sink, SinkExt};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, warn};
@@ -30,32 +36,62 @@ pub const BURST_FRAMES: f64 = 8.0;
 pub const BURST_BYTES: f64 = 128.0 * 1024.0;
 pub const QUEUE_FRAMES: usize = 24;
 pub const QUEUE_BYTES: usize = 256 * 1024;
+/// Inventory pages and output go in only below these.
+pub const BULK_FRAMES: usize = 6;
+pub const BULK_BYTES: usize = 96 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The sending end of a socket's queue.
 pub struct Outbox {
     sender: mpsc::Sender<String>,
     queued: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
 }
 
 /// The writer's end.
 pub struct Queue {
     receiver: mpsc::Receiver<String>,
     queued: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
 }
 
 /// The queue of one socket, bounded in frames and in bytes.
 pub fn queue() -> (Outbox, Queue) {
     let (sender, receiver) = mpsc::channel(QUEUE_FRAMES);
     let queued = Arc::new(AtomicUsize::new(0));
+    let drained = Arc::new(Notify::new());
     let outbox = Outbox {
         sender,
         queued: Arc::clone(&queued),
+        drained: Arc::clone(&drained),
     };
-    (outbox, Queue { receiver, queued })
+    let queue = Queue {
+        receiver,
+        queued,
+        drained,
+    };
+    (outbox, queue)
 }
 
 impl Outbox {
+    /// Whether an inventory page or output may go in now.
+    pub fn has_room_for_bulk(&self) -> bool {
+        let frames = QUEUE_FRAMES - self.sender.capacity();
+        frames < BULK_FRAMES && self.queued.load(Ordering::SeqCst) < BULK_BYTES
+    }
+
+    /// Whether a viewer's request may go in now: half the queue stays for
+    /// heartbeats and handshakes, however many requests its clients make.
+    pub fn has_room_for_requests(&self) -> bool {
+        let frames = QUEUE_FRAMES - self.sender.capacity();
+        frames < QUEUE_FRAMES / 2 && self.queued.load(Ordering::SeqCst) < QUEUE_BYTES / 2
+    }
+
+    /// Notified each time the writer takes a frame.
+    pub fn drained(&self) -> Arc<Notify> {
+        Arc::clone(&self.drained)
+    }
+
     /// Queues a frame; `false` when the queue is full or the writer gone.
     pub fn push(&self, text: String) -> bool {
         let size = text.len();
@@ -132,6 +168,7 @@ where
     while let Some(text) = queue.receiver.recv().await {
         let size = text.len();
         queue.queued.fetch_sub(size, Ordering::SeqCst);
+        queue.drained.notify_one();
         let wait = bucket.wait_for(size, Instant::now());
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
@@ -248,6 +285,22 @@ mod tests {
         let started = Instant::now();
         run(Stuck, queue, Bucket::paced(started)).await;
         assert_eq!(started.elapsed(), WRITE_TIMEOUT);
+    }
+
+    #[test]
+    fn bulk_frames_leave_room_for_the_others() {
+        let (outbox, _queue) = queue();
+        for _ in 0..BULK_FRAMES {
+            assert!(outbox.has_room_for_bulk());
+            assert!(outbox.push("x".into()));
+        }
+        assert!(!outbox.has_room_for_bulk());
+        // A heartbeat still goes in.
+        assert!(outbox.push("keep".into()));
+
+        let (outbox, _queue) = queue();
+        assert!(outbox.push("x".repeat(BULK_BYTES)));
+        assert!(!outbox.has_room_for_bulk());
     }
 
     #[test]
