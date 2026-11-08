@@ -196,7 +196,7 @@ export const MachinesVisual = () => {
   const t = useTranslations("UseCases.machinesDemo");
 
   return (
-    <div className="relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-2xl bg-muted/60 p-4 ring-1 ring-border/60 md:aspect-4/3 md:min-h-0 md:p-8">
+    <div className="relative flex items-center justify-center overflow-hidden rounded-2xl bg-muted/60 px-4 py-8 ring-1 ring-border/60 md:px-8 md:py-10">
       <Sequence className="w-full max-w-lg space-y-4">
         <motion.div className="grid grid-cols-[minmax(0,1fr)_1.25rem_minmax(0,1fr)] items-center gap-2" variants={step}>
           <MachineHeader icon={<ServersIcon className="size-4" />} name={t("server")} role={t("serverRole")} />
