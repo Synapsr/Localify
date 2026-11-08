@@ -33,12 +33,21 @@ const MAX_BODY_BYTES = 16 * 1024;
  * large body never sits in the isolate's memory, which every request shares.
  */
 export async function readLimitedText(request: Request, maxBytes: number): Promise<string | null> {
+  const bytes = await readLimitedBytes(request, maxBytes);
+  return bytes === null ? null : new TextDecoder().decode(bytes);
+}
+
+/** The body as it came, byte for byte, or `null` past `maxBytes`, read like `readLimitedText`. */
+export async function readLimitedBytes(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await request.body?.cancel();
     return null;
   }
-  if (!request.body) return "";
+  if (!request.body) return new Uint8Array(0);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -58,7 +67,7 @@ export async function readLimitedText(request: Request, maxBytes: number): Promi
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(bytes);
+  return bytes;
 }
 
 /** The request's JSON object body. A missing body reads as `{}`. */

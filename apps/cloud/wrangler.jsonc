@@ -46,8 +46,9 @@
       "simple": { "limit": 2000, "period": 60 }
     }
   ],
-  // Every 5 minutes: the tunnel sweep and the cleanup of revoked machines.
-  // Every day at 03:00 UTC: purging URLs deleted more than 30 days ago.
+  // Every 5 minutes: billing refreshes, the tunnel sweep and the cleanup of
+  // revoked machines. Every day at 03:00 UTC: the billing reconciliation, and
+  // purging URLs deleted more than 30 days ago.
   "triggers": {
     "crons": ["*/5 * * * *", "0 3 * * *"]
   },
@@ -74,12 +75,22 @@
     "MACHINE_ZONE_ID": "0a4ca7eeb2a20ddbcc50de8f86a74ae9",
     // The most serving slots (tunnels) the whole account holds. Cloudflare
     // charges past 1,000 tunnels; the sweep logs an error above 800.
-    "MAX_TUNNELS": 950
+    "MAX_TUNNELS": 950,
+    // Polar, the merchant of record. `.dev.vars` points local development at
+    // the sandbox (https://sandbox-api.polar.sh) and its products.
+    "POLAR_API_BASE": "https://api.polar.sh",
+    // The Pro products, each with a USD and an EUR price and a 7-day trial.
+    "POLAR_PRODUCT_PRO_MONTHLY": "80a898d5-cdc8-4145-a01a-441f63921639",
+    "POLAR_PRODUCT_PRO_YEARLY": "b1ac6731-b6b9-4a5a-88c8-5c1fe27b3955",
+    // Empty until add-ons ship.
+    "POLAR_PRODUCT_ADDON_MACHINE": "",
+    "POLAR_PRODUCT_ADDON_URLS": ""
   },
   // Set with `wrangler secret put <NAME>`; locally, in .dev.vars. Deploys
-  // refuse to run while one is missing.
+  // refuse to run while one is missing. POLAR_WEBHOOK_SECRET is optional: it
+  // exists once the webhook endpoint does, and webhooks answer 503 without it.
   "secrets": {
-    "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY", "EDGE_KEY"]
+    "required": ["CLOUDFLARE_API_TOKEN", "COOKIE_KEY", "INGRESS_KEY", "EDGE_KEY", "POLAR_ACCESS_TOKEN"]
   },
   // Error logs only: invocation logs would keep the URL of every request to a
   // public URL, and Localify keeps nothing about that traffic.

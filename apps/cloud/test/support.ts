@@ -1,6 +1,6 @@
 /// <reference types="node" />
 // A D1 stand-in over node:sqlite with the real migrations, a test Env, a
-// fake `fetch` for GitHub, Cloudflare and the machines' tunnels, and an
+// fake `fetch` for GitHub, Cloudflare, Polar and the machines' tunnels, and an
 // ExecutionContext whose `waitUntil` work the tests can wait for.
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -168,6 +168,9 @@ export type TestContext = {
   ownerLimiter: CountingLimiter;
 };
 
+/** The test Worker's webhook secret, Standard Webhooks style: `whsec_` and base64. */
+export const POLAR_WEBHOOK_SECRET = `whsec_${Buffer.from("a-polar-webhook-secret-for-tests").toString("base64")}`;
+
 export function createContext(overrides: Partial<Env> = {}): TestContext {
   const { db, sqlite, queries } = createTestDb();
   const limiter = { allowed: true };
@@ -190,6 +193,13 @@ export function createContext(overrides: Partial<Env> = {}): TestContext {
     INGRESS_KEY: "ingress-key",
     EDGE_KEY: "edge-key",
     MAX_TUNNELS: 950,
+    POLAR_API_BASE: "https://polar.test",
+    POLAR_ACCESS_TOKEN: "polar-token",
+    POLAR_WEBHOOK_SECRET: POLAR_WEBHOOK_SECRET,
+    POLAR_PRODUCT_PRO_MONTHLY: "prod-monthly",
+    POLAR_PRODUCT_PRO_YEARLY: "prod-yearly",
+    POLAR_PRODUCT_ADDON_MACHINE: "",
+    POLAR_PRODUCT_ADDON_URLS: "",
     ...overrides,
   } as unknown as Env;
   const background: Promise<unknown>[] = [];
@@ -321,10 +331,10 @@ export async function api(
   context: TestContext,
   method: string,
   path: string,
-  options: { token?: string; body?: unknown } = {},
+  options: { token?: string; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<Response> {
   const { default: worker } = await import("../src/index");
-  const headers = new Headers();
+  const headers = new Headers(options.headers);
   if (options.token) headers.set("authorization", `Bearer ${options.token}`);
   if (options.body !== undefined) headers.set("content-type", "application/json");
   const request = new Request(`https://api.localify.dev${path}`, {

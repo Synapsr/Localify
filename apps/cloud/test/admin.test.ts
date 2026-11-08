@@ -3,7 +3,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminError, bindParams, runCommand, UsageError, type AdminDb } from "../scripts/admin";
+import {
+  AdminError,
+  bindParams,
+  runCommand,
+  UsageError,
+  type AdminDb,
+  type AdminPolar,
+} from "../scripts/admin";
 import { runSweep } from "../src/tunnels";
 import {
   api,
@@ -278,6 +285,116 @@ describe("overrides", () => {
       admin("override", "teo-goulois", "2", "10", "x", "--expires", "2020-01-01"),
     ).rejects.toThrow(/already past/);
     expect(get("SELECT serving_machines FROM plan_overrides")).toEqual({ serving_machines: 5 });
+  });
+});
+
+describe("duplicates", () => {
+  /** Polar as the command reads it: orders by subscription, and every path it asked for. */
+  function fakePolar(orders: Record<string, Record<string, unknown>[]>) {
+    const paths: string[] = [];
+    const read: AdminPolar = async (path) => {
+      paths.push(path);
+      const id = new URLSearchParams(path.split("?")[1]).get("subscription_id") ?? "";
+      if (!(id in orders)) throw new AdminError("Polar answered 404 to GET the orders.");
+      return { items: orders[id], pagination: { total_count: orders[id]!.length, max_page: 1 } };
+    };
+    return { read, paths };
+  }
+
+  it("lists each duplicate's orders live from Polar, to refund in its dashboard", async () => {
+    const { userId } = await signIn(context);
+    const run = (sql: string, ...params: (string | number | null)[]) =>
+      context.sqlite.prepare(sql).run(...params);
+    run(
+      `INSERT INTO duplicate_subscriptions (subscription_id, user_id, revoked_at, created_at)
+       VALUES ('sub-dup', ?, ?, ?)`,
+      userId,
+      Date.parse("2026-11-08T10:05:00Z"),
+      Date.parse("2026-11-08T10:00:00Z"),
+    );
+    run(
+      `INSERT INTO duplicate_subscriptions (subscription_id, user_id, attempts, created_at)
+       VALUES ('sub-gone', ?, 2, ?)`,
+      userId,
+      Date.parse("2026-11-08T11:00:00Z"),
+    );
+    const order = (fields: Record<string, unknown>) => ({
+      currency: "eur",
+      created_at: "2026-11-08T10:00:00Z",
+      refunded_amount: 0,
+      refunded_tax_amount: 0,
+      ...fields,
+    });
+    const polar = fakePolar({
+      "sub-dup": [
+        order({
+          id: "o-paid",
+          status: "paid",
+          paid: true,
+          total_amount: 967,
+          refundable_amount: 799,
+        }),
+        order({
+          id: "o-partial",
+          status: "partially_refunded",
+          paid: true,
+          total_amount: 967,
+          refunded_amount: 300,
+          refunded_tax_amount: 63,
+          refundable_amount: 499,
+        }),
+        // A renewal whose payment has not gone through yet.
+        order({
+          id: "o-pending",
+          status: "pending",
+          paid: false,
+          total_amount: 967,
+          refundable_amount: 0,
+        }),
+        // A refund attempted in the dashboard that failed: still all refundable.
+        order({
+          id: "o-failed-refund",
+          status: "paid",
+          paid: true,
+          total_amount: 967,
+          refundable_amount: 799,
+        }),
+        order({
+          id: "o-refunded",
+          status: "refunded",
+          paid: true,
+          total_amount: 967,
+          refunded_amount: 799,
+          refunded_tax_amount: 168,
+          refundable_amount: 0,
+        }),
+      ],
+    });
+
+    const lines = await runCommand(adminDb(), ["duplicates"], Date.now(), polar.read);
+    expect(lines).toEqual([
+      `Duplicate sub-dup of teo-goulois (GitHub id 1, user ${userId}), recorded 2026-11-08T10:00:00.000Z: revoked 2026-11-08T10:05:00.000Z.`,
+      "  o-paid (paid, 2026-11-08T10:00:00.000Z): paid 9.67 EUR, refunded 0.00 EUR, refundable 7.99 EUR before tax ← to refund",
+      "  o-partial (partially_refunded, 2026-11-08T10:00:00.000Z): paid 9.67 EUR, refunded 3.63 EUR, refundable 4.99 EUR before tax ← to refund",
+      "  o-pending (pending, 2026-11-08T10:00:00.000Z): not paid, refunded 0.00 EUR, refundable 0.00 EUR before tax ← payment pending: run this again later",
+      "  o-failed-refund (paid, 2026-11-08T10:00:00.000Z): paid 9.67 EUR, refunded 0.00 EUR, refundable 7.99 EUR before tax ← to refund",
+      "  o-refunded (refunded, 2026-11-08T10:00:00.000Z): paid 9.67 EUR, refunded 9.67 EUR, refundable 0.00 EUR before tax",
+      `Duplicate sub-gone of teo-goulois (GitHub id 1, user ${userId}), recorded 2026-11-08T11:00:00.000Z: not revoked yet (2 failed attempts).`,
+      "  Its orders could not be read: Polar answered 404 to GET the orders.",
+      "Refund each order marked to refund in Polar's dashboard (Sales → Orders), reason Duplicate. Run this again for payments still pending.",
+    ]);
+    // It only reads: one GET of orders per duplicate, and nothing written.
+    expect(polar.paths.every((path) => path.startsWith("/v1/orders/?"))).toBe(true);
+    expect(polar.paths).toHaveLength(2);
+    expect(
+      get("SELECT COUNT(*) AS n FROM duplicate_subscriptions WHERE revoked_at IS NULL"),
+    ).toEqual({ n: 1 });
+  });
+
+  it("says when there is none", async () => {
+    expect(await runCommand(adminDb(), ["duplicates"], Date.now(), fakePolar({}).read)).toEqual([
+      "No duplicate Pro subscription is recorded.",
+    ]);
   });
 });
 

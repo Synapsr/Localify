@@ -108,13 +108,30 @@ export function accountOf(row: AccountRow, now: number): Account {
   };
 }
 
-type ProPlan = {
+export type ProPlan = {
   entitled: boolean;
   plan: Pick<PlanState, "status" | "interval" | "trialEndsAt" | "renewsAt" | "endsAt">;
 };
 
-/** The lifecycle table: Polar's status, and the dates that bound it. */
-function proPlan(row: AccountRow, now: number): ProPlan {
+/** The fields of one Pro subscription, as the `billing` snapshot keeps them. */
+export type ProFields = Pick<
+  AccountRow,
+  | "pro_status"
+  | "pro_interval"
+  | "cancel_at_period_end"
+  | "current_period_end"
+  | "trial_end"
+  | "ends_at"
+  | "ended_at"
+  | "past_due_at"
+>;
+
+/**
+ * The lifecycle table: Polar's status, and the dates that bound it. The
+ * refresh reads each subscription through it too, so the subscription it
+ * keeps and the plan it reports agree.
+ */
+export function proPlan(row: ProFields, now: number): ProPlan {
   const interval =
     row.pro_interval === "month" || row.pro_interval === "year" ? row.pro_interval : null;
   const plan = (
@@ -326,6 +343,7 @@ export function reconcileStatements(
   entitlement: Entitlement,
   urls: OwnedUrl[],
   now: number,
+  guard: Statement | null = null,
 ): Statement[] {
   const within = withinLimitIds(entitlement, urls);
   const stopped = urls.filter((url) => !within.has(url.id) && url.suspended_at === null);
@@ -338,7 +356,24 @@ export function reconcileStatements(
   if (resumed.length > 0) {
     statements.push({ sql: RESUME_SQL, params: [JSON.stringify(resumed.map((url) => url.id))] });
   }
-  return statements;
+  return guard === null ? statements : statements.map((statement) => guarded(statement, guard));
+}
+
+/**
+ * `statement` with `guard` added to its WHERE clause: a condition whose
+ * `?1`, `?2`… are the guard's own params, as the entitlement read before
+ * the batch is valid only while it holds. A guarded rotation is no longer
+ * recognized by `isRotation`.
+ */
+function guarded(statement: Statement, guard: Statement): Statement {
+  const offset = statement.params.length;
+  const condition = guard.sql.replace(/\?(\d+)/g, (_, n: string) => `?${Number(n) + offset}`);
+  const returning = statement.sql.search(/\bRETURNING\b/);
+  const sql =
+    returning < 0
+      ? `${statement.sql} AND ${condition}`
+      : `${statement.sql.slice(0, returning)} AND ${condition}\n  ${statement.sql.slice(returning)}`;
+  return { sql, params: [...statement.params, ...guard.params] };
 }
 
 /** The ids of the oldest live URLs within the limit. */
