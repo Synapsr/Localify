@@ -45,9 +45,9 @@ export const UseCases = async () => {
                 {item.key === "machines" ? (
                   <p className="flex max-w-lg flex-wrap items-center gap-2 text-[14px] text-muted-foreground">
                     <span className="rounded-full bg-muted px-2.5 py-0.5 text-[12px] font-medium text-foreground ring-1 ring-border/60">
-                      {t("items.machines.soonLabel")}
+                      {t("items.machines.newLabel")}
                     </span>
-                    {t("items.machines.soon")}
+                    {t("items.machines.new")}
                   </p>
                 ) : null}
                 {item.key === "agent" ? (

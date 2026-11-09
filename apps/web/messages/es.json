@@ -61,8 +61,8 @@
       "machines": {
         "title": "En todas tus máquinas.",
         "body": "Deja que los agentes trabajen en un servidor Linux remoto o en un Mac que no uses mientras revisas desde tu portátil. Una URL pública por proyecto llega a cada servicio y worktree que contiene, con contraseña por defecto.",
-        "soonLabel": "Próximamente",
-        "soon": "Ver los servicios y la salida de tus otras máquinas en la app."
+        "newLabel": "Nuevo",
+        "new": "Ve los servicios, la salida y las URL públicas de tus otras máquinas en la app, y arráncalos, detenlos o reinícialos."
       }
     },
     "agentDemo": {
