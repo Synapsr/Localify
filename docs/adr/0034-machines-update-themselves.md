@@ -1,16 +1,14 @@
 # Machines Update Themselves
 
-Each Mac with Localify installs new versions by itself, and a machine that sees a paired machine on a newer version checks for it at once. The founder asked for it after updating his laptop to 1.6 and finding his runner still on 1.5, so the new remote controls could not reach it.
+A Mac with Localify can install new versions by itself, and a machine that sees a paired machine on a newer version checks for one at once. The founder asked for it after updating his laptop to 1.6 and finding his runner still on 1.5, so the new remote controls could not reach it.
 
-**The daemon installs, not the app.** The app's updater only runs while the app is open, and a runner often has it closed. The daemon is always running. It reads the same signed manifest the app reads, downloads the same archive, checks its signature against the public key built into Localify, and replaces the app bundle. A file that fails the signature check is never installed. The daemon already restarts on the new binary when its file changes. Only official releases are installed, never a file a peer or the relay sent.
+**Who installs.**
+- **With the app closed, the daemon installs.** That covers a runner nobody sits at. The daemon already runs as the installing user, not as root, and installs only where that user can replace the app. This feature adds no privileged process.
+- **With the app open, the app installs, and only when the person says so.** Its updater downloads in the background and offers `Restart to update`. It never relaunches by itself: a relaunch closes service tabs and shell tabs, and an idle check cannot prove that no one is using them.
+- **One installer at a time.** The daemon never replaces a bundle an app is running from. A person dragging a DMG in at the same moment cannot be prevented, and the daemon notices the change and stops.
 
-**Paired machines only trigger a check.** `remote_machines` already knows each machine's version. When a paired machine reports a version newer than this one, this machine checks the manifest now instead of waiting for its next scheduled check. A peer cannot supply a build, pick a version, or force an install: the most it can do is make this machine check the official feed early. That needs no new permission and no consent switch.
+**Paired machines only trigger a check.** A paired machine's version comes from the relay's presence, which is not authenticated, so it is a hint and nothing more. When it is newer than this machine's, this machine checks the official manifest early, within a machine-wide cooldown. A hint never chooses a build or proves that one exists. Only a release signed with Localify's updater key, whose bundle is signed by Localify's Developer ID, is ever installed.
 
-**Running services come first.**
-- **Background runs** survive the daemon restarting, as they do today.
-- **Services in the app's tabs** belong to the app, and they stop when it relaunches. So after installing, the daemon tells the open app that an update is ready. The app shows it and relaunches by itself only once no service runs in its tabs. While a service does, it shows `Restart to update` and waits for the person.
-- **The CLI** (`localify` on `PATH`) is the app bundle's binary, so it updates with it.
+**Opt-in for existing installs, on for new ones.** Unattended updates restart the daemon, which drops proxied and remote connections for a moment. Someone who installed Localify before this version keeps updating by hand until they turn it on: in Settings, or with `localify update --auto on`, which works over SSH on a runner. New installs start with it on, and the welcome screen says so.
 
-**On by default, one switch.** Settings → General gets `Install updates automatically`, on for new installs and for existing ones. A person who wants to choose when to update turns it off, and the app's `Check for updates` works as today. With it off, a newer paired machine only makes this one show "Update available".
-
-**macOS only for now.** On Linux, the CLI is a user binary installed by `install.sh`, checked by SHA-256 only. Installing it unattended would need signed Linux artifacts first. Until then, a Linux machine that sees a newer version says "Update available: run the install command again".
+**No automatic rollback in this version.** A recovery that works when the new build cannot even start needs a supervisor outside that build, and this version does not ship one. The installer keeps the previous bundle and documents how to put it back. Linux stays notification-only, since its CLI is checked by SHA-256 and not signed.
