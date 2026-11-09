@@ -2661,7 +2661,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "localify"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "localify-desktop"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "localify",
  "serde",
