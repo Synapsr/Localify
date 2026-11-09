@@ -1,6 +1,7 @@
 //! The decisions of automatic updates that need no I/O
 //! (docs/desktop.md, "Automatic updates"), kept apart so tests pin them.
 
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,6 +17,9 @@ pub const CHECK_JITTER: Duration = Duration::from_secs(30 * 60);
 /// The machine-wide wait after a check, doubled after each failure.
 pub const BASE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 pub const MAX_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
+/// The wait after an unattended download that didn't end in an install, so
+/// checks and hints can't download the same release again and again.
+pub const DOWNLOAD_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Reads a release version, with or without a leading `v`.
 pub fn parse_version(value: &str) -> Option<Version> {
@@ -34,11 +38,27 @@ pub fn cooldown(failures: u32) -> Duration {
 /// Whether a check may reach the network now, from the persisted time of the
 /// last one (Unix seconds). A clock moved back counts as due.
 pub fn check_is_due(now: u64, last_check_at: Option<u64>, failures: u32) -> bool {
-    match last_check_at {
+    waited(now, last_check_at, cooldown(failures))
+}
+
+/// Whether the daemon may download a release now, from the persisted time
+/// of its last unattended download.
+pub fn download_is_due(now: u64, last_download_at: Option<u64>) -> bool {
+    waited(now, last_download_at, DOWNLOAD_COOLDOWN)
+}
+
+fn waited(now: u64, last: Option<u64>, wait: Duration) -> bool {
+    match last {
         None => true,
         Some(last) if last > now => true,
-        Some(last) => now - last >= cooldown(failures).as_secs(),
+        Some(last) => now - last >= wait.as_secs(),
     }
+}
+
+/// Whether `a` is a newer release than `b`. Build metadata (`+...`) is not
+/// part of a version's precedence, so `1.7.0+2` is not newer than `1.7.0`.
+pub fn is_newer(a: &Version, b: &Version) -> bool {
+    a.cmp_precedence(b) == Ordering::Greater
 }
 
 /// The wait before the next scheduled check: 6 hours plus or minus 30
@@ -53,7 +73,7 @@ pub fn next_check_delay(seed: u64) -> Duration {
 /// installed bundle and than every version this machine ever installed, so
 /// an older valid release is never put back.
 pub fn offer_is_newer(offered: &Version, installed: &Version, highest: Option<&Version>) -> bool {
-    offered > installed && highest.is_none_or(|highest| offered > highest)
+    is_newer(offered, installed) && highest.is_none_or(|highest| is_newer(offered, highest))
 }
 
 /// The newest version paired machines report, when it is newer than ours.
@@ -66,8 +86,8 @@ pub fn peer_hint<'a>(
     peer_versions
         .into_iter()
         .filter_map(parse_version)
-        .filter(|version| version > installed)
-        .max()
+        .filter(|version| is_newer(version, installed))
+        .max_by(Version::cmp_precedence)
 }
 
 /// What `proc_pidpath` said about one process.
@@ -162,6 +182,32 @@ mod tests {
         assert!(!offer_is_newer(&v("1.6.0"), &installed, None));
         assert!(!offer_is_newer(&v("1.5.9"), &installed, None));
         assert!(offer_is_newer(&v("1.7.0-beta.1"), &installed, None));
+    }
+
+    #[test]
+    fn build_metadata_never_makes_a_version_newer() {
+        let installed = v("1.7.0+1");
+        assert!(!offer_is_newer(&v("1.7.0+2"), &installed, None));
+        assert!(!offer_is_newer(&v("1.7.0+0"), &installed, None));
+        assert!(!offer_is_newer(
+            &v("1.7.0+zz"),
+            &v("1.6.0"),
+            Some(&v("1.7.0"))
+        ));
+        assert!(offer_is_newer(
+            &v("1.7.1+0"),
+            &installed,
+            Some(&v("1.7.0+9"))
+        ));
+        assert_eq!(peer_hint(["1.7.0+9", "1.6.0"], &installed), None);
+    }
+
+    #[test]
+    fn an_unattended_download_waits_six_hours_after_the_last() {
+        assert!(download_is_due(1_000, None));
+        assert!(!download_is_due(1_000 + 6 * 3600 - 1, Some(1_000)));
+        assert!(download_is_due(1_000 + 6 * 3600, Some(1_000)));
+        assert!(download_is_due(500, Some(1_000)));
     }
 
     #[test]

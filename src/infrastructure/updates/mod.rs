@@ -209,6 +209,13 @@ pub fn describe(
         .as_ref()
         .and_then(|release| parse_version(&release.version))
         .filter(|offered| rules::offer_is_newer(offered, installed, state.highest().as_ref()));
+    let stranded = || {
+        state
+            .stranded_previous
+            .as_deref()
+            .filter(|at| at.exists())
+            .map(stranded_reason)
+    };
     let (phase, reason) = match activity {
         Activity::Checking => (UpdatePhase::Checking, None),
         Activity::Installing => (UpdatePhase::Installing, None),
@@ -216,11 +223,12 @@ pub fn describe(
             UpdatePhase::Available,
             blocker
                 .or_else(|| state.install_error.clone())
-                .or_else(|| (!automatic).then(auto_off_reason)),
+                .or_else(|| (!automatic).then(auto_off_reason))
+                .or_else(stranded),
         ),
         Activity::Idle if state.failures > 0 => (UpdatePhase::Failed, state.last_error.clone()),
-        Activity::Idle if state.last_check_at.is_none() => (UpdatePhase::Unknown, None),
-        Activity::Idle => (UpdatePhase::UpToDate, None),
+        Activity::Idle if state.last_check_at.is_none() => (UpdatePhase::Unknown, stranded()),
+        Activity::Idle => (UpdatePhase::UpToDate, stranded()),
     };
     UpdateStatus {
         installed: installed.to_string(),
@@ -229,6 +237,32 @@ pub fn describe(
         reason,
         automatic,
     }
+}
+
+/// The status when `updates.json` can't be trusted: nothing installs, and
+/// `error` says how to start again.
+pub fn describe_unreadable(
+    installed: &Version,
+    automatic: bool,
+    error: &anyhow::Error,
+) -> UpdateStatus {
+    UpdateStatus {
+        installed: installed.to_string(),
+        available: None,
+        state: UpdatePhase::Failed,
+        reason: Some(format!("{error:#}")),
+        automatic,
+    }
+}
+
+/// Where the bundle the last install replaced is, when it isn't in
+/// `previous/`.
+pub fn stranded_reason(at: &Path) -> String {
+    format!(
+        "The version the last update replaced could not be moved to previous/. It is at {}: \
+         keep it to go back to that version, or delete it.",
+        at.display()
+    )
 }
 
 fn auto_off_reason() -> String {
@@ -271,13 +305,12 @@ impl Updater {
             .activity
             .lock()
             .map_or(Activity::Idle, |activity| *activity);
-        describe(
-            &installed_version(),
-            &StateStore::new(&self.paths).load(),
-            automatic(&self.config_path),
-            blocker(),
-            activity,
-        )
+        let installed = installed_version();
+        let automatic = automatic(&self.config_path);
+        match StateStore::new(&self.paths).load() {
+            Ok(state) => describe(&installed, &state, automatic, blocker(), activity),
+            Err(error) => describe_unreadable(&installed, automatic, &error),
+        }
     }
 
     pub fn set_automatic(&self, on: bool) -> Result<UpdateStatus> {
@@ -319,7 +352,7 @@ impl Updater {
     #[cfg(target_os = "macos")]
     fn install_unattended(&self, release: &release::Release) {
         let automatic = || automatic(&self.config_path);
-        let attempt = || -> Result<Option<Version>> {
+        let attempt = || -> Result<Option<install::Installed>> {
             // Why it can't is in the status already.
             let Ok(target) = macos::InstallTarget::current() else {
                 return Ok(None);
@@ -332,11 +365,10 @@ impl Updater {
                 processes: &macos::process_paths,
                 automatic: &automatic,
             };
-            if !automatic() || installer.wants(release)?.is_none() {
+            // The app checks run again under the lock.
+            if !automatic() || !install::may_download_unattended(&installer, release, unix_now())? {
                 return Ok(None);
             }
-            // Before downloading: the same checks run again under the lock.
-            install::app_is_closed_now(&installer)?;
             let _activity = self.set_activity(Activity::Installing);
             let url = installer_url(release)?;
             let (archive, _digest) = release::download_archive(url)?;
@@ -378,7 +410,8 @@ fn installer_url(release: &release::Release) -> Result<&str> {
 }
 
 /// Logs an install's outcome and keeps its error for the status.
-pub fn record_install(paths: &UpdatePaths, result: &Result<Option<Version>>) {
+#[cfg(target_os = "macos")]
+pub fn record_install(paths: &UpdatePaths, result: &Result<Option<install::Installed>>) {
     let error = match result {
         Ok(None) => return,
         Ok(Some(_)) => None,
@@ -465,6 +498,37 @@ mod tests {
         assert_eq!(failed.reason.as_deref(), Some("offline"));
         let busy = describe(&v("1.6.0"), &state, true, None, Activity::Installing);
         assert_eq!(busy.state, UpdatePhase::Installing);
+    }
+
+    #[test]
+    fn an_unreadable_state_file_fails_the_status_with_the_way_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = UpdatePaths::new(dir.path().to_path_buf());
+        std::fs::write(paths.state_file(), b"{not json").unwrap();
+        let updater = Updater::new(paths, dir.path().join("config.toml"), false);
+        let status = updater.status();
+        assert_eq!(status.state, UpdatePhase::Failed);
+        assert_eq!(status.available, None);
+        let reason = status.reason.unwrap();
+        assert!(
+            reason.contains("updates.json") && reason.contains("delete it"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_previous_version_left_in_staging_shows_until_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("Localify.app");
+        std::fs::create_dir(&at).unwrap();
+        let mut state = checked("1.7.0");
+        state.stranded_previous = Some(at.clone());
+        let status = describe(&v("1.7.0"), &state, true, None, Activity::Idle);
+        assert_eq!(status.state, UpdatePhase::UpToDate);
+        assert_eq!(status.reason, Some(stranded_reason(&at)));
+        std::fs::remove_dir(&at).unwrap();
+        let status = describe(&v("1.7.0"), &state, true, None, Activity::Idle);
+        assert_eq!(status.reason, None);
     }
 
     #[test]

@@ -72,9 +72,9 @@ async fn run<C, F>(
             _ = hints.tick() => {
                 let versions = peers();
                 let hint = rules::peer_hint(versions.iter().map(String::as_str), &installed);
-                // Once per announced version: the cooldown covers the rest.
+                // Once per newer announced version: the cooldown covers the rest.
                 if let Some(version) = hint
-                    && hinted.as_ref() != Some(&version)
+                    && hinted.as_ref().is_none_or(|seen| rules::is_newer(&version, seen))
                 {
                     info!("A paired machine runs Localify {version}: checking for updates");
                     hinted = Some(version);
@@ -156,8 +156,12 @@ mod tests {
         *probe.peers.lock().unwrap() = vec!["1.7.0".into()];
         advance(Duration::from_secs(60)).await;
         assert_eq!(probe.checks.load(Ordering::SeqCst), 2);
-        // The same hint again asks nothing more.
+        // The same hint again, or with other build metadata, asks nothing
+        // more.
         advance(Duration::from_secs(60 * 5)).await;
+        assert_eq!(probe.checks.load(Ordering::SeqCst), 2);
+        *probe.peers.lock().unwrap() = vec!["1.7.0+2".into()];
+        advance(Duration::from_secs(60)).await;
         assert_eq!(probe.checks.load(Ordering::SeqCst), 2);
 
         *probe.peers.lock().unwrap() = vec!["1.7.1".into()];

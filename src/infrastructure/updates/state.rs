@@ -1,11 +1,16 @@
 //! What the updater remembers between runs, in `updates.json`: the highest
-//! version this machine installed, the archives that failed here, and when
-//! the last check ran, so a restart doesn't reset the cooldown.
+//! version this machine installed, the archives and releases that failed
+//! here, and when the last check and download ran, so a restart doesn't
+//! reset the cooldowns.
+//!
+//! A missing file is a first use. A file that can't be read or holds
+//! something invalid stops every install until it is deleted: reading it as
+//! fresh would forget the version floor and the failed releases.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use semver::Version;
@@ -16,7 +21,7 @@ use super::release::Release;
 use super::rules::{self, parse_version};
 
 /// Enough to cover every release a machine could fail on in a row.
-const MAX_FAILED_DIGESTS: usize = 20;
+const MAX_FAILED: usize = 20;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +31,10 @@ pub struct UpdateState {
     /// SHA-256 of archives that failed verification here, newest last.
     #[serde(default)]
     pub failed_digests: Vec<String>,
+    /// [`Release::identity`] of releases whose archive failed here, newest
+    /// last: skipped before they are downloaded again.
+    #[serde(default)]
+    pub rejected_releases: Vec<String>,
     /// Unix seconds.
     #[serde(default)]
     pub last_check_at: Option<u64>,
@@ -40,6 +49,14 @@ pub struct UpdateState {
     /// Why the last install attempt didn't install, until one succeeds.
     #[serde(default)]
     pub install_error: Option<String>,
+    /// Unix seconds of the daemon's last download, until an install
+    /// succeeds.
+    #[serde(default)]
+    pub last_download_at: Option<u64>,
+    /// The bundle the last install replaced, when it couldn't be moved to
+    /// `previous/`: it stayed in its staging directory.
+    #[serde(default)]
+    pub stranded_previous: Option<PathBuf>,
 }
 
 impl UpdateState {
@@ -47,9 +64,12 @@ impl UpdateState {
         self.highest_installed.as_deref().and_then(parse_version)
     }
 
-    /// Raises the highest installed version to `version` if it is higher.
+    /// Raises the highest installed version to `version` if it is newer.
     pub fn saw_installed(&mut self, version: &Version) {
-        if self.highest().is_none_or(|highest| version > &highest) {
+        if self
+            .highest()
+            .is_none_or(|highest| rules::is_newer(version, &highest))
+        {
             self.highest_installed = Some(version.to_string());
         }
     }
@@ -59,12 +79,76 @@ impl UpdateState {
     }
 
     pub fn record_failed(&mut self, digest: &str) {
-        if !self.has_failed(digest) {
-            self.failed_digests.push(digest.to_string());
-        }
-        let excess = self.failed_digests.len().saturating_sub(MAX_FAILED_DIGESTS);
-        self.failed_digests.drain(..excess);
+        remember(&mut self.failed_digests, digest);
     }
+
+    /// Whether the release with this [`Release::identity`] failed here.
+    pub fn was_rejected(&self, identity: &str) -> bool {
+        self.rejected_releases.iter().any(|seen| seen == identity)
+    }
+
+    pub fn record_rejected(&mut self, identity: &str) {
+        remember(&mut self.rejected_releases, identity);
+    }
+
+    /// Records an unattended download starting now, unless one ran within
+    /// the download cooldown: then `false`, and nothing is downloaded.
+    pub fn start_download(&mut self, now: u64) -> bool {
+        if !rules::download_is_due(now, self.last_download_at) {
+            return false;
+        }
+        self.last_download_at = Some(now);
+        true
+    }
+
+    /// What a file must hold to be trusted: a valid floor version, and
+    /// SHA-256 digests.
+    fn validate(&self) -> Result<(), String> {
+        if let Some(highest) = &self.highest_installed
+            && parse_version(highest).is_none()
+        {
+            return Err(format!("highestInstalled is not a version: {highest:?}"));
+        }
+        if let Some(latest) = &self.latest
+            && parse_version(&latest.version).is_none()
+        {
+            return Err(format!(
+                "latest.version is not a version: {:?}",
+                latest.version
+            ));
+        }
+        let digests = self.failed_digests.iter().chain(&self.rejected_releases);
+        if let Some(bad) = digests.into_iter().find(|digest| !is_sha256_hex(digest)) {
+            return Err(format!("{bad:?} is not a SHA-256 digest"));
+        }
+        Ok(())
+    }
+}
+
+/// Adds `value` once, keeping the newest [`MAX_FAILED`].
+fn remember(list: &mut Vec<String>, value: &str) {
+    if !list.iter().any(|seen| seen == value) {
+        list.push(value.to_string());
+    }
+    let excess = list.len().saturating_sub(MAX_FAILED);
+    list.drain(..excess);
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Why `updates.json` stops installs, and the way out.
+fn unreadable(path: &Path, detail: &str) -> anyhow::Error {
+    anyhow!(
+        "Updates are paused: {} can't be read ({detail}). It holds the oldest version this Mac \
+         may install and the releases that failed here, so nothing installs without it. To \
+         start again, delete it: the installed version then becomes the oldest one allowed.",
+        path.display()
+    )
 }
 
 /// `updates.json`, read and written whole.
@@ -79,13 +163,23 @@ impl StateStore {
         }
     }
 
-    /// A missing or unreadable file reads as a fresh state: the worst that
-    /// costs is one early check.
-    pub fn load(&self) -> UpdateState {
-        fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    /// A missing file reads as a fresh state, the first use. A file that
+    /// can't be read or holds anything invalid is an error, and callers
+    /// install nothing.
+    pub fn load(&self) -> Result<UpdateState> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(UpdateState::default());
+            }
+            Err(error) => return Err(unreadable(&self.path, &error.to_string())),
+        };
+        let state: UpdateState = serde_json::from_slice(&bytes)
+            .map_err(|error| unreadable(&self.path, &error.to_string()))?;
+        state
+            .validate()
+            .map_err(|detail| unreadable(&self.path, &detail))?;
+        Ok(state)
     }
 
     /// Writes a temporary file and renames it over, so a reader never sees
@@ -120,7 +214,7 @@ impl StateStore {
         change: impl FnOnce(&mut UpdateState) -> T,
     ) -> Result<T> {
         let _lock = lock(paths)?;
-        let mut state = self.load();
+        let mut state = self.load()?;
         let answer = change(&mut state);
         self.save(&state)?;
         Ok(answer)
@@ -156,7 +250,7 @@ pub fn check(
 ) -> Result<Checked> {
     let store = StateStore::new(paths);
     let _lock = lock(paths)?;
-    let mut state = store.load();
+    let mut state = store.load()?;
     if !rules::check_is_due(now, state.last_check_at, state.failures) {
         return match (&state.last_error, state.failures) {
             (Some(error), failures) if failures > 0 => Err(anyhow!(
@@ -254,11 +348,11 @@ mod tests {
         let error = early.unwrap_err().to_string();
         assert!(error.contains("offline"), "{error}");
         assert!(check(&paths, 1_000 + 1_200, || Err(anyhow!("offline"))).is_err());
-        assert_eq!(StateStore::new(&paths).load().failures, 2);
+        assert_eq!(StateStore::new(&paths).load().unwrap().failures, 2);
         // 40 minutes after the second failure.
         assert!(check(&paths, 2_200 + 2_399, || Ok(release("1.7.0"))).is_err());
         assert!(check(&paths, 2_200 + 2_400, || Ok(release("1.7.0"))).is_ok());
-        let state = StateStore::new(&paths).load();
+        let state = StateStore::new(&paths).load().unwrap();
         assert_eq!((state.failures, state.last_error), (0, None));
     }
 
@@ -289,10 +383,13 @@ mod tests {
         assert_eq!(state.failed_digests, vec!["aa".to_string()]);
         for index in 0..30 {
             state.record_failed(&format!("{index:02}"));
+            state.record_rejected(&format!("{index:02}"));
         }
-        assert_eq!(state.failed_digests.len(), MAX_FAILED_DIGESTS);
+        assert_eq!(state.failed_digests.len(), MAX_FAILED);
         assert!(!state.has_failed("aa"));
         assert!(state.has_failed("29"));
+        assert_eq!(state.rejected_releases.len(), MAX_FAILED);
+        assert!(state.was_rejected("29") && !state.was_rejected("09"));
     }
 
     #[test]
@@ -304,10 +401,83 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_state_file_reads_as_fresh() {
+    fn the_highest_installed_version_ignores_build_metadata() {
+        let mut state = UpdateState::default();
+        state.saw_installed(&parse_version("1.7.0").unwrap());
+        state.saw_installed(&parse_version("1.7.0+zz").unwrap());
+        assert_eq!(state.highest_installed.as_deref(), Some("1.7.0"));
+    }
+
+    #[test]
+    fn a_missing_state_file_is_a_first_use() {
         let (_dir, paths) = paths();
+        assert_eq!(
+            StateStore::new(&paths).load().unwrap(),
+            UpdateState::default()
+        );
+    }
+
+    fn write_state(paths: &UpdatePaths, bytes: &[u8]) {
         fs::create_dir_all(paths.dir()).unwrap();
-        fs::write(paths.state_file(), b"{not json").unwrap();
-        assert_eq!(StateStore::new(&paths).load(), UpdateState::default());
+        fs::write(paths.state_file(), bytes).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_state_file_stops_everything_and_is_kept() {
+        let (_dir, paths) = paths();
+        write_state(&paths, b"{not json");
+        let store = StateStore::new(&paths);
+        let error = store.load().unwrap_err().to_string();
+        assert!(error.contains("delete it"), "{error}");
+        assert!(error.contains("updates.json"), "{error}");
+        // Neither a check nor a change writes a fresh state over it.
+        assert!(check(&paths, 1_000, || Ok(release("1.7.0"))).is_err());
+        assert!(store.update(&paths, |state| state.failures = 0).is_err());
+        assert_eq!(fs::read(paths.state_file()).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn an_invalid_floor_or_digest_is_refused() {
+        let (_dir, paths) = paths();
+        for bytes in [
+            &br#"{"highestInstalled": "seven"}"#[..],
+            br#"{"latest": {"version": "1.7"}}"#,
+            br#"{"failedDigests": ["aa"]}"#,
+            br#"{"rejectedReleases": ["../x"]}"#,
+        ] {
+            write_state(&paths, bytes);
+            assert!(StateStore::new(&paths).load().is_err());
+        }
+        write_state(&paths, br#"{"highestInstalled": "1.7.0"}"#);
+        let state = StateStore::new(&paths).load().unwrap();
+        assert_eq!(state.highest(), parse_version("1.7.0"));
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_not_a_first_use() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, paths) = paths();
+        write_state(&paths, b"{}");
+        let file = paths.state_file();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        let loaded = StateStore::new(&paths).load();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(loaded.is_err());
+    }
+
+    #[test]
+    fn an_unattended_download_is_recorded_and_waits_out_its_cooldown() {
+        let (_dir, paths) = paths();
+        let store = StateStore::new(&paths);
+        assert!(
+            store
+                .update(&paths, |state| state.start_download(1_000))
+                .unwrap()
+        );
+        // Another process, or a restart, sees it.
+        let again = store.update(&paths, |state| state.start_download(1_060));
+        assert!(!again.unwrap());
+        let later = store.update(&paths, |state| state.start_download(1_000 + 6 * 3600));
+        assert!(later.unwrap());
     }
 }

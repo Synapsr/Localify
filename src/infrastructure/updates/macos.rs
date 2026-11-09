@@ -3,7 +3,9 @@
 //! and the atomic swap.
 
 use std::ffi::{CString, OsStr};
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -282,6 +284,44 @@ fn process_path(pid: i32) -> ProcessPath {
     }
 }
 
+/// `acl_t` in `<sys/acl.h>`: an ACL the library allocates.
+type Acl = *mut libc::c_void;
+/// `ACL_TYPE_EXTENDED` in `<sys/acl.h>`, the only ACL type macOS uses.
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+// The ACL calls of libSystem, which the libc crate doesn't declare for
+// macOS. Signatures from `<sys/acl.h>`; `acl_type_t` is a C enum, an int.
+unsafe extern "C" {
+    fn acl_init(count: libc::c_int) -> Acl;
+    fn acl_set_fd_np(fd: libc::c_int, acl: Acl, kind: libc::c_int) -> libc::c_int;
+    fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+}
+
+/// Removes every ACL entry of an open file or directory, as `chmod -N`
+/// does, so only its owner and its mode decide who may write in it. An ACL
+/// inherited from a parent could otherwise let another account into the
+/// installer's private directories, whatever their mode says.
+pub fn clear_acl(file: &File) -> io::Result<()> {
+    // SAFETY: no preconditions; it returns a new empty ACL, or null.
+    let acl = unsafe { acl_init(0) };
+    if acl.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `file`'s descriptor is open for the call, and `acl` is the
+    // valid ACL just made, which the call only reads.
+    let result = unsafe { acl_set_fd_np(file.as_raw_fd(), acl, ACL_TYPE_EXTENDED) };
+    let error = io::Error::last_os_error();
+    // SAFETY: `acl` came from `acl_init`, is freed once, and is not used
+    // after.
+    unsafe { acl_free(acl) };
+    match result {
+        0 => Ok(()),
+        // A volume without ACLs has none to clear.
+        _ if error.raw_os_error() == Some(libc::ENOTSUP) => Ok(()),
+        _ => Err(error),
+    }
+}
+
 /// Exchanges `staged` and `installed` in one step with `renamex_np`, so
 /// `installed` is never missing. Fails, touching nothing, on a volume
 /// without `RENAME_SWAP`.
@@ -436,6 +476,31 @@ pub(crate) mod tests {
         let pid = std::process::id() as i32;
         let found = processes.iter().find(|(p, _)| *p == pid).unwrap();
         assert_eq!(found.1, ProcessPath::Path(me));
+    }
+
+    /// Whether `ls -le` lists ACL entries for `path`.
+    pub(crate) fn has_acl(path: &Path) -> bool {
+        let output = Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).lines().count() > 1
+    }
+
+    #[test]
+    fn clearing_an_acl_removes_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = Command::new("/bin/chmod")
+            .args(["+a", "everyone allow add_file,delete_child,file_inherit"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(has_acl(dir.path()));
+        clear_acl(&File::open(dir.path()).unwrap()).unwrap();
+        assert!(!has_acl(dir.path()));
     }
 
     #[test]
