@@ -69,13 +69,34 @@ pub fn resolve(
     })
 }
 
+/// One service as `localify dev` launches it with its own command. The
+/// entry the config gives for its environment, which its revision covers, is
+/// kept apart from the plan resolved once its launch is detected, which is
+/// what runs: detection may infer its command and its folder, and drop a
+/// legacy `dev-localify` command. The inventory and the executor both build
+/// it here, so a revision one computed is the revision the other checks.
+pub struct DevLaunch {
+    pub configured: ConfiguredService,
+    pub plan: Result<LaunchPlan>,
+}
+
+impl DevLaunch {
+    /// `configured` as `localify dev` runs it, listening on `port`.
+    pub fn resolve(configured: ConfiguredService, port: u16) -> Self {
+        let plan = dev_plan(configured.clone(), port);
+        Self { configured, plan }
+    }
+}
+
 /// The plan of `localify dev <service> --project <id> [--env <slug>]`, from
 /// the service as its environment gives it: what a remote start would run.
 pub fn dev_plan(service: ConfiguredService, port: u16) -> Result<LaunchPlan> {
     let service = service_with_dev_launch(service);
     let command = service.command.clone().with_context(|| {
         format!(
-            "Service '{}' has no detected command: its folder has no dev script.",
+            "Service '{}' has no detected command: its folder has no dev script. Run it with a command, for example: {} dev {} -- pnpm dev",
+            service.id,
+            crate::branding::BRANDING.cli_command(),
             service.id
         )
     })?;

@@ -9,13 +9,13 @@
 use anyhow::{Error, Result, anyhow, bail};
 
 use crate::infrastructure::launch_profiles::{LaunchProfiles, allowed_remotely};
-use crate::infrastructure::process;
-use crate::infrastructure::running_services::{RunningServiceStore, ServiceKey};
-use crate::infrastructure::runs::RunId;
+use crate::infrastructure::process::{self, helpers};
+use crate::infrastructure::running_services::{RunningServiceStore, ServiceKey, ServiceOrigin};
 use crate::infrastructure::runs::launches::{
     AdmittedLaunch, ExecutorIdentity, ExitReason, LaunchExit, LaunchRecord, Publication,
-    RefusalCode, RequestedBy, unix_ms_now,
+    RefusalCode, RequestedBy, record_alive, unix_ms_now,
 };
+use crate::infrastructure::runs::{RunId, output};
 use crate::infrastructure::test_pause::pause_at;
 
 /// The hidden flags of `localify dev` that a dispatcher passes.
@@ -72,6 +72,19 @@ impl DispatchFlags {
     }
 }
 
+/// Refuses the launch `flags` name, `conflict`, for an executor that stops
+/// before it could read the config. Returns the error it exits with; with no
+/// launch named, or one whose flags do not parse, that is `error` alone.
+pub fn refuse_before_start(flags: DispatchFlags, error: Error) -> Error {
+    let Ok(Some(dispatch)) = flags.parse() else {
+        return error;
+    };
+    match RunningServiceStore::new_default() {
+        Ok(store) => dispatch.refuse(&store, Refusal::conflict(error)),
+        Err(_) => error,
+    }
+}
+
 /// A launch whose id a dispatcher chose: the id of its run and of its launch
 /// record.
 #[derive(Debug, Clone)]
@@ -112,6 +125,30 @@ impl Dispatch {
     /// Whether this launch came from a paired machine.
     pub fn is_remote(&self) -> bool {
         self.remote
+    }
+
+    /// Whether its dispatcher checked a revision (`--expect-rev`).
+    pub fn expects_revision(&self) -> bool {
+        self.expect_rev.is_some()
+    }
+
+    /// Fails when this launch is already decided, such as by the
+    /// reconciler's `expired` or an earlier run of the same id: it then stops
+    /// nothing and starts nothing, and the decision stands.
+    pub fn ensure_undecided(&self, store: &RunningServiceStore) -> Result<()> {
+        match store.launches().read(&self.id)? {
+            None => Ok(()),
+            Some(LaunchRecord::Expired { .. }) => bail!(
+                "This launch expired before it could start (launch {}); nothing was started.",
+                self.id
+            ),
+            Some(LaunchRecord::Refused { message, .. }) => {
+                bail!("Launch {} was already refused: {message}", self.id)
+            }
+            Some(LaunchRecord::Admitted(_)) => {
+                bail!("Launch {} already ran; nothing was started again.", self.id)
+            }
+        }
     }
 
     /// The checks under the lock, in the contract's order: the expiry, the
@@ -205,11 +242,33 @@ impl Dispatch {
         Ok(())
     }
 
-    /// Records that the admitted launch ended before its service started.
-    pub fn exit_before_start(&self, store: &RunningServiceStore, reason: ExitReason) {
+    /// Gets the run's folder ready before any profile helper runs, and has
+    /// each helper this executor starts witnessed there (see
+    /// [`record_alive`]): should it die before its run record, the helpers
+    /// and what they started are proven this launch's, and ended.
+    pub fn witness_helpers(&self, store: &RunningServiceStore) -> Result<()> {
+        let dir = store.run_dir(&self.id);
+        output::create_run_dir(&dir)?;
+        helpers::helpers().witness(move || {
+            let _ = record_alive(&dir);
+        });
+        Ok(())
+    }
+
+    /// Records that the admitted launch ended before its service started,
+    /// and removes the run's folder unless the app made it for its terminal.
+    pub fn exit_before_start(
+        &self,
+        store: &RunningServiceStore,
+        reason: ExitReason,
+        origin: ServiceOrigin,
+    ) {
         let _ = store
             .launches()
             .add_exit(&self.id, LaunchExit::now(None, None, Some(reason)));
+        if origin != ServiceOrigin::App {
+            let _ = std::fs::remove_dir_all(store.run_dir(&self.id));
+        }
     }
 }
 

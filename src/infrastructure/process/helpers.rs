@@ -28,6 +28,9 @@ struct Registry {
     known: Vec<Identity>,
     /// A stop ended the resolution: no helper starts any more.
     cancelled: bool,
+    /// Runs after each spawn, still under the lock: what proves the helper
+    /// was started by this process, alive then, should it die.
+    witness: Option<Box<dyn Fn() + Send>>,
 }
 
 static HELPERS: Helpers = Helpers::new();
@@ -57,12 +60,20 @@ impl Helpers {
             registry: Mutex::new(Registry {
                 known: Vec::new(),
                 cancelled: false,
+                witness: None,
             }),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `witness` after each helper this process starts from now on,
+    /// before `spawn` returns: `localify dev` records there that it was
+    /// alive once the helper started, before its run record exists.
+    pub fn witness(&self, witness: impl Fn() + Send + 'static) {
+        self.lock().witness = Some(Box::new(witness));
     }
 
     /// Starts a helper, known from then on. Refused once a stop cancelled
@@ -90,6 +101,9 @@ impl Helpers {
         let identity = process_info(child.id()).map(|process| Identity::of(&process));
         if let Some(identity) = identity {
             registry.known.push(identity);
+        }
+        if let Some(witness) = &registry.witness {
+            witness();
         }
         drop(registry);
         Ok((

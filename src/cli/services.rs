@@ -26,14 +26,14 @@ use crate::application::ports::DaemonControl;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::{LaunchEnvironment, layer_environment};
 use crate::domain::value_objects::{ProxyTarget, RouteTarget};
-use crate::infrastructure::config::{ConfiguredProjectEnvironment, ConfiguredService};
+use crate::infrastructure::config::{Config, ConfiguredProjectEnvironment, ConfiguredService};
 use crate::infrastructure::inventory::public_origins;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::launch_plan::{
-    self, LaunchCommand, LaunchPlan, apply_local_dev_launch, local_dev_launch_for_service,
-    service_cwd_match_path, service_with_dev_launch, service_with_local_dev_launch,
-    service_with_project_root, service_workdir,
+    self, DevLaunch, LaunchCommand, LaunchPlan, apply_local_dev_launch,
+    local_dev_launch_for_service, service_cwd_match_path, service_with_dev_launch,
+    service_with_local_dev_launch, service_with_project_root, service_workdir,
 };
 use crate::infrastructure::launch_profiles::LaunchProfiles;
 use crate::infrastructure::launch_rev::{LaunchDefinition, LaunchRevKey};
@@ -246,29 +246,32 @@ pub fn run(
         replace,
     } = args;
     let dispatch = dispatch.parse()?;
-    if dispatch.as_ref().is_some_and(Dispatch::is_remote)
-        && (!override_command.is_empty()
-            || !launch_profile.env_files.is_empty()
-            || launch_profile.confirm_profile.is_some())
-    {
-        bail!("A launch from another machine takes no command, --env-file or --confirm-profile.");
-    }
     let run_id = match &dispatch {
         Some(dispatch) => dispatch.id.clone(),
         None => RunId::generate()?,
     };
-    if init_domain.is_some()
-        && (service_name.is_some() || project.is_some() || environment.is_some())
-    {
-        bail!(
-            "--domain only applies when '{} dev' initializes a project from the current folder. For an existing service, use '{} project domain set <service> <domain>'.",
-            BRANDING.cli_command(),
-            BRANDING.cli_command()
-        );
+    let store = RunningServiceStore::new_default()?;
+    // From here, whatever stops a dispatched launch before its admission is
+    // its refusal, published for its dispatcher. A decision already there
+    // stands: this launch then stops nothing and starts nothing.
+    let refuse = |refusal: Refusal| match &dispatch {
+        Some(dispatch) => dispatch.refuse(&store, refusal),
+        None => refusal.error,
+    };
+    let conflict = |error: anyhow::Error| refuse(Refusal::conflict(error));
+    if let Some(dispatch) = &dispatch {
+        dispatch.ensure_undecided(&store)?;
     }
+    check_arguments(&ArgumentCheck {
+        dispatch: dispatch.as_ref(),
+        override_command: &override_command,
+        launch_profile: &launch_profile,
+        init_domain: init_domain.is_some(),
+        named: service_name.is_some() || project.is_some() || environment.is_some(),
+    })
+    .map_err(conflict)?;
 
-    let ports = daemon_ports(ctx)?;
-    // Which service, and so which lock. Its definition is read again under it.
+    // Which service, and so which lock.
     let (service, effective_environment) = resolve_runnable_service(
         RunTarget {
             service: service_name.as_deref(),
@@ -280,38 +283,316 @@ pub fn run(
         config_path,
         policy,
         ctx,
-    )?;
-    let effective_environment = effective_environment.as_deref();
-    let key = service_key(&service, effective_environment, ctx);
-    // Before anything runs, profile sources included: one executor per service.
-    let store = RunningServiceStore::new_default()?;
-    let refuse = |refusal: Refusal| match &dispatch {
-        Some(dispatch) => dispatch.refuse(&store, refusal),
-        None => refusal.error,
+    )
+    .map_err(conflict)?;
+    let key = service_key(&service, effective_environment.as_deref(), ctx);
+    let request = DefinitionRequest {
+        key: &key,
+        environment: effective_environment.as_deref(),
+        mode,
+        override_command: &override_command,
+        profile: launch_profile.profile.as_deref(),
+        data_dir: &paths.data_dir,
     };
-    let lock =
-        admit(&store, &key, replace, &run_id).map_err(|error| refuse(Refusal::conflict(error)))?;
+    // Every refusal but a taken port, before a replacement stops anything.
+    load_definition(&request, dispatch.as_ref(), ctx, Phase::Preflight).map_err(refuse)?;
+    crate::infrastructure::test_pause::pause_at("launch-preflight-passed");
+    // Before anything runs, profile sources included: one executor per service.
+    let Admitted { lock, replaces } = admit(&store, &key, replace).map_err(conflict)?;
+    // Under the lock, the checks that decide, from one read of the config,
+    // which the launch then runs from.
+    let definition =
+        load_definition(&request, dispatch.as_ref(), ctx, Phase::UnderLock).map_err(refuse)?;
+    if let Some(dispatch) = &dispatch {
+        dispatch.admit(&store, &key)?;
+    }
+    if let Some(replaced) = &replaces
+        && let Err(error) = store.launches().mark_replaced(replaced, &run_id)
+    {
+        eprintln!("Warning: could not record that run {replaced} was replaced: {error:#}");
+    }
+    execute(Execution {
+        definition,
+        key: &key,
+        run_id: &run_id,
+        lock,
+        store: &store,
+        dispatch: dispatch.as_ref(),
+        launch_profile: &launch_profile,
+        mode,
+        ctx,
+        paths,
+    })
+}
+
+/// What `localify dev` was given, checked before it resolves anything.
+struct ArgumentCheck<'a> {
+    dispatch: Option<&'a Dispatch>,
+    override_command: &'a [String],
+    launch_profile: &'a LaunchProfileArgs,
+    init_domain: bool,
+    /// A service, project or environment was named.
+    named: bool,
+}
+
+fn check_arguments(check: &ArgumentCheck<'_>) -> Result<()> {
+    if check.dispatch.is_some_and(Dispatch::is_remote)
+        && (!check.override_command.is_empty()
+            || !check.launch_profile.env_files.is_empty()
+            || check.launch_profile.confirm_profile.is_some())
+    {
+        bail!("A launch from another machine takes no command, --env-file or --confirm-profile.");
+    }
+    if check.dispatch.is_some_and(Dispatch::expects_revision) && !check.override_command.is_empty()
+    {
+        bail!("--expect-rev checks the service's own launch, so it takes no command after `--`.");
+    }
+    if check.init_domain && check.named {
+        bail!(
+            "--domain only applies when '{} dev' initializes a project from the current folder. For an existing service, use '{} project domain set <service> <domain>'.",
+            BRANDING.cli_command(),
+            BRANDING.cli_command()
+        );
+    }
+    Ok(())
+}
+
+/// What `localify dev` reads, before its lock and again under it.
+struct DefinitionRequest<'a> {
+    key: &'a ServiceKey,
+    environment: Option<&'a str>,
+    mode: RunMode,
+    override_command: &'a [String],
+    profile: Option<&'a str>,
+    data_dir: &'a Path,
+}
+
+/// When the definition is read: before the lock, where every refusal but a
+/// taken port is found before a replacement stops anything; or under it,
+/// where the checks decide.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Preflight,
+    UnderLock,
+}
+
+/// The definition of one launch, from one read of the config under the run
+/// lock: the launch is checked against it, then runs from it.
+struct Definition {
+    /// The service's entry as the config gives it for its environment.
+    service: ConfiguredService,
+    proxy_target: ProxyTarget,
+    plan: LaunchPlan,
+    profiles: Option<LaunchProfiles>,
+    /// Where the service answers, from that same read.
+    endpoint: ServiceEndpoint,
+}
+
+/// Loads the service, its plan and its checkout's launch profiles from one
+/// read of the config, checks a dispatched launch against them in the
+/// contract's order (expiry, revision, profile), then that the plan resolved,
+/// the target runs on loopback and, under the lock, that the port is free.
+/// What stops the launch here is a refusal, with the code its launch record
+/// carries: what the dispatcher saw is not what is here now.
+fn load_definition(
+    request: &DefinitionRequest<'_>,
+    dispatch: Option<&Dispatch>,
+    ctx: &AppContext,
+    phase: Phase,
+) -> Result<Definition, Refusal> {
+    let config = ctx
+        .config_store
+        .load()
+        .map_err(|error| Refusal::conflict(error.into()))?;
+    let configured = configured_service(&config, request).map_err(Refusal::conflict)?;
+    let port = match &configured.primary_target {
+        Some(RouteTarget::Proxy(target)) => target.port().value(),
+        _ => 0,
+    };
+    let launch = plan_launch(configured, request, port);
+    let profiles_root = match &launch.plan {
+        Ok(plan) => Some(plan.project_root.clone()),
+        Err(_) => launch
+            .configured
+            .project_root_path
+            .as_deref()
+            .map(PathBuf::from),
+    };
+    let profiles = match &profiles_root {
+        Some(root) => LaunchProfiles::load(root),
+        None => Ok(None),
+    };
+    if let Some(dispatch) = dispatch {
+        let revision = || {
+            let definition =
+                LaunchDefinition::new(&launch, request.key.environment.as_deref(), &profiles, None);
+            LaunchRevKey::load_or_create(request.data_dir)?.revision(&definition)
+        };
+        dispatch.check(&Loaded {
+            profiles: &profiles,
+            profile: request.profile,
+            revision: &revision,
+        })?;
+    }
+    let DevLaunch { configured, plan } = launch;
+    let proxy_target = runnable_target(&configured, request.mode).map_err(Refusal::conflict)?;
+    let plan = plan.map_err(Refusal::conflict)?;
+    let profiles = profiles.map_err(Refusal::conflict)?;
+    if phase == Phase::UnderLock {
+        ensure_port_available(port, &configured).map_err(Refusal::conflict)?;
+    }
+    let ports = DaemonPorts::of(&config);
+    Ok(Definition {
+        endpoint: endpoint_in(&config, &configured, ports),
+        service: configured,
+        proxy_target,
+        plan,
+        profiles,
+    })
+}
+
+/// What `localify dev` runs: the service's own launch, the one its revision
+/// covers, or a command given after `--`, run exactly as given from the
+/// folder detection finds.
+fn plan_launch(
+    configured: ConfiguredService,
+    request: &DefinitionRequest<'_>,
+    port: u16,
+) -> DevLaunch {
+    if request.mode == RunMode::Dev && request.override_command.is_empty() {
+        return DevLaunch::resolve(configured, port);
+    }
+    let detected = service_with_launch_for_mode(configured.clone(), request.mode);
+    let command = match request.override_command {
+        [] => detected.command.clone().map(LaunchCommand::Detected).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Service '{}' has no detected command. Run it with an override, for example: {} {} {} -- pnpm dev",
+                detected.id,
+                BRANDING.cli_command(),
+                request.mode.command_name(),
+                detected.id
+            )
+        }),
+        command => Ok(LaunchCommand::Override(command.to_vec())),
+    };
+    let plan = command.and_then(|command| launch_plan::resolve(&detected, command, port));
+    DevLaunch { configured, plan }
+}
+
+/// The service `request` names, as the config snapshot gives it for its
+/// environment, before launch detection: the entry its revision covers.
+fn configured_service(
+    config: &Config,
+    request: &DefinitionRequest<'_>,
+) -> Result<ConfiguredService> {
+    let key = request.key;
+    let roots = load_project_roots();
+    let service = config
+        .configured_services()
+        .into_iter()
+        .find(|service| service.project_id == key.project_id && service.id == key.service_id)
+        .map(|service| service_with_project_root(service, &roots))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Service '{}' is no longer in project '{}'; nothing was started.",
+                key.service_id,
+                key.project_id
+            )
+        })?;
+    let environments = config.configured_project_environments(Some(&key.project_id));
+    let environment = match request.environment {
+        Some(value) => environments
+            .iter()
+            .find(|environment| environment_matches(environment, value)),
+        None => environments.iter().find(|environment| environment.primary),
+    };
+    let service = match (request.environment, environment) {
+        (None, _) => service,
+        (Some(_), Some(environment)) => {
+            launch_plan::environment_service(config, service, environment).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Service '{}' is no longer in environment '{}'; nothing was started.",
+                    key.service_id,
+                    environment.slug
+                )
+            })?
+        }
+        (Some(value), None) => bail!(
+            "Environment '{value}' is no longer in project '{}'; nothing was started.",
+            key.project_id
+        ),
+    };
+    if environment.map(|environment| &environment.slug) != key.environment.as_ref() {
+        bail!(
+            "'{}' changed while it was starting; nothing was started.",
+            key.service_id
+        );
+    }
+    if !service.project_enabled {
+        bail!(
+            "Service '{}' belongs to disabled project '{}'. Enable the project before running it.",
+            service.id,
+            service.project_id
+        );
+    }
+    let worktree = environment
+        .filter(|environment| !environment.primary)
+        .map(|environment| environment.slug.as_str());
+    ensure_service_folder_exists(&service, worktree)?;
+    Ok(service)
+}
+
+/// The service's proxy target, which `dev` can only run on loopback.
+fn runnable_target(service: &ConfiguredService, mode: RunMode) -> Result<ProxyTarget> {
+    let proxy_target = service_proxy_target(service)?.clone();
+    if !is_supported_run_host(proxy_target.host()) {
+        bail!(
+            "Service '{}' points to '{}'. {} {} injects HOST=127.0.0.1 and only supports route targets on 127.0.0.1 or localhost in this slice. Update the route target or run the service manually.",
+            service.id,
+            proxy_target,
+            BRANDING.cli_command(),
+            mode.command_name()
+        );
+    }
+    Ok(proxy_target)
+}
+
+/// One launch, admitted under its lock, as it runs.
+struct Execution<'a> {
+    definition: Definition,
+    key: &'a ServiceKey,
+    run_id: &'a RunId,
+    lock: RunLock,
+    store: &'a RunningServiceStore,
+    dispatch: Option<&'a Dispatch>,
+    launch_profile: &'a LaunchProfileArgs,
+    mode: RunMode,
+    ctx: &'a AppContext,
+    paths: &'a LocalifyPaths,
+}
+
+/// Resolves the profile, registers the run and supervises the service, all
+/// from the definition checked under the lock.
+fn execute(execution: Execution<'_>) -> Result<i32> {
+    let Execution {
+        definition,
+        key,
+        run_id,
+        lock,
+        store,
+        dispatch,
+        launch_profile,
+        mode,
+        ctx,
+        paths,
+    } = execution;
     let Definition {
         service,
         proxy_target,
         plan,
         profiles,
-    } = load_definition(
-        &DefinitionRequest {
-            key: &key,
-            environment: effective_environment,
-            mode,
-            override_command,
-            profile: launch_profile.profile.as_deref(),
-            data_dir: &paths.data_dir,
-        },
-        dispatch.as_ref(),
-        ctx,
-    )
-    .map_err(refuse)?;
-    if let Some(dispatch) = &dispatch {
-        dispatch.admit(&store, &key)?;
-    }
+        endpoint,
+    } = definition;
     let port = proxy_target.port().value();
     let LaunchPlan {
         argv: command,
@@ -320,12 +601,24 @@ pub fn run(
         ..
     } = plan;
     warn_if_daemon_is_stopped(ctx);
+    let origin = run_origin(dispatch.is_some());
+    let not_started = |reason| {
+        if let Some(dispatch) = dispatch {
+            dispatch.exit_before_start(store, reason, origin);
+        }
+    };
+    // Before a profile helper runs: what proves it this launch's, should
+    // this executor die before its run record exists.
+    if let Some(dispatch) = dispatch {
+        dispatch
+            .witness_helpers(store)
+            .inspect_err(|_| not_started(ExitReason::NotStarted))?;
+    }
 
     // Before the profile resolves: a stop meanwhile ends the helpers it runs.
-    let origin = run_origin(dispatch.is_some());
     let supervision = Supervision::start(origin == ServiceOrigin::App);
     let profile = launch_profile::prepare_loaded(
-        &launch_profile,
+        launch_profile,
         profiles.as_ref(),
         &project_root,
         &workdir,
@@ -334,11 +627,6 @@ pub fn run(
     // Also when it failed: a stop that refused its next helper is still
     // ending the others, and `localify dev` exits only once it has.
     supervision.resolved();
-    let not_started = |reason| {
-        if let Some(dispatch) = &dispatch {
-            dispatch.exit_before_start(&store, reason);
-        }
-    };
     let profile = profile.inspect_err(|_| not_started(ExitReason::NotStarted))?;
 
     let launch = Launch {
@@ -348,7 +636,7 @@ pub fn run(
         workdir: &workdir,
         project_root: &project_root,
         profile: profile.as_ref(),
-        ports,
+        endpoint,
         mode,
         paths,
     };
@@ -378,10 +666,10 @@ pub fn run(
         .inspect_err(|_| not_started(ExitReason::RegistrationFailed))?;
 
     let stream = background
-        .then(|| StreamWriter::create(&store.run_dir(&run_id)).map(StreamSink::new))
+        .then(|| StreamWriter::create(&store.run_dir(run_id)).map(StreamSink::new))
         .transpose();
     let run = RegisteredRun {
-        store: &store,
+        store,
         record: &record,
         stream: stream.as_ref().ok().cloned().flatten(),
     };
@@ -389,7 +677,7 @@ pub fn run(
         supervise(Supervised {
             profile: profile.as_ref(),
             service: &service,
-            key: &key,
+            key,
             command: &command,
             workdir: &workdir,
             environment: &environment.variables,
@@ -404,125 +692,6 @@ pub fn run(
     launch_outcome(profile.as_ref(), &service, end?.outcome)
 }
 
-/// What `localify dev` reads again under its run lock.
-struct DefinitionRequest<'a> {
-    key: &'a ServiceKey,
-    environment: Option<&'a str>,
-    mode: RunMode,
-    override_command: Vec<String>,
-    profile: Option<&'a str>,
-    data_dir: &'a Path,
-}
-
-/// The definition of one launch, loaded once under the run lock: the launch
-/// is checked against it, then runs from it.
-struct Definition {
-    service: ConfiguredService,
-    proxy_target: ProxyTarget,
-    plan: LaunchPlan,
-    profiles: Option<LaunchProfiles>,
-}
-
-/// Loads the service from the config, its plan and its checkout's launch
-/// profiles, checks a dispatched launch against them, and checks the port is
-/// free. What stops the launch here is a refusal, with the code its launch
-/// record carries: what the dispatcher saw is not what is here now.
-fn load_definition(
-    request: &DefinitionRequest<'_>,
-    dispatch: Option<&Dispatch>,
-    ctx: &AppContext,
-) -> Result<Definition, Refusal> {
-    let service = reload_service(request.key, request.environment, request.mode, ctx)
-        .map_err(Refusal::conflict)?;
-    let command = if request.override_command.is_empty() {
-        LaunchCommand::Detected(service.command.clone().ok_or_else(|| {
-            Refusal::conflict(anyhow::anyhow!(
-                "Service '{}' has no detected command. Run it with an override, for example: {} {} {} -- pnpm dev",
-                service.id,
-                BRANDING.cli_command(),
-                request.mode.command_name(),
-                service.id
-            ))
-        })?)
-    } else {
-        LaunchCommand::Override(request.override_command.clone())
-    };
-    let proxy_target = runnable_target(&service, request.mode).map_err(Refusal::conflict)?;
-    let port = proxy_target.port().value();
-    let plan = launch_plan::resolve(&service, command, port).map_err(Refusal::conflict)?;
-    let profiles = LaunchProfiles::load(&plan.project_root);
-    if let Some(dispatch) = dispatch {
-        let revision = || {
-            let definition = LaunchDefinition::new(
-                &service,
-                request.key.environment.as_deref(),
-                &Ok(plan.clone()),
-                &profiles,
-                None,
-            );
-            LaunchRevKey::load_or_create(request.data_dir)?.revision(&definition)
-        };
-        dispatch.check(&Loaded {
-            profiles: &profiles,
-            profile: request.profile,
-            revision: &revision,
-        })?;
-    }
-    let profiles = profiles.map_err(Refusal::conflict)?;
-    ensure_port_available(port, &service).map_err(Refusal::conflict)?;
-    Ok(Definition {
-        service,
-        proxy_target,
-        plan,
-        profiles,
-    })
-}
-
-/// The service `key` names, read from the config again, as `dev` runs it.
-fn reload_service(
-    key: &ServiceKey,
-    environment: Option<&str>,
-    mode: RunMode,
-    ctx: &AppContext,
-) -> Result<ConfiguredService> {
-    let service = resolve_run_service(
-        Some(&key.service_id),
-        Some(&key.project_id),
-        environment,
-        ctx,
-    )?;
-    let service = service_with_launch_for_mode(service, mode);
-    if service_key(&service, environment, ctx) != *key {
-        bail!(
-            "'{}' changed while it was starting; nothing was started.",
-            key.service_id
-        );
-    }
-    if !service.project_enabled {
-        bail!(
-            "Service '{}' belongs to disabled project '{}'. Enable the project before running it.",
-            service.id,
-            service.project_id
-        );
-    }
-    Ok(service)
-}
-
-/// The service's proxy target, which `dev` can only run on loopback.
-fn runnable_target(service: &ConfiguredService, mode: RunMode) -> Result<ProxyTarget> {
-    let proxy_target = service_proxy_target(service)?.clone();
-    if !is_supported_run_host(proxy_target.host()) {
-        bail!(
-            "Service '{}' points to '{}'. {} {} injects HOST=127.0.0.1 and only supports route targets on 127.0.0.1 or localhost in this slice. Update the route target or run the service manually.",
-            service.id,
-            proxy_target,
-            BRANDING.cli_command(),
-            mode.command_name()
-        );
-    }
-    Ok(proxy_target)
-}
-
 /// One launch, loaded and admitted, before its environment is built.
 struct Launch<'a> {
     service: &'a ConfiguredService,
@@ -531,7 +700,7 @@ struct Launch<'a> {
     workdir: &'a Path,
     project_root: &'a Path,
     profile: Option<&'a PreparedProfile>,
-    ports: DaemonPorts,
+    endpoint: ServiceEndpoint,
     mode: RunMode,
     paths: &'a LocalifyPaths,
 }
@@ -552,7 +721,7 @@ fn launch_environment(
     let service = launch.service;
     let profile = launch.profile;
     let workdir = launch.workdir;
-    let endpoint = service_endpoint(service, launch.ports, ctx)?;
+    let endpoint = launch.endpoint;
     let url = service_url(service, endpoint);
     let app_host = service_public_host(service);
     let app_domain = service_public_domain(service, endpoint);
@@ -658,6 +827,7 @@ impl RegisteredRun<'_> {
                 run_output::publish_end(&dir, &finished)?;
             }
         }
+        crate::infrastructure::test_pause::pause_at("run-end-published");
         let code = end.and_then(|end| end.outcome.code());
         // The executor knows more than another finisher would: its exit
         // goes in first.
@@ -973,6 +1143,12 @@ impl Replace {
     }
 }
 
+/// The service's lock, taken for one launch, and the run it takes over.
+pub(crate) struct Admitted {
+    pub lock: RunLock,
+    pub replaces: Option<RunId>,
+}
+
 /// How long a replacing launch waits for the run it stopped to let go of the
 /// service's lock.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -983,14 +1159,15 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// one seen first: when the service holds another run once the lock is
 /// free, someone else restarted it, and this launch starts nothing, so two
 /// replacing launches never both start. A run of an older version is never
-/// stopped here. The launch record of a run stopped here says that `run_id`,
-/// this launch, replaced it.
+/// stopped here. Returns, with the lock, the run this launch takes over: the
+/// one it stopped or was approved to replace, which the record still names.
+/// Only the launch that wins the lock gets it, so only the winner records
+/// that it replaced that run.
 pub(crate) fn admit(
     store: &RunningServiceStore,
     key: &ServiceKey,
     replace: Replace,
-    run_id: &RunId,
-) -> Result<RunLock> {
+) -> Result<Admitted> {
     let mut chosen = match &replace {
         Replace::Approved(run_id) => Some(run_id.clone()),
         _ => None,
@@ -1012,7 +1189,10 @@ pub(crate) fn admit(
                         ),
                     }
                 }
-                return Ok(lock);
+                return Ok(Admitted {
+                    lock,
+                    replaces: chosen,
+                });
             }
             Admission::Running(running) => running,
         };
@@ -1052,7 +1232,7 @@ pub(crate) fn admit(
             key.service_id, running.pid
         );
         store.stop(&running)?;
-        store.launches().mark_replaced(&stopped, run_id)?;
+        crate::infrastructure::test_pause::pause_at("replace-stopped");
         chosen = Some(stopped);
         stopped_at = Some(Instant::now());
     }
@@ -2011,12 +2191,29 @@ impl ServiceEndpoint {
 }
 
 fn daemon_ports(ctx: &AppContext) -> Result<DaemonPorts> {
-    let config = ctx.config_store.load()?.daemon;
+    Ok(DaemonPorts::of(&ctx.config_store.load()?))
+}
 
-    Ok(DaemonPorts {
-        http: config.http_port,
-        https: config.https_port,
-    })
+impl DaemonPorts {
+    fn of(config: &Config) -> Self {
+        Self {
+            http: config.daemon.http_port,
+            https: config.daemon.https_port,
+        }
+    }
+}
+
+/// Where `service` answers, by `config` alone.
+fn endpoint_in(
+    config: &Config,
+    service: &ConfiguredService,
+    ports: DaemonPorts,
+) -> ServiceEndpoint {
+    if config.https_enabled_for(&service.primary_domain) {
+        ServiceEndpoint::https(ports.https)
+    } else {
+        ServiceEndpoint::http(ports.http)
+    }
 }
 
 fn service_endpoint(

@@ -28,7 +28,7 @@ use crate::infrastructure::cloud::types::{PublicUrl, PublicUrlState};
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredProjectEnvironment, ConfiguredService,
 };
-use crate::infrastructure::launch_plan::{self, LaunchPlan, service_with_project_root};
+use crate::infrastructure::launch_plan::{self, DevLaunch, LaunchPlan, service_with_project_root};
 use crate::infrastructure::launch_profiles::{LaunchProfiles, allowed_remotely};
 use crate::infrastructure::launch_rev::{LaunchDefinition, LaunchRevKey, random_bytes};
 use crate::infrastructure::running_services::{
@@ -222,14 +222,14 @@ pub fn gather(observed: &Observed<'_>) -> Result<Vec<ServiceFacts>> {
     placed
         .into_iter()
         .map(|placed| {
-            let plan = launch_plan::dev_plan(placed.service.clone(), placed.port);
-            let root = profiles_root(&placed.service, plan.as_ref().ok());
+            let launch = DevLaunch::resolve(placed.service.clone(), placed.port);
+            let root = profiles_root(&placed.service, launch.plan.as_ref().ok());
             let profiles = checkouts
                 .entry(root.clone())
                 .or_insert_with(|| load_profiles(root.as_deref()));
             let reachable = reachable.get(&placed.port).copied();
             let record = records.iter().find(|record| record.key == key_of(&placed));
-            service_facts(placed, reachable, &plan, profiles, record, observed)
+            service_facts(placed, reachable, &launch, profiles, record, observed)
         })
         .collect()
 }
@@ -296,7 +296,7 @@ fn load_profiles(root: Option<&Path>) -> Result<Option<LaunchProfiles>> {
 fn service_facts(
     placed: Placed,
     reachable: Option<bool>,
-    plan: &Result<LaunchPlan>,
+    launch: &DevLaunch,
     profiles: &Result<Option<LaunchProfiles>>,
     record: Option<&RunningService>,
     observed: &Observed<'_>,
@@ -307,7 +307,7 @@ fn service_facts(
         service,
         port,
     } = placed;
-    let definition = LaunchDefinition::new(&service, Some(&environment_slug), plan, profiles, None);
+    let definition = LaunchDefinition::new(launch, Some(&environment_slug), profiles, None);
     Ok(ServiceFacts {
         project: ProjectRef {
             id: service.project_id.clone(),

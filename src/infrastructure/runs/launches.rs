@@ -11,7 +11,9 @@
 //! else.
 //!
 //! Readers only read `<launchId>.json`: a temporary file a crash left before
-//! its link is never a decision, and the daemon sweeps it after an hour.
+//! its link is never a decision, and the daemon sweeps it after an hour. A
+//! decision or an exit counts only once the folder that names it is synced,
+//! so a crash never takes back what the other side already obeyed.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -23,9 +25,10 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::RunId;
-use super::finish::{Membership, RunSession, membership};
-use crate::infrastructure::process::ProcessTable;
-use crate::infrastructure::running_services::{RunningServiceStore, ServiceKey};
+use super::finish::{Finish, Finisher, RunSession};
+use crate::infrastructure::launch_rev::random_bytes;
+use crate::infrastructure::process::{self, ProcessTable};
+use crate::infrastructure::running_services::{RunningService, RunningServiceStore, ServiceKey};
 
 /// Records younger than this are kept, however many there are.
 const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -37,6 +40,15 @@ pub const TEMPORARY_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 /// finishers never interleave theirs. Not a `.json` file, so never read as a
 /// record.
 const EXIT_LOCK: &str = "exits.lock";
+/// How long a dispatched launch has to reach its executor's admission, in
+/// milliseconds.
+const DISPATCH_BUDGET_MS: u64 = 15_000;
+/// Names one temporary file tries. Each is 128 random bits, so a second one
+/// is needed only when another writer picked the same.
+const TEMPORARY_ATTEMPTS: usize = 8;
+/// In a launch's run folder, before its run record exists: when its executor
+/// was last seen alive, right after it started a profile helper.
+const ALIVE_FILE: &str = "executor-alive";
 
 /// The one decision about a launch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +178,9 @@ pub enum ExitReason {
     Stopped,
     /// The launch profile's `max_duration` elapsed.
     MaxDuration,
+    /// The executor died before it recorded how its run ended, so another
+    /// finisher did, without the code.
+    ExecutorLost,
 }
 
 /// What publishing a decision found.
@@ -232,18 +247,24 @@ impl LaunchRecords {
     }
 
     /// Publishes the launch's first decision, or returns the one already
-    /// there, which wins.
+    /// there, which wins. Either way it returns only once the folder naming
+    /// that decision is synced.
     pub fn publish(&self, id: &RunId, record: &LaunchRecord) -> Result<Publication> {
-        fs::create_dir_all(&self.dir)
-            .with_context(|| format!("Failed to create '{}'", self.dir.display()))?;
+        create_durable_dir(&self.dir)?;
         let path = self.path(id);
         let temporary = self.write_temporary(id, record)?;
         crate::infrastructure::test_pause::pause_at("launch-record-written");
         let linked = fs::hard_link(&temporary, &path);
         let _ = fs::remove_file(&temporary);
         match linked {
-            Ok(()) => Ok(Publication::Published),
+            Ok(()) => {
+                sync_dir(&self.dir)?;
+                Ok(Publication::Published)
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                // The winner may not have synced its name yet: obeyed only
+                // once it is durable.
+                sync_dir(&self.dir)?;
                 let decided = self.read(id)?.with_context(|| {
                     format!("'{}' vanished right after it was found", path.display())
                 })?;
@@ -278,8 +299,10 @@ impl LaunchRecords {
         })
     }
 
-    /// Says which launch stopped this one's run, for a restart. Its exit is
-    /// added if no finisher added one yet.
+    /// Says which launch replaced this one's run. Called under the run lock
+    /// by the launch that took the service over, so a replacing launch that
+    /// lost never names itself. Its exit is added if no finisher added one
+    /// yet.
     pub fn mark_replaced(&self, id: &RunId, by: &RunId) -> Result<()> {
         self.change_exit(id, |current| {
             let exit = current.get_or_insert_with(|| LaunchExit::now(None, None, None));
@@ -292,7 +315,8 @@ impl LaunchRecords {
     }
 
     /// Changes an admitted record's exit, under the exit lock: written whole
-    /// to a temporary file, synced, then renamed over the record.
+    /// to a temporary file, synced, renamed over the record, and the folder
+    /// synced.
     fn change_exit(
         &self,
         id: &RunId,
@@ -310,10 +334,11 @@ impl LaunchRecords {
         }
         let temporary = self.write_temporary(id, &LaunchRecord::Admitted(admitted))?;
         let path = self.path(id);
-        fs::rename(&temporary, &path).with_context(|| {
+        if let Err(error) = fs::rename(&temporary, &path) {
             let _ = fs::remove_file(&temporary);
-            format!("Failed to write '{}'", path.display())
-        })
+            return Err(error).with_context(|| format!("Failed to write '{}'", path.display()));
+        }
+        sync_dir(&self.dir)
     }
 
     fn lock_exits(&self) -> Result<File> {
@@ -331,38 +356,53 @@ impl LaunchRecords {
     /// The record, complete and synced, in a file of its own that no other
     /// writer picks.
     fn write_temporary(&self, id: &RunId, record: &LaunchRecord) -> Result<PathBuf> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0);
-        let temporary = self
-            .dir
-            .join(format!("{id}.json.{}.{nanos}.tmp", std::process::id()));
-        let written = File::create_new(&temporary).and_then(|mut file| {
-            file.write_all(&serde_json::to_vec_pretty(record)?)?;
-            file.sync_all()
-        });
-        if let Err(error) = written {
-            let _ = fs::remove_file(&temporary);
-            return Err(error)
-                .with_context(|| format!("Failed to write '{}'", temporary.display()));
-        }
-        Ok(temporary)
+        self.write_temporary_named(id, record, temporary_suffix)
     }
 
-    /// Removes records older than 24 hours beyond the newest 100, except
-    /// those of the runs in `current`, which their services' records still
-    /// name.
-    pub fn prune(&self, current: &HashSet<RunId>) -> Result<usize> {
+    /// `write_temporary`, naming each try from `suffix`. A name another
+    /// writer already holds is skipped, never written to or removed: this
+    /// call removes only a file it created.
+    fn write_temporary_named(
+        &self,
+        id: &RunId,
+        record: &LaunchRecord,
+        mut suffix: impl FnMut() -> Result<String>,
+    ) -> Result<PathBuf> {
+        let content = serde_json::to_vec_pretty(record)?;
+        for _ in 0..TEMPORARY_ATTEMPTS {
+            let temporary = self.dir.join(format!("{id}.json.{}.tmp", suffix()?));
+            let mut file = match File::create_new(&temporary) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("Failed to create '{}'", temporary.display()));
+                }
+            };
+            if let Err(error) = file.write_all(&content).and_then(|()| file.sync_all()) {
+                let _ = fs::remove_file(&temporary);
+                return Err(error)
+                    .with_context(|| format!("Failed to write '{}'", temporary.display()));
+            }
+            return Ok(temporary);
+        }
+        bail!(
+            "Failed to write a launch record in '{}': every temporary name tried was taken. Try again.",
+            self.dir.display()
+        )
+    }
+
+    /// Every record's id and path.
+    fn entries(&self) -> Result<Vec<(RunId, PathBuf)>> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("Failed to read '{}'", self.dir.display()));
             }
         };
-        let mut records: Vec<(SystemTime, PathBuf)> = entries
+        Ok(entries
             .flatten()
             .filter_map(|entry| {
                 let path = entry.path();
@@ -371,25 +411,110 @@ impl LaunchRecords {
                     .to_str()?
                     .strip_suffix(".json")
                     .and_then(|id| RunId::parse(id).ok())?;
-                if current.contains(&id) {
-                    return None;
-                }
-                Some((entry.metadata().ok()?.modified().ok()?, path))
+                Some((id, path))
             })
-            .collect();
-        records.sort_by_key(|record| std::cmp::Reverse(record.0));
-        let now = SystemTime::now();
+            .collect())
+    }
+
+    /// Removes records not changed for 24 hours beyond the newest 100. Never
+    /// one of the runs in `current`, which their services' records still
+    /// name, nor an admission still without its exit: [`reconcile_unresolved`]
+    /// completes those first. Each removal is decided again under the exit
+    /// lock, from the record as it is then, so one that just got its exit
+    /// stays.
+    pub fn prune(&self, current: &HashSet<RunId>) -> Result<usize> {
         let mut removed = 0;
-        for (modified, path) in records.into_iter().skip(KEEP_AT_LEAST) {
-            let old = now
-                .duration_since(modified)
-                .is_ok_and(|age| age >= RETENTION);
-            if old && fs::remove_file(&path).is_ok() {
+        for (id, path) in self.prune_candidates(current)? {
+            if self.remove_if_expendable(&id, &path)? {
                 removed += 1;
             }
         }
         Ok(removed)
     }
+
+    /// The records past the newest 100 and past their retention, as listed
+    /// now.
+    fn prune_candidates(&self, current: &HashSet<RunId>) -> Result<Vec<(RunId, PathBuf)>> {
+        let mut records: Vec<(SystemTime, RunId, PathBuf)> = self
+            .entries()?
+            .into_iter()
+            .filter(|(id, _)| !current.contains(id))
+            .filter_map(|(id, path)| {
+                let modified = fs::metadata(&path).ok()?.modified().ok()?;
+                Some((modified, id, path))
+            })
+            .collect();
+        records.sort_by_key(|record| std::cmp::Reverse(record.0));
+        Ok(records
+            .into_iter()
+            .skip(KEEP_AT_LEAST)
+            .filter(|(modified, _, _)| past_retention(*modified))
+            .map(|(_, id, path)| (id, path))
+            .collect())
+    }
+
+    /// Removes a record unless, read again under the exit lock, it changed
+    /// since it was listed or still waits for its exit.
+    fn remove_if_expendable(&self, id: &RunId, path: &Path) -> Result<bool> {
+        let _lock = self.lock_exits()?;
+        let old = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(past_retention);
+        if !old {
+            return Ok(false);
+        }
+        if let Ok(Some(LaunchRecord::Admitted(admitted))) = self.read(id)
+            && admitted.exit.is_none()
+        {
+            return Ok(false);
+        }
+        Ok(fs::remove_file(path).is_ok())
+    }
+}
+
+fn past_retention(modified: SystemTime) -> bool {
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age >= RETENTION)
+}
+
+/// 128 random bits, in hex.
+fn temporary_suffix() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    random_bytes(&mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Makes the entries of `dir` durable: a link or a rename in it survives a
+/// crash once this returns.
+fn sync_dir(dir: &Path) -> Result<()> {
+    #[cfg(test)]
+    tests::record_sync(dir);
+    File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("Failed to sync '{}'", dir.display()))
+}
+
+/// Creates `dir` and its missing parents, each made durable in its parent.
+fn create_durable_dir(dir: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut ancestor = Some(dir);
+    while let Some(path) = ancestor
+        && !path.is_dir()
+    {
+        missing.push(path);
+        ancestor = path.parent();
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Removes the temporary files in `dir` older than `max_age`: what a crash
@@ -420,6 +545,13 @@ pub fn sweep_temporaries(dir: &Path, max_age: Duration) -> Result<usize> {
     Ok(removed)
 }
 
+/// The `--launch-expires` of a launch dispatched now: 15 seconds later. A
+/// local dispatcher computes it once a replacement's stop phase is over, so a
+/// slow stop never uses up the budget.
+pub fn dispatch_expiry() -> u64 {
+    unix_ms_now().saturating_add(DISPATCH_BUDGET_MS)
+}
+
 /// Unix milliseconds, the unit of `--launch-expires`.
 pub fn unix_ms_now() -> u64 {
     SystemTime::now()
@@ -428,13 +560,32 @@ pub fn unix_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Records that this executor is alive now, right after it started a profile
+/// helper and before its run record exists. A helper that started by then,
+/// and so what it starts, is proven the launch's should the executor die
+/// (docs/remote-machines.md, "The end of a run"). Written whole, renamed over
+/// the last one; only the executor writes it.
+pub fn record_alive(run_dir: &Path) -> Result<()> {
+    let temporary = run_dir.join(format!("{ALIVE_FILE}.tmp"));
+    fs::write(&temporary, process::monotonic_now().to_string())
+        .and_then(|()| fs::rename(&temporary, run_dir.join(ALIVE_FILE)))
+        .with_context(|| format!("Failed to write '{}'", temporary.display()))
+}
+
+fn read_alive(run_dir: &Path) -> Option<u64> {
+    fs::read_to_string(run_dir.join(ALIVE_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// What happened to launch `id`, from its record, the run record of its
 /// service, and its executor: exactly one [`LaunchReport`]. Once `expires_at`
 /// (Unix milliseconds) has passed with no record, it publishes `expired`
 /// first, so no run with that id can start from then on. An admitted launch
-/// whose executor died before registering its run is completed here with
-/// `interrupted_before_registration`.
-#[allow(dead_code)] // Used by the control executor (PR 4c) and the tests, through the library crate.
+/// whose executor died is completed here: what it left is ended through the
+/// identity-checked finisher, and its exit recorded.
 pub fn reconcile(
     store: &RunningServiceStore,
     table: &dyn ProcessTable,
@@ -457,37 +608,51 @@ pub fn reconcile(
     if let Some(exit) = &admitted.exit {
         return Ok(exited(exit));
     }
-    if let Some(report) = registered(store, &admitted)? {
-        return Ok(report);
+    if let Some(run) = named_run(store, &admitted)? {
+        return run_report(store, &run, id);
     }
-    let session = RunSession {
-        executor_pid: admitted.executor.pid,
-        executor_start: admitted.executor.start,
-        sid: admitted.executor.sid,
-        pgid: admitted.executor.sid,
-        boot_id: admitted.executor.boot_id.clone(),
-        // Nothing heartbeats before the run record: only what started with
-        // the executor could prove its session.
-        last_alive_at: admitted.executor.start,
-    };
+    let session = unregistered_session(store, &admitted);
     if session.executor_alive(table) {
         return Ok(LaunchReport::Starting);
     }
     // Dead, it can no longer register: a run record found now is final.
-    let _record = store.lock_record(&admitted.service)?;
-    if let Some(report) = registered(store, &admitted)? {
-        return Ok(report);
+    let named = {
+        let _record = store.lock_record(&admitted.service)?;
+        named_run(store, &admitted)?
+    };
+    if let Some(run) = named {
+        return run_report(store, &run, id);
     }
-    end_unregistered(table, &session)?;
+    end_unregistered(store, &admitted.run_id, &session)?;
     let reason = ExitReason::InterruptedBeforeRegistration;
     records.add_exit(id, LaunchExit::now(None, None, Some(reason)))?;
-    match records.read(id)? {
-        Some(LaunchRecord::Admitted(admitted)) => match &admitted.exit {
-            Some(exit) => Ok(exited(exit)),
-            None => bail!("The exit of launch {id} was not recorded; try again."),
-        },
-        _ => bail!("The record of launch {id} changed while it was completed; try again."),
+    recorded_exit(&records, id)
+}
+
+/// Reconciles every admission still without its exit, so one whose
+/// executor died, before or after registering its run, has what it left
+/// ended and its exit recorded: the daemon's part, each pass. One that cannot
+/// be decided yet is tried again next time. Returns how many it completed.
+pub fn reconcile_unresolved(
+    store: &RunningServiceStore,
+    table: &dyn ProcessTable,
+) -> Result<usize> {
+    let records = store.launches();
+    let mut completed = 0;
+    for (id, _) in records.entries()? {
+        let Ok(Some(LaunchRecord::Admitted(admitted))) = records.read(&id) else {
+            continue;
+        };
+        if admitted.exit.is_some() {
+            continue;
+        }
+        if let Ok(LaunchReport::Exited { .. } | LaunchReport::Replaced { .. }) =
+            reconcile(store, table, &id, None)
+        {
+            completed += 1;
+        }
     }
+    Ok(completed)
 }
 
 fn exited(exit: &LaunchExit) -> LaunchReport {
@@ -501,55 +666,123 @@ fn exited(exit: &LaunchExit) -> LaunchReport {
     }
 }
 
-/// The report of a launch whose run its service's record names.
-fn registered(
+/// The exit just recorded in launch `id`'s record.
+fn recorded_exit(records: &LaunchRecords, id: &RunId) -> Result<LaunchReport> {
+    match records.read(id)? {
+        Some(LaunchRecord::Admitted(admitted)) => match &admitted.exit {
+            Some(exit) => Ok(exited(exit)),
+            None => bail!("The exit of launch {id} was not recorded; try again."),
+        },
+        _ => bail!("The record of launch {id} changed while it was completed; try again."),
+    }
+}
+
+/// The service's record, while it names the launch's run.
+fn named_run(
     store: &RunningServiceStore,
     admitted: &AdmittedLaunch,
-) -> Result<Option<LaunchReport>> {
-    let Some(record) = store.get(&admitted.service)? else {
-        return Ok(None);
-    };
-    if record.run_id() != Some(&admitted.run_id) {
-        return Ok(None);
+) -> Result<Option<RunningService>> {
+    Ok(store
+        .get(&admitted.service)?
+        .filter(|record| record.run_id() == Some(&admitted.run_id)))
+}
+
+/// The report of a launch whose run its service's record names. A run whose
+/// executor died without recording how it ended is completed first, by the
+/// identity-checked finisher, so it never reads `running` once nothing runs.
+/// Its exit then has no code: only the executor knew it.
+fn run_report(
+    store: &RunningServiceStore,
+    run: &RunningService,
+    id: &RunId,
+) -> Result<LaunchReport> {
+    if run.exit.is_none() && !store.complete_dead_run(run)? {
+        return Ok(LaunchReport::Running);
     }
-    Ok(Some(match &record.exit {
-        Some(exit) => LaunchReport::Exited {
-            code: exit.code,
-            signal: None,
-            reason: None,
-        },
-        None => LaunchReport::Running,
-    }))
+    // Also for a finisher that died between the run record's exit and this
+    // one's.
+    let code = run.exit.as_ref().and_then(|exit| exit.code);
+    let reason = code.is_none().then_some(ExitReason::ExecutorLost);
+    let records = store.launches();
+    records.add_exit(id, LaunchExit::now(code, None, reason))?;
+    recorded_exit(&records, id)
+}
+
+/// The session of an executor that has no run record: what proves its
+/// members is the last sign of life it gave after starting a helper, or else
+/// its own start.
+fn unregistered_session(store: &RunningServiceStore, admitted: &AdmittedLaunch) -> RunSession {
+    let executor = &admitted.executor;
+    let alive = read_alive(&store.run_dir(&admitted.run_id)).unwrap_or(executor.start);
+    RunSession {
+        executor_pid: executor.pid,
+        executor_start: executor.start,
+        sid: executor.sid,
+        pgid: executor.sid,
+        boot_id: executor.boot_id.clone(),
+        last_alive_at: alive.max(executor.start),
+    }
 }
 
 /// The session cleanup of "The end of a run", for an executor that died
-/// before its run record. Nothing heartbeats before that record, so only a
-/// process that started with the executor could prove its session: the
-/// cleanup finds the session unproven and signals nothing, as a finisher never
-/// signals what it cannot prove. The profile helpers it was running, the only
-/// processes it starts in that window, are left to end on their own. A session
-/// it could not decide on keeps the launch open: the next reconcile tries
-/// again.
-fn end_unregistered(table: &dyn ProcessTable, session: &RunSession) -> Result<()> {
-    if session.sid.is_none() {
-        return Ok(());
-    }
-    match membership(table, session) {
-        Membership::OtherBoot | Membership::Unproven => Ok(()),
-        Membership::Proven(members) if members.is_empty() => Ok(()),
-        Membership::Proven(_) | Membership::Inconclusive => bail!(
-            "The session of a launch whose executor died before registering is still alive; try again."
+/// between its admission and its run record: the profile helpers it started
+/// there, proven by [`record_alive`], and what they started are ended by the
+/// identity-checked finisher, in the run's folder, which is then removed, as
+/// no run will use it. Without that folder, nothing ran. Something it cannot
+/// confirm, or a run terminal the app still reads, keeps the launch open:
+/// the next reconcile tries again.
+fn end_unregistered(
+    store: &RunningServiceStore,
+    run_id: &RunId,
+    session: &RunSession,
+) -> Result<()> {
+    let dir = store.run_dir(run_id);
+    match Finisher::native().finish(&dir, session, true)? {
+        Finish::Gone => return Ok(()),
+        Finish::AlreadyFinalized | Finish::Finalized(_) => {}
+        Finish::ExecutorAlive => bail!("The executor of launch {run_id} still runs; try again."),
+        Finish::Busy => bail!(
+            "The app still reads the terminal of launch {run_id}; try again once it closed it."
         ),
+        Finish::Unconfirmed(pids) => bail!("{}", Finish::unconfirmed_message(&pids)),
     }
+    fs::remove_dir_all(&dir).with_context(|| format!("Failed to remove '{}'", dir.display()))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs::FileTimes;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     use super::*;
     use crate::infrastructure::process::{NativeProcesses, process_info};
     use crate::infrastructure::running_services::{NewRun, ServiceOrigin};
+
+    thread_local! {
+        static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Each folder this thread synced, in order.
+    pub(super) fn record_sync(dir: &Path) {
+        SYNCED.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
+    }
+
+    fn take_syncs() -> Vec<PathBuf> {
+        SYNCED.with(|synced| std::mem::take(&mut *synced.borrow_mut()))
+    }
+
+    fn backdate(records: &LaunchRecords, id: &RunId, age: Duration) {
+        File::options()
+            .write(true)
+            .open(records.path(id))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::now() - age))
+            .unwrap();
+    }
+
+    const TWO_DAYS: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 
     fn key() -> ServiceKey {
         ServiceKey {
@@ -638,6 +871,106 @@ mod tests {
             records.read(&id).unwrap(),
             Some(LaunchRecord::Expired { .. })
         ));
+    }
+
+    #[test]
+    fn of_simultaneous_publishers_exactly_one_wins_and_every_other_obeys_it() {
+        let (_dir, store) = sandbox();
+        let store = Arc::new(store);
+        let id = RunId::generate().unwrap();
+        let publishers = 8;
+        let barrier = Arc::new(Barrier::new(publishers));
+        let outcomes: Vec<(LaunchRecord, Publication)> = (0..publishers)
+            .map(|index| {
+                let (store, barrier, id) = (Arc::clone(&store), Arc::clone(&barrier), id.clone());
+                thread::spawn(move || {
+                    let record = LaunchRecord::Refused {
+                        code: RefusalCode::Conflict,
+                        message: format!("publisher {index}"),
+                        at: unix_ms_now(),
+                    };
+                    barrier.wait();
+                    let outcome = store.launches().publish(&id, &record).unwrap();
+                    (record, outcome)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|publisher| publisher.join().unwrap())
+            .collect();
+
+        let decided = store.launches().read(&id).unwrap().unwrap();
+        let winners: Vec<&LaunchRecord> = outcomes
+            .iter()
+            .filter(|(_, outcome)| *outcome == Publication::Published)
+            .map(|(record, _)| record)
+            .collect();
+        assert_eq!(winners, [&decided]);
+        for (_, outcome) in &outcomes {
+            if let Publication::Decided(seen) = outcome {
+                assert_eq!(seen, &decided);
+            }
+        }
+        // No temporary file is left behind.
+        let left: Vec<_> = fs::read_dir(store.launches().dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn a_decision_and_an_exit_count_only_once_their_folder_is_synced() {
+        let (dir, store) = sandbox();
+        let records = store.launches();
+        let id = RunId::generate().unwrap();
+        take_syncs();
+
+        records.publish(&id, &admitted(&id, true)).unwrap();
+        // The folders it created, each in its parent, then the record's name.
+        assert_eq!(
+            take_syncs(),
+            [
+                dir.path().to_path_buf(),
+                dir.path().join("services"),
+                records.dir().to_path_buf()
+            ]
+        );
+        records
+            .add_exit(&id, LaunchExit::now(Some(0), None, None))
+            .unwrap();
+        assert_eq!(take_syncs(), [records.dir().to_path_buf()]);
+        // The loser makes the winner's name durable before it obeys it.
+        assert!(matches!(
+            records.expire(&id).unwrap(),
+            LaunchRecord::Admitted(_)
+        ));
+        assert_eq!(take_syncs(), [records.dir().to_path_buf()]);
+    }
+
+    #[test]
+    fn a_temporary_name_another_writer_holds_is_skipped_and_left_alone() {
+        let (_dir, store) = sandbox();
+        let records = store.launches();
+        create_durable_dir(records.dir()).unwrap();
+        let id = RunId::generate().unwrap();
+        let taken = records.dir().join(format!("{id}.json.taken.tmp"));
+        fs::write(&taken, "another writer's").unwrap();
+
+        let mut names = ["taken", "fresh"].into_iter();
+        let written = records
+            .write_temporary_named(&id, &refused(), || Ok(names.next().unwrap().into()))
+            .unwrap();
+        assert_eq!(written, records.dir().join(format!("{id}.json.fresh.tmp")));
+        assert_eq!(fs::read_to_string(&taken).unwrap(), "another writer's");
+
+        // When every name tried is taken, it fails and removes nothing.
+        let failed = records.write_temporary_named(&id, &refused(), || Ok("taken".into()));
+        assert!(failed.is_err());
+        assert_eq!(fs::read_to_string(&taken).unwrap(), "another writer's");
+        // Real names never collide: 128 random bits each.
+        assert_ne!(temporary_suffix().unwrap(), temporary_suffix().unwrap());
     }
 
     #[test]
@@ -846,6 +1179,97 @@ mod tests {
     }
 
     #[test]
+    fn retention_keeps_an_admission_until_it_has_its_exit() {
+        let (_dir, store) = sandbox();
+        let records = store.launches();
+        for _ in 0..KEEP_AT_LEAST {
+            let young = RunId::generate().unwrap();
+            records.publish(&young, &refused()).unwrap();
+        }
+        // Admitted two days ago, never registered: one whose executor, this
+        // process, is suspended or slow, and one whose executor died.
+        let live = RunId::generate().unwrap();
+        records.publish(&live, &admitted(&live, true)).unwrap();
+        let dead = RunId::generate().unwrap();
+        records.publish(&dead, &admitted(&dead, false)).unwrap();
+        let old = RunId::generate().unwrap();
+        records.publish(&old, &refused()).unwrap();
+        for id in [&live, &dead, &old] {
+            backdate(&records, id, TWO_DAYS);
+        }
+
+        assert_eq!(records.prune(&HashSet::new()).unwrap(), 1);
+        assert!(records.read(&old).unwrap().is_none());
+        assert!(records.read(&live).unwrap().is_some());
+        assert!(records.read(&dead).unwrap().is_some());
+
+        // The daemon's pass completes the dead one and leaves the live one,
+        // which a reconciler still reports as starting, never expired.
+        assert_eq!(reconcile_unresolved(&store, &NativeProcesses).unwrap(), 1);
+        assert_eq!(report(&store, &live, Some(0)), LaunchReport::Starting);
+        assert_eq!(
+            report(&store, &dead, None),
+            LaunchReport::Exited {
+                code: None,
+                signal: None,
+                reason: Some(ExitReason::InterruptedBeforeRegistration)
+            }
+        );
+        // Complete and old, it goes; the live one stays.
+        backdate(&records, &dead, TWO_DAYS);
+        assert_eq!(records.prune(&HashSet::new()).unwrap(), 1);
+        assert!(records.read(&dead).unwrap().is_none());
+        assert!(records.read(&live).unwrap().is_some());
+    }
+
+    #[test]
+    fn pruning_decides_each_removal_again_under_the_exit_lock() {
+        let (_dir, store) = sandbox();
+        let records = store.launches();
+        for _ in 0..KEEP_AT_LEAST {
+            let young = RunId::generate().unwrap();
+            records.publish(&young, &refused()).unwrap();
+        }
+        let changed = RunId::generate().unwrap();
+        records
+            .publish(&changed, &admitted(&changed, false))
+            .unwrap();
+        records
+            .add_exit(&changed, LaunchExit::now(Some(0), None, None))
+            .unwrap();
+        let waiting = RunId::generate().unwrap();
+        records.publish(&waiting, &refused()).unwrap();
+        backdate(&records, &changed, TWO_DAYS);
+        backdate(&records, &waiting, TWO_DAYS);
+        let candidates = records.prune_candidates(&HashSet::new()).unwrap();
+        assert_eq!(candidates.len(), 2);
+
+        // A finisher changed one after it was listed: it stays.
+        records
+            .mark_replaced(&changed, &RunId::generate().unwrap())
+            .unwrap();
+        let (id, path) = candidates.iter().find(|(id, _)| *id == changed).unwrap();
+        assert!(!records.remove_if_expendable(id, path).unwrap());
+        assert!(records.read(&changed).unwrap().is_some());
+
+        // A removal waits while an exit is being written.
+        let held = records.lock_exits().unwrap();
+        let (id, path) = candidates
+            .into_iter()
+            .find(|(id, _)| *id == waiting)
+            .unwrap();
+        let pruner = {
+            let records = LaunchRecords::new(records.dir().to_path_buf());
+            thread::spawn(move || records.remove_if_expendable(&id, &path).unwrap())
+        };
+        thread::sleep(Duration::from_millis(300));
+        assert!(records.read(&waiting).unwrap().is_some());
+        drop(held);
+        assert!(pruner.join().unwrap());
+        assert!(records.read(&waiting).unwrap().is_none());
+    }
+
+    #[test]
     fn a_request_names_a_machine_and_its_request() {
         assert_eq!(
             RequestedBy::parse("machine-A_1:req.2").unwrap(),
@@ -886,5 +1310,7 @@ mod tests {
         .unwrap();
         assert_eq!(exit["reason"], "interrupted_before_registration");
         assert_eq!(exit["replacedBy"], serde_json::Value::Null);
+        let lost = serde_json::to_value(ExitReason::ExecutorLost).unwrap();
+        assert_eq!(lost, "executor_lost");
     }
 }

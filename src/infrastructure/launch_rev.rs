@@ -19,7 +19,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::infrastructure::config::ConfiguredService;
-use crate::infrastructure::launch_plan::LaunchPlan;
+use crate::infrastructure::launch_plan::{DevLaunch, LaunchPlan};
 use crate::infrastructure::launch_profiles::{LaunchProfile, LaunchProfiles, ProfileSource};
 
 /// In the data directory.
@@ -144,9 +144,10 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// (argv, folder and the arguments Localify adds); the profile it would
 /// choose; every effective launch profile of its checkout as
 /// [`LaunchProfiles::load`] gives them; and the `package.json` files the
-/// plan was resolved from. `localify dev --expect-rev` builds the same one,
-/// for the effective default profile as the inventory does, from what it
-/// loaded under its run lock, then runs that plan without resolving it again.
+/// plan was resolved from. The inventory and `localify dev --expect-rev` both
+/// build it from a [`DevLaunch`], for the effective default profile; the
+/// executor builds it from what it loaded under its run lock, then runs that
+/// plan without resolving it again.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchDefinition {
@@ -240,16 +241,18 @@ enum SourceEntry {
 }
 
 impl LaunchDefinition {
-    /// `service` as it runs in `environment` (the record's slug), the plan
-    /// resolved from it, the profile `requested` (`None`: the effective
-    /// default), and the result of `LaunchProfiles::load` on its checkout.
+    /// `launch` as it runs in `environment` (the record's slug): the entry
+    /// the config gives and the plan resolved from it, kept apart; the
+    /// profile `requested` (`None`: the effective default), and the result of
+    /// `LaunchProfiles::load` on its checkout.
     pub fn new(
-        service: &ConfiguredService,
+        launch: &DevLaunch,
         environment: Option<&str>,
-        plan: &Result<LaunchPlan>,
         profiles: &Result<Option<LaunchProfiles>>,
         requested: Option<&str>,
     ) -> Self {
+        let service = &launch.configured;
+        let plan = &launch.plan;
         Self {
             service: ServiceEntry {
                 project_id: service.project_id.clone(),

@@ -916,6 +916,33 @@ fn load_config_and_paths(config_path: &Path) -> Result<(Config, LocalifyPaths)> 
     Ok((config, paths))
 }
 
+/// A dispatched `localify dev` that cannot even read the config still
+/// publishes its refusal, so its dispatcher learns why instead of waiting for
+/// the launch to expire.
+fn refuse_dispatched_launch(command: &Commands, error: anyhow::Error) -> anyhow::Error {
+    let Commands::Dev {
+        launch_id,
+        remote_launch,
+        launch_expires,
+        expect_rev,
+        request,
+        ..
+    } = command
+    else {
+        return error;
+    };
+    cli::launch_fence::refuse_before_start(
+        cli::launch_fence::DispatchFlags {
+            launch_id: launch_id.clone(),
+            remote_launch: remote_launch.clone(),
+            launch_expires: *launch_expires,
+            expect_rev: expect_rev.clone(),
+            request: request.clone(),
+        },
+        error,
+    )
+}
+
 fn ensure_rustls_crypto_provider() -> Result<()> {
     static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -1011,7 +1038,8 @@ fn main() -> Result<()> {
 
     refuse_sudo()?;
 
-    let (config, paths) = load_config_and_paths(config_path)?;
+    let (config, paths) = load_config_and_paths(config_path)
+        .map_err(|error| refuse_dispatched_launch(&cli.command, error))?;
     let ctx = AppContext::new(config_path, &paths);
 
     match cli.command {

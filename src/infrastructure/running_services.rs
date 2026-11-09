@@ -28,7 +28,8 @@ use crate::infrastructure::runs::finish::{
     CLEANUP_WAIT, Finish, Finisher, Membership, RunSession, membership,
 };
 use crate::infrastructure::runs::launches::{
-    LaunchExit, LaunchRecords, TEMPORARY_MAX_AGE, sweep_temporaries,
+    ExitReason, LaunchExit, LaunchRecords, TEMPORARY_MAX_AGE, reconcile_unresolved,
+    sweep_temporaries,
 };
 use crate::infrastructure::runs::output::{self, plain_lines};
 use crate::infrastructure::runs::{RunId, run_dir};
@@ -480,6 +481,16 @@ impl RunningServiceStore {
     /// it over since or its end is already recorded, and in its launch
     /// record unless a finisher added an exit there first.
     pub fn mark_exited(&self, key: &ServiceKey, run_id: &RunId, code: Option<i32>) -> Result<()> {
+        self.record_exit(key, run_id, code, LaunchExit::now(code, None, None))
+    }
+
+    fn record_exit(
+        &self,
+        key: &ServiceKey,
+        run_id: &RunId,
+        code: Option<i32>,
+        launch: LaunchExit,
+    ) -> Result<()> {
         self.update(key, run_id, |record| {
             if record.exit.is_some() {
                 return false;
@@ -490,8 +501,7 @@ impl RunningServiceStore {
             });
             true
         })?;
-        self.launches()
-            .add_exit(run_id, LaunchExit::now(code, None, None))
+        self.launches().add_exit(run_id, launch)
     }
 
     /// Changes the record of `run_id`, under the service's record lock, so no
@@ -534,10 +544,36 @@ impl RunningServiceStore {
         Ok(file)
     }
 
+    /// The exit a finisher other than the executor records: the executor
+    /// alone knew the code, and its own exit, recorded first, stands.
     fn mark_ended(&self, record: &RunningService) -> Result<()> {
-        match record.run_id() {
-            Some(run_id) => self.mark_exited(&record.key, run_id, None),
-            None => Ok(()),
+        let Some(run_id) = record.run_id() else {
+            return Ok(());
+        };
+        let lost = LaunchExit::now(None, None, Some(ExitReason::ExecutorLost));
+        self.record_exit(&record.key, run_id, None, lost)
+    }
+
+    /// Completes a run whose executor died without recording how it ended:
+    /// what is proven left of its session is ended by the identity-checked
+    /// finisher, it is finalized unless it already was, and its exit is
+    /// recorded without a code. Returns whether it is over: not while its
+    /// executor or the app reading it still runs, or something it cannot
+    /// confirm still carries its session.
+    pub fn complete_dead_run(&self, record: &RunningService) -> Result<bool> {
+        let (Some(run), Some(session)) = (&record.run, record.session()) else {
+            return Ok(false);
+        };
+        if session.executor_alive(&NativeProcesses) {
+            return Ok(false);
+        }
+        let dir = self.run_dir(&run.run_id);
+        match Finisher::native().finish(&dir, &session, record.has_stream())? {
+            Finish::AlreadyFinalized | Finish::Finalized(_) | Finish::Gone => {
+                self.mark_ended(record)?;
+                Ok(true)
+            }
+            Finish::ExecutorAlive | Finish::Busy | Finish::Unconfirmed(_) => Ok(false),
         }
     }
 
@@ -678,10 +714,9 @@ impl RunningServiceStore {
                 Some(RunOutput::Pty) => !output::reader_alive(&dir)?,
                 None => false,
             };
-            if !unread
-                || output::read_end(&dir)?.is_some()
-                || session.executor_alive(&NativeProcesses)
-            {
+            // Finalized but with no exit: its executor or the app died in
+            // between, and the finisher records the exit without its code.
+            if !unread || service.exit.is_some() || session.executor_alive(&NativeProcesses) {
                 continue;
             }
             let finish = Finisher::native().finish(&dir, &session, true)?;
@@ -694,10 +729,12 @@ impl RunningServiceStore {
         Ok(finished)
     }
 
-    /// The daemon's housekeeping: the temporary files a crash left in
-    /// `launches/` and in each run's folder, once an hour old, and the launch
-    /// records past their retention. Returns how many files went.
+    /// The daemon's housekeeping: the admissions whose executor died
+    /// without their exit are completed, then the temporary files a crash
+    /// left in `launches/` and in each run's folder, once an hour old, and the
+    /// launch records past their retention go. Returns how many files went.
     pub fn sweep_leftovers(&self) -> Result<usize> {
+        reconcile_unresolved(self, &NativeProcesses)?;
         let launches = self.launches();
         let mut removed = sweep_temporaries(launches.dir(), TEMPORARY_MAX_AGE)?;
         if let Ok(runs) = fs::read_dir(self.dir.join("output")) {

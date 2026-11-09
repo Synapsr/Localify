@@ -31,6 +31,7 @@ use crate::infrastructure::running_services::{
     ServiceOrigin, service_selector,
 };
 use crate::infrastructure::runs::RunId;
+use crate::infrastructure::runs::launches::dispatch_expiry;
 use crate::infrastructure::runs::output::{self, StreamLine, StreamRead};
 
 /// A first `next dev` can take this long before it listens.
@@ -51,7 +52,10 @@ pub struct Detached<'a> {
 
 /// Runs the same `dev` command again in the background, in its own session
 /// and with its output in the run's stream, and returns once the service
-/// listens, stopped, or is still starting.
+/// listens, stopped, or is still starting. A launch this dispatcher names gets
+/// its expiry only once the run it replaces has stopped, so a slow stop never
+/// uses up the launch's budget; a launch id given by the caller comes with the
+/// caller's expiry, passed on as given.
 pub fn start_detached(
     launch_id: Option<&str>,
     detached: Detached<'_>,
@@ -61,13 +65,28 @@ pub fn start_detached(
     let store = RunningServiceStore::new_default()?;
     // The executor has no terminal: a person at this one is asked here, and
     // the executor stops only the run they were asked about.
-    let approved = match detached.replace {
-        Replace::Ask => ask_before_detaching(&store, detached.target, config_path, ctx)?,
-        _ => None,
+    let replace = match detached.replace {
+        Replace::Ask => match ask_before_detaching(&store, detached.target, config_path, ctx)? {
+            Some(run_id) => Replace::Approved(run_id),
+            None => Replace::No,
+        },
+        replace => replace,
     };
-    let (launch_id, chosen) = match launch_id {
-        Some(id) => (RunId::parse(id)?, false),
-        None => (RunId::generate()?, true),
+    let (launch_id, dispatcher) = match launch_id {
+        Some(id) => {
+            let replace = match &replace {
+                Replace::Approved(run_id) => Some(run_id.clone()),
+                _ => None,
+            };
+            (RunId::parse(id)?, Dispatcher::Caller { replace })
+        }
+        None => {
+            let replace =
+                stop_before_detaching(&store, detached.target, &replace, config_path, ctx)?;
+            let launch_id = RunId::generate()?;
+            let expires = dispatch_expiry();
+            (launch_id, Dispatcher::Named { expires, replace })
+        }
     };
     // The executor's own messages, such as why it refused to start.
     let launch_log = store.launch_log(&launch_id)?;
@@ -81,8 +100,8 @@ pub fn start_detached(
     command
         .args(foreground_args(
             std::env::args_os().skip(1),
-            chosen.then_some(&launch_id),
-            approved.as_ref(),
+            &launch_id,
+            &dispatcher,
         ))
         .env(SERVICE_ORIGIN_ENV, ServiceOrigin::Background.as_env())
         .stdin(Stdio::null())
@@ -104,7 +123,21 @@ pub fn start_detached(
     wait_for_child(&mut child, &store, &launch_id, &launch_log)
 }
 
-/// The run a person agrees to stop before the service starts in the
+/// Who named the launch, and what this dispatcher passes on.
+enum Dispatcher {
+    /// The caller passed `--launch-id` or `--remote-launch`, with its own
+    /// expiry: its flags reach the executor as given, and `--replace=<runId>`
+    /// for the run a person agreed to stop here.
+    Caller { replace: Option<RunId> },
+    /// This dispatcher named it: it adds the id and the expiry, and in place
+    /// of `--replace` the run it stopped, or was approved to stop.
+    Named {
+        expires: u64,
+        replace: Option<RunId>,
+    },
+}
+
+/// The run a person agreed to stop before the service starts in the
 /// background. Nothing running, or a run of an older version, which the
 /// executor refuses itself, asks nothing.
 fn ask_before_detaching(
@@ -126,41 +159,81 @@ fn ask_before_detaching(
     Ok(running.run_id().cloned())
 }
 
-/// The arguments of this command without `--detach`, with the launch id this
-/// dispatcher chose, and `--replace=<runId>` for the run a person agreed to
-/// stop. What follows `--` is the service's own command and stays as it is.
+/// A replacement's stop phase, before its launch is dispatched: the run
+/// `replace` says to stop is stopped and finalized here, as `stop` does. The
+/// executor then takes over only that run (`--replace=<runId>`), so one
+/// started by someone else meanwhile is left running and the launch refused.
+fn stop_before_detaching(
+    store: &RunningServiceStore,
+    target: RunTarget<'_>,
+    replace: &Replace,
+    config_path: &Path,
+    ctx: &AppContext,
+) -> Result<Option<RunId>> {
+    let approved = match replace {
+        Replace::Approved(run_id) => Some(run_id.clone()),
+        Replace::Yes => None,
+        Replace::Ask | Replace::No => return Ok(None),
+    };
+    let launch = resolve_launch_target(target, config_path, ctx)?;
+    let running = store
+        .get(&launch.key)?
+        .filter(|run| run.run_id().is_some() && run.executor_runs())
+        .filter(|run| approved.is_none() || run.run_id() == approved.as_ref());
+    let Some(running) = running else {
+        return Ok(approved);
+    };
+    eprintln!(
+        "Stopping '{}' (PID {}) to start it again...",
+        running.key.service_id, running.pid
+    );
+    store.stop(&running)?;
+    Ok(running.run_id().cloned())
+}
+
+/// The arguments of this command without `--detach`, with what `dispatcher`
+/// adds. What follows `--` is the service's own command and stays as it is.
 fn foreground_args(
     args: impl Iterator<Item = OsString>,
-    launch_id: Option<&RunId>,
-    replace: Option<&RunId>,
+    launch_id: &RunId,
+    dispatcher: &Dispatcher,
 ) -> Vec<OsString> {
+    let named = matches!(dispatcher, Dispatcher::Named { .. });
     let mut foreground = Vec::new();
     let mut in_service_command = false;
     for arg in args {
         if !in_service_command && arg == "--" {
             in_service_command = true;
-            push_dispatcher_args(&mut foreground, launch_id, replace);
+            push_dispatcher_args(&mut foreground, launch_id, dispatcher);
         }
-        if in_service_command || arg != "--detach" {
+        let ours = arg == "--detach" || (named && is_replace_flag(&arg));
+        if in_service_command || !ours {
             foreground.push(arg);
         }
     }
     if !in_service_command {
-        push_dispatcher_args(&mut foreground, launch_id, replace);
+        push_dispatcher_args(&mut foreground, launch_id, dispatcher);
     }
     foreground
 }
 
+/// `--replace`, or `--replace=<runId>`.
+fn is_replace_flag(arg: &OsString) -> bool {
+    arg.to_str()
+        .is_some_and(|arg| arg == "--replace" || arg.starts_with("--replace="))
+}
+
 /// Each run id in one argument: an id may start with `-`, which would read
 /// as a flag.
-fn push_dispatcher_args(
-    args: &mut Vec<OsString>,
-    launch_id: Option<&RunId>,
-    replace: Option<&RunId>,
-) {
-    if let Some(launch_id) = launch_id {
-        args.push(format!("--launch-id={launch_id}").into());
-    }
+fn push_dispatcher_args(args: &mut Vec<OsString>, launch_id: &RunId, dispatcher: &Dispatcher) {
+    let replace = match dispatcher {
+        Dispatcher::Caller { replace } => replace,
+        Dispatcher::Named { expires, replace } => {
+            args.push(format!("--launch-id={launch_id}").into());
+            args.push(format!("--launch-expires={expires}").into());
+            replace
+        }
+    };
     if let Some(replace) = replace {
         args.push(format!("--replace={replace}").into());
     }
@@ -833,20 +906,33 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    const ID: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+
+    fn named(replace: Option<&str>) -> Dispatcher {
+        Dispatcher::Named {
+            expires: 1_700_000_015_000,
+            replace: replace.map(|id| RunId::parse(id).unwrap()),
+        }
+    }
+
     #[test]
-    fn a_yes_given_before_detaching_names_the_run_it_was_about() {
-        let shown = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
+    fn a_launch_this_dispatcher_names_gets_its_id_expiry_and_the_run_it_stopped() {
+        let launch_id = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
         let result = foreground_args(
-            args(&["dev", "web", "--detach", "--", "pnpm", "dev"]).into_iter(),
-            None,
-            Some(&shown),
+            args(&["dev", "web", "--detach", "--replace", "--", "pnpm", "dev"]).into_iter(),
+            &launch_id,
+            &named(Some("-rAAAAAAAAAAAAAAAAAAAA")),
         );
+        // `--replace` became the run this dispatcher stopped, each id in one
+        // argument since it may start with `-`.
         assert_eq!(
             result,
             args(&[
                 "dev",
                 "web",
-                "--replace=-qAAAAAAAAAAAAAAAAAAAA",
+                "--launch-id=-qAAAAAAAAAAAAAAAAAAAA",
+                "--launch-expires=1700000015000",
+                "--replace=-rAAAAAAAAAAAAAAAAAAAA",
                 "--",
                 "pnpm",
                 "dev"
@@ -855,31 +941,43 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_id_that_starts_with_a_dash_is_passed_as_one_argument() {
-        let launch_id = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
-
+    fn a_replace_with_nothing_left_to_stop_is_dropped() {
+        let launch_id = RunId::parse(ID).unwrap();
         let result = foreground_args(
-            args(&["dev", "web", "--detach"]).into_iter(),
-            Some(&launch_id),
-            None,
+            args(&["dev", "web", "--replace=-rAAAAAAAAAAAAAAAAAAAA", "--detach"]).into_iter(),
+            &launch_id,
+            &named(None),
         );
-
         assert_eq!(
             result,
-            args(&["dev", "web", "--launch-id=-qAAAAAAAAAAAAAAAAAAAA"])
+            args(&[
+                "dev",
+                "web",
+                "--launch-id=AAAAAAAAAAAAAAAAAAAAAA",
+                "--launch-expires=1700000015000"
+            ])
         );
     }
 
     #[test]
     fn the_background_run_drops_only_localify_s_detach_flag() {
-        let launch_id = RunId::parse("AAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        let launch_id = RunId::parse(ID).unwrap();
         let result = foreground_args(
             args(&[
-                "dev", "web", "--detach", "--env", "feat", "--", "pnpm", "dev", "--detach",
+                "dev",
+                "web",
+                "--detach",
+                "--env",
+                "feat",
+                "--",
+                "pnpm",
+                "dev",
+                "--detach",
+                "--replace",
             ])
             .into_iter(),
-            Some(&launch_id),
-            None,
+            &launch_id,
+            &named(None),
         );
 
         assert_eq!(
@@ -890,32 +988,48 @@ mod tests {
                 "--env",
                 "feat",
                 "--launch-id=AAAAAAAAAAAAAAAAAAAAAA",
+                "--launch-expires=1700000015000",
                 "--",
                 "pnpm",
                 "dev",
-                "--detach"
+                "--detach",
+                "--replace"
             ])
         );
     }
 
     #[test]
-    fn a_launch_id_given_by_the_caller_is_not_added_twice() {
+    fn a_launch_the_caller_named_keeps_its_flags_as_given() {
+        let launch_id = RunId::parse(ID).unwrap();
+        let shown = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
         let result = foreground_args(
             args(&[
                 "dev",
                 "web",
                 "--launch-id",
-                "AAAAAAAAAAAAAAAAAAAAAA",
+                ID,
+                "--launch-expires",
+                "1",
                 "--detach",
             ])
             .into_iter(),
-            None,
-            None,
+            &launch_id,
+            &Dispatcher::Caller {
+                replace: Some(shown),
+            },
         );
 
         assert_eq!(
             result,
-            args(&["dev", "web", "--launch-id", "AAAAAAAAAAAAAAAAAAAAAA"])
+            args(&[
+                "dev",
+                "web",
+                "--launch-id",
+                ID,
+                "--launch-expires",
+                "1",
+                "--replace=-qAAAAAAAAAAAAAAAAAAAA"
+            ])
         );
     }
 

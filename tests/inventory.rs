@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use localify::branding::BRANDING;
+use localify::infrastructure::test_pause::PAUSE_DIR_ENV;
 use serde_json::Value;
 
 /// Tries for a daemon on fresh ports.
@@ -68,8 +69,39 @@ impl Sandbox {
             .env_remove("LOCALIFY_SERVICE_ORIGIN")
             .env_remove("LOCALIFY_SERVICE_OUTPUT")
             .env_remove("LOCALIFY_CLOUD_API")
+            .env(PAUSE_DIR_ENV, self.root.join("pause"))
             .stdin(Stdio::null());
         command
+    }
+
+    /// Holds every `localify dev` at `point` until [`Sandbox::release`].
+    fn arm(&self, point: &str) {
+        fs::create_dir_all(self.root.join("pause")).unwrap();
+        fs::write(self.root.join("pause").join(point), "").unwrap();
+    }
+
+    fn release(&self, point: &str) {
+        fs::remove_file(self.root.join("pause").join(point)).unwrap();
+        let _ = fs::remove_file(self.root.join("pause").join(format!("{point}.reached")));
+    }
+
+    fn wait_reached(&self, point: &str) {
+        let reached = self.root.join("pause").join(format!("{point}.reached"));
+        wait_for(point, || reached.exists().then_some(()));
+    }
+
+    fn config_rev(&self) -> String {
+        self.item()["service"]["configRev"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The service's `configRev` once it is no longer `previous`.
+    fn changed_rev(&self, previous: &str) -> String {
+        wait_for("a new configRev", || {
+            Some(self.config_rev()).filter(|rev| rev != previous)
+        })
     }
 
     /// Writes the config with the daemon's ports reserved, frees them only
@@ -338,30 +370,30 @@ fn the_daemon_reports_each_state_and_revision_of_a_service() {
 
 /// A remote launch of `profile` that expects revision `rev`, as the daemon
 /// will dispatch one.
-fn remote_launch(sandbox: &Sandbox, id: &str, rev: &str, profile: &str) -> std::process::Output {
+fn remote_launch(sandbox: &Sandbox, id: &str, rev: &str, profile: Option<&str>) -> Command {
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis()
         + 15_000;
-    sandbox
-        .localify(&[
-            "dev",
-            "web",
-            "--project",
-            "app",
-            "--profile",
-            profile,
-            &format!("--remote-launch={id}"),
-            "--launch-expires",
-            &expires.to_string(),
-            "--expect-rev",
-            rev,
-            "--request",
-            "machine-a:request-1",
-        ])
-        .output()
-        .unwrap()
+    let mut args = vec!["dev", "web", "--project", "app"];
+    if let Some(profile) = profile {
+        args.extend(["--profile", profile]);
+    }
+    let remote = format!("--remote-launch={id}");
+    let expires = expires.to_string();
+    args.extend([
+        remote.as_str(),
+        "--launch-expires",
+        &expires,
+        "--expect-rev",
+        rev,
+        "--request",
+        "machine-a:request-1",
+    ]);
+    let mut command = sandbox.localify(&args);
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    command
 }
 
 /// `services/launches/<id>.json`.
@@ -390,20 +422,36 @@ sources = []
 sources = []
 "#;
 
+/// A remote launch held after the checks it passed before its lock, while
+/// the test changes `localify.toml` to `changed`: refused under the lock.
+fn changed_during_launch(sandbox: &Sandbox, id: &str, rev: &str, changed: &str) {
+    sandbox.arm("launch-preflight-passed");
+    let launch = remote_launch(sandbox, id, rev, Some("stage"))
+        .spawn()
+        .unwrap();
+    sandbox.wait_reached("launch-preflight-passed");
+    fs::write(sandbox.app.join("localify.toml"), changed).unwrap();
+    sandbox.release("launch-preflight-passed");
+    let output = launch.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let record = launch_record(sandbox, id);
+    assert_eq!(record["outcome"], "refused", "{record}");
+    assert_eq!(record["code"], "conflict", "{record}");
+}
+
 #[test]
 fn a_remote_launch_runs_only_the_definition_and_profile_it_was_checked_against() {
     let mut sandbox = Sandbox::new();
     sandbox.start_daemon();
     drop(sandbox.service.take());
     fs::write(sandbox.app.join("localify.toml"), STAGE).unwrap();
-    let rev = sandbox.item()["service"]["configRev"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let rev = sandbox.config_rev();
 
     // The executor computes the revision the inventory shows, and runs.
     let admitted = "AAAAAAAAAAAAAAAAAAAAAA";
-    let output = remote_launch(&sandbox, admitted, &rev, "stage");
+    let output = remote_launch(&sandbox, admitted, &rev, Some("stage"))
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -416,33 +464,80 @@ fn a_remote_launch_runs_only_the_definition_and_profile_it_was_checked_against()
     assert_eq!(record["exit"]["code"], 0);
     assert_eq!(sandbox.item()["run"]["runId"], admitted);
 
-    // The profile turned dangerous after the target checked it: the revision
-    // it expected is gone.
-    fs::write(
-        sandbox.app.join("localify.toml"),
-        STAGE.replace("[profiles.stage]\n", "[profiles.stage]\ndanger = true\n"),
-    )
-    .unwrap();
-    let stale = "BAAAAAAAAAAAAAAAAAAAAA";
-    let output = remote_launch(&sandbox, stale, &rev, "stage");
-    assert!(!output.status.success());
-    assert_eq!(launch_record(&sandbox, stale)["outcome"], "refused");
-    assert_eq!(launch_record(&sandbox, stale)["code"], "conflict");
+    // Changed while the executor runs, after the checks it passed first:
+    // to other sources, then to dangerous.
+    let sources = STAGE.replace(
+        "[profiles.stage]\nsources = []",
+        "[profiles.stage]\nsources = [{ file = \".env.stage\" }]",
+    );
+    changed_during_launch(&sandbox, "BAAAAAAAAAAAAAAAAAAAAA", &rev, &sources);
+    let rev = sandbox.changed_rev(&rev);
+    let dangerous = sources.replace("[profiles.stage]\n", "[profiles.stage]\ndanger = true\n");
+    changed_during_launch(&sandbox, "CAAAAAAAAAAAAAAAAAAAAA", &rev, &dangerous);
 
     // Checked against the new revision, a dangerous profile is still refused.
-    let fresh = sandbox.item()["service"]["configRev"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_ne!(fresh, rev);
-    let dangerous = "CAAAAAAAAAAAAAAAAAAAAA";
-    let output = remote_launch(&sandbox, dangerous, &fresh, "stage");
+    let fresh = sandbox.changed_rev(&rev);
+    let refused = "DAAAAAAAAAAAAAAAAAAAAA";
+    let output = remote_launch(&sandbox, refused, &fresh, Some("stage"))
+        .output()
+        .unwrap();
     assert!(!output.status.success());
-    assert_eq!(
-        launch_record(&sandbox, dangerous)["code"],
-        "refused_profile"
-    );
+    assert_eq!(launch_record(&sandbox, refused)["code"], "refused_profile");
 
-    // Neither started a run.
+    // None of them started a run.
     assert_eq!(sandbox.item()["run"]["runId"], admitted);
+}
+
+/// A `package.json` whose `dev` script ends at once.
+const DEV_PACKAGE: &str = r#"{"name": "web", "scripts": {"dev": "node -e 0"}}"#;
+
+#[test]
+fn a_remote_launch_matches_the_inventory_s_revision_when_its_launch_is_detected() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    drop(sandbox.service.take());
+    let configured = "command = [\"sh\", \"-c\", \"exit 0\"]\n";
+    let config = sandbox.root.join("config.toml");
+    let edit = |to: &str| {
+        let content = fs::read_to_string(&config).unwrap();
+        assert!(content.contains(configured));
+        fs::write(&config, content.replace(configured, to)).unwrap();
+    };
+    let mut rev = sandbox.config_rev();
+    let mut check = |id: &str, what: &str| {
+        rev = sandbox.changed_rev(&rev);
+        let output = remote_launch(&sandbox, id, &rev, None).output().unwrap();
+        let record = launch_record(&sandbox, id);
+        assert_eq!(
+            record["outcome"],
+            "admitted",
+            "{what}: {record}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // No command: the package's `dev` script is detected.
+    edit("");
+    fs::write(sandbox.app.join("package.json"), DEV_PACKAGE).unwrap();
+    check("EAAAAAAAAAAAAAAAAAAAAA", "an inferred command");
+
+    // No folder either: the package of the service's name is found.
+    fs::remove_file(sandbox.app.join("package.json")).unwrap();
+    fs::create_dir_all(sandbox.app.join("apps/web")).unwrap();
+    fs::write(sandbox.app.join("apps/web/package.json"), DEV_PACKAGE).unwrap();
+    check("FAAAAAAAAAAAAAAAAAAAAA", "an inferred folder");
+
+    // A legacy `dev-localify` command, which detection drops.
+    fs::remove_dir_all(sandbox.app.join("apps")).unwrap();
+    fs::write(sandbox.app.join("package.json"), DEV_PACKAGE).unwrap();
+    let content = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        content.replace(
+            "primary_domain = \"web.localify\"\n",
+            "primary_domain = \"web.localify\"\ncommand = [\"pnpm\", \"dev-localify\"]\n",
+        ),
+    )
+    .unwrap();
+    check("GAAAAAAAAAAAAAAAAAAAAA", "a legacy command");
 }

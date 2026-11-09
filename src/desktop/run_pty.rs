@@ -38,7 +38,7 @@ use crate::infrastructure::running_services::{
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::{Finish, KILL_WAIT, STOP_GRACE};
-use crate::infrastructure::runs::launches::LaunchExit;
+use crate::infrastructure::runs::launches::{LaunchExit, dispatch_expiry};
 use crate::infrastructure::runs::output::{
     self, EndReason, FinalizeLock, ReaderLock, RunEnd, StreamSink, StreamWriter,
 };
@@ -357,8 +357,11 @@ fn start(dir: &Path, run_id: &RunId, launch: RunPtyLaunch) -> Result<Started> {
     let mut command = Command::new(&launch.executable);
     command
         .args(&launch.args)
-        // In one argument: a base64url id may start with `-`.
+        // In one argument: a base64url id may start with `-`. A restart
+        // stopped the run it replaces before this point, so that stop never
+        // counts against the launch's expiry.
         .arg(format!("--launch-id={run_id}"))
+        .arg(format!("--launch-expires={}", dispatch_expiry()))
         .env_clear()
         .envs(launch.environment)
         .current_dir(&launch.working_directory);
@@ -548,11 +551,13 @@ impl Finishing {
                 }
             }
         }
-        drop(self.reader_lock);
         self.store
             .launches()
             .add_exit(&self.run_id, LaunchExit::now(code, signal, None))?;
         self.store.mark_exited(&record.key, &self.run_id, code)?;
+        // Held until the exit is recorded: the daemon completes a run whose
+        // reader died before that, and would record it without its code.
+        drop(self.reader_lock);
         Ok((reason, cut_off))
     }
 

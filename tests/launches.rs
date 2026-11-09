@@ -8,6 +8,7 @@
 use std::fs::{self, File, FileTimes};
 use std::io;
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -52,13 +53,19 @@ impl Sandbox {
     /// `localify dev` of the service with `flags`, running `script`, in the
     /// sandbox's home and state, with its test pauses.
     fn dev(&self, flags: &[&str], script: &str) -> Command {
+        let mut command = self.dev_own("web", flags);
+        command.args(["--", "sh", "-c", script]);
+        command
+    }
+
+    /// `localify dev` of `service` with `flags`, running its own command.
+    fn dev_own(&self, service: &str, flags: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_localify"));
         command
             .arg("--config")
             .arg(&self.config)
-            .args(["dev", "web", "--project", "app"])
+            .args(["dev", service, "--project", "app"])
             .args(flags)
-            .args(["--", "sh", "-c", script])
             .current_dir(&self.app)
             .env("HOME", &self.root)
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -96,17 +103,83 @@ impl Sandbox {
 
     /// Holds every executor at `point` until [`Sandbox::release`].
     fn arm(&self, point: &str) {
-        fs::write(self.root.join("pause").join(point), "").unwrap();
+        self.arm_in("pause", point);
     }
 
     fn release(&self, point: &str) {
-        fs::remove_file(self.root.join("pause").join(point)).unwrap();
+        self.release_in("pause", point);
     }
 
     fn wait_reached(&self, point: &str) {
-        let reached = self.root.join("pause").join(format!("{point}.reached"));
+        self.wait_reached_in("pause", point);
+    }
+
+    /// A pause folder of its own, for one executor among several.
+    fn pause_dir(&self, name: &str) -> PathBuf {
+        let dir = self.root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn arm_in(&self, dir: &str, point: &str) {
+        fs::write(self.pause_dir(dir).join(point), "").unwrap();
+    }
+
+    fn release_in(&self, dir: &str, point: &str) {
+        fs::remove_file(self.root.join(dir).join(point)).unwrap();
+    }
+
+    fn wait_reached_in(&self, dir: &str, point: &str) {
+        let reached = self.root.join(dir).join(format!("{point}.reached"));
         wait_until(Duration::from_secs(30), || reached.exists().then_some(()))
             .unwrap_or_else(|| panic!("never reached {point}:\n{}", self.executor_log()));
+    }
+
+    /// Rewrites the config, `from` replaced by `to`.
+    fn edit_config(&self, from: &str, to: &str) {
+        let config = fs::read_to_string(&self.config).unwrap();
+        assert!(config.contains(from), "{from} is not in the config");
+        fs::write(&self.config, config.replace(from, to)).unwrap();
+    }
+
+    /// A `slow` profile whose Infisical CLI never answers, as one waiting
+    /// for a login does, and leaves a descendant behind. Returns the PATH that
+    /// finds it, and the file it writes its PID and its descendant's to.
+    fn slow_infisical(&self) -> (String, PathBuf) {
+        fs::write(
+            self.app.join("localify.toml"),
+            "[profiles.slow]\nsources = [{ infisical = {} }]\n",
+        )
+        .unwrap();
+        fs::write(self.app.join(".infisical.yaml"), "workspaceId: \"w\"\n").unwrap();
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let marker = self.root.join("infisical.pids");
+        let cli = bin.join("infisical");
+        fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nsleep 300 &\necho $$ $! > \"{}.tmp\"\nmv \"{0}.tmp\" \"{0}\"\nexec sleep 300\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+        (format!("{}:{}", bin.display(), self.path), marker)
+    }
+
+    fn running(&self, id: &RunId) {
+        wait_until(Duration::from_secs(30), || {
+            (self.report(id, None) == LaunchReport::Running).then_some(())
+        })
+        .unwrap_or_else(|| panic!("{id} never ran:\n{}", self.executor_log()));
+    }
+
+    /// Stops what still runs of the service.
+    fn stop(&self) {
+        if let Some(record) = self.store().list().unwrap().into_iter().next() {
+            let _ = self.store().stop(&record);
+        }
     }
 
     fn services_dir(&self) -> PathBuf {
@@ -457,4 +530,315 @@ fn a_person_s_own_launch_leaves_no_launch_record() {
         })
         .unwrap_or(0);
     assert_eq!(records, 0);
+}
+
+fn refused_with(report: &LaunchReport) -> Option<RefusalCode> {
+    match report {
+        LaunchReport::Refused { code, .. } => Some(*code),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_launch_refused_before_its_lock_never_stops_the_running_service() {
+    let sandbox = Sandbox::new();
+    let first = RunId::generate().unwrap();
+    let mut running = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&first)], "sleep 30"));
+    sandbox.running(&first);
+    let touch = sandbox.touch_marker();
+
+    // Expired, with --replace.
+    let expired = RunId::generate().unwrap();
+    let past = (unix_ms_now() - 1).to_string();
+    let output = sandbox
+        .dev(
+            &[
+                &launch_id_flag(&expired),
+                "--launch-expires",
+                &past,
+                "--replace",
+            ],
+            &touch,
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        refused_with(&sandbox.report(&expired, None)),
+        Some(RefusalCode::Expired)
+    );
+
+    // Already decided: the reconciler declared it expired.
+    let decided = RunId::generate().unwrap();
+    sandbox.store().launches().expire(&decided).unwrap();
+    let output = sandbox
+        .dev(&[&launch_id_flag(&decided), "--replace"], &touch)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(sandbox.report(&decided, None), LaunchReport::Expired);
+
+    // Checked against another revision, with its own command.
+    let stale = RunId::generate().unwrap();
+    let output = sandbox
+        .dev_own(
+            "web",
+            &[
+                &launch_id_flag(&stale),
+                "--expect-rev",
+                "0123456789abcdef",
+                "--replace",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        refused_with(&sandbox.report(&stale, None)),
+        Some(RefusalCode::Conflict)
+    );
+
+    // A person's own launch of a target off loopback.
+    sandbox.edit_config("target = \"127.0.0.1:", "target = \"192.0.2.1:");
+    let output = sandbox.dev(&["--replace"], &touch).output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("only supports route targets"),
+        "{}",
+        stderr(&output)
+    );
+    sandbox.edit_config("target = \"192.0.2.1:", "target = \"127.0.0.1:");
+
+    // None of them stopped the run, nor started anything.
+    assert!(running.try_wait().unwrap().is_none(), "the run was stopped");
+    assert_eq!(sandbox.report(&first, None), LaunchReport::Running);
+    assert!(!sandbox.marker().exists());
+    sandbox.stop();
+    running.wait().unwrap();
+}
+
+#[test]
+fn a_launch_that_fails_before_its_admission_publishes_its_refusal() {
+    let sandbox = Sandbox::new();
+
+    // A service the config no longer has.
+    let removed = RunId::generate().unwrap();
+    let output = sandbox
+        .dev_own("gone", &[&launch_id_flag(&removed)])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        refused_with(&sandbox.report(&removed, None)),
+        Some(RefusalCode::Conflict)
+    );
+
+    // A checkout that no longer exists.
+    let moved = RunId::generate().unwrap();
+    fs::rename(&sandbox.app, sandbox.root.join("moved")).unwrap();
+    let output = sandbox
+        .dev(&[&launch_id_flag(&moved)], "exit 0")
+        .current_dir(&sandbox.root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let LaunchReport::Refused { code, message } = sandbox.report(&moved, None) else {
+        panic!("not refused: {}", stderr(&output));
+    };
+    assert_eq!(code, RefusalCode::Conflict);
+    assert!(message.contains("no longer exists"), "{message}");
+    fs::rename(sandbox.root.join("moved"), &sandbox.app).unwrap();
+
+    // A config that does not parse.
+    let invalid = RunId::generate().unwrap();
+    fs::write(&sandbox.config, "[projects.app\n").unwrap();
+    let output = sandbox
+        .dev(&[&launch_id_flag(&invalid)], "exit 0")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        refused_with(&sandbox.report(&invalid, None)),
+        Some(RefusalCode::Conflict),
+        "{}",
+        stderr(&output)
+    );
+    assert!(sandbox.store().list().unwrap().is_empty());
+}
+
+#[test]
+fn killing_an_executor_while_its_profile_helper_runs_ends_the_helper_and_what_it_started() {
+    let sandbox = Sandbox::new();
+    let (path, marker) = sandbox.slow_infisical();
+    let id = RunId::generate().unwrap();
+    let mut command = sandbox.dev(
+        &[&launch_id_flag(&id), "--profile", "slow"],
+        &sandbox.touch_marker(),
+    );
+    command.env("PATH", &path);
+    let mut executor = sandbox.spawn_executor(command);
+    let (helper, descendant) = wait_until(Duration::from_secs(30), || {
+        let content = fs::read_to_string(&marker).ok()?;
+        let mut pids = content
+            .split_whitespace()
+            .map(|pid| pid.parse::<u32>().ok());
+        Some((pids.next()??, pids.next()??))
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "the profile never ran its helper:\n{}",
+            sandbox.executor_log()
+        )
+    });
+    assert_eq!(sandbox.report(&id, None), LaunchReport::Starting);
+
+    assert!(process::send_signal(executor.id(), Signal::Kill));
+    executor.wait().unwrap();
+    assert!(
+        process::process_info(helper).is_some(),
+        "the helper died with its executor"
+    );
+
+    let interrupted = LaunchReport::Exited {
+        code: None,
+        signal: None,
+        reason: Some(ExitReason::InterruptedBeforeRegistration),
+    };
+    assert_eq!(sandbox.report(&id, None), interrupted);
+    for pid in [helper, descendant] {
+        assert!(
+            wait_until(Duration::from_secs(30), || process::process_info(pid)
+                .is_none()
+                .then_some(()))
+            .is_some(),
+            "process {pid} of the launch outlived its cleanup"
+        );
+    }
+    let sid = executor.id();
+    assert!(
+        process::all_processes()
+            .iter()
+            .all(|process| process.sid != Some(sid)),
+        "the launch's session is not empty"
+    );
+    assert_eq!(sandbox.report(&id, None), interrupted);
+    assert!(!sandbox.store().run_dir(&id).exists());
+    assert!(!sandbox.marker().exists());
+    let next = sandbox.dev(&[], "exit 0").output().unwrap();
+    assert!(next.status.success(), "{}", stderr(&next));
+}
+
+#[test]
+fn an_executor_killed_between_its_run_s_end_and_its_exit_never_reads_running() {
+    let sandbox = Sandbox::new();
+    let lost = LaunchReport::Exited {
+        code: None,
+        signal: None,
+        reason: Some(ExitReason::ExecutorLost),
+    };
+    sandbox.arm("run-end-published");
+
+    // Completed by a reconciler.
+    let id = RunId::generate().unwrap();
+    let mut executor = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&id)], "exit 3"));
+    sandbox.wait_reached("run-end-published");
+    assert!(process::send_signal(executor.id(), Signal::Kill));
+    executor.wait().unwrap();
+    assert_eq!(sandbox.report(&id, None), lost);
+    let record = sandbox.store().list().unwrap().remove(0);
+    assert_eq!(record.exit.map(|exit| exit.code), Some(None));
+
+    // Completed by the daemon's pass, before anyone asked.
+    fs::remove_file(sandbox.root.join("pause/run-end-published.reached")).unwrap();
+    let id = RunId::generate().unwrap();
+    let mut executor = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&id)], "exit 3"));
+    sandbox.wait_reached("run-end-published");
+    assert!(process::send_signal(executor.id(), Signal::Kill));
+    executor.wait().unwrap();
+    sandbox.release("run-end-published");
+    let store = sandbox.store();
+    store.sweep_leftovers().unwrap();
+    store.finish_unread_runs().unwrap();
+    let Some(LaunchRecord::Admitted(admitted)) = sandbox.launch(&id) else {
+        panic!("not admitted");
+    };
+    assert_eq!(
+        admitted.exit.and_then(|exit| exit.reason),
+        Some(ExitReason::ExecutorLost)
+    );
+    assert!(store.list().unwrap()[0].exit.is_some());
+    assert_eq!(sandbox.report(&id, None), lost);
+}
+
+#[test]
+fn of_two_replacing_launches_only_the_one_that_takes_the_service_over_is_named() {
+    let sandbox = Sandbox::new();
+    let first = RunId::generate().unwrap();
+    let mut running = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&first)], "sleep 30"));
+    sandbox.running(&first);
+    let (winner, loser) = (RunId::generate().unwrap(), RunId::generate().unwrap());
+    let replacer = |id: &RunId, pauses: &str| {
+        for point in ["replace-chosen", "replace-stopped"] {
+            sandbox.arm_in(pauses, point);
+        }
+        let mut command = sandbox.dev(&[&launch_id_flag(id), "--replace"], "sleep 30");
+        command.env(PAUSE_DIR_ENV, sandbox.pause_dir(pauses));
+        sandbox.spawn_executor(command)
+    };
+    let mut lost = replacer(&loser, "pause-loser");
+    let mut won = replacer(&winner, "pause-winner");
+    sandbox.wait_reached_in("pause-loser", "replace-chosen");
+    sandbox.wait_reached_in("pause-winner", "replace-chosen");
+
+    // The loser stops the run first, then waits before taking the lock.
+    sandbox.release_in("pause-loser", "replace-chosen");
+    sandbox.wait_reached_in("pause-loser", "replace-stopped");
+    running.wait().unwrap();
+    sandbox.release_in("pause-winner", "replace-chosen");
+    sandbox.wait_reached_in("pause-winner", "replace-stopped");
+    // The other one takes the lock first.
+    sandbox.release_in("pause-winner", "replace-stopped");
+    sandbox.running(&winner);
+    sandbox.release_in("pause-loser", "replace-stopped");
+    assert!(!lost.wait().unwrap().success());
+
+    assert_eq!(
+        sandbox.report(&first, None),
+        LaunchReport::Replaced { by: winner.clone() }
+    );
+    assert_eq!(
+        refused_with(&sandbox.report(&loser, None)),
+        Some(RefusalCode::Conflict)
+    );
+    sandbox.stop();
+    won.wait().unwrap();
+}
+
+#[test]
+fn an_admitted_launch_runs_from_the_config_it_was_checked_against() {
+    let sandbox = Sandbox::new();
+    let id = RunId::generate().unwrap();
+    sandbox.arm("launch-admitted");
+    let mut executor = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&id)], "exit 0"));
+    sandbox.wait_reached("launch-admitted");
+
+    // Edited after the checks: the run never sees it.
+    sandbox.edit_config("https_enabled = false", "https_enabled = true");
+    sandbox.release("launch-admitted");
+    assert!(
+        executor.wait().unwrap().success(),
+        "{}",
+        sandbox.executor_log()
+    );
+
+    let record = sandbox.store().list().unwrap().remove(0);
+    assert_eq!(record.url, "http://web.localify");
+    assert_eq!(
+        sandbox.report(&id, None),
+        LaunchReport::Exited {
+            code: Some(0),
+            signal: None,
+            reason: None
+        }
+    );
 }

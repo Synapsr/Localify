@@ -273,8 +273,9 @@ struct RunFinisher {
 /// (docs/remote-machines.md, "The end of a run"): a background run whose
 /// executor died, or a run PTY whose app and executor both died, has its
 /// remaining processes ended and its stream finalized, so the service is free
-/// again. Each pass also sweeps what crashes left in `services/` and the
-/// launch records past their retention. A daemon running as root reads
+/// again. Each pass also completes the admitted launches whose executor
+/// died, and sweeps what crashes left in `services/` and the launch records
+/// past their retention. A daemon running as root reads
 /// another home and never signals a user's processes.
 async fn finish_unread_runs(finisher: RunFinisher, cancel: CancellationToken) {
     if finisher.as_root {
@@ -289,7 +290,7 @@ async fn finish_unread_runs(finisher: RunFinisher, cancel: CancellationToken) {
         let pass = tokio::task::spawn_blocking(move || {
             let store = store()?;
             if let Err(error) = store.sweep_leftovers() {
-                warn!("Could not sweep leftover launch files: {error:#}");
+                warn!("Could not complete or sweep launch records: {error:#}");
             }
             store.finish_unread_runs()
         });
