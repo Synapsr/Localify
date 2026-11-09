@@ -6,6 +6,8 @@
 // the macOS installer, but build everywhere so their tests run on Linux too.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+#[allow(dead_code)] // Used by the desktop through the library crate.
+pub mod app_lock;
 pub mod extract;
 #[cfg(target_os = "macos")]
 pub mod install;
@@ -100,13 +102,6 @@ impl UpdatePaths {
     }
 }
 
-/// The lock the app takes as its first step and holds for its lifetime,
-/// so the installer never replaces it while it runs.
-#[allow(dead_code)] // Used by the desktop through the library crate.
-pub fn app_lock_path() -> Option<PathBuf> {
-    UpdatePaths::for_user().map(|paths| paths.app_lock())
-}
-
 /// Appends a line to `updater.log`. Logging never fails an update.
 pub fn log(paths: &UpdatePaths, message: &str) {
     let _ = std::fs::create_dir_all(paths.dir());
@@ -171,6 +166,13 @@ pub struct UpdateStatus {
     /// check failed.
     pub reason: Option<String>,
     pub automatic: bool,
+    /// When the last check ran, in Unix seconds.
+    #[serde(rename = "lastCheckAt", default)]
+    pub last_check_at: Option<u64>,
+    /// Whether this copy may be replaced at all. When it may not, `reason`
+    /// says why, and only a manual install updates it.
+    #[serde(rename = "canInstall", default)]
+    pub can_install: bool,
 }
 
 /// `state` in [`UpdateStatus`].
@@ -209,6 +211,7 @@ pub fn describe(
         .as_ref()
         .and_then(|release| parse_version(&release.version))
         .filter(|offered| rules::offer_is_newer(offered, installed, state.highest().as_ref()));
+    let can_install = blocker.is_none();
     let (phase, reason) = match activity {
         Activity::Checking => (UpdatePhase::Checking, None),
         Activity::Installing => (UpdatePhase::Installing, None),
@@ -228,6 +231,8 @@ pub fn describe(
         state: phase,
         reason,
         automatic,
+        last_check_at: state.last_check_at,
+        can_install,
     }
 }
 
@@ -438,6 +443,8 @@ mod tests {
             Activity::Idle,
         );
         assert_eq!(linux.reason.as_deref(), Some(LINUX_REASON));
+        assert!(on.can_install);
+        assert!(!linux.can_install);
     }
 
     #[test]
@@ -479,6 +486,8 @@ mod tests {
                 "state": "available",
                 "reason": null,
                 "automatic": true,
+                "lastCheckAt": 1,
+                "canInstall": true,
             })
         );
     }

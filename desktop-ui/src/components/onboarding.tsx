@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AnimatePresence,
   motion,
@@ -30,7 +30,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { captureDesktopEvent } from "@/lib/analytics";
-import { bootstrapQueries, configMutations, daemonMutations, systemMutations } from "@/lib/queries";
+import {
+  bootstrapQueries,
+  configMutations,
+  daemonMutations,
+  systemMutations,
+  systemQueries,
+} from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 import { assertInstallCompleted } from "@/lib/util.install-result";
 import { cn } from "@/lib/utils";
@@ -623,6 +629,8 @@ function ActivateStep({
   const queryClient = useQueryClient();
   const install = useMutation(systemMutations.install(queryClient));
   const startDaemon = useMutation(daemonMutations.start(queryClient));
+  // On for a new install; an older config that predates the setting keeps it off.
+  const { data: updateStatus } = useQuery(systemQueries.updateStatus());
   const appName = bootstrap.environment.appName;
 
   const [state, setState] = useState<ActivateState>("idle");
@@ -683,6 +691,14 @@ function ActivateStep({
       label: `DNS for ${suffix} domains, without /etc/hosts`,
     },
     { icon: <PowerIcon className="size-3.5" />, label: `${appName} runs as you, not as root` },
+    ...(updateStatus?.automatic
+      ? [
+          {
+            icon: <RefreshIcon className="size-3.5" />,
+            label: "Updates install themselves, unless you turn them off in Settings",
+          },
+        ]
+      : []),
     ...(connectAgents
       ? [
           {

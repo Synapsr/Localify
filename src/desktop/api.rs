@@ -2999,6 +2999,10 @@ impl DesktopApi {
         &self.binary_path
     }
 
+    pub(super) fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
     /// The last run of every service, with what the app shows about it: a
     /// service still running from a shell tab of a previous version is a
     /// legacy run, kept as it is.

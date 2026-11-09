@@ -1,95 +1,87 @@
 "use client";
 
-import { motion } from "motion/react";
+import type { ReactNode } from "react";
+
+import type { UpdateStatusDto } from "@/types/localify";
 
 import { DownloadIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import type { AppUpdateStatus } from "@/providers/app-update-provider";
-import type { AppUpdateInfoDto } from "@/types/localify";
+import { Switch } from "@/components/ui/switch";
+import { describeUpdate } from "@/lib/util.app-update";
+
+import { SettingsCard } from "./settings-card";
 
 interface SettingsUpdateCardProps {
-  status: AppUpdateStatus;
-  availableUpdate: AppUpdateInfoDto | null;
-  errorMessage: string | null;
-  onCheckForUpdates: () => void;
-  onInstallUpdate: () => void;
+  appName: string;
+  /** Null while it is read. */
+  status: UpdateStatusDto | null;
+  /** Unix seconds, for the last check's age. */
+  now: number;
+  error: string | null;
+  automatic: boolean;
+  automaticDisabled: boolean;
+  onAutomaticChange: (automatic: boolean) => void;
+  checking: boolean;
+  onCheck: () => void;
+  /** Shown in place of `Check now` when an update can be installed. */
+  restart: ReactNode;
 }
 
 export const SettingsUpdateCard = ({
+  appName,
   status,
-  availableUpdate,
-  errorMessage,
-  onCheckForUpdates,
-  onInstallUpdate,
+  now,
+  error,
+  automatic,
+  automaticDisabled,
+  onAutomaticChange,
+  checking,
+  onCheck,
+  restart,
 }: SettingsUpdateCardProps) => {
-  const isChecking = status === "checking";
-  const isInstalling = status === "installing";
-  const hasUpdate = Boolean(availableUpdate);
-  const title = hasUpdate
-    ? `Update ready - v${availableUpdate?.version}`
-    : status === "upToDate"
-      ? "You're up to date"
-      : status === "unconfigured"
-        ? "Updates unavailable"
-        : "Desktop updates";
-  const description = hasUpdate
-    ? "A new Localify build is ready to download and install."
-    : status === "unconfigured"
-      ? "Auto-updates are not configured for this build."
-      : "Checks for new Localify builds in the background and on demand.";
-
-  const action = hasUpdate ? (
-    <Button
-      size="lg"
-      variant="primary"
-      loading={isInstalling}
-      disabled={isChecking}
-      onClick={onInstallUpdate}
-    >
-      Install
-    </Button>
-  ) : (
-    <Button
-      size="lg"
-      variant="outline"
-      loading={isChecking}
-      disabled={isInstalling || status === "unconfigured"}
-      onClick={onCheckForUpdates}
-    >
-      Check now
-    </Button>
-  );
+  const summary = status ? describeUpdate(status, appName, now) : null;
+  const busy = status?.state === "checking" || status?.state === "installing";
 
   return (
-    <section className="space-y-2">
-      <motion.div
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ type: "spring", duration: 0.5, bounce: 0, delay: 0.1 }}
-        className="relative isolate overflow-hidden rounded-2xl border border-border/40 bg-neutral-50/80 px-6 py-5 shadow-[0_1px_0_0_rgba(255,255,255,0.6)_inset] transition-colors duration-200 hover:border-border dark:bg-neutral-900/50 dark:shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset]"
-      >
-        <div className="flex items-center gap-5">
-          <span
-            aria-hidden
-            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-background text-foreground/80 ring-1 ring-border/60 [&>svg]:size-4"
-          >
-            <DownloadIcon />
-          </span>
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <h3 className="text-[17px] font-semibold tracking-tight text-foreground">
-              {title}
-            </h3>
-            <p className="max-w-md text-[13.5px] leading-normal text-pretty text-muted-foreground">
-              {description}
+    <SettingsCard
+      icon={<DownloadIcon />}
+      title="Install updates automatically"
+      description={`New versions install while ${appName} is closed. While it's open, they wait for you to restart.`}
+      trailing={
+        <Switch
+          aria-label="Install updates automatically"
+          checked={automatic}
+          disabled={automaticDisabled}
+          onCheckedChange={onAutomaticChange}
+        />
+      }
+    >
+      <div className="mt-4 flex items-center gap-4 border-t border-border/40 pt-4">
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <p className="text-sm font-medium text-foreground">
+            {summary?.title ?? "Reading the update status…"}
+          </p>
+          {summary?.detail ? (
+            <p className="text-xs leading-normal text-pretty text-muted-foreground">
+              {summary.detail}
             </p>
-          </div>
-          {action}
+          ) : null}
         </div>
-      </motion.div>
-
-      {errorMessage ? (
-        <p className="px-1 text-xs text-[--color-danger]">{errorMessage}</p>
-      ) : null}
-    </section>
+        {summary?.canRestart ? (
+          restart
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            loading={checking}
+            disabled={!status || busy}
+            onClick={onCheck}
+          >
+            Check now
+          </Button>
+        )}
+      </div>
+      {error ? <p className="pt-3 text-xs leading-normal text-destructive">{error}</p> : null}
+    </SettingsCard>
   );
 };

@@ -61,6 +61,7 @@ export const SettingsScreen = () => {
       <div className="space-y-4">
         <SettingsStatus />
         <SettingsStartup />
+        <SettingsUpdates />
         <SettingsTroubleshooting />
         <SettingsLaunchers />
         <SettingsAgents config={data.config} />
@@ -70,7 +71,6 @@ export const SettingsScreen = () => {
         <SettingsTransfer />
         <SettingsHotkeys />
         <SettingsCli />
-        <SettingsUpdates />
         <SettingsUninstall />
         {import.meta.env.DEV ? <SettingsDeveloper /> : null}
       </div>

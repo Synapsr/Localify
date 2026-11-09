@@ -2,76 +2,64 @@
 
 import { useState } from "react";
 
+import type { UpdateStatusDto } from "@/types/localify";
+
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { AppUpdateStatus } from "@/providers/app-update-provider";
-import type { AppUpdateInfoDto } from "@/types/localify";
 
 import { SettingsUpdateCard } from "./settings-update-card";
 
-type UpdatePreviewState = {
-  status: AppUpdateStatus;
-  label: string;
-  update: AppUpdateInfoDto | null;
-  errorMessage: string | null;
+const NOW = 1_780_000_000;
+
+const base: UpdateStatusDto = {
+  installed: "1.6.0",
+  available: null,
+  state: "upToDate",
+  reason: null,
+  automatic: true,
+  lastCheckAt: NOW - 3 * 3600,
+  canInstall: true,
 };
 
-const previewUpdate = {
-  version: "1.4.0",
-  notes: "Mock release notes for the update card preview.",
-  pubDate: "2026-04-27T10:00:00Z",
-} satisfies AppUpdateInfoDto;
+const previewStates: { label: string; status: UpdateStatusDto }[] = [
+  { label: "Never checked", status: { ...base, state: "unknown", lastCheckAt: null } },
+  { label: "Up to date", status: base },
+  { label: "Checking", status: { ...base, state: "checking" } },
+  { label: "Available", status: { ...base, state: "available", available: "1.7.0" } },
+  {
+    label: "Automatic off",
+    status: {
+      ...base,
+      state: "available",
+      available: "1.7.0",
+      automatic: false,
+      reason:
+        "Automatic updates are off. Install it with: localify update install, or turn them on with: localify update --auto on",
+    },
+  },
+  {
+    label: "Can't install",
+    status: {
+      ...base,
+      state: "available",
+      available: "1.7.0",
+      canInstall: false,
+      reason:
+        "/Applications/Localify.app belongs to another account: only its owner can update it.",
+    },
+  },
+  { label: "Installing", status: { ...base, state: "installing", available: "1.7.0" } },
+  {
+    label: "Failed",
+    status: { ...base, state: "failed", reason: "The update feed could not be reached." },
+  },
+];
 
-const previewStates = [
-  {
-    status: "idle",
-    label: "Idle",
-    update: null,
-    errorMessage: null,
-  },
-  {
-    status: "checking",
-    label: "Checking",
-    update: null,
-    errorMessage: null,
-  },
-  {
-    status: "available",
-    label: "Available",
-    update: previewUpdate,
-    errorMessage: null,
-  },
-  {
-    status: "installing",
-    label: "Installing",
-    update: previewUpdate,
-    errorMessage: null,
-  },
-  {
-    status: "upToDate",
-    label: "Up to date",
-    update: null,
-    errorMessage: null,
-  },
-  {
-    status: "unconfigured",
-    label: "Unconfigured",
-    update: null,
-    errorMessage: null,
-  },
-  {
-    status: "error",
-    label: "Error",
-    update: previewUpdate,
-    errorMessage: "Localify could not download the latest desktop update.",
-  },
-] satisfies UpdatePreviewState[];
-
+/** Mock states for designing the update card without a daemon. */
 export const SettingsUpdatePreview = () => {
-  const [selectedStatus, setSelectedStatus] = useState<AppUpdateStatus>("checking");
-  const selectedState =
-    previewStates.find((previewState) => previewState.status === selectedStatus) ??
-    previewStates[0];
+  const [selected, setSelected] = useState("Available");
+  const preview =
+    previewStates.find((previewState) => previewState.label === selected) ?? previewStates[0];
 
   return (
     <section className="space-y-3">
@@ -85,16 +73,11 @@ export const SettingsUpdatePreview = () => {
         <div className="flex flex-wrap justify-end gap-1.5">
           {previewStates.map((previewState) => (
             <Button
-              key={previewState.status}
+              key={previewState.label}
               size="xs"
-              variant={previewState.status === selectedStatus ? "secondary" : "ghost"}
-              className={cn(
-                "rounded-full",
-                previewState.status === selectedStatus && "bg-foreground/10",
-              )}
-              onClick={() => {
-                setSelectedStatus(previewState.status);
-              }}
+              variant={previewState.label === selected ? "secondary" : "ghost"}
+              className={cn("rounded-full", previewState.label === selected && "bg-foreground/10")}
+              onClick={() => setSelected(previewState.label)}
             >
               {previewState.label}
             </Button>
@@ -102,15 +85,20 @@ export const SettingsUpdatePreview = () => {
         </div>
       </div>
       <SettingsUpdateCard
-        status={selectedState.status}
-        availableUpdate={selectedState.update}
-        errorMessage={selectedState.errorMessage}
-        onCheckForUpdates={() => {
-          setSelectedStatus("checking");
-        }}
-        onInstallUpdate={() => {
-          setSelectedStatus("installing");
-        }}
+        appName="Localify"
+        status={preview.status}
+        now={NOW}
+        error={null}
+        automatic={preview.status.automatic}
+        automaticDisabled={false}
+        onAutomaticChange={() => {}}
+        checking={false}
+        onCheck={() => setSelected("Checking")}
+        restart={
+          <Button size="sm" variant="primary" onClick={() => setSelected("Installing")}>
+            Restart to update
+          </Button>
+        }
       />
     </section>
   );

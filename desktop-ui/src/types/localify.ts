@@ -539,15 +539,30 @@ export interface SettingsImportResultDto {
   daemonReloadError: string | null;
 }
 
-export interface AppUpdateInfoDto {
-  version: string;
-  notes: string | null;
-  pubDate: string | null;
+/** `state` of the daemon's `update_status` (docs/desktop.md, "Automatic updates"). */
+export type UpdatePhase =
+  | "unknown"
+  | "upToDate"
+  | "available"
+  | "checking"
+  | "installing"
+  | "failed";
+
+export interface UpdateStatusDto {
+  installed: string;
+  available: string | null;
+  state: UpdatePhase;
+  /** Why an available update waits, or why the last check failed. */
+  reason: string | null;
+  automatic: boolean;
+  /** Unix seconds. */
+  lastCheckAt: number | null;
+  /** False when this copy can only be updated by hand: `reason` says why. */
+  canInstall: boolean;
 }
 
-export interface AppUpdateCheckDto {
-  configured: boolean;
-  update: AppUpdateInfoDto | null;
+export interface UpdateSettingsRequest {
+  automatic: boolean;
 }
 
 export type DeepLinkRouteDto = "projects" | "logs" | "launchService";

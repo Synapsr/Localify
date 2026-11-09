@@ -29,16 +29,11 @@ use localify::desktop::dto::{
     StartCloudAddonCheckoutRequest, StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
 };
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
 use tauri::{AppHandle, Runtime};
-use tauri_plugin_updater::UpdaterExt;
 
 use localify::desktop::dto::{ServiceRunRequest, ServiceStopDto};
 use localify::desktop::shell_environment::ShellEnvironmentDto;
@@ -47,6 +42,8 @@ use localify::desktop::terminal::{
     TerminalManager, TerminalResizeRequest, TerminalRestartServiceRequest, TerminalSessionDto,
     TerminalSessionRequest, TerminalWriteRequest,
 };
+use localify::desktop::updates::hand_off_update;
+use localify::infrastructure::updates::UpdateStatus;
 
 pub struct AppState {
     pub api: DesktopApi,
@@ -108,21 +105,6 @@ pub struct DeepLinkLaunchDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppUpdateInfoDto {
-    pub version: String,
-    pub notes: Option<String>,
-    pub pub_date: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppUpdateCheckDto {
-    pub configured: bool,
-    pub update: Option<AppUpdateInfoDto>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AutostartStatusDto {
     pub enabled: bool,
 }
@@ -133,19 +115,16 @@ pub struct UpdateAutostartRequest {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSettingsRequest {
+    pub automatic: bool,
+}
+
 const INSTALL_ATTRIBUTION_PREFIX: &str = "localify:install-attribution:v1:";
-const UPDATE_DOWNLOAD_ATTEMPTS: usize = 3;
-const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
-const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn map_error<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
-}
-
-fn map_updater_error<E: std::fmt::Display>(stage: &str, error: E) -> String {
-    let message = format!("{stage}: {error}");
-    append_updater_log(&format!("error {message}"));
-    message
 }
 
 /// Trust that is still pending does not count against the install: the machine
@@ -196,37 +175,6 @@ fn autostart_uninstall_step<R: Runtime>(app: &AppHandle<R>) -> StepDto {
     }
 }
 
-fn desktop_state_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| "Failed to resolve the user home directory.".to_string())?;
-
-    Ok(home
-        .join("Library/Application Support")
-        .join(localify::branding::BRANDING.desktop_state_dir_name()))
-}
-
-fn append_updater_log(message: &str) {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|_| "unknown".into());
-    let Ok(directory) = desktop_state_dir() else {
-        return;
-    };
-
-    if std::fs::create_dir_all(&directory).is_err() {
-        return;
-    }
-
-    let path = directory.join("updater.log");
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
-        return;
-    };
-    let _ = writeln!(file, "{timestamp} {message}");
-}
-
 #[cfg(target_os = "macos")]
 fn read_clipboard_text() -> Result<Option<String>, String> {
     let output = Command::new("pbpaste")
@@ -248,148 +196,6 @@ fn read_clipboard_text() -> Result<Option<String>, String> {
 #[cfg(not(target_os = "macos"))]
 fn read_clipboard_text() -> Result<Option<String>, String> {
     Ok(None)
-}
-
-fn build_updater<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Option<tauri_plugin_updater::Updater>, String> {
-    let Some(endpoint) = super::updater_endpoint() else {
-        append_updater_log("build skipped updater_endpoint=none");
-        return Ok(None);
-    };
-
-    append_updater_log(&format!("build endpoint={endpoint}"));
-    let builder = app
-        .updater_builder()
-        .pubkey(super::updater_public_key())
-        .timeout(UPDATE_CHECK_TIMEOUT)
-        .endpoints(vec![tauri::Url::parse(endpoint).map_err(map_error)?])
-        .map_err(|error| map_updater_error("configure updater endpoint", error))?;
-    let updater = super::configure_updater_builder(builder)
-        .build()
-        .map_err(|error| map_updater_error("build updater", error))?;
-
-    Ok(Some(updater))
-}
-
-pub(crate) async fn check_app_update_with_handle<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<AppUpdateCheckDto, String> {
-    let current_version = app.package_info().version.to_string();
-    append_updater_log(&format!("check start current_version={current_version}"));
-    let Some(updater) = build_updater(&app)? else {
-        return Ok(AppUpdateCheckDto {
-            configured: false,
-            update: None,
-        });
-    };
-
-    let update = updater
-        .check()
-        .await
-        .map_err(|error| map_updater_error("check update manifest", error))?
-        .map(|update| AppUpdateInfoDto {
-            version: update.version.to_string(),
-            notes: update.body,
-            pub_date: update.date.map(|value| value.to_string()),
-        });
-    match &update {
-        Some(update) => append_updater_log(&format!("check available version={}", update.version)),
-        None => append_updater_log("check no_update"),
-    }
-
-    Ok(AppUpdateCheckDto {
-        configured: true,
-        update,
-    })
-}
-
-pub(crate) async fn install_app_update_with_handle<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<(), String> {
-    append_updater_log("install start");
-    let Some(updater) = build_updater(&app)? else {
-        return Err("Desktop updater is not configured for this build.".into());
-    };
-
-    let Some(mut update) = updater
-        .check()
-        .await
-        .map_err(|error| map_updater_error("install check update manifest", error))?
-    else {
-        append_updater_log("install no_update");
-        return Ok(());
-    };
-
-    append_updater_log(&format!(
-        "install candidate version={} url={}",
-        update.version, update.download_url
-    ));
-    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
-
-    let mut downloaded_update = None;
-    let mut last_download_error = None;
-    for attempt in 1..=UPDATE_DOWNLOAD_ATTEMPTS {
-        append_updater_log(&format!(
-            "download start attempt={attempt}/{UPDATE_DOWNLOAD_ATTEMPTS}"
-        ));
-        let mut downloaded_bytes = 0usize;
-        let mut expected_bytes = None;
-        let mut next_progress_log = 5 * 1024 * 1024;
-        let download_result = update
-            .download(
-                |chunk_size, content_length| {
-                    downloaded_bytes += chunk_size;
-                    expected_bytes = content_length;
-                    if downloaded_bytes >= next_progress_log {
-                        append_updater_log(&format!(
-                            "download progress attempt={attempt} bytes={downloaded_bytes} expected={expected_bytes:?}"
-                        ));
-                        next_progress_log += 5 * 1024 * 1024;
-                    }
-                },
-                || {
-                    append_updater_log(&format!("download finished attempt={attempt}"));
-                },
-            )
-            .await;
-
-        match download_result {
-            Ok(bytes) => {
-                append_updater_log(&format!(
-                    "download verified attempt={attempt} bytes={}",
-                    bytes.len()
-                ));
-                downloaded_update = Some(bytes);
-                last_download_error = None;
-                break;
-            }
-            Err(error) => {
-                let message = format!(
-                    "{error}; attempt={attempt}; downloaded_bytes={downloaded_bytes}; expected_bytes={expected_bytes:?}"
-                );
-                append_updater_log(&format!("download error {message}"));
-                last_download_error = Some(message);
-            }
-        }
-    }
-
-    let Some(downloaded_update) = downloaded_update else {
-        let message = last_download_error.unwrap_or_else(|| "unknown download error".into());
-        return Err(map_updater_error("download update", message));
-    };
-
-    update
-        .install(&downloaded_update)
-        .map_err(|error| map_updater_error("install downloaded update", error))?;
-
-    append_updater_log("install finished restarting");
-    app.restart()
-}
-
-#[tauri::command]
-pub async fn check_app_update(app: tauri::AppHandle) -> Result<AppUpdateCheckDto, String> {
-    check_app_update_with_handle(app).await
 }
 
 #[tauri::command]
@@ -414,8 +220,50 @@ pub fn set_autostart_enabled(
 }
 
 #[tauri::command]
-pub async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
-    install_app_update_with_handle(app).await
+pub async fn get_update_status(state: tauri::State<'_, AppState>) -> Result<UpdateStatus, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.update_status().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn set_automatic_updates(
+    state: tauri::State<'_, AppState>,
+    request: UpdateSettingsRequest,
+) -> Result<UpdateStatus, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || {
+        api.set_automatic_updates(request.automatic)
+            .map_err(map_error)
+    })
+    .await
+    .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn check_for_updates(state: tauri::State<'_, AppState>) -> Result<UpdateStatus, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.check_for_updates().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+/// `Restart to update`. When the install can't be handed off, the app
+/// says why and stays open.
+#[tauri::command]
+pub fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
+    // The CLI next to a dev build would open the installed app instead.
+    if cfg!(debug_assertions) {
+        return Err("A development build doesn't install updates: update it by hand.".into());
+    }
+    let cli = super::sibling_binary_path().ok_or_else(|| {
+        "This copy of Localify has no CLI in its bundle, so it can't install updates. Update it by hand."
+            .to_string()
+    })?;
+    hand_off_update(&cli).map_err(|error| format!("{error:#}"))?;
+    super::quit_app(&app);
+    Ok(())
 }
 
 #[tauri::command]

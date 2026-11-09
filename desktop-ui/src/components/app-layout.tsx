@@ -9,6 +9,7 @@ import { HttpsTrustNotice } from "./app/https-trust-notice";
 import { useProjectCreateHotkey } from "./app/projects/use-project-create-hotkey";
 import { useProjectSearchHotkey } from "./app/projects/use-project-search-hotkey";
 import { TerminalPanel } from "./app/terminal/terminal-panel";
+import { UpdateNotice } from "./app/update-notice";
 import { DesktopAnalytics } from "./shared/desktop-analytics";
 import { PageTransition } from "./shared/page-transition";
 import { SharedNavigation } from "./shared/shared-navigation";
@@ -43,6 +44,7 @@ function AppLayoutContent() {
         <DesktopAnalytics />
         {!isOpen && !outputOpen ? <SharedNavigation /> : null}
         <HttpsTrustNotice />
+        <UpdateNotice />
         <main className="flex-1 overflow-hidden  rounded-lg">
           <PageTransition />
         </main>

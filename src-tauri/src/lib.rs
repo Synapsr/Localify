@@ -3,9 +3,11 @@ mod remote;
 mod terminal;
 
 use std::collections::HashMap;
+use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Child;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +24,8 @@ use localify::desktop::run_pty::AppInstallation;
 use localify::desktop::terminal::TerminalManager;
 use localify::infrastructure::running_services::RunningServiceStore;
 use localify::infrastructure::shell_env;
+use localify::infrastructure::updates::UpdatePaths;
+use localify::infrastructure::updates::app_lock::{AppLock, take_app_lock};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -48,8 +52,6 @@ const TRAY_PROJECT_LIMIT: usize = 10;
 #[cfg(target_os = "macos")]
 const MENU_CHECK_UPDATES: &str = "menu-check-updates";
 const TRAY_TEMPLATE_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
-const UPDATER_PUBLIC_KEY: &str = include_str!("../updater.pub");
-const UPDATER_ENDPOINT: Option<&str> = option_env!("LOCALIFY_UPDATER_ENDPOINT");
 const DEEP_LINK_EVENT: &str = "localify://deep-link";
 const LOCALIFY_SCHEME: &str = "localify";
 
@@ -151,27 +153,6 @@ fn sibling_binary_path() -> Option<PathBuf> {
 
     let candidate = std::env::current_exe().ok()?.parent()?.join(binary_name);
     candidate.exists().then_some(candidate)
-}
-
-pub(crate) fn updater_endpoint() -> Option<&'static str> {
-    if cfg!(debug_assertions) {
-        return None;
-    }
-
-    UPDATER_ENDPOINT
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-pub(crate) fn updater_public_key() -> &'static str {
-    UPDATER_PUBLIC_KEY.trim()
-}
-
-pub(crate) fn configure_updater_builder(
-    builder: tauri_plugin_updater::UpdaterBuilder,
-) -> tauri_plugin_updater::UpdaterBuilder {
-    // Updater archives must be read byte-for-byte; let the signed .tar.gz stay opaque.
-    builder.configure_client(|client| client.no_gzip().no_brotli().no_zstd().no_deflate())
 }
 
 fn runtime_desktop_name() -> String {
@@ -735,13 +716,19 @@ fn run_tray_action<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), Strin
             sync_tray_menu(app).map_err(|error| error.to_string())
         }
         TRAY_QUIT => {
-            let tray_state = app.state::<TrayState>();
-            tray_state.quitting.store(true, Ordering::Relaxed);
-            app.exit(0);
+            quit_app(app);
             Ok(())
         }
         _ => Ok(()),
     }
+}
+
+/// Quits for good: closing the window only hides it.
+fn quit_app<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<TrayState>()
+        .quitting
+        .store(true, Ordering::Relaxed);
+    app.exit(0);
 }
 
 fn handle_tray_action_error<R: Runtime>(app: &AppHandle<R>, id: &str, error: String) {
@@ -953,27 +940,6 @@ fn show_message_dialog<R: Runtime>(
 }
 
 #[cfg(target_os = "macos")]
-fn confirm_update_install<R: Runtime>(
-    app: &AppHandle<R>,
-    version: &str,
-    current_version: &str,
-) -> bool {
-    let message = format!(
-        "Version {version} is available.\n\nCurrent version: {current_version}\n\nInstall the update now? Localify will restart automatically when it finishes."
-    );
-
-    app.dialog()
-        .message(message)
-        .title("Update Available")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Install".into(),
-            "Not now".into(),
-        ))
-        .blocking_show()
-}
-
-#[cfg(target_os = "macos")]
 fn finish_update_check<R: Runtime>(app: &AppHandle<R>) {
     app.state::<UpdateMenuState>()
         .checking
@@ -990,39 +956,42 @@ async fn run_manual_update_check<R: Runtime>(app: AppHandle<R>) {
     }
 }
 
+/// The menu's check, the same one as `Check now` in Settings. Installing
+/// goes through `Restart to update` in the window, which lists what it
+/// closes.
 #[cfg(target_os = "macos")]
 async fn run_manual_update_check_inner<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let current_version = app.package_info().version.to_string();
-    let update_check = commands::check_app_update_with_handle(app.clone()).await?;
-
-    if !update_check.configured {
-        show_message_dialog(
-            &app,
-            "Updates Unavailable",
-            "Desktop updates are not configured for this build.".into(),
-            MessageDialogKind::Info,
-        );
-        finish_update_check(&app);
-        return Ok(());
-    }
-
-    let Some(update) = update_check.update else {
-        show_message_dialog(
-            &app,
+    let api = app.state::<AppState>().api.clone();
+    let status = async_runtime::spawn_blocking(move || api.check_for_updates())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let (title, message) = match (&status.available, &status.reason) {
+        (None, _) => (
             "You're Up to Date",
-            format!("Localify {current_version} is already the latest version."),
-            MessageDialogKind::Info,
-        );
-        finish_update_check(&app);
-        return Ok(());
+            format!(
+                "{} {} is the latest version.",
+                BRANDING.app_name, status.installed
+            ),
+        ),
+        (Some(version), Some(reason)) if !status.can_install => (
+            "Update Available",
+            format!("{} {version} is available. {reason}", BRANDING.app_name),
+        ),
+        (Some(version), _) => (
+            "Update Available",
+            format!(
+                "{} {version} is available. Use Restart to update in the window to install it.",
+                BRANDING.app_name
+            ),
+        ),
     };
-
-    if !confirm_update_install(&app, &update.version, &current_version) {
-        finish_update_check(&app);
-        return Ok(());
+    if status.available.is_some() {
+        let _ = open_main_window(&app);
     }
-
-    commands::install_app_update_with_handle(app).await
+    show_message_dialog(&app, title, message, MessageDialogKind::Info);
+    finish_update_check(&app);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1094,8 +1063,84 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     sync_app_menu(app)
 }
 
+/// The app's first step (docs/desktop.md, "Automatic updates"): it holds
+/// `app.lock` for its lifetime, so the installer never replaces the bundle
+/// under it. While an install holds the lock, the app waits for it. Without
+/// the lock the app still starts: the installer also looks for processes
+/// running from the bundle.
+fn hold_app_lock() -> Option<File> {
+    let paths = UpdatePaths::for_user()?;
+    let mut message = None;
+    let lock = take_app_lock(&paths, || message = show_updating_message());
+    if let Some(mut message) = message {
+        let _ = message.kill();
+        let _ = message.wait();
+    }
+    match lock {
+        Ok(AppLock::Held { file, waited }) => {
+            if waited {
+                restart_if_replaced();
+            }
+            Some(file)
+        }
+        // That copy gets this launch through the single-instance plugin.
+        Ok(AppLock::HeldByAnotherApp) => None,
+        Err(error) => {
+            eprintln!("the app lock is off: {error:#}");
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_updating_message() -> Option<Child> {
+    let script = format!(
+        "display dialog \"Updating {0}…\" with title \"{0}\" buttons {{\"OK\"}} default button 1 giving up after 600",
+        BRANDING.app_name
+    );
+    Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_updating_message() -> Option<Child> {
+    None
+}
+
+/// An install that held the lock may have replaced the bundle this process
+/// started from: the version installed now starts instead.
+#[cfg(target_os = "macos")]
+fn restart_if_replaced() {
+    use std::os::unix::process::CommandExt;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(bundle) = exe.ancestors().nth(3) else {
+        return;
+    };
+    let Ok(installed) = localify::infrastructure::updates::macos::bundle_version(bundle) else {
+        return;
+    };
+    if installed.to_string() == env!("CARGO_PKG_VERSION") {
+        return;
+    }
+    let error = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
+    eprintln!("could not start Localify {installed}: {error}");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restart_if_replaced() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Held until the process exits.
+    let _app_lock = hold_app_lock();
     let api = DesktopApi::new(default_config_path(), default_binary_path());
 
     let mut builder = tauri::Builder::default();
@@ -1151,11 +1196,6 @@ pub fn run() {
             terminal.warm_shell_environment();
             start_app_bridge(app.handle(), bridge_api.clone(), terminal.clone());
             app.manage(terminal);
-            app.handle().plugin(
-                tauri_plugin_updater::Builder::new()
-                    .pubkey(updater_public_key())
-                    .build(),
-            )?;
             let app_handle = app.handle().clone();
             app_handle.clone().deep_link().on_open_url(move |event| {
                 let urls = event.urls();
@@ -1193,8 +1233,10 @@ pub fn run() {
             commands::get_bootstrap,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
-            commands::check_app_update,
-            commands::install_app_update,
+            commands::get_update_status,
+            commands::set_automatic_updates,
+            commands::check_for_updates,
+            commands::restart_to_update,
             commands::read_install_attribution_clipboard,
             commands::get_config,
             commands::update_config,
