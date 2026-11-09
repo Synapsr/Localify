@@ -3,6 +3,7 @@
 //! Viewing, and the PR 3 gate, are in `viewing`.
 
 mod access;
+mod cli;
 mod control;
 mod convergence;
 mod viewing;

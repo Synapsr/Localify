@@ -14,6 +14,10 @@ use crate::infrastructure::cloud::types::{PublicStatus, PublicUrl};
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
 use crate::infrastructure::updates::UpdateStatus;
 
+/// How long a one-shot remote command may take: the daemon waits 30 s for
+/// the other machine, after a lease and a session it may have to open.
+const REMOTE_ANSWER_WAIT: Duration = Duration::from_secs(45);
+
 /// What the daemon should do after it stops serving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownKind {
@@ -191,6 +195,36 @@ impl MgmtSocketClient {
         Ok(response["data"]["removed"].as_bool().unwrap_or(false))
     }
 
+    /// Another machine's inventory: one snapshot, every page. Opens a
+    /// session when none is, which takes a few seconds; a refusal carries
+    /// its code.
+    pub fn remote_inventory(
+        &self,
+        machine_id: &str,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let command = serde_json::json!({ "cmd": "remote_inventory", "machineId": machine_id });
+        let mut response = self.send_command_within(&command.to_string(), REMOTE_ANSWER_WAIT)?;
+        Ok(response["data"].take())
+    }
+
+    /// One bounded read of a run's output on another machine: an
+    /// `output.data`, or a refusal with its code (`gone` once the service
+    /// restarted).
+    pub fn remote_output_read(
+        &self,
+        machine_id: &str,
+        run_id: &str,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let command = serde_json::json!({
+            "cmd": "remote_output_read", "machineId": machine_id,
+            "runId": run_id, "offset": offset, "maxBytes": max_bytes,
+        });
+        let mut response = self.send_command_within(&command.to_string(), REMOTE_ANSWER_WAIT)?;
+        Ok(response["data"].take())
+    }
+
     /// A streaming command (`remote_pair`, `remote_events`): one answer per
     /// line until the daemon or the caller closes it.
     pub fn remote_stream(
@@ -292,6 +326,11 @@ impl MgmtStream {
         Ok(read_answer(&mut self.reader)?.map(|mut answer| answer["data"].take()))
     }
 
+    /// How long `next_answer` waits for a line; `None` waits forever.
+    pub fn set_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.reader.get_ref().set_read_timeout(timeout)
+    }
+
     /// A handle that closes the stream from another thread: shutting it
     /// down ends what the stream watched, and `next_answer` returns.
     #[allow(dead_code)] // Used by the desktop through the library crate.
@@ -321,6 +360,12 @@ fn read_answer(
             .as_str()
             .unwrap_or("unknown error")
             .to_string();
+        if let Some(code) = resp["code"].as_str() {
+            return Err(DaemonConnectionError::Remote {
+                code: code.to_string(),
+                message: msg,
+            });
+        }
         return Err(DaemonConnectionError::ProtocolError(msg));
     }
 

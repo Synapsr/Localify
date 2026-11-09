@@ -809,19 +809,19 @@ localify stop <service> --machine <machine> [--project <id>] [--env <slug>]
 localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 ```
 
-- **Resolving `--machine`:** an exact machine id; otherwise an exact name, ignoring case, among the active machines of the roster. Active names are unique, since a same-name sign-in replaces the older machine; a name that still matches two, differing only in case, is an error that lists both with their ids. A name of no active machine lists the roster. This machine's own id or name acts locally, as without `--machine`.
+- **Resolving `--machine`:** an exact machine id; otherwise an exact name, ignoring case, among the active machines of the roster. Active names are unique, since a same-name sign-in replaces the older machine; a name that still matches two, differing only in case, is an error that lists both with their ids. A name of no active machine lists the roster. This machine's own id or name acts locally; `dev` behaves as `dev --in-app`, and the other commands behave as without `--machine`.
 - **Resolving a service:** there is no folder to read on another machine, so a service name must be unique on the target, or come with `--project`, and `--env` names a non-primary checkout. An ambiguous name lists the matches.
 - **What `--machine` refuses:** with `dev`, every option but `--project`, `--env` and `--profile`: no command after `--`, no `--detach`, `--in-app`, `--env-file`, `--confirm-profile` or `--domain`. The target decides where the service runs.
 - **Launch flags:** `--launch-id`, `--launch-expires`, `--remote-launch`, `--expect-rev`, `--request` and `--replace-legacy` are hidden flags for dispatchers, documented here and not in `--help`.
-- **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; an outcome it could not learn (`lost`) prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2.
+- **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; an outcome it could not learn (`lost`) prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2; a `conflict` prints "B changed in the meantime." with the service's fresh state, and the control is never sent again. `unknown` is progress, "Outcome unknown. Checking B…", never where a control stops. A control the snapshot already refuses (its `controls`, or a live legacy run, which the app relaunches after a confirmation) is refused the same way without being sent. A run that failed exits with code 1. With JSON, progress goes to stderr, so stdout holds one document: `{outcome, code, message, …}`. `logs` prints plain lines, as without `--machine`, and its next cursor on stderr. When the service restarts during a read or `--follow` (`gone`), it reads the service's current run from offset 0.
 - `pair` and `remove` need a terminal: an agent cannot pair or remove machines.
 
 ## MCP
 
 - `list_machines`: the roster with states, read-only.
-- An optional `machine` argument on `list_services`, `service_status`, `service_logs`, `service_start`, `service_stop` and `service_restart`, and on no other tool. With it, a tool ignores `cwd`.
+- An optional `machine` argument on `list_services`, `service_status`, `service_logs`, `service_start`, `service_stop` and `service_restart`, and on no other tool. With it, a tool ignores `cwd`. Any other tool given `machine` fails before it runs anything, rather than acting on this machine.
 - With `machine`, `service_start` takes only `service`, `project`, `env` and `profile`. `background`, `env_files`, `confirm_profile`, `command` and `domain` make it fail with an error that says the target decides how its services start. It never creates a project.
-- `service_logs` with `machine` returns a cursor `<runId>:<offset>`.
+- `service_logs` with `machine` returns a cursor `<runId>:<offset>`. `list_services` and `service_status` with `machine` both give the target's snapshot (`services status --machine`).
 - Pairing, unpairing, settings and removal have no tool. Like signing in (ADR 0018), they stay a person's decision.
 - An error from a target reaches the agent with its code and message, so `control_disabled` tells it to ask the user to allow controls on that machine, and an outcome it could not learn (`lost`) tells it to check `service_status` before trying again.
 

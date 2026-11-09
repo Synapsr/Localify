@@ -516,6 +516,23 @@ there, the card gives the one command to run on it instead, such as
 A service started from an app older than 1.5 shows "Relaunch to share". Relaunch it, after
 a confirmation, and its output and controls work from then on.
 
+**From a terminal or an agent.** Add `--machine <name or id>` to act on another machine's
+services. Without `--env`, it uses the primary checkout there, and a service name that
+exists in two projects needs `--project`.
+
+```bash
+localify services status --machine teo-desktop
+localify logs web --machine teo-desktop -f
+localify dev web --machine teo-desktop --profile staging
+localify restart web --machine teo-desktop
+```
+
+`dev --machine` takes only `--project`, `--env` and `--profile`: the other machine decides
+whether the service starts in its app or in the background. A refusal prints why and
+exits with code 2; a control whose outcome never came back prints the service's current
+state and exits with code 3. Agents get the same through the `machine` argument of the
+service tools, and `list_machines`.
+
 How it works, for contributors: [remote-machines.md](remote-machines.md).
 
 ## Access from other devices
@@ -601,6 +618,7 @@ for debug output. `localify <command> --help` lists the rest.
 | `localify billing` | Manage the subscription |
 | `localify public-url create\|list\|remove\|protect\|unprotect\|claim` | Manage public URLs |
 | `localify machines [pair\|unpair\|remove\|settings]` | Pair machines and choose what they may do here |
+| `localify services status\|logs\|dev\|stop\|restart ... --machine <m>` | The same on another machine |
 | **Other** | |
 | `localify completions <shell>` | Generate shell completions |
 
