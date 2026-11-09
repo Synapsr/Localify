@@ -12,8 +12,8 @@ use crate::infrastructure::launch_profiles::{LaunchProfiles, allowed_remotely};
 use crate::infrastructure::process::{self, helpers};
 use crate::infrastructure::running_services::{RunningServiceStore, ServiceKey, ServiceOrigin};
 use crate::infrastructure::runs::launches::{
-    AdmittedLaunch, ExecutorIdentity, ExitReason, LaunchExit, LaunchRecord, Publication,
-    RefusalCode, RequestedBy, record_alive, unix_ms_now,
+    AdmittedLaunch, ExecutorIdentity, ExitReason, LaunchExit, LaunchLock, LaunchRecord,
+    Publication, RefusalCode, RequestedBy, record_alive, unix_ms_now,
 };
 use crate::infrastructure::runs::{RunId, output};
 use crate::infrastructure::test_pause::pause_at;
@@ -149,6 +149,16 @@ impl Dispatch {
                 bail!("Launch {} already ran; nothing was started again.", self.id)
             }
         }
+    }
+
+    /// Takes this launch's own lock, held until its decision is published,
+    /// then checks again that it is undecided: two executors of one launch id
+    /// never both reach a replacement, and the one that waited finds the
+    /// other's decision and stops nothing.
+    pub fn lock(&self, store: &RunningServiceStore) -> Result<LaunchLock> {
+        let lock = store.launches().lock_launch(&self.id)?;
+        self.ensure_undecided(store)?;
+        Ok(lock)
     }
 
     /// The checks under the lock, in the contract's order: the expiry, the

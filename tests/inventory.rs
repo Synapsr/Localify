@@ -541,3 +541,38 @@ fn a_remote_launch_matches_the_inventory_s_revision_when_its_launch_is_detected(
     .unwrap();
     check("GAAAAAAAAAAAAAAAAAAAAA", "a legacy command");
 }
+
+#[test]
+fn a_remote_launch_naming_the_primary_environment_matches_the_inventory_s_revision() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    drop(sandbox.service.take());
+    // A second domain, which another environment would collapse, and no
+    // command nor folder: the folder is inferred from the package found.
+    let before = sandbox.config_rev();
+    let config = sandbox.root.join("config.toml");
+    let content = fs::read_to_string(&config).unwrap().replace(
+        "primary_domain = \"web.localify\"\ncommand = [\"sh\", \"-c\", \"exit 0\"]\n",
+        "primary_domain = \"web.localify\"\ndomains = [\"web.localify\", \"www.web.localify\"]\n",
+    );
+    fs::write(&config, content).unwrap();
+    fs::create_dir_all(sandbox.app.join("apps/web")).unwrap();
+    fs::write(sandbox.app.join("apps/web/package.json"), DEV_PACKAGE).unwrap();
+    let rev = sandbox.changed_rev(&before);
+    let item = sandbox.item();
+    assert_eq!(item["environment"]["primary"], true, "{item}");
+
+    let id = "HAAAAAAAAAAAAAAAAAAAAA";
+    let output = remote_launch(&sandbox, id, &rev, None)
+        .args(["--env", "primary"])
+        .output()
+        .unwrap();
+
+    let record = launch_record(&sandbox, id);
+    assert_eq!(
+        record["outcome"],
+        "admitted",
+        "{record}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -105,12 +105,18 @@ pub fn dev_plan(service: ConfiguredService, port: u16) -> Result<LaunchPlan> {
 
 /// A service as `localify dev --env` runs it in another environment: that
 /// environment's domain, checkout and target, and the folder the primary
-/// checkout's route detects when the config names none.
+/// checkout's route detects when the config names none. The primary
+/// environment, named or not, runs the service as the config gives it, every
+/// domain and no inferred folder: one launch, so one `configRev`, whether
+/// `--env` names it or not.
 pub fn environment_service(
     config: &Config,
     service: ConfiguredService,
     environment: &ConfiguredProjectEnvironment,
 ) -> Option<ConfiguredService> {
+    if environment.primary {
+        return Some(service);
+    }
     let inferred_service_path = service
         .path
         .clone()

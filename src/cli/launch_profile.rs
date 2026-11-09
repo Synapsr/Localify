@@ -13,8 +13,8 @@ use super::service_supervisor::SessionReporter;
 use crate::branding::BRANDING;
 use crate::domain::launch_profile::RuntimeVariables;
 use crate::infrastructure::launch_profiles::{
-    self, InfisicalCli, LaunchProfiles, LaunchRequest, ProtonPassCli, ResolvedProfile,
-    SourceStatus, launch_profiles_file_name,
+    self, InfisicalCli, LaunchProfile, LaunchProfiles, LaunchRequest, ProtonPassCli,
+    ResolvedProfile, SourceStatus, launch_profiles_file_name,
 };
 use crate::infrastructure::output_masking::secret_patterns;
 
@@ -130,28 +130,9 @@ pub fn prepare_loaded(
     service_dir: &Path,
     current_dir: &Path,
 ) -> Result<Option<PreparedProfile>> {
-    let profile = match (profiles, args.profile.as_deref()) {
-        (Some(profiles), requested) => profiles.select(requested)?,
-        (None, Some(requested)) => bail!(
-            "--profile {requested} needs launch profiles, but '{}' does not exist.\n\
-             Declare profiles in that file, for example:\n\n\
-             [profiles.{requested}]\n\
-             sources = [{{ file = \".env.{requested}\" }}]\n\n\
-             Or, if the project's variables live in Infisical, run 'infisical init' in that folder: default, staging and prod then read its environments.",
-            project_root.join(launch_profiles_file_name()).display()
-        ),
-        (None, None) => None,
-    };
+    let profile = select_profile(args, profiles, project_root, is_interactive())?;
     if profile.is_none() && args.env_files.is_empty() {
         return Ok(None);
-    }
-
-    if let Some(profile) = profile.filter(|profile| profile.danger) {
-        check_dangerous_launch(
-            profile.name.as_str(),
-            args.confirm_profile.as_deref(),
-            is_interactive(),
-        )?;
     }
 
     let env_files: Vec<PathBuf> = args
@@ -177,6 +158,39 @@ pub fn prepare_loaded(
         resolved,
         mask_output,
     }))
+}
+
+/// The profile `args` select among `profiles`, refused when it does not
+/// exist, or when it is dangerous and not confirmed: with no terminal
+/// (`interactive` false), `--confirm-profile` must name it. It reads and runs
+/// nothing, so `localify dev` and `dev --detach` check it before they stop a
+/// running service, and the sources run only under the run lock.
+pub fn select_profile<'a>(
+    args: &LaunchProfileArgs,
+    profiles: Option<&'a LaunchProfiles>,
+    project_root: &Path,
+    interactive: bool,
+) -> Result<Option<&'a LaunchProfile>> {
+    let profile = match (profiles, args.profile.as_deref()) {
+        (Some(profiles), requested) => profiles.select(requested)?,
+        (None, Some(requested)) => bail!(
+            "--profile {requested} needs launch profiles, but '{}' does not exist.\n\
+             Declare profiles in that file, for example:\n\n\
+             [profiles.{requested}]\n\
+             sources = [{{ file = \".env.{requested}\" }}]\n\n\
+             Or, if the project's variables live in Infisical, run 'infisical init' in that folder: default, staging and prod then read its environments.",
+            project_root.join(launch_profiles_file_name()).display()
+        ),
+        (None, None) => None,
+    };
+    if let Some(profile) = profile.filter(|profile| profile.danger) {
+        check_dangerous_launch(
+            profile.name.as_str(),
+            args.confirm_profile.as_deref(),
+            interactive,
+        )?;
+    }
+    Ok(profile)
 }
 
 /// Service folder relative to the project root with `/` separators, empty
@@ -213,7 +227,9 @@ fn check_dangerous_launch(name: &str, confirm_flag: Option<&str>, interactive: b
     }
 }
 
-fn is_interactive() -> bool {
+/// Whether `localify dev` has a person at its terminal, who confirms a
+/// dangerous profile by naming it.
+pub fn is_interactive() -> bool {
     io::stdin().is_terminal() && io::stderr().is_terminal()
 }
 

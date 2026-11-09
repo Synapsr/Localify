@@ -17,15 +17,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use localify::project_init::LocalAppUpdatePolicy;
 use serde::Serialize;
 
 use super::context::AppContext;
+use super::launch_profile::LaunchProfileArgs;
 use super::services::{
-    Replace, RunTarget, already_running, older_version_running, resolve_launch_target,
-    resolve_service_key,
+    CheckContext, DevRequest, Replace, RunMode, RunTarget, already_running, check_before_lock,
+    older_version_running, resolve_launch_target, resolve_service_key,
 };
 use crate::branding::BRANDING;
 use crate::infrastructure::launch_sessions::unix_now;
+use crate::infrastructure::paths::LocalifyPaths;
 use crate::infrastructure::running_services::{
     self, Admission, RunState, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
     ServiceOrigin, service_selector,
@@ -43,26 +46,49 @@ const LOGS_WINDOW: u64 = 1024 * 1024;
 /// How much one read of a stream takes.
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Which service a detached start runs, and what it does if that one already
-/// runs.
+/// Which service a detached start runs, with what, and what it does if that
+/// one already runs.
 pub struct Detached<'a> {
     pub target: RunTarget<'a>,
+    pub override_command: &'a [String],
+    pub launch_profile: &'a LaunchProfileArgs,
     pub replace: Replace,
 }
 
 /// Runs the same `dev` command again in the background, in its own session
 /// and with its output in the run's stream, and returns once the service
-/// listens, stopped, or is still starting. A launch this dispatcher names gets
+/// listens, stopped, or is still starting. A launch this dispatcher names is
+/// checked first, as its executor checks it before its lock, so one that
+/// would be refused never asks about or stops the running service. It gets
 /// its expiry only once the run it replaces has stopped, so a slow stop never
-/// uses up the launch's budget; a launch id given by the caller comes with the
-/// caller's expiry, passed on as given.
+/// uses up the launch's budget. A launch id given by the caller comes with
+/// the caller's expiry, passed on as given, and its executor, which records
+/// its refusal, checks it.
 pub fn start_detached(
     launch_id: Option<&str>,
     detached: Detached<'_>,
     config_path: &Path,
     ctx: &AppContext,
+    paths: &LocalifyPaths,
 ) -> Result<i32> {
     let store = RunningServiceStore::new_default()?;
+    if launch_id.is_none() {
+        let launch = DevRequest {
+            target: detached.target,
+            mode: RunMode::Dev,
+            override_command: detached.override_command,
+            launch_profile: detached.launch_profile,
+            // The executor has no terminal.
+            interactive: false,
+        };
+        let from = CheckContext {
+            config_path,
+            policy: LocalAppUpdatePolicy::runtime_only(),
+            ctx,
+            data_dir: &paths.data_dir,
+        };
+        check_before_lock(&launch, None, &from).map_err(|refusal| refusal.error)?;
+    }
     // The executor has no terminal: a person at this one is asked here, and
     // the executor stops only the run they were asked about.
     let replace = match detached.replace {

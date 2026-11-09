@@ -102,6 +102,8 @@ impl Helpers {
         if let Some(identity) = identity {
             registry.known.push(identity);
         }
+        // Where a test kills the executor before it witnessed this helper.
+        crate::infrastructure::test_pause::pause_at("helper-spawned");
         if let Some(witness) = &registry.witness {
             witness();
         }

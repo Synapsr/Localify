@@ -262,50 +262,53 @@ pub fn run(
     if let Some(dispatch) = &dispatch {
         dispatch.ensure_undecided(&store)?;
     }
-    check_arguments(&ArgumentCheck {
-        dispatch: dispatch.as_ref(),
-        override_command: &override_command,
-        launch_profile: &launch_profile,
-        init_domain: init_domain.is_some(),
-        named: service_name.is_some() || project.is_some() || environment.is_some(),
-    })
-    .map_err(conflict)?;
-
-    // Which service, and so which lock.
-    let (service, effective_environment) = resolve_runnable_service(
-        RunTarget {
+    let launch = DevRequest {
+        target: RunTarget {
             service: service_name.as_deref(),
             project: project.as_deref(),
             environment: environment.as_deref(),
             init_domain: init_domain.as_deref(),
         },
         mode,
-        config_path,
-        policy,
-        ctx,
-    )
-    .map_err(conflict)?;
-    let key = service_key(&service, effective_environment.as_deref(), ctx);
-    let request = DefinitionRequest {
-        key: &key,
-        environment: effective_environment.as_deref(),
-        mode,
         override_command: &override_command,
-        profile: launch_profile.profile.as_deref(),
-        data_dir: &paths.data_dir,
+        launch_profile: &launch_profile,
+        interactive: launch_profile::is_interactive(),
     };
     // Every refusal but a taken port, before a replacement stops anything.
-    load_definition(&request, dispatch.as_ref(), ctx, Phase::Preflight).map_err(refuse)?;
+    let (key, effective_environment) = check_before_lock(
+        &launch,
+        dispatch.as_ref(),
+        &CheckContext {
+            config_path,
+            policy,
+            ctx,
+            data_dir: &paths.data_dir,
+        },
+    )
+    .map_err(refuse)?;
     crate::infrastructure::test_pause::pause_at("launch-preflight-passed");
+    // One executor of a launch id at a time through what it may stop, until
+    // its decision is published: a twin that waited finds it decided.
+    let launch_lock = match &dispatch {
+        Some(dispatch) => Some(dispatch.lock(&store)?),
+        None => None,
+    };
     // Before anything runs, profile sources included: one executor per service.
-    let Admitted { lock, replaces } = admit(&store, &key, replace).map_err(conflict)?;
+    let still_undecided = || match &dispatch {
+        Some(dispatch) => dispatch.ensure_undecided(&store),
+        None => Ok(()),
+    };
+    let Admitted { lock, replaces } =
+        admit(&store, &key, replace, &still_undecided).map_err(conflict)?;
     // Under the lock, the checks that decide, from one read of the config,
     // which the launch then runs from.
+    let request = launch.definition_request(&key, effective_environment.as_deref(), paths);
     let definition =
         load_definition(&request, dispatch.as_ref(), ctx, Phase::UnderLock).map_err(refuse)?;
     if let Some(dispatch) = &dispatch {
         dispatch.admit(&store, &key)?;
     }
+    drop(launch_lock);
     if let Some(replaced) = &replaces
         && let Err(error) = store.launches().mark_replaced(replaced, &run_id)
     {
@@ -323,6 +326,85 @@ pub fn run(
         ctx,
         paths,
     })
+}
+
+/// What `localify dev` is asked to launch, before anything is resolved.
+pub(crate) struct DevRequest<'a> {
+    pub target: RunTarget<'a>,
+    pub mode: RunMode,
+    pub override_command: &'a [String],
+    pub launch_profile: &'a LaunchProfileArgs,
+    /// Whether the executor has a person at its terminal, who may start a
+    /// dangerous profile without `--confirm-profile`.
+    pub interactive: bool,
+}
+
+impl<'a> DevRequest<'a> {
+    fn definition_request(
+        &'a self,
+        key: &'a ServiceKey,
+        environment: Option<&'a str>,
+        paths: &'a LocalifyPaths,
+    ) -> DefinitionRequest<'a> {
+        DefinitionRequest {
+            key,
+            environment,
+            mode: self.mode,
+            override_command: self.override_command,
+            launch_profile: self.launch_profile,
+            interactive: self.interactive,
+            data_dir: &paths.data_dir,
+        }
+    }
+}
+
+/// Where the checks before the lock read from.
+pub(crate) struct CheckContext<'a> {
+    pub config_path: &'a Path,
+    pub policy: LocalAppUpdatePolicy,
+    pub ctx: &'a AppContext,
+    pub data_dir: &'a Path,
+}
+
+/// Every check `localify dev` makes before its lock, which changes nothing
+/// but what resolving the service creates (its project, or the environment
+/// of the current worktree): the arguments, the service, its environment and
+/// checkout, its plan and target, the profile selected and the confirmation
+/// a dangerous one needs, and for a dispatched launch its expiry and
+/// revision. Its sources run only under the lock. `localify dev` runs it
+/// before its replacement stops anything, and `dev --detach` before it asks
+/// about or stops the running service. Returns the service's key and
+/// environment.
+pub(crate) fn check_before_lock(
+    launch: &DevRequest<'_>,
+    dispatch: Option<&Dispatch>,
+    from: &CheckContext<'_>,
+) -> Result<(ServiceKey, Option<String>), Refusal> {
+    let target = launch.target;
+    check_arguments(&ArgumentCheck {
+        dispatch,
+        override_command: launch.override_command,
+        launch_profile: launch.launch_profile,
+        init_domain: target.init_domain.is_some(),
+        named: target.service.is_some() || target.project.is_some() || target.environment.is_some(),
+    })
+    .map_err(Refusal::conflict)?;
+    // Which service, and so which lock.
+    let (service, environment) =
+        resolve_runnable_service(target, launch.mode, from.config_path, from.policy, from.ctx)
+            .map_err(Refusal::conflict)?;
+    let key = service_key(&service, environment.as_deref(), from.ctx);
+    let request = DefinitionRequest {
+        key: &key,
+        environment: environment.as_deref(),
+        mode: launch.mode,
+        override_command: launch.override_command,
+        launch_profile: launch.launch_profile,
+        interactive: launch.interactive,
+        data_dir: from.data_dir,
+    };
+    load_definition(&request, dispatch, from.ctx, Phase::Preflight)?;
+    Ok((key, environment))
 }
 
 /// What `localify dev` was given, checked before it resolves anything.
@@ -363,7 +445,8 @@ struct DefinitionRequest<'a> {
     environment: Option<&'a str>,
     mode: RunMode,
     override_command: &'a [String],
-    profile: Option<&'a str>,
+    launch_profile: &'a LaunchProfileArgs,
+    interactive: bool,
     data_dir: &'a Path,
 }
 
@@ -430,7 +513,7 @@ fn load_definition(
         };
         dispatch.check(&Loaded {
             profiles: &profiles,
-            profile: request.profile,
+            profile: request.launch_profile.profile.as_deref(),
             revision: &revision,
         })?;
     }
@@ -438,6 +521,13 @@ fn load_definition(
     let proxy_target = runnable_target(&configured, request.mode).map_err(Refusal::conflict)?;
     let plan = plan.map_err(Refusal::conflict)?;
     let profiles = profiles.map_err(Refusal::conflict)?;
+    launch_profile::select_profile(
+        request.launch_profile,
+        profiles.as_ref(),
+        &plan.project_root,
+        request.interactive,
+    )
+    .map_err(Refusal::conflict)?;
     if phase == Phase::UnderLock {
         ensure_port_available(port, &configured).map_err(Refusal::conflict)?;
     }
@@ -1162,11 +1252,14 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// stopped here. Returns, with the lock, the run this launch takes over: the
 /// one it stopped or was approved to replace, which the record still names.
 /// Only the launch that wins the lock gets it, so only the winner records
-/// that it replaced that run.
+/// that it replaced that run. `before_stop` runs right before each stop, and
+/// fails once the launch was decided: a launch never stops the run its own
+/// id started.
 pub(crate) fn admit(
     store: &RunningServiceStore,
     key: &ServiceKey,
     replace: Replace,
+    before_stop: &dyn Fn() -> Result<()>,
 ) -> Result<Admitted> {
     let mut chosen = match &replace {
         Replace::Approved(run_id) => Some(run_id.clone()),
@@ -1227,6 +1320,9 @@ pub(crate) fn admit(
             bail!("{}", already_running(&running));
         }
         crate::infrastructure::test_pause::pause_at("replace-chosen");
+        // Right before the stop: the run read here may be the one this very
+        // launch id started meanwhile, from another executor.
+        before_stop()?;
         eprintln!(
             "Stopping '{}' (PID {}) to start it again...",
             key.service_id, running.pid

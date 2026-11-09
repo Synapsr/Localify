@@ -249,12 +249,11 @@ fn place_services(config: &Config, project_roots: &HashMap<String, PathBuf>) -> 
             .iter()
             .filter(|service| service.project_id == environment.project_id);
         for service in of_project {
-            let service = if environment.primary {
-                Some(service.clone())
-            } else {
+            let Some(service) =
                 launch_plan::environment_service(config, service.clone(), &environment)
+            else {
+                continue;
             };
-            let Some(service) = service else { continue };
             let Some(RouteTarget::Proxy(target)) = &service.primary_target else {
                 continue;
             };

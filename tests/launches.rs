@@ -146,6 +146,17 @@ impl Sandbox {
     /// for a login does, and leaves a descendant behind. Returns the PATH that
     /// finds it, and the file it writes its PID and its descendant's to.
     fn slow_infisical(&self) -> (String, PathBuf) {
+        let marker = self.root.join("infisical.pids");
+        let path = self.infisical(&format!(
+            "sleep 300 &\necho $$ $! > \"{}.tmp\"\nmv \"{0}.tmp\" \"{0}\"\nexec sleep 300\n",
+            marker.display()
+        ));
+        (path, marker)
+    }
+
+    /// A `slow` profile whose Infisical CLI runs `script`. Returns the PATH
+    /// that finds it.
+    fn infisical(&self, script: &str) -> String {
         fs::write(
             self.app.join("localify.toml"),
             "[profiles.slow]\nsources = [{ infisical = {} }]\n",
@@ -154,18 +165,33 @@ impl Sandbox {
         fs::write(self.app.join(".infisical.yaml"), "workspaceId: \"w\"\n").unwrap();
         let bin = self.root.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let marker = self.root.join("infisical.pids");
         let cli = bin.join("infisical");
-        fs::write(
-            &cli,
-            format!(
-                "#!/bin/sh\nsleep 300 &\necho $$ $! > \"{}.tmp\"\nmv \"{0}.tmp\" \"{0}\"\nexec sleep 300\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&cli, format!("#!/bin/sh\n{script}")).unwrap();
         fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
-        (format!("{}:{}", bin.display(), self.path), marker)
+        format!("{}:{}", bin.display(), self.path)
+    }
+
+    /// A dispatched launch of the service on the `slow` profile, found on
+    /// `path`.
+    fn spawn_slow(&self, id: &RunId, path: &str) -> Child {
+        let mut command = self.dev(
+            &[&launch_id_flag(id), "--profile", "slow"],
+            &self.touch_marker(),
+        );
+        command.env("PATH", path);
+        self.spawn_executor(command)
+    }
+
+    /// The PIDs a helper wrote to `marker`, once it did.
+    fn helper_pids(&self, marker: &Path) -> (u32, u32) {
+        wait_until(Duration::from_secs(30), || {
+            let content = fs::read_to_string(marker).ok()?;
+            let mut pids = content
+                .split_whitespace()
+                .map(|pid| pid.parse::<u32>().ok());
+            Some((pids.next()??, pids.next()??))
+        })
+        .unwrap_or_else(|| panic!("the profile never ran its helper:\n{}", self.executor_log()))
     }
 
     fn running(&self, id: &RunId) {
@@ -671,25 +697,8 @@ fn killing_an_executor_while_its_profile_helper_runs_ends_the_helper_and_what_it
     let sandbox = Sandbox::new();
     let (path, marker) = sandbox.slow_infisical();
     let id = RunId::generate().unwrap();
-    let mut command = sandbox.dev(
-        &[&launch_id_flag(&id), "--profile", "slow"],
-        &sandbox.touch_marker(),
-    );
-    command.env("PATH", &path);
-    let mut executor = sandbox.spawn_executor(command);
-    let (helper, descendant) = wait_until(Duration::from_secs(30), || {
-        let content = fs::read_to_string(&marker).ok()?;
-        let mut pids = content
-            .split_whitespace()
-            .map(|pid| pid.parse::<u32>().ok());
-        Some((pids.next()??, pids.next()??))
-    })
-    .unwrap_or_else(|| {
-        panic!(
-            "the profile never ran its helper:\n{}",
-            sandbox.executor_log()
-        )
-    });
+    let mut executor = sandbox.spawn_slow(&id, &path);
+    let (helper, descendant) = sandbox.helper_pids(&marker);
     assert_eq!(sandbox.report(&id, None), LaunchReport::Starting);
 
     assert!(process::send_signal(executor.id(), Signal::Kill));
@@ -841,4 +850,186 @@ fn an_admitted_launch_runs_from_the_config_it_was_checked_against() {
             reason: None
         }
     );
+}
+
+/// Kills `pid` and waits until it is gone.
+fn kill_and_wait(pid: u32) {
+    process::send_signal(pid, Signal::Kill);
+    assert!(
+        wait_until(Duration::from_secs(30), || process::process_info(pid)
+            .is_none()
+            .then_some(()))
+        .is_some(),
+        "process {pid} survived SIGKILL"
+    );
+}
+
+#[test]
+fn a_killed_launch_whose_helpers_nothing_proves_stays_open_and_signals_nothing() {
+    let sandbox = Sandbox::new();
+    let interrupted = LaunchReport::Exited {
+        code: None,
+        signal: None,
+        reason: Some(ExitReason::InterruptedBeforeRegistration),
+    };
+    // Reported, with its folder and without an exit, while they live.
+    let still_open = |id: &RunId, alive: &[u32]| {
+        let error = reconcile(&sandbox.store(), &NativeProcesses, id, None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("could not be confirmed"),
+            "{error:#}"
+        );
+        assert!(sandbox.store().run_dir(id).exists());
+        let Some(LaunchRecord::Admitted(admitted)) = sandbox.launch(id) else {
+            panic!("not admitted");
+        };
+        assert_eq!(admitted.exit, None);
+        for pid in alive {
+            assert!(process::process_info(*pid).is_some(), "{pid} was signalled");
+        }
+    };
+
+    // Killed right after it started its helper, before it witnessed it.
+    let (path, marker) = sandbox.slow_infisical();
+    sandbox.arm("helper-spawned");
+    let id = RunId::generate().unwrap();
+    let mut executor = sandbox.spawn_slow(&id, &path);
+    sandbox.wait_reached("helper-spawned");
+    let (helper, descendant) = sandbox.helper_pids(&marker);
+    assert!(process::send_signal(executor.id(), Signal::Kill));
+    executor.wait().unwrap();
+    sandbox.release("helper-spawned");
+    still_open(&id, &[helper, descendant]);
+    kill_and_wait(helper);
+    kill_and_wait(descendant);
+    assert_eq!(sandbox.report(&id, None), interrupted);
+    assert!(!sandbox.store().run_dir(&id).exists());
+
+    // A descendant its witnessed helper started after the executor died,
+    // once that helper exited.
+    let (go, late) = (sandbox.root.join("go"), sandbox.root.join("late.pid"));
+    let path = sandbox.infisical(&format!(
+        "while [ ! -e \"{go}\" ]; do sleep 0.05; done\nsleep 300 &\necho $! > \"{late}.tmp\"\nmv \"{late}.tmp\" \"{late}\"\n",
+        go = go.display(),
+        late = late.display()
+    ));
+    let id = RunId::generate().unwrap();
+    let mut executor = sandbox.spawn_slow(&id, &path);
+    let alive = sandbox.store().run_dir(&id).join("executor-alive");
+    wait_until(Duration::from_secs(30), || alive.exists().then_some(()))
+        .unwrap_or_else(|| panic!("never witnessed:\n{}", sandbox.executor_log()));
+    assert!(process::send_signal(executor.id(), Signal::Kill));
+    executor.wait().unwrap();
+    fs::write(&go, "").unwrap();
+    let born_late = wait_until(Duration::from_secs(30), || {
+        fs::read_to_string(&late).ok()?.trim().parse::<u32>().ok()
+    })
+    .unwrap();
+    let sid = executor.id();
+    wait_until(Duration::from_secs(30), || {
+        let members: Vec<u32> = process::all_processes()
+            .iter()
+            .filter(|process| process.sid == Some(sid))
+            .map(|process| process.pid)
+            .collect();
+        (members == [born_late]).then_some(())
+    })
+    .expect("the helper never exited");
+    still_open(&id, &[born_late]);
+    kill_and_wait(born_late);
+    assert_eq!(sandbox.report(&id, None), interrupted);
+    assert!(!sandbox.store().run_dir(&id).exists());
+    assert!(!sandbox.marker().exists());
+}
+
+#[test]
+fn a_replacement_its_checks_refuse_never_stops_the_running_service() {
+    let sandbox = Sandbox::new();
+    let first = RunId::generate().unwrap();
+    let mut running = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&first)], "sleep 30"));
+    sandbox.running(&first);
+    let touch = sandbox.touch_marker();
+    let profiles =
+        "[profiles.default]\nsources = []\n\n[profiles.prod]\ndanger = true\nsources = []\n";
+    let refused = |flags: &[&str], says: &str| {
+        let output = sandbox.dev(flags, &touch).output().unwrap();
+        assert!(!output.status.success(), "{flags:?} started");
+        assert!(
+            stderr(&output).contains(says),
+            "{flags:?}: {}",
+            stderr(&output)
+        );
+    };
+
+    // In the foreground and detached: a profile that does not exist, and a
+    // dangerous one nobody confirmed, with no terminal.
+    fs::write(sandbox.app.join("localify.toml"), profiles).unwrap();
+    for detach in [&[][..], &["--detach"][..]] {
+        let with = |flags: &[&'static str]| [detach, flags].concat();
+        refused(&with(&["--replace", "--profile", "typo"]), "typo");
+        refused(
+            &with(&["--replace", "--profile", "prod"]),
+            "--confirm-profile prod",
+        );
+    }
+    // Detached: a `localify.toml` that does not load.
+    fs::write(sandbox.app.join("localify.toml"), "[profiles\n").unwrap();
+    refused(&["--detach", "--replace"], "localify.toml");
+
+    assert!(running.try_wait().unwrap().is_none(), "the run was stopped");
+    assert_eq!(sandbox.report(&first, None), LaunchReport::Running);
+    assert!(!sandbox.marker().exists());
+    sandbox.stop();
+    running.wait().unwrap();
+}
+
+#[test]
+fn of_two_executors_of_one_launch_the_one_that_waited_never_stops_its_twin_s_run() {
+    let sandbox = Sandbox::new();
+    let first = RunId::generate().unwrap();
+    let mut running = sandbox.spawn_executor(sandbox.dev(&[&launch_id_flag(&first)], "sleep 30"));
+    sandbox.running(&first);
+    let id = RunId::generate().unwrap();
+    let twin = |pauses: &str, points: &[&str]| {
+        for point in points {
+            sandbox.arm_in(pauses, point);
+        }
+        let mut command = sandbox.dev(&[&launch_id_flag(&id), "--replace"], "sleep 30");
+        command.env(PAUSE_DIR_ENV, sandbox.pause_dir(pauses));
+        sandbox.spawn_executor(command)
+    };
+
+    // One is held once its checks passed, while the other replaces the run
+    // and is held before it publishes its decision.
+    let mut late = twin("pause-late", &["launch-preflight-passed", "replace-chosen"]);
+    sandbox.wait_reached_in("pause-late", "launch-preflight-passed");
+    let mut early = twin("pause-early", &["launch-admission"]);
+    sandbox.wait_reached_in("pause-early", "launch-admission");
+    running.wait().unwrap();
+    sandbox.release_in("pause-late", "launch-preflight-passed");
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        !sandbox
+            .root
+            .join("pause-late/replace-chosen.reached")
+            .exists(),
+        "both executors of the launch reached a replacement"
+    );
+
+    // Admitted, it runs, and its twin stops nothing.
+    sandbox.release_in("pause-early", "launch-admission");
+    sandbox.running(&id);
+    sandbox.release_in("pause-late", "replace-chosen");
+    assert!(!late.wait().unwrap().success());
+    assert!(
+        early.try_wait().unwrap().is_none(),
+        "its twin stopped the run"
+    );
+    assert_eq!(sandbox.report(&id, None), LaunchReport::Running);
+    assert_eq!(
+        sandbox.report(&first, None),
+        LaunchReport::Replaced { by: id.clone() }
+    );
+    sandbox.stop();
+    early.wait().unwrap();
 }

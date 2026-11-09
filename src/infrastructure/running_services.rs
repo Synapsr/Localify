@@ -337,10 +337,9 @@ impl RunningServiceStore {
     /// Where a detached executor writes its own messages, before and during
     /// its run: `services/launches/<launchId>.log`.
     pub fn launch_log(&self, launch_id: &RunId) -> Result<PathBuf> {
-        let dir = self.launches().dir().to_path_buf();
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create '{}'", dir.display()))?;
-        Ok(dir.join(format!("{launch_id}.log")))
+        let launches = self.launches();
+        launches.create_dir()?;
+        Ok(launches.log_path(launch_id))
     }
 
     /// Takes the service's lock, for the executor, before it runs anything.
@@ -730,13 +729,15 @@ impl RunningServiceStore {
     }
 
     /// The daemon's housekeeping: the admissions whose executor died
-    /// without their exit are completed, then the temporary files a crash
-    /// left in `launches/` and in each run's folder, once an hour old, and the
-    /// launch records past their retention go. Returns how many files went.
+    /// without their exit are completed, then the temporary files and launch
+    /// locks a crash left in `launches/`, and the temporary files in each
+    /// run's folder, once an hour old, and the launch records past their
+    /// retention go. Returns how many files went.
     pub fn sweep_leftovers(&self) -> Result<usize> {
         reconcile_unresolved(self, &NativeProcesses)?;
         let launches = self.launches();
         let mut removed = sweep_temporaries(launches.dir(), TEMPORARY_MAX_AGE)?;
+        removed += launches.sweep_launch_locks(TEMPORARY_MAX_AGE)?;
         if let Ok(runs) = fs::read_dir(self.dir.join("output")) {
             for run in runs.flatten() {
                 removed += sweep_temporaries(&run.path(), TEMPORARY_MAX_AGE)?;
@@ -793,9 +794,7 @@ impl RunningServiceStore {
             && next.and_then(RunningService::run_id) != Some(run_id)
         {
             let _ = fs::remove_dir_all(self.run_dir(run_id));
-            if let Ok(log) = self.launch_log(run_id) {
-                let _ = fs::remove_file(log);
-            }
+            let _ = fs::remove_file(self.launches().log_path(run_id));
         }
         if let Some(log_file) = &service.log_file
             && next.and_then(|next| next.log_file.as_ref()) != Some(log_file)
@@ -835,15 +834,14 @@ fn same_run(left: &RunningService, right: &RunningService) -> bool {
     }
 }
 
-/// Waits for the reader of a run PTY to finalize its stream. It reads what
-/// the run's processes left in the PTY first, which takes a moment once they
-/// are gone.
+/// Waits for the reader of a run PTY to finalize its stream and record the
+/// run's exit. It reads what the run's processes left in the PTY first,
+/// which takes a moment once they are gone.
 fn wait_for_end(service: &str, dir: &Path) -> Result<()> {
     let deadline = Instant::now() + READER_FINALIZE_WAIT;
-    while output::read_end(dir)?.is_none() {
-        if !output::reader_alive(dir)? {
-            return Ok(());
-        }
+    // Until the app lets go of it: it finalizes, then records the exit with
+    // its code, which no exit recorded here may precede.
+    while output::reader_alive(dir)? {
         if Instant::now() >= deadline {
             bail!(
                 "'{service}' stopped, but the {} app has not finished reading its output yet. Try again in a moment.",

@@ -543,7 +543,11 @@ impl Finishing {
         end.error = cut_off.clone();
         let dir = self.store.run_dir(&self.run_id);
         let mut reason = end.reason;
-        if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
+        // Held until the exit is recorded, as is the reader lock: another
+        // finisher that finds the run finalized, or its reader gone, then
+        // finds the exit with its code, and never records one without it.
+        let finalizing = FinalizeLock::acquire(&dir)?;
+        if finalizing.is_some() {
             match output::read_end(&dir)? {
                 Some(existing) => reason = existing.reason,
                 None => {
@@ -551,12 +555,12 @@ impl Finishing {
                 }
             }
         }
+        crate::infrastructure::test_pause::pause_at("run-pty-end-published");
         self.store
             .launches()
             .add_exit(&self.run_id, LaunchExit::now(code, signal, None))?;
         self.store.mark_exited(&record.key, &self.run_id, code)?;
-        // Held until the exit is recorded: the daemon completes a run whose
-        // reader died before that, and would record it without its code.
+        drop(finalizing);
         drop(self.reader_lock);
         Ok((reason, cut_off))
     }

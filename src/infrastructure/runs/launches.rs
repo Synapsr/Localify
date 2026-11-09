@@ -46,6 +46,8 @@ const DISPATCH_BUDGET_MS: u64 = 15_000;
 /// Names one temporary file tries. Each is 128 random bits, so a second one
 /// is needed only when another writer picked the same.
 const TEMPORARY_ATTEMPTS: usize = 8;
+/// `<launchId>.lock`: one executor of a launch id at a time.
+const LAUNCH_LOCK_SUFFIX: &str = ".lock";
 /// In a launch's run folder, before its run record exists: when its executor
 /// was last seen alive, right after it started a profile helper.
 const ALIVE_FILE: &str = "executor-alive";
@@ -183,6 +185,25 @@ pub enum ExitReason {
     ExecutorLost,
 }
 
+/// An exclusive `flock` on `<launchId>.lock`, held by an executor of that
+/// launch from before anything it may stop until its decision is published.
+/// Once the launch is decided, the file guards nothing: every later holder,
+/// of it or of a new one, finds the decision first. So its holder removes it
+/// then; the daemon sweeps one that a crash before the decision left.
+pub struct LaunchLock {
+    _file: File,
+    path: PathBuf,
+    record: PathBuf,
+}
+
+impl Drop for LaunchLock {
+    fn drop(&mut self) {
+        if self.record.exists() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// What publishing a decision found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Publication {
@@ -228,8 +249,19 @@ impl LaunchRecords {
         &self.dir
     }
 
+    /// Creates the records' folder, durable in its parents, for anything
+    /// written there: a decision, or a detached executor's messages.
+    pub fn create_dir(&self) -> Result<()> {
+        create_durable_dir(&self.dir)
+    }
+
     fn path(&self, id: &RunId) -> PathBuf {
         self.dir.join(format!("{id}.json"))
+    }
+
+    /// `<launchId>.log`: a detached executor's own messages.
+    pub fn log_path(&self, id: &RunId) -> PathBuf {
+        self.dir.join(format!("{id}.log"))
     }
 
     /// The launch's decision, or `None` while there is none.
@@ -250,7 +282,7 @@ impl LaunchRecords {
     /// there, which wins. Either way it returns only once the folder naming
     /// that decision is synced.
     pub fn publish(&self, id: &RunId, record: &LaunchRecord) -> Result<Publication> {
-        create_durable_dir(&self.dir)?;
+        self.create_dir()?;
         let path = self.path(id);
         let temporary = self.write_temporary(id, record)?;
         crate::infrastructure::test_pause::pause_at("launch-record-written");
@@ -312,6 +344,55 @@ impl LaunchRecords {
             exit.replaced_by = Some(by.clone());
             true
         })
+    }
+
+    /// Takes launch `id`'s own lock, `<launchId>.lock`, waiting for another
+    /// executor of that id that holds it.
+    pub fn lock_launch(&self, id: &RunId) -> Result<LaunchLock> {
+        self.create_dir()?;
+        let path = self.dir.join(format!("{id}{LAUNCH_LOCK_SUFFIX}"));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("Failed to open '{}'", path.display()))?;
+        file.lock()
+            .with_context(|| format!("Failed to lock '{}'", path.display()))?;
+        Ok(LaunchLock {
+            _file: file,
+            path,
+            record: self.path(id),
+        })
+    }
+
+    /// Removes the launch locks older than `max_age` that nobody holds,
+    /// which a crash before its decision left. Returns how many went.
+    pub fn sweep_launch_locks(&self, max_age: Duration) -> Result<usize> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to read '{}'", self.dir.display()));
+            }
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let launch = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(LAUNCH_LOCK_SUFFIX))
+                .is_some_and(|id| RunId::parse(id).is_ok());
+            if launch
+                && older_than(&entry, max_age)
+                && unheld(&path)
+                && fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     /// Changes an admitted record's exit, under the exit lock: written whole
@@ -495,22 +576,25 @@ fn sync_dir(dir: &Path) -> Result<()> {
         .with_context(|| format!("Failed to sync '{}'", dir.display()))
 }
 
-/// Creates `dir` and its missing parents, each made durable in its parent.
+/// How many levels, from the records' folder up, Localify makes on demand:
+/// `launches/`, `services/` and the state folder holding them.
+const OWN_LEVELS: usize = 3;
+
+/// Creates `dir` and its missing parents, and makes each of Localify's own
+/// levels durable in its parent: synced on every call, whoever created it,
+/// since a folder another process just made may not be synced yet. A level
+/// above those is synced in its parent only when it was missing.
 fn create_durable_dir(dir: &Path) -> Result<()> {
-    let mut missing = Vec::new();
-    let mut ancestor = Some(dir);
-    while let Some(path) = ancestor
-        && !path.is_dir()
-    {
-        missing.push(path);
-        ancestor = path.parent();
-    }
-    if missing.is_empty() {
-        return Ok(());
+    let mut levels = Vec::new();
+    for (depth, level) in dir.ancestors().enumerate() {
+        if depth >= OWN_LEVELS && level.is_dir() {
+            break;
+        }
+        levels.push(level);
     }
     fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
-    for created in missing.iter().rev() {
-        if let Some(parent) = created.parent() {
+    for level in levels.iter().rev() {
+        if let Some(parent) = level.parent() {
             sync_dir(parent)?;
         }
     }
@@ -527,22 +611,34 @@ pub fn sweep_temporaries(dir: &Path, max_age: Duration) -> Result<usize> {
             return Err(error).with_context(|| format!("Failed to read '{}'", dir.display()));
         }
     };
-    let now = SystemTime::now();
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != "tmp") {
             continue;
         }
-        let old = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|modified| now.duration_since(modified).is_ok_and(|age| age >= max_age));
-        if old && fs::remove_file(&path).is_ok() {
+        if older_than(&entry, max_age) && fs::remove_file(&path).is_ok() {
             removed += 1;
         }
     }
     Ok(removed)
+}
+
+/// Whether no process holds the lock at `path`.
+fn unheld(path: &Path) -> bool {
+    File::open(path).is_ok_and(|file| file.try_lock().is_ok())
+}
+
+/// Whether `entry` was last changed at least `max_age` ago.
+fn older_than(entry: &fs::DirEntry, max_age: Duration) -> bool {
+    entry
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .is_ok_and(|age| age >= max_age)
+        })
 }
 
 /// The `--launch-expires` of a launch dispatched now: 15 seconds later. A
@@ -728,16 +824,18 @@ fn unregistered_session(store: &RunningServiceStore, admitted: &AdmittedLaunch) 
 /// between its admission and its run record: the profile helpers it started
 /// there, proven by [`record_alive`], and what they started are ended by the
 /// identity-checked finisher, in the run's folder, which is then removed, as
-/// no run will use it. Without that folder, nothing ran. Something it cannot
-/// confirm, or a run terminal the app still reads, keeps the launch open:
-/// the next reconcile tries again.
+/// no run will use it. Without that folder, nothing ran. A process in the
+/// session that nothing proves (a helper the executor died before
+/// witnessing, or what a helper started after the last witness), or a run
+/// terminal the app still reads, keeps the launch open with its folder,
+/// signalled by no one: the next reconcile tries again.
 fn end_unregistered(
     store: &RunningServiceStore,
     run_id: &RunId,
     session: &RunSession,
 ) -> Result<()> {
     let dir = store.run_dir(run_id);
-    match Finisher::native().finish(&dir, session, true)? {
+    match Finisher::native().finish_unregistered(&dir, session)? {
         Finish::Gone => return Ok(()),
         Finish::AlreadyFinalized | Finish::Finalized(_) => {}
         Finish::ExecutorAlive => bail!("The executor of launch {run_id} still runs; try again."),
@@ -928,15 +1026,8 @@ mod tests {
         take_syncs();
 
         records.publish(&id, &admitted(&id, true)).unwrap();
-        // The folders it created, each in its parent, then the record's name.
-        assert_eq!(
-            take_syncs(),
-            [
-                dir.path().to_path_buf(),
-                dir.path().join("services"),
-                records.dir().to_path_buf()
-            ]
-        );
+        // Localify's own folders, each in its parent, then the record's name.
+        assert_eq!(take_syncs(), own_levels_then_records(&dir, &records));
         records
             .add_exit(&id, LaunchExit::now(Some(0), None, None))
             .unwrap();
@@ -946,7 +1037,88 @@ mod tests {
             records.expire(&id).unwrap(),
             LaunchRecord::Admitted(_)
         ));
-        assert_eq!(take_syncs(), [records.dir().to_path_buf()]);
+        assert_eq!(take_syncs(), own_levels_then_records(&dir, &records));
+    }
+
+    /// What a publication syncs: the state folder in its parent, `services/`,
+    /// `launches/`, then the record's name in `launches/`.
+    fn own_levels_then_records(dir: &tempfile::TempDir, records: &LaunchRecords) -> Vec<PathBuf> {
+        vec![
+            dir.path().parent().unwrap().to_path_buf(),
+            dir.path().to_path_buf(),
+            dir.path().join("services"),
+            records.dir().to_path_buf(),
+        ]
+    }
+
+    #[test]
+    fn a_records_folder_another_writer_made_is_synced_before_a_decision_counts() {
+        // Made by a detached launch's log, or by another process that has
+        // not synced it yet.
+        let (dir, store) = sandbox();
+        let records = store.launches();
+        store.launch_log(&RunId::generate().unwrap()).unwrap();
+        fs::create_dir_all(records.dir()).unwrap();
+        take_syncs();
+
+        let id = RunId::generate().unwrap();
+        records.publish(&id, &refused()).unwrap();
+
+        assert_eq!(take_syncs(), own_levels_then_records(&dir, &records));
+    }
+
+    #[test]
+    fn of_writers_creating_the_records_folder_at_once_each_syncs_it_before_its_decision() {
+        let (dir, store) = sandbox();
+        let store = Arc::new(store);
+        let writers = 8;
+        let barrier = Arc::new(Barrier::new(writers));
+        let synced: Vec<Vec<PathBuf>> = (0..writers)
+            .map(|_| {
+                let (store, barrier) = (Arc::clone(&store), Arc::clone(&barrier));
+                thread::spawn(move || {
+                    let id = RunId::generate().unwrap();
+                    take_syncs();
+                    barrier.wait();
+                    store.launches().publish(&id, &refused()).unwrap();
+                    take_syncs()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect();
+
+        let expected = own_levels_then_records(&dir, &store.launches());
+        for syncs in synced {
+            assert_eq!(syncs, expected);
+        }
+    }
+
+    #[test]
+    fn a_launch_lock_goes_with_its_decision_or_is_swept_once_old() {
+        let (_dir, store) = sandbox();
+        let records = store.launches();
+        let lock_file = |id: &RunId| records.dir().join(format!("{id}.lock"));
+
+        let decided = RunId::generate().unwrap();
+        let lock = records.lock_launch(&decided).unwrap();
+        records.publish(&decided, &refused()).unwrap();
+        drop(lock);
+        assert!(!lock_file(&decided).exists());
+
+        // One still held stays; one an executor that died before its
+        // decision left goes.
+        let crashed = RunId::generate().unwrap();
+        let held = records.lock_launch(&crashed).unwrap();
+        assert_eq!(records.sweep_launch_locks(Duration::ZERO).unwrap(), 0);
+        drop(held);
+        assert!(lock_file(&crashed).exists());
+        drop(records.lock_exits().unwrap());
+        assert_eq!(records.sweep_launch_locks(TEMPORARY_MAX_AGE).unwrap(), 0);
+        assert_eq!(records.sweep_launch_locks(Duration::ZERO).unwrap(), 1);
+        assert!(!lock_file(&crashed).exists());
+        assert!(records.dir().join(EXIT_LOCK).exists());
     }
 
     #[test]
