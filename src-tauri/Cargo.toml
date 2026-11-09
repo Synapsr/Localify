@@ -18,6 +18,7 @@ localify = { path = ".." }
 tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "~2.3"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

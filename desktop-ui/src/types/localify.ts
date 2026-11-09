@@ -1202,19 +1202,15 @@ export type RemoteAccessWants = "control" | "backgroundStarts";
 export type RemoteAccessOutcome = "granted" | "declined" | "nobody" | "expired" | "cancelled";
 
 export type RemoteStreamRequest =
-  /** With `access`, the app shows the access dialog; until then, requests get `nobody`. */
+  /** With `access`, the app shows the access dialog; without it, requests get `nobody`. */
   | { kind: "events"; access?: boolean }
   | { kind: "pair"; machineId: string }
   | { kind: "watch"; machineId: string }
   | { kind: "follow"; machineId: string; runId: string; offset: number | null }
   | { kind: "access"; machineId: string; wants: RemoteAccessWants }
-  /** Unused by the window until PR 4d adds the buttons. */
   | ({ kind: "control"; machineId: string } & RemoteControlRequest);
 
-/**
- * A control, as the snapshot showed the service when the person clicked.
- * Unused by the window until PR 4d.
- */
+/** A control, as the snapshot showed the service when the person clicked. */
 export interface RemoteControlRequest {
   action: RemoteControlAction;
   service: { projectId: string; environment: string | null; serviceId: string };
@@ -1232,9 +1228,10 @@ export type RemoteControlOutcome =
   | "unknown";
 
 /**
- * What `remote_control` streams: `sent`, its progress, then its result. A
- * lost session is `unknown`, followed by the result `control.status` gives,
- * or `lost`. Unused by the window until PR 4d.
+ * What `remote_control` streams: `sent`, its progress, then its result.
+ * Without an open session, or when it could not be sent, only a `refused`
+ * result. A lost session is `unknown`, followed by the result
+ * `control.status` gives, or `lost`; `unknown` is never the last event.
  */
 export type RemoteControlEventDto =
   | { event: "sent"; requestId: string }

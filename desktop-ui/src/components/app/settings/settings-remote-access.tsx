@@ -33,8 +33,6 @@ import { useRemote } from "@/providers/remote-provider";
 
 import { SettingsCard } from "./settings-card";
 
-const CONTROLS_LATER = "Comes with remote controls, in a later version.";
-
 /**
  * Settings → Remote access (docs/remote-machines.md, "Desktop app"): what paired machines may
  * see and do here, all off by default, this Mac's fingerprint, and the paired machines.
@@ -81,6 +79,7 @@ export const SettingsRemoteAccess = () => {
             </div>
           ) : null}
           <Machines lapsed={needsPro(status.data)} />
+          <Suppressed />
         </>
       ) : null}
     </SettingsCard>
@@ -95,13 +94,11 @@ function UpgradeAction() {
 function Switches({ settings }: { settings: RemoteSettingsDto }) {
   const queryClient = useQueryClient();
   const change = useMutation(remoteMutations.changeSettings(queryClient));
-  const setShare = (share: boolean) =>
-    change.mutate(
-      { share },
-      {
-        onError: (error) => toast.error("Could not change sharing", { description: error.message }),
-      },
-    );
+  const set = (request: Partial<RemoteSettingsDto>) =>
+    change.mutate(request, {
+      onError: (error) =>
+        toast.error("Could not change remote access", { description: error.message }),
+    });
 
   return (
     <div className="mt-5 space-y-4 border-t border-border/40 pt-5">
@@ -109,20 +106,22 @@ function Switches({ settings }: { settings: RemoteSettingsDto }) {
         label="Share projects and output with paired machines"
         checked={settings.share}
         disabled={change.isPending}
-        onChange={setShare}
+        onChange={(share) => set({ share })}
         note="Output can contain secrets your services print, and what you type into service tabs."
       />
       <SwitchRow
         label="Allow paired machines to start, stop and restart services"
         checked={settings.control}
-        disabled
-        note={CONTROLS_LATER}
+        disabled={change.isPending || !settings.share}
+        onChange={(control) => set({ control })}
+        note={settings.share ? undefined : "Needs sharing."}
       />
       <SwitchRow
         label="Allow background starts when the app is closed"
         checked={settings.backgroundStarts}
-        disabled
-        note={CONTROLS_LATER}
+        disabled={change.isPending || !settings.control}
+        onChange={(backgroundStarts) => set({ backgroundStarts })}
+        note={settings.control ? undefined : "Needs remote controls."}
       />
     </div>
   );
@@ -138,11 +137,11 @@ function SwitchRow({
   label: string;
   checked: boolean;
   disabled?: boolean;
-  onChange?: (checked: boolean) => void;
+  onChange: (checked: boolean) => void;
   note?: ReactNode;
 }) {
   return (
-    <label className={cn("flex items-start gap-3", disabled && !onChange && "opacity-60")}>
+    <label className="flex items-start gap-3">
       <span className="min-w-0 flex-1">
         <span className="block text-sm text-foreground">{label}</span>
         {note ? (
@@ -152,7 +151,7 @@ function SwitchRow({
       <Switch
         checked={checked}
         disabled={disabled}
-        onCheckedChange={(next) => onChange?.(next)}
+        onCheckedChange={(next) => onChange(next)}
         aria-label={label}
       />
     </label>
@@ -193,6 +192,50 @@ function Machines({ lapsed }: { lapsed: boolean }) {
           </ul>
         </>
       ) : null}
+    </div>
+  );
+}
+
+/** Machines whose access requests this Mac declines at once, from its access dialog. */
+function Suppressed() {
+  const queryClient = useQueryClient();
+  const suppressed = useQuery(remoteQueries.suppressed());
+  const restore = useMutation(remoteMutations.restoreAccess(queryClient));
+  if (!suppressed.data?.length) return null;
+
+  return (
+    <div className="mt-5 space-y-3 border-t border-border/40 pt-5">
+      <div className="text-xs text-muted-foreground">Machines that can't ask for access</div>
+      <ul className="space-y-2">
+        {suppressed.data.map((machine) => (
+          <li key={machine.machineId} className="flex items-center gap-3">
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm text-foreground">{machine.name}</span>
+              <span className="block text-xs leading-normal text-muted-foreground">
+                Since {new Date(machine.since).toLocaleDateString()}
+              </span>
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              loading={restore.isPending && restore.variables?.machineId === machine.machineId}
+              onClick={() =>
+                restore.mutate(
+                  { machineId: machine.machineId },
+                  {
+                    onError: (error) =>
+                      toast.error(`Could not allow ${machine.name} again`, {
+                        description: error.message,
+                      }),
+                  },
+                )
+              }
+            >
+              Allow requests again
+            </Button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

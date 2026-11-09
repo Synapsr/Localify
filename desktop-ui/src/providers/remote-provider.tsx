@@ -2,6 +2,11 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
+import {
   createContext,
   type PropsWithChildren,
   useCallback,
@@ -11,14 +16,29 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 
-import type { RemoteEventDto, RemoteMachineDto, RemotePairEventDto } from "@/types/localify";
+import type {
+  RemoteAccessWants,
+  RemoteEventDto,
+  RemoteMachineDto,
+  RemotePairEventDto,
+} from "@/types/localify";
 
+import { RemoteAccessDialog } from "@/components/app/remote/remote-access-dialog";
 import { RemotePairingDialogs } from "@/components/app/remote/remote-pairing-dialogs";
 import { remoteQueries } from "@/lib/queries";
 import { openRemoteStream } from "@/lib/remote-stream";
 import { tauriClient } from "@/lib/tauri-client";
 import { pairingCancelledMessage } from "@/lib/util.remote";
+import {
+  type AccessPrompt,
+  accessPromptAdded,
+  accessPromptAnswering,
+  accessPromptClosed,
+  accessPromptFailed,
+  accessRequestTitle,
+} from "@/lib/util.remote-controls";
 
 /** How long the app waits before it listens to the daemon again. */
 const EVENTS_RETRY_MS = 5000;
@@ -43,6 +63,16 @@ export type IncomingPairing =
   | { step: "paired"; pairingId: string; name: string }
   | { step: "cancelled"; pairingId: string; name: string };
 
+/** Another machine asks this Mac to turn on remote controls (docs/remote-machines.md). */
+export interface IncomingAccess {
+  requestId: string;
+  machineId: string;
+  /** From the local pin, never from the asker. */
+  name: string;
+  fingerprint: string;
+  wants: RemoteAccessWants;
+}
+
 interface RemoteContextValue {
   /** The machine on screen; null for this Mac. */
   selectedMachineId: string | null;
@@ -55,6 +85,10 @@ interface RemoteContextValue {
   incoming: IncomingPairing | null;
   answerIncoming: (accept: boolean) => Promise<void>;
   dismissIncoming: () => void;
+  /** The access request on screen; the others wait their turn. */
+  access: AccessPrompt<IncomingAccess> | null;
+  /** Answers the request on screen; a failure shows in its dialog, which stays. */
+  answerAccess: (allow: boolean, suppress: boolean) => void;
   /** A remote service's output covers the bottom of the window, as the terminal does. */
   outputOpen: boolean;
   setOutputOpen: (open: boolean) => void;
@@ -69,6 +103,8 @@ export function RemoteProvider({ children }: PropsWithChildren) {
   const [outgoing, setOutgoing] = useState<OutgoingPairing | null>(null);
   const [incoming, setIncoming] = useState<IncomingPairing | null>(null);
   const [outputOpen, setOutputOpen] = useState(false);
+  const [accessQueue, setAccessQueue] = useState<AccessPrompt<IncomingAccess>[]>([]);
+  const access = accessQueue[0] ?? null;
   const closeOutgoing = useRef<(() => void) | null>(null);
   const incomingRef = useRef(incoming);
   incomingRef.current = incoming;
@@ -78,7 +114,8 @@ export function RemoteProvider({ children }: PropsWithChildren) {
     [queryClient],
   );
 
-  // While the app runs, a person can confirm a pairing on this Mac.
+  // While the app runs, a person can confirm a pairing on this Mac, and answer access
+  // requests: with `access`, the daemon waits for the dialog's answer instead of `nobody`.
   useEffect(() => {
     let active = true;
     let close: (() => void) | null = null;
@@ -103,6 +140,15 @@ export function RemoteProvider({ children }: PropsWithChildren) {
               : current,
           );
           return;
+        case "access_request": {
+          const { event: _, expiresAt: __, ...request } = event;
+          setAccessQueue((queue) => accessPromptAdded(queue, request));
+          void notify(accessRequestTitle(request.name, request.fingerprint));
+          return;
+        }
+        case "access_closed":
+          setAccessQueue((queue) => accessPromptClosed(queue, event.requestId));
+          return;
         case "presence":
         case "revoked":
         case "unpaired":
@@ -115,11 +161,13 @@ export function RemoteProvider({ children }: PropsWithChildren) {
     const listen = async () => {
       try {
         close = await openRemoteStream<RemoteEventDto>(
-          { kind: "events" },
+          { kind: "events", access: true },
           {
             onData: onEvent,
             onEnd: () => {
               close = null;
+              // Its requests end with the subscription that showed them.
+              setAccessQueue([]);
               if (active) timer = window.setTimeout(() => void listen(), EVENTS_RETRY_MS);
             },
           },
@@ -230,6 +278,37 @@ export function RemoteProvider({ children }: PropsWithChildren) {
 
   const dismissIncoming = useCallback(() => setIncoming(null), []);
 
+  const accessRef = useRef(access);
+  accessRef.current = access;
+  // Set at the click, before React renders: a second click finds it.
+  const answering = useRef(new Set<string>());
+  // The dialog stays until the answer is through or `access_closed` arrives: the daemon
+  // still waits when the answer could not be sent, and "Don't ask again" with it.
+  const answerAccess = useCallback(
+    (allow: boolean, suppress: boolean) => {
+      const current = accessRef.current;
+      if (!current || answering.current.has(current.requestId)) return;
+      const { requestId } = current;
+      answering.current.add(requestId);
+      setAccessQueue((queue) => accessPromptAnswering(queue, requestId));
+      void tauriClient
+        .answerRemoteAccess({ requestId, allow, suppress })
+        .then(({ outcome }) => {
+          setAccessQueue((queue) => accessPromptClosed(queue, requestId));
+          void queryClient.invalidateQueries({ queryKey: remoteQueries.all() });
+          if (outcome === "granted") {
+            toast.success("Remote controls are on for every paired machine.");
+          } else if (allow) toast.info("That request had already ended. Nothing changed.");
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setAccessQueue((queue) => accessPromptFailed(queue, requestId, message));
+        })
+        .finally(() => answering.current.delete(requestId));
+    },
+    [queryClient],
+  );
+
   const value = useMemo<RemoteContextValue>(
     () => ({
       selectedMachineId,
@@ -242,6 +321,8 @@ export function RemoteProvider({ children }: PropsWithChildren) {
       incoming,
       answerIncoming,
       dismissIncoming,
+      access,
+      answerAccess,
       outputOpen,
       setOutputOpen,
     }),
@@ -255,6 +336,8 @@ export function RemoteProvider({ children }: PropsWithChildren) {
       incoming,
       answerIncoming,
       dismissIncoming,
+      access,
+      answerAccess,
       outputOpen,
     ],
   );
@@ -263,8 +346,23 @@ export function RemoteProvider({ children }: PropsWithChildren) {
     <RemoteContext.Provider value={value}>
       {children}
       <RemotePairingDialogs />
+      <RemoteAccessDialog />
     </RemoteContext.Provider>
   );
+}
+
+/**
+ * A system notification, so a person away from the window sees the request. It never
+ * brings the window forward; while the window has focus, the dialog is enough.
+ */
+async function notify(title: string) {
+  try {
+    if (document.hasFocus()) return;
+    const granted = (await isPermissionGranted()) || (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title, body: "Answer in Localify." });
+  } catch {
+    // Notifications are unavailable: the dialog still shows.
+  }
 }
 
 export function useRemote(): RemoteContextValue {

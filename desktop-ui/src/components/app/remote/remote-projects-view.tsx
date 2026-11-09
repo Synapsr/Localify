@@ -16,10 +16,12 @@ import {
   serviceKey,
   serviceTone,
 } from "@/lib/util.remote";
+import { sessionDownReason } from "@/lib/util.remote-controls";
 import { cn } from "@/lib/utils";
 import { useRemote } from "@/providers/remote-provider";
 import { useTerminal } from "@/providers/terminal-provider";
 
+import { RemoteControlsProvider } from "./remote-controls";
 import { RemoteOutputPanel } from "./remote-output-panel";
 import { RemoteServiceChip } from "./remote-service-chip";
 import { useRemoteInventory } from "./use-remote-inventory";
@@ -47,6 +49,13 @@ export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) 
   const groups = useMemo(() => groupInventory(inventory?.items ?? [], query), [inventory, query]);
   const outputItem = inventory?.items.find((item) => serviceKey(item) === outputKey) ?? null;
   const outputShown = outputItem !== null;
+  // A control is sent only on an open session, never queued.
+  const down = sessionDownReason({
+    machine: name,
+    machineLabel: describeMachine(machine).label,
+    phase: state.phase,
+    proto: machine.proto,
+  });
   useEffect(() => {
     setOutputOpen(outputShown);
     return () => setOutputOpen(false);
@@ -59,57 +68,67 @@ export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) 
   };
 
   return (
-    <div className="flex flex-col gap-2 pb-(--bottom-padding-navigation)">
-      <Banner>
-        You're viewing {name}. Its .localify URLs open only on {name}.
-      </Banner>
-      <MachineNotice machine={machine} />
-      {state.phase === "lost" ? (
-        <Banner tone="warn">
-          {remoteErrorMessage(state.code, name, state.message)}
-          {isFinalCode(state.code) ? null : ` Trying again in ${state.retryIn} s.`}
+    <RemoteControlsProvider
+      key={machine.id}
+      machineId={machine.id}
+      machineName={name}
+      proto={machine.proto}
+      down={down}
+      appRunning={inventory?.machine.app === "running"}
+      items={inventory?.items ?? []}
+    >
+      <div className="flex flex-col gap-2 pb-(--bottom-padding-navigation)">
+        <Banner>
+          You're viewing {name}. Its .localify URLs open only on {name}.
         </Banner>
-      ) : null}
-      {inventory?.truncated ? (
-        <Banner>{name} has more services than fit here; some are left out.</Banner>
-      ) : null}
+        <MachineNotice machine={machine} />
+        {state.phase === "lost" ? (
+          <Banner tone="warn">
+            {remoteErrorMessage(state.code, name, state.message)}
+            {isFinalCode(state.code) ? null : ` Trying again in ${state.retryIn} s.`}
+          </Banner>
+        ) : null}
+        {inventory?.truncated ? (
+          <Banner>{name} has more services than fit here; some are left out.</Banner>
+        ) : null}
 
-      {!inventory && state.phase !== "lost" ? (
-        <div className="flex items-center gap-2 px-1 py-6 text-sm text-muted-foreground">
-          <SpinnerIcon className="size-4 animate-spin" />
-          Connecting to {name}…
-        </div>
-      ) : null}
+        {!inventory && state.phase !== "lost" ? (
+          <div className="flex items-center gap-2 px-1 py-6 text-sm text-muted-foreground">
+            <SpinnerIcon className="size-4 animate-spin" />
+            Connecting to {name}…
+          </div>
+        ) : null}
 
-      {inventory && groups.length === 0 ? (
-        <p className="px-1 py-6 text-sm text-muted-foreground">
-          {query ? "No service matches." : `${name} has no projects yet.`}
-        </p>
-      ) : null}
+        {inventory && groups.length === 0 ? (
+          <p className="px-1 py-6 text-sm text-muted-foreground">
+            {query ? "No service matches." : `${name} has no projects yet.`}
+          </p>
+        ) : null}
 
-      {groups.map((project) => (
-        <RemoteProjectCard
-          key={project.id}
-          project={project}
-          machineName={name}
-          onOutput={showOutput}
-        />
-      ))}
-
-      {outputItem ? (
-        <>
-          {/* Keeps the last cards scrollable above the panel. */}
-          <div aria-hidden style={{ height: panelHeight }} />
-          <RemoteOutputPanel
-            key={`${machine.id}/${outputKey}`}
-            machineId={machine.id}
+        {groups.map((project) => (
+          <RemoteProjectCard
+            key={project.id}
+            project={project}
             machineName={name}
-            item={outputItem}
-            onClose={() => setOutputKey(null)}
+            onOutput={showOutput}
           />
-        </>
-      ) : null}
-    </div>
+        ))}
+
+        {outputItem ? (
+          <>
+            {/* Keeps the last cards scrollable above the panel. */}
+            <div aria-hidden style={{ height: panelHeight }} />
+            <RemoteOutputPanel
+              key={`${machine.id}/${outputKey}`}
+              machineId={machine.id}
+              machineName={name}
+              item={outputItem}
+              onClose={() => setOutputKey(null)}
+            />
+          </>
+        ) : null}
+      </div>
+    </RemoteControlsProvider>
   );
 }
 
