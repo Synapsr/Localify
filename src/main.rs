@@ -50,6 +50,10 @@ struct ServiceSelector {
     /// Project environment (worktree) name or slug. Defaults to the current worktree's.
     #[arg(long, requires = "service")]
     env: Option<String>,
+
+    /// Act on the service of another machine of this account, by name or id (`machines` lists them). Without --env, its primary checkout.
+    #[arg(long, requires = "service", value_name = "MACHINE")]
+    machine: Option<String>,
 }
 
 /// Launch profile options shared by `dev` and `run`.
@@ -83,6 +87,8 @@ impl LaunchProfileFlags {
     }
 }
 
+// Parsed once per process: the size of `dev`'s flags costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Initial setup - configures DNS and prepares Localify for use
@@ -308,6 +314,10 @@ enum Commands {
             conflicts_with = "replace"
         )]
         replace_legacy: Option<String>,
+
+        /// Start the service on another machine of this account, by name or id (`machines` lists them). Takes only --project, --env and --profile: that machine decides where it runs.
+        #[arg(long, requires = "service", value_name = "MACHINE")]
+        machine: Option<String>,
 
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
@@ -913,6 +923,10 @@ enum ServicesCommands {
         /// Print structured JSON
         #[arg(long)]
         json: bool,
+
+        /// Show the services of another machine of this account instead, by name or id (`machines` lists them)
+        #[arg(long, value_name = "MACHINE")]
+        machine: Option<String>,
     },
 }
 
@@ -999,6 +1013,36 @@ fn ensure_rustls_crypto_provider() -> Result<()> {
         Ok(()) => Ok(()),
         Err(message) => Err(anyhow::anyhow!(message.clone())),
     }
+}
+
+/// A service of another machine, as `--project` and `--env` name it there.
+fn service_query<'a>(
+    name: &'a str,
+    selector: &'a ServiceSelector,
+) -> cli::remote::ServiceQuery<'a> {
+    cli::remote::ServiceQuery {
+        service: name,
+        project: selector.project.as_deref(),
+        env: selector.env.as_deref(),
+    }
+}
+
+/// `stop` and `restart` with `--machine`: a control on that machine, or
+/// `local` when it names this one.
+fn control_on_machine(
+    machine: &str,
+    action: cli::remote::ControlAction,
+    selector: &ServiceSelector,
+    ctx: &AppContext,
+    local: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let name = selector.service.as_deref().unwrap_or_default();
+    cli::remote::run(false, |console| {
+        let query = service_query(name, selector);
+        cli::remote::on_machine(machine, &ctx.mgmt_client, local, |peer| {
+            cli::remote::control(&ctx.mgmt_client, peer, action, &query, None, console)
+        })
+    })
 }
 
 /// Ends this process with a service's exit code, so `localify dev web && next`
@@ -1291,7 +1335,21 @@ fn main() -> Result<()> {
         }
         Commands::Services { command } => match command {
             ServicesCommands::List { json } => cli::services::list(&ctx, json),
-            ServicesCommands::Status { json } => cli::background::status(json),
+            ServicesCommands::Status {
+                json,
+                machine: Some(machine),
+            } => cli::remote::run(json, |console| {
+                cli::remote::on_machine(
+                    &machine,
+                    &ctx.mgmt_client,
+                    || cli::background::status(json),
+                    |peer| cli::remote::status(&ctx.mgmt_client, peer, console),
+                )
+            }),
+            ServicesCommands::Status {
+                json,
+                machine: None,
+            } => cli::background::status(json),
         },
         Commands::Get {
             service,
@@ -1324,6 +1382,78 @@ fn main() -> Result<()> {
             &ctx,
             &paths,
         )?),
+        Commands::Dev {
+            machine: Some(machine),
+            service,
+            domain,
+            project,
+            env,
+            launch_profile,
+            in_app,
+            detach,
+            replace,
+            launch_id,
+            remote_launch,
+            launch_expires,
+            expect_rev,
+            request,
+            replace_legacy,
+            command,
+        } => {
+            let given: Vec<&str> = [
+                ("a command after --", !command.is_empty()),
+                ("--detach", detach),
+                ("--in-app", in_app),
+                ("--env-file", !launch_profile.env_file.is_empty()),
+                (
+                    "--confirm-profile",
+                    launch_profile.confirm_profile.is_some(),
+                ),
+                ("--no-masking", launch_profile.no_masking),
+                ("--domain", domain.is_some()),
+                ("--replace", replace.is_some()),
+                ("--launch-id", launch_id.is_some()),
+                ("--remote-launch", remote_launch.is_some()),
+                ("--launch-expires", launch_expires.is_some()),
+                ("--expect-rev", expect_rev.is_some()),
+                ("--request", request.is_some()),
+                ("--replace-legacy", replace_legacy.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(option, given)| given.then_some(option))
+            .collect();
+            // `requires = "service"` makes clap ask for it.
+            let service = service.unwrap_or_default();
+            let profile = launch_profile.profile.as_deref();
+            cli::remote::run(false, |console| {
+                cli::remote::only_target_options(&given)?;
+                // This machine runs it as the target would: in the app.
+                let local = || {
+                    cli::background::start_in_app(
+                        cli::services::RunTarget {
+                            service: Some(&service),
+                            project: project.as_deref(),
+                            environment: env.as_deref(),
+                            init_domain: None,
+                        },
+                        profile,
+                        cli::services::Replace::No,
+                        config_path,
+                        &ctx,
+                        &paths.data_dir,
+                    )
+                };
+                let query = cli::remote::ServiceQuery {
+                    service: &service,
+                    project: project.as_deref(),
+                    env: env.as_deref(),
+                };
+                cli::remote::on_machine(&machine, &ctx.mgmt_client, local, |peer| {
+                    let action = cli::remote::ControlAction::Start;
+                    cli::remote::control(&ctx.mgmt_client, peer, action, &query, profile, console)
+                })
+            })
+        }
         Commands::Dev {
             detach: true,
             service,
@@ -1478,22 +1608,50 @@ fn main() -> Result<()> {
             cli::start::execute(foreground, cli.verbose, config_path, &paths, &config.daemon)
         }
         Commands::Stop { service } => match service.service {
-            Some(name) => cli::background::stop(
-                &name,
-                service.project.as_deref(),
-                service.env.as_deref(),
-                &ctx,
-            ),
+            Some(ref name) => {
+                let local = || {
+                    cli::background::stop(
+                        name,
+                        service.project.as_deref(),
+                        service.env.as_deref(),
+                        &ctx,
+                    )
+                };
+                match service.machine.as_deref() {
+                    Some(machine) => control_on_machine(
+                        machine,
+                        cli::remote::ControlAction::Stop,
+                        &service,
+                        &ctx,
+                        local,
+                    ),
+                    None => local(),
+                }
+            }
             None => cli::stop::execute(&ctx, &paths, &config.daemon),
         },
         Commands::Restart { service } => match service.service {
-            Some(name) => cli::background::restart(
-                &name,
-                service.project.as_deref(),
-                service.env.as_deref(),
-                config_path,
-                &ctx,
-            ),
+            Some(ref name) => {
+                let local = || {
+                    cli::background::restart(
+                        name,
+                        service.project.as_deref(),
+                        service.env.as_deref(),
+                        config_path,
+                        &ctx,
+                    )
+                };
+                match service.machine.as_deref() {
+                    Some(machine) => control_on_machine(
+                        machine,
+                        cli::remote::ControlAction::Restart,
+                        &service,
+                        &ctx,
+                        local,
+                    ),
+                    None => local(),
+                }
+            }
             None => cli::restart::execute(cli.verbose, config_path, &ctx, &paths, &config.daemon),
         },
         Commands::Status => cli::status::execute(&ctx, &config.daemon),
@@ -1505,17 +1663,35 @@ fn main() -> Result<()> {
             clear,
             follow,
         } => match service.service {
-            Some(name) => cli::background::logs(
-                cli::background::LogsArgs {
-                    service: &name,
-                    project: service.project.as_deref(),
-                    environment: service.env.as_deref(),
-                    lines,
-                    follow,
-                    cursor: cursor.as_deref(),
-                },
-                &ctx,
-            ),
+            Some(ref name) => {
+                let local = || {
+                    cli::background::logs(
+                        cli::background::LogsArgs {
+                            service: name,
+                            project: service.project.as_deref(),
+                            environment: service.env.as_deref(),
+                            lines,
+                            follow,
+                            cursor: cursor.as_deref(),
+                        },
+                        &ctx,
+                    )
+                };
+                match service.machine.as_deref() {
+                    Some(machine) => cli::remote::run(false, |console| {
+                        let query = cli::remote::LogsQuery {
+                            service: service_query(name, &service),
+                            lines,
+                            follow,
+                            cursor: cursor.as_deref(),
+                        };
+                        cli::remote::on_machine(machine, &ctx.mgmt_client, local, |peer| {
+                            cli::remote::logs(&ctx.mgmt_client, peer, &query, console)
+                        })
+                    }),
+                    None => local(),
+                }
+            }
             None => cli::logs::execute(lines, clear, follow, &paths),
         },
         Commands::Reload => {

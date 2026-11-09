@@ -33,6 +33,12 @@ Public URLs (Localify Cloud), only when the user wants to reach an app from anot
 - Serving public URLs takes Localify Cloud Pro: $7.99 a month or $79 a year, after a 7-day free trial that asks for a card. Paying is the user's call too: when a tool answers that a plan is needed, tell them the price and the trial and ask them to run `localify subscribe`. When a tool answers that a limit is reached and names a command that raises it, suggest the user run that command. Never start a checkout or pass on a checkout link. `whoami` shows the plan (`plan.entitled`, dates, limits and usage) and why this machine's tunnel is blocked, if it is.
 - `public_url_list` shows which machine serves each URL and its `state`: `suspended` when the plan does not cover it, `taken_down` when it was removed for abuse. `public_url_claim` moves one to this machine; `public_url_remove` takes it offline. When every serving slot is taken, removing the URLs another machine serves, or claiming them here, frees its slot.
 
+Other machines (Localify Cloud), only when the user asks about a service on another of their machines:
+- `list_machines` lists the account's machines. Pass a name or id as `machine` to `list_services`, `service_status`, `service_logs`, `service_start`, `service_stop` or `service_restart` to act on that machine. `cwd` is ignored there, and `env` names one of its worktrees.
+- The other machine decides how a service starts: with `machine`, `service_start` takes only `service`, `project`, `env` and `profile`, and never creates a project.
+- A refusal carries the other machine's code. On `control_disabled` or `background_disabled`, ask the user to allow remote controls on that machine. When a control ends `lost`, its outcome is unknown: call `service_status` before you try again.
+- Pairing, unpairing and a machine's settings are the user's to change.
+
 When something does not work:
 - Call `status` first. A domain that does not resolve: the daemon may be stopped (`daemon` start) or Localify not installed (`install_localify`). A page saying the target is unavailable: the app is not listening; read its logs.
 - Do not edit /etc/hosts, run another proxy, bypass certificate errors, edit Localify's config file, or run Localify with sudo.

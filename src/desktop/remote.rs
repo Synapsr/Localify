@@ -22,7 +22,8 @@ fn daemon_error(error: DaemonConnectionError) -> anyhow::Error {
         DaemonConnectionError::NotRunning => anyhow!(
             "The Localify daemon is not running, and remote machines go through it. Start it in Settings."
         ),
-        DaemonConnectionError::ProtocolError(message) => anyhow!(message),
+        DaemonConnectionError::ProtocolError(message)
+        | DaemonConnectionError::Remote { message, .. } => anyhow!(message),
         other => anyhow!("Could not reach the Localify daemon: {other}"),
     }
 }

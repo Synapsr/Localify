@@ -21,6 +21,7 @@ pub mod project_env;
 pub mod public_url;
 pub mod register;
 pub mod reload;
+pub mod remote;
 pub mod remove_project;
 pub mod restart;
 pub mod route;

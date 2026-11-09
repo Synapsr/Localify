@@ -25,6 +25,10 @@ pub enum DaemonConnectionError {
     ConnectionFailed(#[source] anyhow::Error),
     #[error("Protocol error: {0}")]
     ProtocolError(String),
+    /// Another machine, or the way to it, refused: the contract's code and
+    /// its message (docs/remote-machines.md, "Errors").
+    #[error("{message}")]
+    Remote { code: String, message: String },
 }
 
 /// Port for communicating with a running daemon process.

@@ -135,6 +135,9 @@ fn call_tool(params: &Value, runner: &CliRunner) -> Result<Value> {
 /// can be raised, the command that raises it stays in the text, for the
 /// agent to suggest.
 fn for_an_agent(text: String) -> String {
+    if let Some(hint) = remote_hint(&text) {
+        return format!("{text}\n\n{hint}");
+    }
     if text.contains(RAISE_LIMIT) {
         return format!(
             "{text}\n\nRaising the limit is a purchase, so it is the user's call: suggest they run that command themselves, then try again. Do not start a checkout or pass on a checkout link."
@@ -149,10 +152,33 @@ fn for_an_agent(text: String) -> String {
     )
 }
 
+/// What an agent does when another machine refused, or did not say how a
+/// control ended (docs/remote-machines.md, "MCP"). The CLI prints these as
+/// JSON when its output is not a terminal.
+fn remote_hint(text: &str) -> Option<String> {
+    let cli = BRANDING.cli_command();
+    if text.contains(r#""code": "control_disabled""#)
+        || text.contains(r#""code": "background_disabled""#)
+    {
+        return Some(format!(
+            "That machine decides who may control its services. Ask the user to allow remote controls on it: Settings → Remote access in Localify there, or `{cli} machines settings --control on` run there (with `--background-starts on` for starts while its app is closed)."
+        ));
+    }
+    if text.contains(r#""outcome": "lost""#) {
+        return Some(
+            "Call service_status with the same machine to see what happened before you try again."
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn prepare(tool: &Tool, args: &ToolArgs) -> Result<(Vec<String>, Option<PathBuf>)> {
     let argv = (tool.build)(args)?;
+    // A tool acting on another machine has no folder of this one to read.
+    let here = args.string("machine")?.is_none();
     let cwd = match args.string("cwd")? {
-        Some(cwd) if tool.uses_cwd => Some(existing_dir(&cwd)?),
+        Some(cwd) if tool.uses_cwd && here => Some(existing_dir(&cwd)?),
         _ => None,
     };
     Ok((argv, cwd))
@@ -351,6 +377,42 @@ mod tests {
         assert!(
             text.contains("the user's call") && !text.contains("$7.99"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_tool_on_another_machine_ignores_cwd() {
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == "service_logs")
+            .unwrap();
+        let here = ToolArgs::new(&json!({ "service": "web", "cwd": "relative/path" })).unwrap();
+        let there = ToolArgs::new(
+            &json!({ "service": "web", "cwd": "relative/path", "machine": "teo-mini" }),
+        )
+        .unwrap();
+
+        assert!(prepare(tool, &here).is_err());
+        let (argv, cwd) = prepare(tool, &there).unwrap();
+        assert_eq!(cwd, None);
+        assert_eq!(argv, ["logs", "web", "--machine=teo-mini"]);
+    }
+
+    #[test]
+    fn an_error_from_another_machine_reaches_the_agent_with_its_code_and_what_to_do() {
+        let refused = "{\n  \"outcome\": \"refused\",\n  \"code\": \"control_disabled\",\n  \"message\": \"teo-mini doesn't allow remote controls.\"\n}";
+
+        let text = for_an_agent(refused.to_string());
+
+        assert!(text.starts_with(refused));
+        assert!(
+            text.contains("Ask the user to allow remote controls"),
+            "{text}"
+        );
+
+        let lost = "{\n  \"outcome\": \"lost\",\n  \"code\": \"timeout\"\n}";
+        assert!(
+            for_an_agent(lost.to_string()).contains("Call service_status with the same machine")
         );
     }
 
