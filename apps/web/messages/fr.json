@@ -61,8 +61,8 @@
       "machines": {
         "title": "Sur toutes tes machines.",
         "body": "Laisse les agents travailler sur un serveur Linux distant ou un Mac qui ne te sert plus pendant que tu relis depuis ton portable. Une URL publique par projet ouvre chacun de ses services et worktrees, protégée par défaut par un mot de passe.",
-        "soonLabel": "Bientôt",
-        "soon": "Les services et la sortie de tes autres machines, dans l'app."
+        "newLabel": "Nouveau",
+        "new": "Les services, la sortie et les URLs publiques de tes autres machines, dans l'app, avec Start, Stop et Restart."
       }
     },
     "agentDemo": {

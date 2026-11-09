@@ -61,8 +61,8 @@
       "machines": {
         "title": "On every machine you own.",
         "body": "Let agents work on a remote Linux server or a spare Mac while you review from your laptop. One public URL per project reaches every service and worktree under it, behind a password by default.",
-        "soonLabel": "Coming soon",
-        "soon": "See the services and output of your other machines in the app."
+        "newLabel": "New",
+        "new": "See your other machines' services, output and public URLs from the app, and start, stop or restart them."
       }
     },
     "agentDemo": {

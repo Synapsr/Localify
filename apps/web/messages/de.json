@@ -61,8 +61,8 @@
       "machines": {
         "title": "Auf jeder deiner Maschinen.",
         "body": "Lass Agenten auf einem entfernten Linux-Server oder einem freien Mac arbeiten, während du auf dem Laptop prüfst. Eine öffentliche URL pro Projekt erreicht jeden Service und jeden Worktree darunter, standardmäßig hinter einem Passwort.",
-        "soonLabel": "Demnächst",
-        "soon": "Die Services und die Ausgabe deiner anderen Rechner in der App sehen."
+        "newLabel": "Neu",
+        "new": "Sieh die Dienste, Ausgaben und öffentlichen URLs deiner anderen Rechner in der App, und starte, stoppe oder starte sie neu."
       }
     },
     "agentDemo": {
