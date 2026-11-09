@@ -458,7 +458,7 @@ async fn removing_the_target_ends_a_follow_on_the_management_socket() {
 }
 
 /// The daemon's management socket, answering with `daemon`'s link.
-async fn serve_management(daemon: &Daemon) -> PathBuf {
+pub(super) async fn serve_management(daemon: &Daemon) -> PathBuf {
     use crate::daemon::lifecycle::ShutdownHandle;
     use crate::daemon::mgmt_socket::{DaemonPorts, MachineServices, serve};
     use crate::daemon::public_tunnel::PublicTunnel;

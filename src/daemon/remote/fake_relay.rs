@@ -73,6 +73,9 @@ struct State {
     /// Every frame a daemon sent, with its sender.
     log: Vec<(String, Send)>,
     upgrades: Vec<(String, Instant)>,
+    /// What `presence` claims for every machine instead, as a relay that
+    /// alters it could.
+    claimed_proto: Option<Value>,
     lease_status: u16,
     lease_ttl: u64,
     connections: u32,
@@ -120,6 +123,12 @@ impl FakeCloud {
             key: None,
         });
         token
+    }
+
+    /// Makes every `presence` claim `{min, max}`, whatever the machines
+    /// said when they connected.
+    pub fn claim_proto(&self, min: u32, max: u32) {
+        self.state().claimed_proto = Some(json!({"min": min, "max": max}));
     }
 
     pub fn set_hook(&self, hook: Option<Hook>) {
@@ -291,8 +300,15 @@ impl FakeCloud {
             return;
         }
         if request_line.starts_with("GET /v1/remote/connect") {
+            let proto = header("x-localify-proto").and_then(|value| {
+                let (min, max) = value.split_once('-')?;
+                let (min, max): (u32, u32) = (min.parse().ok()?, max.parse().ok()?);
+                (1..=max)
+                    .contains(&min)
+                    .then(|| json!({"min": min, "max": max}))
+            });
             let speaks = header("sec-websocket-protocol").as_deref() == Some("localify-remote.1")
-                && header("x-localify-proto").as_deref() == Some("1-1")
+                && proto.is_some()
                 && header("x-localify-version").is_some();
             if !speaks {
                 let _ = stream
@@ -435,14 +451,15 @@ impl FakeCloud {
             if let Some(old) = state.sockets.insert(id.clone(), sender.clone()) {
                 let _ = old.send(close(4001, ""));
             }
-            let presence = presence_value(&id, "online").to_string();
+            let claimed = state.claimed_proto.clone();
+            let presence = presence_value(&id, "online", claimed.as_ref()).to_string();
             let others: Vec<Value> = state
                 .sockets
                 .iter()
                 .filter(|(machine, _)| **machine != id)
                 .map(|(machine, socket)| {
                     let _ = socket.send(Message::text(presence.clone()));
-                    presence_value(machine, "online")
+                    presence_value(machine, "online", claimed.as_ref())
                 })
                 .collect();
             others
@@ -471,7 +488,7 @@ impl FakeCloud {
             .is_some_and(|socket| socket.same_channel(&sender))
         {
             state.sockets.remove(&id);
-            let gone = presence_value(&id, "offline").to_string();
+            let gone = presence_value(&id, "offline", state.claimed_proto.as_ref()).to_string();
             for socket in state.sockets.values() {
                 let _ = socket.send(Message::text(gone.clone()));
             }
@@ -693,9 +710,14 @@ impl RelayBudget {
     }
 }
 
-fn presence_value(id: &str, state: &str) -> Value {
+/// `presence` for `id`: the versions this build speaks, unless the relay
+/// claims others.
+fn presence_value(id: &str, state: &str, claimed: Option<&Value>) -> Value {
+    let proto = claimed
+        .cloned()
+        .unwrap_or_else(|| json!({"min": 1, "max": 2}));
     json!({"t": "presence", "machineId": id, "state": state, "version": "test",
-           "proto": {"min": 1, "max": 1}, "since": "2026-11-08T10:00:00Z"})
+           "proto": proto, "since": "2026-11-08T10:00:00Z"})
 }
 
 fn close(code: u16, reason: &str) -> Message {

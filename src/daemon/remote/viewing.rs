@@ -1,9 +1,9 @@
 //! Viewing another machine (`docs/remote-machines.md`, "Daemon"): what
-//! `remote_inventory`, `remote_watch`, `remote_output_read` and
-//! `remote_output_follow` ask a target for, over the actor's one session to
-//! it. Everything that came from the target is shown as plain text: control
-//! characters and bidirectional overrides are removed here again, whatever
-//! the target sent.
+//! `remote_inventory`, `remote_watch`, `remote_output_read`,
+//! `remote_output_follow` and `remote_access` ask a target for, over the
+//! actor's one session to it. Everything that came from the target is shown
+//! as plain text: control characters and bidirectional overrides are removed
+//! here again, whatever the target sent.
 
 use std::time::Duration;
 
@@ -13,7 +13,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::actor::WINDOW;
 use super::{Command, Failure, RemoteLink, TapEvent, TapRequest, lease_refused};
-use crate::infrastructure::remote::wire::{Have, MachineSummary, OutputData, SessionMessage};
+use crate::infrastructure::remote::wire::{
+    AccessOutcome, AccessWants, Have, MachineSummary, OutputData, SessionMessage,
+};
 use crate::infrastructure::runs::output::plain_line;
 
 /// Answers a request may have waiting for its reader: every page of a
@@ -78,6 +80,87 @@ pub enum FollowEvent {
         code: String,
         message: String,
     },
+}
+
+/// What `remote_access` streams: `waiting`, then one end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "event",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AccessEvent {
+    /// The request is on its way to the target, or waits for its answer.
+    Waiting,
+    /// The target's `access.result`.
+    Result { outcome: AccessOutcome },
+    /// The target refused it: `not_shared`, `busy`, `too_many`, or
+    /// `unsupported` for a target of protocol 1.
+    Error {
+        code: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_after: Option<u64>,
+    },
+    /// The session ended before an answer, or never opened.
+    Lost { code: String, message: String },
+}
+
+/// An access request this machine waits on. Dropping it sends
+/// `access.cancel` when the target still waits.
+pub struct Asking {
+    link: RemoteLink,
+    peer: String,
+    id: String,
+    events: mpsc::Receiver<TapEvent>,
+    announced: bool,
+    ended: bool,
+}
+
+impl Asking {
+    /// `waiting` first, then how it ended; `None` after that.
+    pub async fn next(&mut self) -> Option<AccessEvent> {
+        if !self.announced {
+            self.announced = true;
+            return Some(AccessEvent::Waiting);
+        }
+        if self.ended {
+            return None;
+        }
+        self.ended = true;
+        let event = match self.events.recv().await {
+            Some(TapEvent::Answer(SessionMessage::AccessResult { outcome, .. })) => {
+                AccessEvent::Result { outcome }
+            }
+            Some(TapEvent::Answer(SessionMessage::Error {
+                code,
+                message,
+                retry_after,
+                ..
+            })) => AccessEvent::Error {
+                code,
+                message: plain_line(&message),
+                retry_after,
+            },
+            Some(TapEvent::Answer(answer)) => lost(answered_with(answer)),
+            Some(TapEvent::Ended(failure)) => lost(failure),
+            None => lost(closed()),
+        };
+        Some(event)
+    }
+}
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        self.link.untap(&self.peer, &self.id);
+    }
+}
+
+fn lost(failure: Failure) -> AccessEvent {
+    AccessEvent::Lost {
+        code: failure.code,
+        message: plain_line(&failure.message),
+    }
 }
 
 /// Pages of one revision, until they are all in. Pages of an older revision
@@ -438,6 +521,21 @@ impl RemoteLink {
             events,
             skip_piece: offset.is_none(),
             acked: 0,
+        })
+    }
+
+    /// `remote_access`: asks `peer` to turn on `wants`. A person there
+    /// decides; this waits for the answer until the returned request is
+    /// dropped, which cancels it.
+    pub async fn access(&self, peer: &str, wants: AccessWants) -> Result<Asking, Failure> {
+        let (id, events) = self.tap(peer, TapRequest::Access { wants }).await?;
+        Ok(Asking {
+            link: self.clone(),
+            peer: peer.to_string(),
+            id,
+            events,
+            announced: false,
+            ended: false,
         })
     }
 

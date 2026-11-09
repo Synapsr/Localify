@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use localify::desktop::dto::{
-    RemoteMachineRequest, RemotePairAnswerRequest, RemoteSettingsRequest, RemoteStreamRequest,
+    RemoteAccessAnswerRequest, RemoteMachineRequest, RemotePairAnswerRequest,
+    RemoteSettingsRequest, RemoteStreamRequest,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -113,6 +114,38 @@ pub async fn remove_remote_machine(
 ) -> Result<(), String> {
     let api = state.api.clone();
     async_runtime::spawn_blocking(move || api.remove_remote_machine(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn answer_remote_access(
+    state: tauri::State<'_, AppState>,
+    request: RemoteAccessAnswerRequest,
+) -> Result<Value, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.answer_remote_access(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn get_remote_access_suppressed(
+    state: tauri::State<'_, AppState>,
+) -> Result<Value, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.remote_access_suppressed().map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn restore_remote_access(
+    state: tauri::State<'_, AppState>,
+    request: RemoteMachineRequest,
+) -> Result<bool, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.restore_remote_access(request).map_err(map_error))
         .await
         .map_err(map_error)?
 }
