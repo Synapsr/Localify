@@ -27,6 +27,10 @@ use crate::infrastructure::process::{
 use crate::infrastructure::runs::finish::{
     CLEANUP_WAIT, Finish, Finisher, Membership, RunSession, membership,
 };
+use crate::infrastructure::runs::launches::{
+    ExitReason, LaunchExit, LaunchRecords, TEMPORARY_MAX_AGE, reconcile_unresolved,
+    sweep_temporaries,
+};
 use crate::infrastructure::runs::output::{self, plain_lines};
 use crate::infrastructure::runs::{RunId, run_dir};
 
@@ -324,13 +328,18 @@ impl RunningServiceStore {
         run_dir(&self.dir, run_id)
     }
 
+    /// `services/launches/`: the launch records, and the messages of detached
+    /// executors.
+    pub fn launches(&self) -> LaunchRecords {
+        LaunchRecords::new(self.dir.join("launches"))
+    }
+
     /// Where a detached executor writes its own messages, before and during
     /// its run: `services/launches/<launchId>.log`.
     pub fn launch_log(&self, launch_id: &RunId) -> Result<PathBuf> {
-        let dir = self.dir.join("launches");
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create '{}'", dir.display()))?;
-        Ok(dir.join(format!("{launch_id}.log")))
+        let launches = self.launches();
+        launches.create_dir()?;
+        Ok(launches.log_path(launch_id))
     }
 
     /// Takes the service's lock, for the executor, before it runs anything.
@@ -467,9 +476,20 @@ impl RunningServiceStore {
         })
     }
 
-    /// Records how a run ended. Does nothing when another run has taken the
-    /// record over since, or when its end is already recorded.
+    /// Records how a run ended, in its record unless another run has taken
+    /// it over since or its end is already recorded, and in its launch
+    /// record unless a finisher added an exit there first.
     pub fn mark_exited(&self, key: &ServiceKey, run_id: &RunId, code: Option<i32>) -> Result<()> {
+        self.record_exit(key, run_id, code, LaunchExit::now(code, None, None))
+    }
+
+    fn record_exit(
+        &self,
+        key: &ServiceKey,
+        run_id: &RunId,
+        code: Option<i32>,
+        launch: LaunchExit,
+    ) -> Result<()> {
         self.update(key, run_id, |record| {
             if record.exit.is_some() {
                 return false;
@@ -479,7 +499,8 @@ impl RunningServiceStore {
                 code,
             });
             true
-        })
+        })?;
+        self.launches().add_exit(run_id, launch)
     }
 
     /// Changes the record of `run_id`, under the service's record lock, so no
@@ -508,7 +529,7 @@ impl RunningServiceStore {
     /// An exclusive `flock` held for one read-modify-write of a service's
     /// record. The `@` keeps its name apart from any record or run lock, since
     /// record names never hold one.
-    fn lock_record(&self, key: &ServiceKey) -> Result<File> {
+    pub(crate) fn lock_record(&self, key: &ServiceKey) -> Result<File> {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("Failed to create '{}'", self.dir.display()))?;
         let path = self.dir.join(format!("{}@record.lock", record_name(key)));
@@ -522,10 +543,36 @@ impl RunningServiceStore {
         Ok(file)
     }
 
+    /// The exit a finisher other than the executor records: the executor
+    /// alone knew the code, and its own exit, recorded first, stands.
     fn mark_ended(&self, record: &RunningService) -> Result<()> {
-        match record.run_id() {
-            Some(run_id) => self.mark_exited(&record.key, run_id, None),
-            None => Ok(()),
+        let Some(run_id) = record.run_id() else {
+            return Ok(());
+        };
+        let lost = LaunchExit::now(None, None, Some(ExitReason::ExecutorLost));
+        self.record_exit(&record.key, run_id, None, lost)
+    }
+
+    /// Completes a run whose executor died without recording how it ended:
+    /// what is proven left of its session is ended by the identity-checked
+    /// finisher, it is finalized unless it already was, and its exit is
+    /// recorded without a code. Returns whether it is over: not while its
+    /// executor or the app reading it still runs, or something it cannot
+    /// confirm still carries its session.
+    pub fn complete_dead_run(&self, record: &RunningService) -> Result<bool> {
+        let (Some(run), Some(session)) = (&record.run, record.session()) else {
+            return Ok(false);
+        };
+        if session.executor_alive(&NativeProcesses) {
+            return Ok(false);
+        }
+        let dir = self.run_dir(&run.run_id);
+        match Finisher::native().finish(&dir, &session, record.has_stream())? {
+            Finish::AlreadyFinalized | Finish::Finalized(_) | Finish::Gone => {
+                self.mark_ended(record)?;
+                Ok(true)
+            }
+            Finish::ExecutorAlive | Finish::Busy | Finish::Unconfirmed(_) => Ok(false),
         }
     }
 
@@ -666,10 +713,9 @@ impl RunningServiceStore {
                 Some(RunOutput::Pty) => !output::reader_alive(&dir)?,
                 None => false,
             };
-            if !unread
-                || output::read_end(&dir)?.is_some()
-                || session.executor_alive(&NativeProcesses)
-            {
+            // Finalized but with no exit: its executor or the app died in
+            // between, and the finisher records the exit without its code.
+            if !unread || service.exit.is_some() || session.executor_alive(&NativeProcesses) {
                 continue;
             }
             let finish = Finisher::native().finish(&dir, &session, true)?;
@@ -680,6 +726,36 @@ impl RunningServiceStore {
             finished.push((service.key.clone(), finish));
         }
         Ok(finished)
+    }
+
+    /// The daemon's housekeeping: the admissions whose executor died
+    /// without their exit are completed, then the temporary files and launch
+    /// locks a crash left in `launches/`, and the temporary files in each
+    /// run's folder, once an hour old, and the launch records past their
+    /// retention go. Returns how many files went.
+    pub fn sweep_leftovers(&self) -> Result<usize> {
+        reconcile_unresolved(self, &NativeProcesses)?;
+        let launches = self.launches();
+        let mut removed = sweep_temporaries(launches.dir(), TEMPORARY_MAX_AGE)?;
+        removed += launches.sweep_launch_locks(TEMPORARY_MAX_AGE)?;
+        if let Ok(runs) = fs::read_dir(self.dir.join("output")) {
+            for run in runs.flatten() {
+                removed += sweep_temporaries(&run.path(), TEMPORARY_MAX_AGE)?;
+            }
+        }
+        removed += self.prune_launches()?;
+        Ok(removed)
+    }
+
+    /// Removes the launch records past their retention, but never one of a
+    /// run its service's record still names.
+    pub fn prune_launches(&self) -> Result<usize> {
+        let current: HashSet<RunId> = self
+            .list()?
+            .iter()
+            .filter_map(|record| record.run_id().cloned())
+            .collect();
+        self.launches().prune(&current)
     }
 
     /// Stops the service if it runs, then forgets it and deletes its output.
@@ -718,9 +794,7 @@ impl RunningServiceStore {
             && next.and_then(RunningService::run_id) != Some(run_id)
         {
             let _ = fs::remove_dir_all(self.run_dir(run_id));
-            if let Ok(log) = self.launch_log(run_id) {
-                let _ = fs::remove_file(log);
-            }
+            let _ = fs::remove_file(self.launches().log_path(run_id));
         }
         if let Some(log_file) = &service.log_file
             && next.and_then(|next| next.log_file.as_ref()) != Some(log_file)
@@ -760,15 +834,14 @@ fn same_run(left: &RunningService, right: &RunningService) -> bool {
     }
 }
 
-/// Waits for the reader of a run PTY to finalize its stream. It reads what
-/// the run's processes left in the PTY first, which takes a moment once they
-/// are gone.
+/// Waits for the reader of a run PTY to finalize its stream and record the
+/// run's exit. It reads what the run's processes left in the PTY first,
+/// which takes a moment once they are gone.
 fn wait_for_end(service: &str, dir: &Path) -> Result<()> {
     let deadline = Instant::now() + READER_FINALIZE_WAIT;
-    while output::read_end(dir)?.is_none() {
-        if !output::reader_alive(dir)? {
-            return Ok(());
-        }
+    // Until the app lets go of it: it finalizes, then records the exit with
+    // its code, which no exit recorded here may precede.
+    while output::reader_alive(dir)? {
         if Instant::now() >= deadline {
             bail!(
                 "'{service}' stopped, but the {} app has not finished reading its output yet. Try again in a moment.",

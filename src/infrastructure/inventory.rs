@@ -28,8 +28,8 @@ use crate::infrastructure::cloud::types::{PublicUrl, PublicUrlState};
 use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredProjectEnvironment, ConfiguredService,
 };
-use crate::infrastructure::launch_plan::{self, LaunchPlan, service_with_project_root};
-use crate::infrastructure::launch_profiles::LaunchProfiles;
+use crate::infrastructure::launch_plan::{self, DevLaunch, LaunchPlan, service_with_project_root};
+use crate::infrastructure::launch_profiles::{LaunchProfiles, allowed_remotely};
 use crate::infrastructure::launch_rev::{LaunchDefinition, LaunchRevKey, random_bytes};
 use crate::infrastructure::running_services::{
     RunState, RunningService, RunningServiceStore, ServiceKey, ServiceOrigin,
@@ -222,14 +222,14 @@ pub fn gather(observed: &Observed<'_>) -> Result<Vec<ServiceFacts>> {
     placed
         .into_iter()
         .map(|placed| {
-            let plan = launch_plan::dev_plan(placed.service.clone(), placed.port);
-            let root = profiles_root(&placed.service, plan.as_ref().ok());
+            let launch = DevLaunch::resolve(placed.service.clone(), placed.port);
+            let root = profiles_root(&placed.service, launch.plan.as_ref().ok());
             let profiles = checkouts
                 .entry(root.clone())
                 .or_insert_with(|| load_profiles(root.as_deref()));
             let reachable = reachable.get(&placed.port).copied();
             let record = records.iter().find(|record| record.key == key_of(&placed));
-            service_facts(placed, reachable, &plan, profiles, record, observed)
+            service_facts(placed, reachable, &launch, profiles, record, observed)
         })
         .collect()
 }
@@ -249,12 +249,11 @@ fn place_services(config: &Config, project_roots: &HashMap<String, PathBuf>) -> 
             .iter()
             .filter(|service| service.project_id == environment.project_id);
         for service in of_project {
-            let service = if environment.primary {
-                Some(service.clone())
-            } else {
+            let Some(service) =
                 launch_plan::environment_service(config, service.clone(), &environment)
+            else {
+                continue;
             };
-            let Some(service) = service else { continue };
             let Some(RouteTarget::Proxy(target)) = &service.primary_target else {
                 continue;
             };
@@ -296,7 +295,7 @@ fn load_profiles(root: Option<&Path>) -> Result<Option<LaunchProfiles>> {
 fn service_facts(
     placed: Placed,
     reachable: Option<bool>,
-    plan: &Result<LaunchPlan>,
+    launch: &DevLaunch,
     profiles: &Result<Option<LaunchProfiles>>,
     record: Option<&RunningService>,
     observed: &Observed<'_>,
@@ -307,7 +306,7 @@ fn service_facts(
         service,
         port,
     } = placed;
-    let definition = LaunchDefinition::new(&service, Some(&environment_slug), plan, profiles, None);
+    let definition = LaunchDefinition::new(launch, Some(&environment_slug), profiles, None);
     Ok(ServiceFacts {
         project: ProjectRef {
             id: service.project_id.clone(),
@@ -330,8 +329,8 @@ fn service_facts(
         run: record.map(|record| run_facts(observed.store, record, profiles)),
         public_url: public_url_facts(&service.primary_domain, observed.public),
         profiles: ProfileChecks {
-            start: profile_allowed(profiles, None),
-            restart: profile_allowed(
+            start: allowed_remotely(profiles, None),
+            restart: allowed_remotely(
                 profiles,
                 record.and_then(|record| record.profile.as_deref()),
             ),
@@ -369,19 +368,6 @@ fn run_facts(
             at: rfc3339(exit.at),
             code: exit.code,
         }),
-    }
-}
-
-/// A profile a remote launch may use: it resolves under the effective rules
-/// of `LaunchProfiles::load` and is not dangerous. `None` is the effective
-/// default, which is never dangerous. Profiles that do not load allow none.
-fn profile_allowed(profiles: &Result<Option<LaunchProfiles>>, name: Option<&str>) -> bool {
-    match profiles {
-        Err(_) => false,
-        Ok(None) => name.is_none(),
-        Ok(Some(profiles)) => profiles
-            .select(name)
-            .is_ok_and(|profile| profile.is_none_or(|profile| !profile.danger)),
     }
 }
 
@@ -916,20 +902,20 @@ domain = "web.feature.localify"
         fs::write(dir.path().join(".infisical.yaml"), "workspaceId: w\n").unwrap();
         let implicit = LaunchProfiles::load(dir.path());
 
-        assert!(profile_allowed(&implicit, None));
-        assert!(profile_allowed(&implicit, Some("staging")));
-        assert!(!profile_allowed(&implicit, Some("prod")));
-        assert!(!profile_allowed(&implicit, Some("removed")));
+        assert!(allowed_remotely(&implicit, None));
+        assert!(allowed_remotely(&implicit, Some("staging")));
+        assert!(!allowed_remotely(&implicit, Some("prod")));
+        assert!(!allowed_remotely(&implicit, Some("removed")));
         assert!(profile_danger(&implicit, Some("prod")));
         assert!(!profile_danger(&implicit, Some("staging")));
 
-        assert!(profile_allowed(&Ok(None), None));
-        assert!(!profile_allowed(&Ok(None), Some("default")));
+        assert!(allowed_remotely(&Ok(None), None));
+        assert!(!allowed_remotely(&Ok(None), Some("default")));
 
         fs::write(dir.path().join("localify.toml"), "[profiles.x]\nbad = 1\n").unwrap();
         let invalid = LaunchProfiles::load(dir.path());
         assert!(invalid.is_err());
-        assert!(!profile_allowed(&invalid, None));
+        assert!(!allowed_remotely(&invalid, None));
     }
 
     fn public_url(id: &str, local_domain: &str, wildcard: bool, extra: &str) -> PublicUrl {

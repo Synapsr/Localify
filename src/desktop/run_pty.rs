@@ -38,6 +38,7 @@ use crate::infrastructure::running_services::{
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::{Finish, KILL_WAIT, STOP_GRACE};
+use crate::infrastructure::runs::launches::{LaunchExit, dispatch_expiry};
 use crate::infrastructure::runs::output::{
     self, EndReason, FinalizeLock, ReaderLock, RunEnd, StreamSink, StreamWriter,
 };
@@ -356,8 +357,11 @@ fn start(dir: &Path, run_id: &RunId, launch: RunPtyLaunch) -> Result<Started> {
     let mut command = Command::new(&launch.executable);
     command
         .args(&launch.args)
-        // In one argument: a base64url id may start with `-`.
+        // In one argument: a base64url id may start with `-`. A restart
+        // stopped the run it replaces before this point, so that stop never
+        // counts against the launch's expiry.
         .arg(format!("--launch-id={run_id}"))
+        .arg(format!("--launch-expires={}", dispatch_expiry()))
         .env_clear()
         .envs(launch.environment)
         .current_dir(&launch.working_directory);
@@ -482,7 +486,7 @@ impl Finishing {
         let record = self.record();
         let registered = record.is_some();
         let (output, error) = match record {
-            Some(record) => match self.finish(&record, code) {
+            Some(record) => match self.finish(&record, code, signal) {
                 Ok((reason, cut_off)) => (Some(reason), cut_off),
                 Err(error) => (None, Some(format!("{error:#}"))),
             },
@@ -519,6 +523,7 @@ impl Finishing {
         self,
         record: &RunningService,
         code: Option<i32>,
+        signal: Option<i32>,
     ) -> Result<(EndReason, Option<String>)> {
         // A process nothing proves to be the run's keeps it open: never
         // finalized under it, never signalled.
@@ -538,7 +543,11 @@ impl Finishing {
         end.error = cut_off.clone();
         let dir = self.store.run_dir(&self.run_id);
         let mut reason = end.reason;
-        if let Some(_finalizing) = FinalizeLock::acquire(&dir)? {
+        // Held until the exit is recorded, as is the reader lock: another
+        // finisher that finds the run finalized, or its reader gone, then
+        // finds the exit with its code, and never records one without it.
+        let finalizing = FinalizeLock::acquire(&dir)?;
+        if finalizing.is_some() {
             match output::read_end(&dir)? {
                 Some(existing) => reason = existing.reason,
                 None => {
@@ -546,8 +555,13 @@ impl Finishing {
                 }
             }
         }
-        drop(self.reader_lock);
+        crate::infrastructure::test_pause::pause_at("run-pty-end-published");
+        self.store
+            .launches()
+            .add_exit(&self.run_id, LaunchExit::now(code, signal, None))?;
         self.store.mark_exited(&record.key, &self.run_id, code)?;
+        drop(finalizing);
+        drop(self.reader_lock);
         Ok((reason, cut_off))
     }
 

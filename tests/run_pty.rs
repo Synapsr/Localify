@@ -27,11 +27,13 @@ use localify::desktop::run_pty::{
     AppInstallation, RunPty, RunPtyEnd, RunPtyLaunch, run_environment,
 };
 use localify::desktop::shell_environment::ShellEnvironment;
-use localify::infrastructure::process::{self, Signal};
+use localify::infrastructure::process::{self, NativeProcesses, Signal};
 use localify::infrastructure::running_services::{
     OutputAvailability, RunState, RunningService, RunningServiceStore,
 };
+use localify::infrastructure::runs::RunId;
 use localify::infrastructure::runs::finish::Finish;
+use localify::infrastructure::runs::launches::{LaunchReport, reconcile};
 use localify::infrastructure::runs::output::{self, EndReason};
 use localify::infrastructure::shell_env;
 use localify::infrastructure::test_pause::PAUSE_DIR_ENV;
@@ -898,6 +900,47 @@ fn the_daemon_finishes_a_run_pty_whose_app_and_executor_both_died() {
 }
 
 #[test]
+fn a_run_pty_s_exit_keeps_its_code_when_the_daemon_completes_the_run_meanwhile() {
+    let sandbox = Sandbox::new(STUBBORN);
+    let pause = sandbox.root.join("pause");
+    fs::create_dir_all(&pause).unwrap();
+    let point = pause.join("run-pty-end-published");
+    fs::write(&point, "").unwrap();
+    let mut app = sandbox.app_helper("until-end", &[(PAUSE_DIR_ENV, pause.to_str().unwrap())]);
+    let run_id = RunId::parse(app.line("run ").trim()).unwrap();
+    sandbox.wait_until_trapped();
+    let executor = sandbox.record().expect("the run never registered").pid;
+    sandbox.wait_for_proof(executor);
+
+    // The app ends the run, publishes its end, and stops before its exit.
+    assert!(process::send_signal(executor, Signal::Kill));
+    wait_until(Duration::from_secs(60), || {
+        pause
+            .join("run-pty-end-published.reached")
+            .exists()
+            .then_some(())
+    })
+    .expect("the app never published the run's end");
+    let store = sandbox.store();
+    let id = run_id.clone();
+    let daemon = thread::spawn(move || reconcile(&store, &NativeProcesses, &id, None).unwrap());
+    thread::sleep(Duration::from_millis(500));
+    fs::remove_file(&point).unwrap();
+
+    let killed = LaunchReport::Exited {
+        code: None,
+        signal: Some(libc::SIGKILL),
+        reason: None,
+    };
+    assert_eq!(daemon.join().unwrap(), killed);
+    assert_eq!(app.line("end "), "None");
+    assert_eq!(
+        reconcile(&sandbox.store(), &NativeProcesses, &run_id, None).unwrap(),
+        killed
+    );
+}
+
+#[test]
 fn a_run_pty_whose_app_still_reads_is_left_to_the_app() {
     // Printed as two words, so only the service's output, not its echoed command, reads so.
     let sandbox = Sandbox::new("printf 'service-%s\\n' up; sleep 300");
@@ -1134,6 +1177,16 @@ fn app_helper() {
             }
             let end = ended.recv_timeout(Duration::from_secs(60)).unwrap();
             println!("HELPER run {}", run.run_id());
+            println!("HELPER end {:?}", end.code);
+        }
+        "until-end" => {
+            let (run, shown, ended) = helper_run(&config, &app, std::env::vars_os().collect());
+            wait_until(Duration::from_secs(30), || {
+                contains(&shown.lock().unwrap(), "ready").then_some(())
+            })
+            .unwrap();
+            println!("HELPER run {}", run.run_id());
+            let end = ended.recv_timeout(Duration::from_secs(120)).unwrap();
             println!("HELPER end {:?}", end.code);
         }
         "resolving" => {

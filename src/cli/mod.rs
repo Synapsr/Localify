@@ -7,6 +7,7 @@ pub mod init_project;
 pub mod install;
 pub mod inventory;
 pub mod lan;
+pub mod launch_fence;
 pub mod launch_profile;
 pub mod list;
 pub mod list_projects;

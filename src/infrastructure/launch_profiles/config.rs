@@ -79,6 +79,21 @@ pub enum ProfileSource {
     },
 }
 
+/// Whether a remote launch may use profile `name` (`None`: the effective
+/// default) of a checkout whose profiles loaded as `profiles`
+/// (docs/remote-machines.md, "What a control may name"): it resolves under
+/// the effective rules of [`LaunchProfiles::load`] and is not dangerous.
+/// Profiles that do not load allow none.
+pub fn allowed_remotely(profiles: &Result<Option<LaunchProfiles>>, name: Option<&str>) -> bool {
+    match profiles {
+        Err(_) => false,
+        Ok(None) => name.is_none(),
+        Ok(Some(profiles)) => profiles
+            .select(name)
+            .is_ok_and(|profile| profile.is_none_or(|profile| !profile.danger)),
+    }
+}
+
 impl LaunchProfiles {
     /// Reads the profiles of a project root: `localify.toml`, or implicit
     /// Infisical profiles when the project only has `.infisical.yaml`.

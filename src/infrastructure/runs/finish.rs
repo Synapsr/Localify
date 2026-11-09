@@ -109,9 +109,9 @@ impl RunSession {
 pub enum Membership {
     /// The record is from another boot: a reboot ended every process of it.
     OtherBoot,
-    /// No member started at or before the last heartbeat: whatever carries the
-    /// session id now is unrelated.
-    Unproven,
+    /// No member started at or before the last heartbeat: nothing ties the
+    /// processes carrying the session id now, these, to the run.
+    Unproven(Vec<ProcessInfo>),
     /// Members that could prove the session kept vanishing before they could
     /// be read again: nothing is decided, and the run stays open.
     Inconclusive,
@@ -125,7 +125,7 @@ pub fn membership(table: &dyn ProcessTable, session: &RunSession) -> Membership 
     }
     match prove(table, session) {
         Proof::Proven(members, _) => Membership::Proven(members),
-        Proof::Unproven => Membership::Unproven,
+        Proof::Unproven(found) => Membership::Unproven(found),
         Proof::Inconclusive => Membership::Inconclusive,
     }
 }
@@ -133,7 +133,8 @@ pub fn membership(table: &dyn ProcessTable, session: &RunSession) -> Membership 
 enum Proof {
     /// The members, and the whole scan they came from.
     Proven(Vec<ProcessInfo>, Vec<ProcessInfo>),
-    Unproven,
+    /// The processes carrying the session, none of which proves it.
+    Unproven(Vec<ProcessInfo>),
     Inconclusive,
 }
 
@@ -159,7 +160,7 @@ fn prove(table: &dyn ProcessTable, session: &RunSession) -> Proof {
             !session.is_executor(process) && process.start <= session.last_alive_at
         }));
         if candidates.is_empty() {
-            return Proof::Unproven;
+            return Proof::Unproven(members);
         }
         if candidates
             .into_iter()
@@ -169,6 +170,19 @@ fn prove(table: &dyn ProcessTable, session: &RunSession) -> Proof {
         }
     }
     Proof::Inconclusive
+}
+
+/// What a finisher makes of processes carrying the session that no member
+/// proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unproven {
+    /// A registered run: its heartbeat proves its members, so processes that
+    /// all started after it, in a session whose older members all died, are
+    /// unrelated (docs/remote-machines.md, "The end of a run").
+    Unrelated,
+    /// A launch that died before its run record: see
+    /// [`Finisher::finish_unregistered`].
+    KeepOpen,
 }
 
 /// What a finisher did.
@@ -403,7 +417,22 @@ impl Finisher<'_> {
         captured_elsewhere: bool,
     ) -> Result<Finish> {
         match FinalizeLock::acquire(dir)? {
-            Some(lock) => self.finish_locked(&lock, dir, session, captured_elsewhere),
+            Some(lock) => {
+                self.finish_locked(&lock, dir, session, captured_elsewhere, Unproven::Unrelated)
+            }
+            None => Ok(Finish::Gone),
+        }
+    }
+
+    /// `finish`, for a launch whose executor died between its admission and
+    /// its run record. Only the witness of its profile helpers proves them
+    /// its own, so a process in its session that nothing proves, a helper
+    /// started right before the executor died or what a helper started after
+    /// the last witness, may still be its own: it is reported as unconfirmed,
+    /// never signalled, and the launch stays open while it lives.
+    pub fn finish_unregistered(&self, dir: &Path, session: &RunSession) -> Result<Finish> {
+        match FinalizeLock::acquire(dir)? {
+            Some(lock) => self.finish_locked(&lock, dir, session, true, Unproven::KeepOpen),
             None => Ok(Finish::Gone),
         }
     }
@@ -423,9 +452,13 @@ impl Finisher<'_> {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let finish = match FinalizeLock::acquire_within(dir, left)? {
-                Acquired::Locked(lock) => {
-                    self.finish_locked(&lock, dir, session, captured_elsewhere)?
-                }
+                Acquired::Locked(lock) => self.finish_locked(
+                    &lock,
+                    dir,
+                    session,
+                    captured_elsewhere,
+                    Unproven::Unrelated,
+                )?,
                 Acquired::Gone => return Ok(Finish::Gone),
                 Acquired::Busy => return Ok(Finish::Busy),
             };
@@ -444,6 +477,7 @@ impl Finisher<'_> {
         dir: &Path,
         session: &RunSession,
         captured_elsewhere: bool,
+        unproven: Unproven,
     ) -> Result<Finish> {
         let finalized = output::read_end(dir)?.is_some();
         // Another boot ended every process of the run: nothing it saved is
@@ -483,9 +517,10 @@ impl Finisher<'_> {
                 .max(saved.proven_through.saturating_sub(1)),
             ..session.clone()
         };
-        let mut members = match membership(self.table, &session) {
-            Membership::Proven(members) => members,
-            Membership::OtherBoot | Membership::Unproven => Vec::new(),
+        let (mut members, found) = match membership(self.table, &session) {
+            Membership::Proven(members) => (members, Vec::new()),
+            Membership::OtherBoot => (Vec::new(), Vec::new()),
+            Membership::Unproven(found) => (Vec::new(), found),
             Membership::Inconclusive => bail!(
                 "Could not confirm which processes belong to the run: they kept changing while Localify looked. Try again."
             ),
@@ -507,6 +542,11 @@ impl Finisher<'_> {
                 return Ok(Finish::Unconfirmed(pids));
             }
         } else {
+            if unproven == Unproven::KeepOpen && !found.is_empty() {
+                return Ok(Finish::Unconfirmed(
+                    found.iter().map(|process| process.pid).collect(),
+                ));
+            }
             // What an earlier finisher could not confirm keeps the run open
             // while it lives as itself and still carries the session, though
             // no scan proves the session now. One that left it, by setsid or

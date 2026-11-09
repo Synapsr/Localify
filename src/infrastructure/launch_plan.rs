@@ -69,13 +69,34 @@ pub fn resolve(
     })
 }
 
+/// One service as `localify dev` launches it with its own command. The
+/// entry the config gives for its environment, which its revision covers, is
+/// kept apart from the plan resolved once its launch is detected, which is
+/// what runs: detection may infer its command and its folder, and drop a
+/// legacy `dev-localify` command. The inventory and the executor both build
+/// it here, so a revision one computed is the revision the other checks.
+pub struct DevLaunch {
+    pub configured: ConfiguredService,
+    pub plan: Result<LaunchPlan>,
+}
+
+impl DevLaunch {
+    /// `configured` as `localify dev` runs it, listening on `port`.
+    pub fn resolve(configured: ConfiguredService, port: u16) -> Self {
+        let plan = dev_plan(configured.clone(), port);
+        Self { configured, plan }
+    }
+}
+
 /// The plan of `localify dev <service> --project <id> [--env <slug>]`, from
 /// the service as its environment gives it: what a remote start would run.
 pub fn dev_plan(service: ConfiguredService, port: u16) -> Result<LaunchPlan> {
     let service = service_with_dev_launch(service);
     let command = service.command.clone().with_context(|| {
         format!(
-            "Service '{}' has no detected command: its folder has no dev script.",
+            "Service '{}' has no detected command: its folder has no dev script. Run it with a command, for example: {} dev {} -- pnpm dev",
+            service.id,
+            crate::branding::BRANDING.cli_command(),
             service.id
         )
     })?;
@@ -84,12 +105,18 @@ pub fn dev_plan(service: ConfiguredService, port: u16) -> Result<LaunchPlan> {
 
 /// A service as `localify dev --env` runs it in another environment: that
 /// environment's domain, checkout and target, and the folder the primary
-/// checkout's route detects when the config names none.
+/// checkout's route detects when the config names none. The primary
+/// environment, named or not, runs the service as the config gives it, every
+/// domain and no inferred folder: one launch, so one `configRev`, whether
+/// `--env` names it or not.
 pub fn environment_service(
     config: &Config,
     service: ConfiguredService,
     environment: &ConfiguredProjectEnvironment,
 ) -> Option<ConfiguredService> {
+    if environment.primary {
+        return Some(service);
+    }
     let inferred_service_path = service
         .path
         .clone()
