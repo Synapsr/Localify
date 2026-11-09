@@ -3,6 +3,44 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.5.0 - 2026-11-09
+
+### New
+
+- **See your other machines' services, public URLs and output from the app.** Pick
+  another Mac in the switcher next to Projects and see its projects as it sees them: which
+  services run and who started them, whether their ports answer, and their public URLs,
+  which open in one click. Open a service's output to read and search it live, as plain
+  text. Pair machines from the switcher or Settings → Remote access by confirming the same
+  6-digit code on both, and choose there whether this Mac shares its projects and output,
+  which stays off until you turn it on. Needs Localify Cloud Pro.
+  [Remote machines](https://github.com/Synapsr/Localify/blob/main/docs/remote-machines.md)
+- **Pair your machines from the terminal.** `localify machines` lists the other computers
+  signed in to your Localify Cloud account, with whether each one is online and paired.
+  `localify machines pair <machine>` pairs this one with another: both show the same
+  6-digit code, and you confirm it on each, so even Localify Cloud cannot slip in a
+  machine of its own. What paired machines may see or do here stays off until you turn it
+  on with `localify machines settings`.
+- **Start Localify Cloud Pro from the terminal or the app.** `localify subscribe` opens
+  the checkout for Localify Cloud Pro, with its 7-day free trial, and `localify billing`
+  manages the subscription. `localify whoami` and Settings → Localify Cloud show your
+  plan, its dates and how much of it you use, and a Mac whose public URLs cannot be served
+  now says why and what to do.
+  [Public URLs](https://github.com/Synapsr/Localify/blob/main/docs/README.md#public-urls)
+- **Buy more machines and URLs from the app or the terminal.** On Localify Cloud Pro,
+  Settings → Localify Cloud now has Add capacity: pick how many serving machines or packs
+  of 10 public URLs you need, see the monthly price, and finish the checkout in your
+  browser. In a terminal, `localify subscribe --machines 2` or
+  `localify subscribe --url-packs 1` does the same and waits for the new limit. When you
+  hit a limit, Localify names the command that raises it.
+
+### Improved
+
+- **See how your agents run Localify on first launch.** The welcome screens now show in a
+  few lines how Localify works with Claude Code, Codex, and Cursor, with a link to the
+  docs for each part. Choose whether setup connects your coding agents, or copy a prompt
+  that has your agent set Localify up for your workflow.
+
 ## 1.4.0 - 2026-11-08
 
 ### Improved
