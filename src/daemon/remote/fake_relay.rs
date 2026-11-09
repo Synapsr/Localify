@@ -910,7 +910,29 @@ impl LocalSource for FakeSource {
     }
 
     fn control_status(&self, peer: &str, request_id: &str) -> Report {
+        let host = self.host();
+        let held = {
+            let mut state = host.state();
+            state.statuses += 1;
+            state.status_hold.take()
+        };
+        if let Some(held) = held {
+            let _ = held.recv();
+        }
         self.runner().status(peer, request_id)
+    }
+
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        let gate = {
+            let host = self.host();
+            let mut state = host.state();
+            state.admits += 1;
+            state.admits_gate.clone()
+        };
+        if let Some(gate) = gate {
+            let _ = gate.lock().unwrap().recv();
+        }
+        self.runner().admits(peer, request_id)
     }
 
     fn shell_environment_failure(&self) -> Option<String> {
@@ -959,6 +981,15 @@ pub struct HostState {
     pub hold: Option<std::sync::mpsc::Receiver<()>>,
     /// Holds the next stop the same way, before it ends anything.
     pub stop_hold: Option<std::sync::mpsc::Receiver<()>>,
+    /// Holds the next `control.status` the same way, before it reads.
+    pub status_hold: Option<std::sync::mpsc::Receiver<()>>,
+    /// How many `control.status` queries reached the executor.
+    pub statuses: usize,
+    /// While set, every entry-limit check before a lease waits on it, until
+    /// the test drops the other end.
+    pub admits_gate: Option<Arc<Mutex<std::sync::mpsc::Receiver<()>>>>,
+    /// How many entry-limit checks reached the executor.
+    pub admits: usize,
 }
 
 /// A target's services in memory: stops end their run, launches run

@@ -63,6 +63,10 @@ pub trait LocalSource: Send + Sync {
     ) -> Report;
     /// `control.status`: what became of a peer's request. Blocks.
     fn control_status(&self, peer: &str, request_id: &str) -> Report;
+    /// Whether a control under `request_id` may go on to its lease: a new
+    /// request id past the peer's entry limit is refused `too_many` (see
+    /// `ControlRunner::admits`). Blocks, briefly.
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report>;
     /// Why background starts run without the user's shell environment,
     /// when it could not be read.
     fn shell_environment_failure(&self) -> Option<String>;
@@ -200,6 +204,10 @@ impl LocalSource for DaemonSource {
 
     fn control_status(&self, peer: &str, request_id: &str) -> Report {
         self.controls.status(peer, request_id)
+    }
+
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        self.controls.admits(peer, request_id)
     }
 
     fn shell_environment_failure(&self) -> Option<String> {

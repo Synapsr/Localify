@@ -2,8 +2,11 @@
 //! a real daemon watch: target B serves its real inventory and runs the real
 //! control executor over a temporary home, and the service is started from
 //! a terminal with the real `localify dev`, stopped with the real
-//! `localify stop`, and its config edited on disk. The fake relay only
-//! exists in this crate, so this runs here rather than in `tests/`.
+//! `localify stop`, and its config edited on disk. B looks for changes at
+//! the production pace (`watch_every` of 2 s, on its 1 s tick), probes its
+//! app every 2 s as the daemon does, and its ports through the real
+//! inventory, so the 12 s gate is the one a person gets. The fake relay
+//! only exists in this crate, so this runs here rather than in `tests/`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -19,8 +22,9 @@ use tokio::time::Instant;
 use super::{Daemon, launch_serving, pair, wait_until};
 use crate::application::inventory::Switches;
 use crate::branding::BRANDING;
+use crate::daemon::remote::Timings;
 use crate::daemon::remote::fake_relay::{FakeCloud, FakeSource};
-use crate::daemon::remote::local::{LocalSource, RunLookup, SnapshotFuture, lookup};
+use crate::daemon::remote::local::{AppSeen, LocalSource, RunLookup, SnapshotFuture, lookup};
 use crate::daemon::remote::viewing::WatchEvent;
 use crate::daemon::remote::{ControlAsk, ControlEvent};
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
@@ -144,7 +148,9 @@ command = ["sh", "-c", "{script}"]
         command
     }
 
-    fn source(&self) -> Arc<RealSource> {
+    /// B's source; its app is watched as the daemon watches it, until
+    /// `cancel`.
+    fn source(&self, cancel: tokio_util::sync::CancellationToken) -> Arc<RealSource> {
         let inventory = LocalInventory::new(self.config.clone(), self.root.join("data"))
             .unwrap()
             .with_services_dir(self.services_dir());
@@ -174,6 +180,7 @@ command = ["sh", "-c", "{script}"]
             inventory: Arc::new(inventory),
             runner,
             store: RunningServiceStore::new(self.services_dir()),
+            app: AppSeen::watch(&self.root.join("data"), cancel),
         })
     }
 }
@@ -201,6 +208,7 @@ struct RealSource {
     inventory: Arc<LocalInventory>,
     runner: ControlRunner,
     store: RunningServiceStore,
+    app: AppSeen,
 }
 
 impl LocalSource for RealSource {
@@ -224,7 +232,7 @@ impl LocalSource for RealSource {
     }
 
     fn app(&self) -> AppPresence {
-        AppPresence::Absent
+        self.app.get()
     }
 
     fn control(
@@ -238,6 +246,10 @@ impl LocalSource for RealSource {
 
     fn control_status(&self, peer: &str, request_id: &str) -> Report {
         self.runner.status(peer, request_id)
+    }
+
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        self.runner.admits(peer, request_id)
     }
 
     fn shell_environment_failure(&self) -> Option<String> {
@@ -318,9 +330,10 @@ fn wait_for(child: &mut Child) {
     }
 }
 
-/// The gate: while A watches B, `web` is started from a terminal, stopped
-/// with `localify stop`, and its config edited. Within 12 seconds A's
-/// snapshot shows each, and a control built on the state before gets
+/// The gate, at production timings: while A watches B, `web` is started
+/// from a terminal, stopped with `localify stop`, and its config edited.
+/// Within 12 seconds A's snapshot shows each, and a control built on the
+/// state before gets
 /// `conflict`: a start once it runs, a stop of the run once it stopped, a
 /// start on the old revision once the config changed.
 #[tokio::test]
@@ -329,14 +342,24 @@ async fn real_starts_stops_and_config_edits_converge_and_old_controls_conflict()
     let cloud = FakeCloud::start().await;
     let a = super::daemon(&cloud, "mA", "laptop").await;
     let token = cloud.add_machine("mB", "teo-mini");
+    // B looks for changes as a daemon does, on its 1 s tick; the rest of
+    // its link is fast.
+    let production = Timings::default();
+    let timings = Timings {
+        watch_every: production.watch_every,
+        tick: production.tick,
+        ..super::fast()
+    };
+    let probing = tokio_util::sync::CancellationToken::new();
     let b = launch_serving(
         &cloud,
         ("mB", "teo-mini", &token),
         tempfile::tempdir().unwrap(),
-        super::fast(),
-        sandbox.source(),
+        timings,
+        sandbox.source(probing.clone()),
         Arc::new(FakeSource::default()),
     );
+    let _probing = probing.drop_guard();
     let b = super::connected(b).await;
     wait_until("both see each other", || a.sees("mB") && b.sees("mA")).await;
     pair(&a, &b).await;

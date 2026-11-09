@@ -8,7 +8,8 @@
 //!
 //! [`LocalSource`]: crate::daemon::remote::local::LocalSource
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +30,60 @@ const CONTROLS_PER_PEER: usize = 4;
 const CONTROLS_PER_TARGET: usize = 16;
 /// What a viewer refused `busy` is told to wait, in seconds.
 const BUSY_RETRY: u64 = 5;
+
+/// The controls and `control.status`es going on this target, by peer. The
+/// link keeps them, not a session or a connection: a [`ControlPermit`]
+/// lives as long as its work, the lease and the blocking execution
+/// included, so a viewer that reconnects or opens a new session finds its
+/// earlier work still counted.
+#[derive(Debug, Default)]
+pub struct ControlSlots {
+    going: Mutex<HashMap<String, usize>>,
+}
+
+impl ControlSlots {
+    /// A permit for one more piece of `peer`'s work, within
+    /// [`CONTROLS_PER_PEER`] and [`CONTROLS_PER_TARGET`].
+    pub fn admit(self: &Arc<Self>, peer: &str) -> Option<ControlPermit> {
+        let mut going = self
+            .going
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let all: usize = going.values().sum();
+        let mine = going.get(peer).copied().unwrap_or(0);
+        if mine >= CONTROLS_PER_PEER || all >= CONTROLS_PER_TARGET {
+            return None;
+        }
+        *going.entry(peer.to_string()).or_default() += 1;
+        Some(ControlPermit {
+            slots: Arc::clone(self),
+            peer: peer.to_string(),
+        })
+    }
+}
+
+/// One admitted control or `control.status`, counted until dropped.
+#[derive(Debug)]
+pub struct ControlPermit {
+    slots: Arc<ControlSlots>,
+    peer: String,
+}
+
+impl Drop for ControlPermit {
+    fn drop(&mut self) {
+        let mut going = self
+            .slots
+            .going
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = going.get_mut(&self.peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                going.remove(&self.peer);
+            }
+        }
+    }
+}
 
 /// What the executor says about one control, back on the actor's task.
 #[derive(Debug)]
@@ -61,25 +116,17 @@ impl Actor {
     }
 
     /// Admits a control or a `control.status` before anything is spawned or
-    /// fetched for it, within [`CONTROLS_PER_PEER`] and
-    /// [`CONTROLS_PER_TARGET`]. Answers it and returns `false` otherwise.
-    fn admit_control(&mut self, key: &Key, id: &str) -> bool {
+    /// fetched for it, within the link's [`ControlSlots`]. Answers it and
+    /// returns `None` otherwise. The permit goes with the work, so the
+    /// bounds hold whatever becomes of the session.
+    fn admit_control(&mut self, key: &Key, id: &str) -> Option<ControlPermit> {
         if self.id_in_use(key, id) {
             let refusal =
                 SessionMessage::refusal(id, "bad_request", "This request id is already in use.");
             self.send_message(key, &refusal);
-            return false;
+            return None;
         }
-        let mine = self
-            .sessions
-            .get(key)
-            .map_or(0, |session| session.controls.len());
-        let all: usize = self
-            .sessions
-            .values()
-            .map(|session| session.controls.len())
-            .sum();
-        if mine >= CONTROLS_PER_PEER || all >= CONTROLS_PER_TARGET {
+        let Some(permit) = self.shared.control_slots.admit(&key.0) else {
             let busy = SessionMessage::Error {
                 re: Some(id.to_string()),
                 code: "busy".into(),
@@ -87,12 +134,11 @@ impl Actor {
                 retry_after: Some(BUSY_RETRY),
             };
             self.send_message(key, &busy);
-            return false;
-        }
-        match self.sessions.get_mut(key) {
-            Some(session) => session.controls.insert(id.to_string()),
-            None => false,
-        }
+            return None;
+        };
+        let session = self.sessions.get_mut(key)?;
+        session.controls.insert(id.to_string());
+        Some(permit)
     }
 
     /// `control`: checks 1 to 3, then the executor, off this task.
@@ -130,9 +176,9 @@ impl Actor {
         else {
             return;
         };
-        if !self.admit_control(key, &id) {
+        let Some(permit) = self.admit_control(key, &id) else {
             return;
-        }
+        };
         let peer_name = self
             .shared
             .store
@@ -151,13 +197,22 @@ impl Actor {
             .entry(key.0.clone())
             .or_default()
             .clone();
-        self.execute_control(key.clone(), id, order, Pairing { pin_key, cancel });
+        let pairing = Pairing { pin_key, cancel };
+        self.execute_control(key.clone(), id, order, pairing, permit);
     }
 
-    /// Check 3, a fresh lease, then the executor on a blocking thread; its
-    /// progress and result come back as [`Command::ControlDone`]. An
-    /// unpairing or a new key cancels it until it is dispatched.
-    fn execute_control(&mut self, key: Key, id: String, order: Order, pairing: Pairing) {
+    /// The peer's entry limit, then check 3, a fresh lease, then the
+    /// executor on a blocking thread; its progress and result come back as
+    /// [`Command::ControlDone`]. An unpairing or a new key cancels it until
+    /// it is dispatched. `permit` is held until the executor returns.
+    fn execute_control(
+        &mut self,
+        key: Key,
+        id: String,
+        order: Order,
+        pairing: Pairing,
+        permit: ControlPermit,
+    ) {
         let lease = Arc::clone(&self.ctx.lease);
         let source = Arc::clone(&self.ctx.source);
         let shared = Arc::clone(&self.shared);
@@ -169,6 +224,26 @@ impl Actor {
                     re: id.clone(),
                     event,
                 });
+            };
+            // A new request id past the peer's entry limit costs no lease.
+            // The permit goes with the blocking work and comes back with its
+            // answer, so aborting this task never frees it while that work
+            // goes on.
+            let (asked, peer) = (Arc::clone(&source), order.peer.clone());
+            let request_id = order.control.request_id.clone();
+            let admitted = tokio::task::spawn_blocking(move || {
+                (asked.control_admits(&peer, &request_id), permit)
+            })
+            .await;
+            let permit = match admitted {
+                Ok((Ok(()), permit)) => permit,
+                Ok((Err(refused), _)) => return send(ControlEvent::Result(refused)),
+                Err(error) => {
+                    return send(ControlEvent::Result(Report::refused(
+                        "unavailable",
+                        format!("The control failed here: {error}"),
+                    )));
+                }
             };
             // 3: a fresh lease, asked for now, that still lists the viewer.
             let renewed = tokio::select! {
@@ -187,6 +262,7 @@ impl Actor {
             let progress_commands = commands.clone();
             let (progress_key, progress_id) = (key.clone(), id.clone());
             let ran = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let switches = || Switches {
                     settings: shared.store.settings().unwrap_or(DEFAULT_SETTINGS).into(),
                     app: source.app().into(),
@@ -236,22 +312,24 @@ impl Actor {
             self.send_message(key, &SessionMessage::ControlResult(report.answer(&id)));
             return;
         }
-        if !self.admit_control(key, &id) {
+        let Some(permit) = self.admit_control(key, &id) else {
             return;
-        }
+        };
         let source = Arc::clone(&self.ctx.source);
         let commands = self.commands.clone();
         let (key, peer) = (key.clone(), key.0.clone());
         self.spawn(async move {
-            let report =
-                tokio::task::spawn_blocking(move || source.control_status(&peer, &request_id))
-                    .await
-                    .unwrap_or_else(|error| {
-                        Report::refused(
-                            "unavailable",
-                            format!("The request could not be read here: {error}"),
-                        )
-                    });
+            let report = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                source.control_status(&peer, &request_id)
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Report::refused(
+                    "unavailable",
+                    format!("The request could not be read here: {error}"),
+                )
+            });
             let _ = commands.send(Command::ControlDone {
                 key,
                 re: id,
@@ -264,6 +342,17 @@ impl Actor {
     /// still waits for it, and this machine shares. After a result, viewers
     /// that watch get the fresh snapshot.
     pub(super) fn on_control_done(&mut self, key: &Key, re: &str, event: ControlEvent) {
+        // `share` saved off but not acted on yet: the revocation comes
+        // first, so this answer is `not_shared` like every other one.
+        let sharing = self
+            .shared
+            .store
+            .settings()
+            .unwrap_or(DEFAULT_SETTINGS)
+            .share;
+        if !sharing && self.shelf.sharing {
+            self.reload_settings();
+        }
         let waiting = self
             .sessions
             .get(key)
@@ -281,13 +370,6 @@ impl Actor {
                 SessionMessage::ControlResult(report.answer(re))
             }
         };
-        // Turning `share` off dropped what was waiting; this checks again.
-        let sharing = self
-            .shared
-            .store
-            .settings()
-            .unwrap_or(DEFAULT_SETTINGS)
-            .share;
         if waiting && sharing && !self.send_message(key, &message) {
             warn!(peer = %key.0, "Could not send a control's answer");
         }
@@ -357,4 +439,31 @@ fn not_paired() -> Report {
         "not_paired",
         "This machine is no longer paired with that one.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bounds hold for as long as permits live, whoever holds them.
+    #[test]
+    fn permits_bound_each_peer_and_every_peer_together() {
+        let slots = Arc::new(ControlSlots::default());
+        let mine: Vec<_> = (0..CONTROLS_PER_PEER)
+            .map(|_| slots.admit("mA").unwrap())
+            .collect();
+        assert!(slots.admit("mA").is_none());
+        drop(mine);
+        assert!(
+            slots.admit("mA").is_some(),
+            "a dropped permit frees its slot"
+        );
+
+        let all: Vec<_> = (0..CONTROLS_PER_TARGET)
+            .map(|n| slots.admit(&format!("m{}", n % 8)).unwrap())
+            .collect();
+        assert!(slots.admit("mZ").is_none(), "every viewer together");
+        drop(all);
+        assert!(slots.admit("mZ").is_some());
+    }
 }
