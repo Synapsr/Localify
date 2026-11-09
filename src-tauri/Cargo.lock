@@ -2706,6 +2706,7 @@ dependencies = [
  "sha2",
  "simple-dns",
  "snow",
+ "socket2",
  "thiserror 2.0.18",
  "time",
  "tokio",

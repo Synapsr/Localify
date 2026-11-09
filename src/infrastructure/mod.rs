@@ -1,3 +1,4 @@
+pub mod app_bridge;
 pub mod binary_identity;
 pub mod certs;
 pub mod cloud;

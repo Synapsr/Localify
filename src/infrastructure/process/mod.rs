@@ -255,8 +255,13 @@ impl ProcessTable for NativeProcesses {
 /// Whether this process has root's privileges right now. Reads the kernel's answer:
 /// the `UID` environment variable can say anything.
 pub fn is_root() -> bool {
+    effective_uid() == 0
+}
+
+/// The user this process acts as: who owns what it creates.
+pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
-    unsafe { libc::geteuid() == 0 }
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

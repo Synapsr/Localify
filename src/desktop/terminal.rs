@@ -26,17 +26,24 @@ use crate::desktop::dto::{
     ServiceRunCommand,
 };
 use crate::desktop::pty::{self, PtyMaster, WindowSize};
-use crate::desktop::run_pty::{AppInstallation, RunPty, RunPtyEnd, RunPtyLaunch, run_environment};
+use crate::desktop::run_pty::{
+    AppInstallation, RunLaunch, RunPty, RunPtyEnd, RunPtyLaunch, run_environment,
+};
 use crate::desktop::shell_environment::{ShellEnvironment, ShellEnvironmentDto};
 use crate::domain::launch_profile::LaunchProfileName;
 use crate::infrastructure::process::{self, Identity, Signal};
 use crate::infrastructure::running_services::RunningServiceStore;
+use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::{KILL_WAIT, STOP_GRACE};
 
 /// How long a stop or a cancellation waits for the run's end to be
 /// finalized, after its processes were asked to stop: the grace period, the
 /// kill, and the reading of what they left in the PTY.
 const END_WAIT: Duration = Duration::from_secs(STOP_GRACE.as_secs() + KILL_WAIT.as_secs() + 10);
+/// The size a tab opened for a dispatched launch starts with, the panel's
+/// own; the panel resizes it once it shows it.
+const DISPATCHED_COLS: u16 = 120;
+const DISPATCHED_ROWS: u16 = 32;
 
 /// Where the manager's sessions report what happens to them.
 pub trait TerminalEvents: Send + Sync + 'static {
@@ -46,6 +53,9 @@ pub trait TerminalEvents: Send + Sync + 'static {
     fn exit(&self, payload: TerminalExitPayload);
     /// A session changed: a service tab's run ended and was finalized.
     fn session(&self, session: TerminalSessionDto);
+    /// A service tab opened for a launch handed to the app, not from the
+    /// window: the window adds it without taking focus.
+    fn opened(&self, opened: TerminalOpenedPayload);
     fn shell_environment(&self, status: ShellEnvironmentDto);
 }
 
@@ -193,6 +203,37 @@ pub enum TerminalSessionStatus {
     Exited,
 }
 
+/// A service tab the app opened for a dispatched launch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOpenedPayload {
+    pub session: TerminalSessionDto,
+    /// The tab it took over, if any.
+    pub replaced: Option<String>,
+    /// The paired machine that asked, shown on the tab for a few seconds.
+    pub started_by: Option<String>,
+}
+
+/// A launch handed to the app over its bridge: its id and expiry come from
+/// its dispatcher.
+#[derive(Debug, Clone)]
+pub struct DispatchedLaunch {
+    pub target: TerminalTargetRequest,
+    pub profile: Option<String>,
+    pub launch: RunLaunch,
+    /// The name of the paired machine that asked.
+    pub started_by: Option<String>,
+}
+
+/// Why a dispatched launch was not started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchFailure {
+    /// The ids name no service of this machine's configuration.
+    UnknownService(String),
+    /// Its run PTY could not be started.
+    Failed(String),
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutputPayload {
@@ -247,12 +288,34 @@ struct ResolvedTerminalTarget {
     command: Option<ServiceRunCommand>,
 }
 
-/// A service tab to start: what it runs, and the tab it takes over.
+/// A service tab to start: what it runs, the tab it takes over, and how its
+/// launch is fenced.
 struct RunRequest {
     resolved: ResolvedTerminalTarget,
     profile: Option<String>,
     size: WindowSize,
     replaces: Option<String>,
+    fence: Fence,
+}
+
+/// Where a run PTY's launch id and expiry come from.
+enum Fence {
+    /// The app's own launch, made right before its run PTY starts, with the
+    /// run it replaces once that run has stopped.
+    Own { replaces: Option<RunId> },
+    /// A launch handed to the app, as its dispatcher made it.
+    Dispatched(RunLaunch),
+}
+
+impl Fence {
+    fn launch(self) -> Result<RunLaunch, String> {
+        match self {
+            Self::Own { replaces } => {
+                RunLaunch::own(replaces).map_err(|error| format!("{error:#}"))
+            }
+            Self::Dispatched(launch) => Ok(launch),
+        }
+    }
 }
 
 impl TerminalManager {
@@ -346,6 +409,8 @@ impl TerminalManager {
             profile: request.profile,
             size: window_size(request.cols, request.rows)?,
             replaces: replaces.clone(),
+            // An ended tab is taken over; no run is replaced.
+            fence: Fence::Own { replaces: None },
         })?;
         Ok(TerminalLaunchServiceResultDto {
             session,
@@ -367,7 +432,7 @@ impl TerminalManager {
             return Err("Only a service tab can be restarted.".into());
         };
         let profile = run.profile.clone();
-        self.stop_run(&request.session_id)?;
+        let stopped = self.stop_run(&request.session_id)?;
         let resolved =
             resolve_terminal_target(api, &request_target(&session.target), profile.as_deref())?;
         let new_session = self.start_run(RunRequest {
@@ -375,6 +440,7 @@ impl TerminalManager {
             profile,
             size: window_size(request.cols, request.rows)?,
             replaces: Some(request.session_id.clone()),
+            fence: Fence::Own { replaces: stopped },
         })?;
         Ok(TerminalLaunchServiceResultDto {
             session: new_session,
@@ -386,14 +452,55 @@ impl TerminalManager {
     /// `localify stop` does, and returns once it has ended and its output is
     /// finalized. The tab then shows how it ended.
     pub fn stop_service(&self, request: TerminalSessionRequest) -> Result<(), String> {
-        self.stop_run(&request.session_id)
+        self.stop_run(&request.session_id).map(|_| ())
+    }
+
+    /// Starts a launch handed to the app over its bridge in a new run PTY,
+    /// fenced by the launch's own id and expiry, and returns once it is
+    /// spawned: `localify dev` decides, under the service's lock, whether it
+    /// starts. The tab of the run it replaces is taken over; otherwise it
+    /// opens a new one. The window adds it without taking focus.
+    pub fn launch_dispatched(
+        &self,
+        api: &DesktopApi,
+        request: DispatchedLaunch,
+    ) -> Result<TerminalSessionDto, DispatchFailure> {
+        if let Some(profile) = request.profile.as_deref() {
+            LaunchProfileName::new(profile)
+                .map_err(|error| DispatchFailure::Failed(error.to_string()))?;
+        }
+        let resolved = resolve_terminal_target(api, &request.target, request.profile.as_deref())
+            .map_err(DispatchFailure::UnknownService)?;
+        let replaced = request
+            .launch
+            .replaces
+            .as_ref()
+            .and_then(|run_id| self.find_run_session(run_id));
+        let session = self
+            .start_run(RunRequest {
+                resolved,
+                profile: request.profile,
+                size: window_size(DISPATCHED_COLS, DISPATCHED_ROWS)
+                    .map_err(DispatchFailure::Failed)?,
+                replaces: replaced.clone(),
+                fence: Fence::Dispatched(request.launch),
+            })
+            .map_err(DispatchFailure::Failed)?;
+        self.events.opened(TerminalOpenedPayload {
+            session: session.clone(),
+            replaced,
+            started_by: request.started_by,
+        });
+        Ok(session)
     }
 
     /// Ends a tab's run and waits for its end. A run with no record is a
     /// launch still preparing, such as resolving its profile's sources: it is
     /// cancelled through `localify dev`'s own identity, never left to start
-    /// unseen.
-    fn stop_run(&self, session_id: &str) -> Result<(), String> {
+    /// unseen. Returns the run it stopped once it had registered, which a
+    /// restart then replaces; `None` when it had ended already or never
+    /// registered.
+    fn stop_run(&self, session_id: &str) -> Result<Option<RunId>, String> {
         let run = match self
             .session_guard()
             .get(session_id)
@@ -406,7 +513,7 @@ impl TerminalManager {
             None => return Err(missing_session(session_id)),
         };
         if run.has_ended() {
-            return Ok(());
+            return Ok(None);
         }
         let record = self
             .store
@@ -414,16 +521,20 @@ impl TerminalManager {
             .map_err(|error| format!("{error:#}"))?
             .into_iter()
             .find(|record| record.run_id() == Some(run.run_id()));
-        match record {
+        let stopped = match record {
             Some(record) => {
                 self.store
                     .stop(&record)
                     .map_err(|error| format!("{error:#}"))?;
+                Some(run.run_id().clone())
             }
-            None => run.cancel().map_err(|error| format!("{error:#}"))?,
-        }
+            None => {
+                run.cancel().map_err(|error| format!("{error:#}"))?;
+                None
+            }
+        };
         if run.wait_ended(END_WAIT) {
-            Ok(())
+            Ok(stopped)
         } else {
             Err("The service stopped, but its tab has not finished reading its output.".into())
         }
@@ -435,6 +546,7 @@ impl TerminalManager {
             profile,
             size,
             replaces,
+            fence,
         } = request;
         let command = resolved
             .command
@@ -447,6 +559,8 @@ impl TerminalManager {
             &resolved.working_directory,
             &self.installation,
         );
+        // After the shell's read, so it never counts against the expiry.
+        let launch = fence.launch()?;
         let id = self.new_id();
         let (output_events, output_id) = (Arc::clone(&self.events), id.clone());
         let (end_events, end_sessions, end_id) = (
@@ -465,6 +579,7 @@ impl TerminalManager {
                 working_directory: resolved.working_directory.clone(),
                 environment,
                 size,
+                launch,
             },
             move |bytes| {
                 output_events.output(TerminalOutputPayload {
@@ -638,6 +753,20 @@ impl TerminalManager {
         self.session_guard()
             .get(session_id)
             .map(|session| session.dto.clone())
+    }
+
+    /// The service tab that shows run `run_id`.
+    fn find_run_session(&self, run_id: &RunId) -> Option<String> {
+        self.session_guard()
+            .values()
+            .find(|session| {
+                session
+                    .dto
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.run_id == run_id.as_str())
+            })
+            .map(|session| session.dto.id.clone())
     }
 
     /// The service tab of this service: the running one, else an ended one.

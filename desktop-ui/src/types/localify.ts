@@ -317,6 +317,15 @@ export interface TerminalLaunchServiceResultDto {
   replaced: string | null;
 }
 
+/** A service tab the app opened for a launch handed to it over its bridge. */
+export interface TerminalOpenedPayload {
+  session: TerminalSessionDto;
+  /** The tab it took over. */
+  replaced: string | null;
+  /** The paired machine that asked, shown on the tab for a few seconds. */
+  startedBy: string | null;
+}
+
 export type ShellEnvironmentState = "resolving" | "ready" | "failed";
 
 export interface ShellEnvironmentDto {

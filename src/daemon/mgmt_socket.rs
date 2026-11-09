@@ -735,7 +735,11 @@ mod tests {
         );
         let data_dir = dir.path().join("data");
         let tunnel = PublicTunnel::new(1);
-        let source = DaemonSource::new(Arc::clone(&inventory), tunnel.clone());
+        let source = DaemonSource::new(
+            Arc::clone(&inventory),
+            tunnel.clone(),
+            crate::daemon::remote::local::AppSeen::default(),
+        );
         let test_ports = DaemonPorts {
             http: 80,
             https: 443,

@@ -1,9 +1,9 @@
 //! Services that run without the caller's terminal, and the commands that act
 //! on any service `localify dev` started: `status`, `logs`, `stop`, `restart`.
 //! `dev --in-app` starts a service in the desktop app's terminal, as its launch
-//! button does; `dev --detach` starts one in the background, where its output
-//! goes to the run's stream. `logs` reads either, so a person in the app and an
-//! agent read the same lines.
+//! button does, through the app bridge; `dev --detach` starts one in the
+//! background, where its output goes to the run's stream. `logs` reads either,
+//! so a person in the app and an agent read the same lines.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -27,19 +27,23 @@ use super::services::{
     older_version_running, resolve_launch_target, resolve_service_key,
 };
 use crate::branding::BRANDING;
+use crate::infrastructure::app_bridge::{self, Handoff, LaunchRequest, ServiceRef};
 use crate::infrastructure::launch_sessions::unix_now;
 use crate::infrastructure::paths::LocalifyPaths;
+use crate::infrastructure::process::NativeProcesses;
 use crate::infrastructure::running_services::{
     self, Admission, RunState, RunningService, RunningServiceStore, SERVICE_ORIGIN_ENV, ServiceKey,
     ServiceOrigin, service_selector,
 };
 use crate::infrastructure::runs::RunId;
-use crate::infrastructure::runs::launches::dispatch_expiry;
+use crate::infrastructure::runs::launches::{ExitReason, LaunchReport, dispatch_expiry, reconcile};
 use crate::infrastructure::runs::output::{self, StreamLine, StreamRead};
 
 /// A first `next dev` can take this long before it listens.
 const START_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long a desktop app that was not running has to open its bridge.
+const APP_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 const FAILURE_OUTPUT_LINES: usize = 40;
 /// How much of a run's stream one `logs` call reads at most.
 const LOGS_WINDOW: u64 = 1024 * 1024;
@@ -320,13 +324,17 @@ fn wait_for_child(
 }
 
 /// Asks the desktop app to start the service in its terminal, as its launch
-/// button does, and returns once the service listens.
+/// button does, through its bridge, and returns once the service listens. An
+/// app that is not running is opened first, through its deep link. The
+/// launch is fenced: should the app not confirm it, nothing starts under its
+/// id once it expired, and nothing else is started in its place.
 pub fn start_in_app(
     target: RunTarget<'_>,
     profile: Option<&str>,
     replace: Replace,
     config_path: &Path,
     ctx: &AppContext,
+    data_dir: &Path,
 ) -> Result<()> {
     let launch = resolve_launch_target(target, config_path, ctx)?;
     let Some(environment) = launch.key.environment.clone() else {
@@ -337,40 +345,9 @@ pub fn start_in_app(
         );
     };
     let store = RunningServiceStore::new_default()?;
-    // Admitted as the app's executor will be: what a dead executor left is
-    // ended here, so its port is free. The lock is the app's to take.
-    if let Admission::Running(running) = store.lock(&launch.key)? {
-        let Some(run) = running.as_deref() else {
-            println!(
-                "'{}' is already running: another launch is starting it, not started again.",
-                launch.key.service_id
-            );
-            return Ok(());
-        };
-        // A run of an older version is never stopped here; nor is one without
-        // `--replace` or a yes, which an agent sees as already running.
-        let replaceable = run.run_id().is_some() && run.executor_runs();
-        if replaceable && replace.stops(run)? {
-            eprintln!(
-                "Stopping '{}' (PID {}) to start it again...",
-                run.key.service_id, run.pid
-            );
-            store.stop(run)?;
-        } else if replace == Replace::Ask && replaceable {
-            bail!("{}", already_running(run));
-        } else if replace != Replace::No && run.run_id().is_none() {
-            bail!("{}", older_version_running(run));
-        } else {
-            println!(
-                "'{}' is already running (PID {}, {}), not started again.\n  url: {}",
-                run.key.service_id,
-                run.pid,
-                describe_origin(run.origin),
-                run.url
-            );
-            return Ok(());
-        }
-    }
+    let Some(replaces) = stop_before_app_launch(&store, &launch.key, replace)? else {
+        return Ok(());
+    };
     if listens(launch.port) {
         println!(
             "Something already answers on port {} for '{}', not started again.\n  url: {}",
@@ -379,13 +356,48 @@ pub fn start_in_app(
         return Ok(());
     }
 
+    if !app_bridge::available(data_dir) {
+        return start_through_deep_link(&store, &launch.key, &environment, profile);
+    }
+    let socket = app_bridge::socket_path(data_dir);
+    open_app(&socket)?;
+    // Once the run it replaces has stopped, so that stop never counts
+    // against the launch's expiry.
+    let request = LaunchRequest {
+        launch_id: RunId::generate()?,
+        expires_at: dispatch_expiry(),
+        service: ServiceRef {
+            project_id: launch.key.project_id.clone(),
+            environment: Some(environment),
+            service_id: launch.key.service_id.clone(),
+        },
+        profile: profile.map(str::to_string),
+        expect_rev: None,
+        replaces,
+        replaces_legacy: None,
+        requested_by: None,
+    };
+    hand_to_app(&store, &socket, &request)?;
+    wait_for_launch(&store, &launch.key, &request.launch_id, request.expires_at)
+}
+
+/// Where the app can have no bridge, as on a data dir of root's such as
+/// `/etc/localify`: asks it to start the service through its deep link, as
+/// before the bridge, and waits for a run newer than the ask. That launch has
+/// no id of this command's, so a run it stopped is not marked replaced.
+fn start_through_deep_link(
+    store: &RunningServiceStore,
+    key: &ServiceKey,
+    environment: &str,
+    profile: Option<&str>,
+) -> Result<()> {
     let since = unix_now();
-    open_url(&launch_service_link(&launch.key, &environment, profile))?;
+    open_url(&launch_service_link(key, environment, profile))?;
     println!(
         "Asked the {} app to start '{}' in its terminal.",
-        BRANDING.app_name, launch.key.service_id
+        BRANDING.app_name, key.service_id
     );
-    wait_for_app_run(&store, &launch.key, since)
+    wait_for_app_run(store, key, since)
 }
 
 /// `localify://action/launch-service?project=…&env=…&service=…[&profile=…]`
@@ -412,6 +424,106 @@ fn percent_encode(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+/// Hands the launch to the app once. When the app does not confirm it, waits
+/// until the launch expired and its record is decided: it may have started,
+/// and nothing else is started in its place.
+fn hand_to_app(store: &RunningServiceStore, socket: &Path, request: &LaunchRequest) -> Result<()> {
+    let service = &request.service.service_id;
+    match app_bridge::launch(socket, request) {
+        Handoff::Accepted => println!(
+            "Asked the {} app to start '{service}' in its terminal.",
+            BRANDING.app_name
+        ),
+        Handoff::Absent => bail!(
+            "The {} app closed before '{service}' could be handed to it. Nothing was started.",
+            BRANDING.app_name
+        ),
+        Handoff::Refused(refusal) => bail!(
+            "The {} app did not start '{service}': {}",
+            BRANDING.app_name,
+            refusal.message
+        ),
+        Handoff::Unanswered(reason) => {
+            eprintln!(
+                "The {} app did not confirm the start ({reason}). Checking what it did...",
+                BRANDING.app_name
+            );
+            app_bridge::settle_unanswered(store, &request.launch_id, request.expires_at)?;
+        }
+    }
+    Ok(())
+}
+
+/// Takes the service over for a launch in the app: a run that is going is
+/// stopped when `replace` says so, and returned, so the app's launch records
+/// that it replaced it. The lock is the app's executor's to take, so this
+/// only looks, as it will: what a dead executor left is ended here, so its
+/// port is free. `None` when the service is left running, which says so.
+fn stop_before_app_launch(
+    store: &RunningServiceStore,
+    key: &ServiceKey,
+    replace: Replace,
+) -> Result<Option<Option<RunId>>> {
+    let Admission::Running(running) = store.lock(key)? else {
+        return Ok(Some(None));
+    };
+    let Some(run) = running.as_deref() else {
+        println!(
+            "'{}' is already running: another launch is starting it, not started again.",
+            key.service_id
+        );
+        return Ok(None);
+    };
+    // A run of an older version is never stopped here; nor is one without
+    // `--replace` or a yes, which an agent sees as already running.
+    let replaceable = run.run_id().is_some() && run.executor_runs();
+    if replaceable && replace.stops(run)? {
+        eprintln!(
+            "Stopping '{}' (PID {}) to start it again...",
+            run.key.service_id, run.pid
+        );
+        store.stop(run)?;
+        return Ok(Some(run.run_id().cloned()));
+    }
+    if replace == Replace::Ask && replaceable {
+        bail!("{}", already_running(run));
+    }
+    if replace != Replace::No && run.run_id().is_none() {
+        bail!("{}", older_version_running(run));
+    }
+    println!(
+        "'{}' is already running (PID {}, {}), not started again.\n  url: {}",
+        run.key.service_id,
+        run.pid,
+        describe_origin(run.origin),
+        run.url
+    );
+    Ok(None)
+}
+
+/// Opens the app through its deep link when its bridge does not answer, and
+/// waits until it does.
+fn open_app(socket: &Path) -> Result<()> {
+    if app_bridge::hello(socket).is_some() {
+        return Ok(());
+    }
+    open_url("localify://open/projects")?;
+    println!("Opening the {} app...", BRANDING.app_name);
+    let deadline = Instant::now() + APP_OPEN_TIMEOUT;
+    while app_bridge::hello(socket).is_none() {
+        if Instant::now() >= deadline {
+            bail!(
+                "The {} app did not open within {} seconds. Open it, then run this again, or start the service without it: {} dev --detach",
+                BRANDING.app_name,
+                APP_OPEN_TIMEOUT.as_secs(),
+                BRANDING.cli_command()
+            );
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    Ok(())
 }
 
 fn open_url(url: &str) -> Result<()> {
@@ -470,6 +582,62 @@ fn wait_for_app_run(store: &RunningServiceStore, key: &ServiceKey, since: u64) -
     }
 }
 
+/// Waits for the launch handed to the app, from its launch record: until its
+/// run listens, or it ended, was refused, or expired before the app's
+/// `localify dev` admitted it.
+fn wait_for_launch(
+    store: &RunningServiceStore,
+    key: &ServiceKey,
+    launch_id: &RunId,
+    expires_at: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let run = store
+            .get(key)?
+            .filter(|run| run.run_id() == Some(launch_id));
+        match reconcile(store, &NativeProcesses, launch_id, Some(expires_at))? {
+            LaunchReport::Unknown | LaunchReport::Starting => {}
+            LaunchReport::Running => {
+                if let Some(run) = run.as_ref().filter(|run| listens(run.port)) {
+                    print_started(run, "Started");
+                    return Ok(());
+                }
+            }
+            LaunchReport::Exited { code, reason, .. } => {
+                let how = reason.map_or_else(|| describe_exit_code(code), describe_exit_reason);
+                let output = run.map(|run| last_lines(store, &run)).unwrap_or_default();
+                bail!(
+                    "'{}' stopped while starting ({how}). Its last output:\n\n{output}",
+                    key.service_id
+                );
+            }
+            LaunchReport::Replaced { by } => bail!(
+                "'{}' was restarted by another launch (run {by}) while it started.",
+                key.service_id
+            ),
+            LaunchReport::Refused { message, .. } => bail!("{message}"),
+            LaunchReport::Expired => bail!(
+                "The {} app did not start '{}' before its launch expired: it may have closed. Nothing was started.",
+                BRANDING.app_name,
+                key.service_id
+            ),
+        }
+        if Instant::now() >= deadline {
+            match run {
+                Some(run) => print_started(&run, "Still starting"),
+                None => println!(
+                    "The app has not started '{}' yet. Look at its terminal panel, or check with: {} services status",
+                    key.service_id,
+                    BRANDING.cli_command()
+                ),
+            }
+            return Ok(());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 fn listens(port: u16) -> bool {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
@@ -494,6 +662,18 @@ fn describe_origin(origin: ServiceOrigin) -> &'static str {
         ServiceOrigin::Background => "in the background",
         ServiceOrigin::Terminal => "in a terminal",
     }
+}
+
+fn describe_exit_reason(reason: ExitReason) -> String {
+    let reason = match reason {
+        ExitReason::InterruptedBeforeRegistration => "localify dev died before the service started",
+        ExitReason::RegistrationFailed => "its run could not be recorded",
+        ExitReason::NotStarted => "it failed before the service started",
+        ExitReason::Stopped => "stopped",
+        ExitReason::MaxDuration => "its profile's max_duration elapsed",
+        ExitReason::ExecutorLost => "localify dev died while it ran",
+    };
+    reason.to_string()
 }
 
 fn describe_exit_code(code: Option<i32>) -> String {

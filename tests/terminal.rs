@@ -16,11 +16,14 @@ use localify::desktop::run_pty::AppInstallation;
 use localify::desktop::shell_environment::ShellEnvironmentDto;
 use localify::desktop::terminal::{
     TerminalEvents, TerminalExitPayload, TerminalLaunchServiceRequest, TerminalManager,
-    TerminalOutputPayload, TerminalSessionDto, TerminalSessionRequest, TerminalSessionStatus,
-    TerminalTargetKind, TerminalTargetRequest,
+    TerminalOpenedPayload, TerminalOutputPayload, TerminalRestartServiceRequest,
+    TerminalSessionDto, TerminalSessionRequest, TerminalSessionStatus, TerminalTargetKind,
+    TerminalTargetRequest,
 };
-use localify::infrastructure::process;
+use localify::infrastructure::process::{self, NativeProcesses};
 use localify::infrastructure::running_services::RunningServiceStore;
+use localify::infrastructure::runs::RunId;
+use localify::infrastructure::runs::launches::{LaunchReport, reconcile};
 
 /// What the manager told the window.
 #[derive(Default)]
@@ -39,6 +42,8 @@ impl TerminalEvents for Recorded {
     fn session(&self, session: TerminalSessionDto) {
         self.sessions.lock().unwrap().push(session);
     }
+
+    fn opened(&self, _opened: TerminalOpenedPayload) {}
 
     fn shell_environment(&self, _status: ShellEnvironmentDto) {}
 }
@@ -339,4 +344,53 @@ fn launching_a_running_service_again_returns_its_tab() {
         .unwrap();
     let tab = wait_exited(&manager, &first.session.id);
     assert!(tab.run.unwrap().ended.unwrap().stopped);
+}
+
+/// The run a tab shows, once `localify dev` registered it.
+fn wait_registered(sandbox: &Sandbox, session: &TerminalSessionDto) -> RunId {
+    let run_id = RunId::parse(&session.run.as_ref().unwrap().run_id).unwrap();
+    wait_until(Duration::from_secs(30), || {
+        sandbox
+            .store()
+            .list()
+            .unwrap()
+            .iter()
+            .any(|record| record.run_id() == Some(&run_id))
+            .then_some(())
+    })
+    .unwrap_or_else(|| panic!("run {run_id} never registered"));
+    run_id
+}
+
+#[test]
+fn restarting_a_tab_records_that_its_new_run_replaced_the_old_one() {
+    let sandbox = Sandbox::new("echo up; sleep 300");
+    let (manager, _events, api) = sandbox.manager(Path::new(env!("CARGO_BIN_EXE_localify")));
+    let first = manager
+        .launch_service(&api, sandbox.launch(&api, None))
+        .unwrap();
+    let first_run = wait_registered(&sandbox, &first.session);
+
+    let restarted = manager
+        .restart_service(
+            &api,
+            TerminalRestartServiceRequest {
+                session_id: first.session.id.clone(),
+                cols: 100,
+                rows: 30,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(restarted.replaced, Some(first.session.id));
+    let second_run = wait_registered(&sandbox, &restarted.session);
+    assert_eq!(
+        reconcile(&sandbox.store(), &NativeProcesses, &first_run, None).unwrap(),
+        LaunchReport::Replaced { by: second_run }
+    );
+    manager
+        .stop_service(TerminalSessionRequest {
+            session_id: restarted.session.id,
+        })
+        .unwrap();
 }

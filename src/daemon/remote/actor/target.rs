@@ -19,8 +19,8 @@ use crate::application::inventory::{Snapshot, pages};
 use crate::daemon::remote::local::RunLookup;
 use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
 use crate::infrastructure::remote::wire::{
-    AppPresence, Have, MAX_MESSAGE_BYTES, MAX_READ_BYTES, MachineSummary, OutputData, OutputLine,
-    Purpose, Role, Rotated, SessionMessage,
+    Have, MAX_MESSAGE_BYTES, MAX_READ_BYTES, MachineSummary, OutputData, OutputLine, Purpose, Role,
+    Rotated, SessionMessage,
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::output;
@@ -501,9 +501,21 @@ impl Actor {
             return self.end_served("not_shared", NOT_SHARED);
         }
         let summary = self.summary();
+        // The revision moves with the summary as much as with the items.
+        let numbered = result.map(|snapshot| {
+            let current = self
+                .shared
+                .sent_revisions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .number(&snapshot, &summary);
+            (snapshot, current)
+        });
         for key in self.served_sessions() {
-            match &result {
-                Ok(snapshot) => self.answer_snapshot(&key, snapshot, &summary),
+            match &numbered {
+                Ok((snapshot, current)) => {
+                    self.answer_snapshot(&key, snapshot, &summary, current);
+                }
                 Err(message) => {
                     let gets: Vec<String> = self
                         .served(&key)
@@ -520,39 +532,43 @@ impl Actor {
         }
     }
 
-    fn answer_snapshot(&mut self, key: &Key, snapshot: &Snapshot, summary: &MachineSummary) {
-        let current = Have {
-            epoch: snapshot.epoch.clone(),
-            rev: snapshot.rev,
-        };
+    /// Answers `key`'s gets and watch with `snapshot`, which goes out with
+    /// `summary` as revision `current`.
+    fn answer_snapshot(
+        &mut self,
+        key: &Key,
+        snapshot: &Snapshot,
+        summary: &MachineSummary,
+        current: &Have,
+    ) {
         let Some(served) = self.served(key) else {
             return;
         };
         let gets = std::mem::take(&mut served.gets);
         for (id, have) in gets {
-            if snapshot.is_held_by(have.as_ref()) {
+            if have.as_ref() == Some(current) {
                 if let Some(served) = self.served(key) {
                     served.done(&id);
                 }
-                self.answer(key, &id, unchanged(&id, &current));
+                self.answer(key, &id, unchanged(&id, current));
             } else {
-                self.queue_pages(key, &id, snapshot, summary, true);
+                self.queue_pages(key, &id, (snapshot, current), summary, true);
             }
         }
         let Some(watch) = self.served(key).and_then(|served| served.watch.as_mut()) else {
             return;
         };
         let id = watch.id.clone();
-        if snapshot.is_held_by(watch.have.as_ref()) {
+        if watch.have.as_ref() == Some(current) {
             let first = !watch.answered;
             watch.answered = true;
             if first {
-                self.answer(key, &id, unchanged(&id, &current));
+                self.answer(key, &id, unchanged(&id, current));
             }
-        } else if self.queue_pages(key, &id, snapshot, summary, false)
+        } else if self.queue_pages(key, &id, (snapshot, current), summary, false)
             && let Some(watch) = self.served(key).and_then(|served| served.watch.as_mut())
         {
-            watch.have = Some(current);
+            watch.have = Some(current.clone());
             watch.answered = true;
         }
     }
@@ -565,7 +581,7 @@ impl Actor {
         &mut self,
         key: &Key,
         re: &str,
-        snapshot: &Snapshot,
+        snapshot: (&Snapshot, &Have),
         summary: &MachineSummary,
         get: bool,
     ) -> bool {
@@ -616,8 +632,7 @@ impl Actor {
             }
             .to_string(),
             settings: self.shared.store.settings().unwrap_or(DEFAULT_SETTINGS),
-            // The app bridge comes with remote controls.
-            app: AppPresence::Absent,
+            app: self.ctx.source.app(),
         }
     }
 
@@ -891,10 +906,11 @@ fn gone() -> (&'static str, String) {
     )
 }
 
-/// The snapshot as pages answering `re`, each one within 32 KiB.
+/// The snapshot as pages of revision `current` answering `re`, each one
+/// within 32 KiB.
 fn pages_of(
     re: &str,
-    snapshot: &Snapshot,
+    (snapshot, current): (&Snapshot, &Have),
     summary: &MachineSummary,
 ) -> Result<Vec<SessionMessage>, String> {
     let split = pages(&snapshot.items).map_err(|error| format!("{error:#}"))?;
@@ -910,8 +926,8 @@ fn pages_of(
                 .map_err(|error| error.to_string())?;
             Ok(SessionMessage::InventoryPage {
                 re: re.to_string(),
-                epoch: snapshot.epoch.clone(),
-                rev: snapshot.rev,
+                epoch: current.epoch.clone(),
+                rev: current.rev,
                 page: u32::try_from(index + 1).unwrap_or(u32::MAX),
                 pages: count,
                 machine: summary.clone(),

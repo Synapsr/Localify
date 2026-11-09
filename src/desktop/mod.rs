@@ -1,4 +1,5 @@
 mod api;
+pub mod app_bridge;
 mod browser;
 pub mod dto;
 mod editor;

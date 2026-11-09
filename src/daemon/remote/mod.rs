@@ -309,6 +309,8 @@ struct Shared {
     /// The access requests of each peer and the dialogs shown, kept by the
     /// link so a new connection does not reset the limits.
     access_history: Mutex<access::History>,
+    /// The revisions inventories go out as, across relay connections.
+    sent_revisions: Mutex<local::SentRevisions>,
     /// The pairing attempts of the last hour on this machine as a target.
     /// The link keeps them, so a new connection does not reset the limit.
     pair_attempts: Mutex<VecDeque<Instant>>,
@@ -496,6 +498,7 @@ impl RemoteLink {
                 subscribers: AtomicUsize::new(0),
                 access_subscribers: AtomicUsize::new(0),
                 access_history: Mutex::new(access::History::default()),
+                sent_revisions: Mutex::new(local::SentRevisions::default()),
                 pair_attempts: Mutex::new(VecDeque::new()),
                 refresh: Notify::new(),
                 #[cfg(test)]

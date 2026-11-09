@@ -71,6 +71,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 humantime = "2.1"
 # geteuid, and free for launch_activate_socket's result
 libc = "0.2"
+# A Unix socket connect bounded by a timeout, for the app bridge's client:
+# std has none. Already in the tree through tokio and hyper-util.
+socket2 = "0.6"
 dialoguer = { version = "0.12", default-features = false }
 
 # Tracing

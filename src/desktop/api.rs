@@ -2944,6 +2944,12 @@ impl DesktopApi {
         Ok((config, paths))
     }
 
+    /// The data dir of this app's configuration, where the daemon and the
+    /// CLI find the app bridge's socket.
+    pub fn data_dir(&self) -> Result<PathBuf> {
+        Ok(self.load_config_and_paths()?.1.data_dir)
+    }
+
     fn config_store(&self) -> ConfigStore {
         ConfigStore::new(self.config_path.clone())
     }
