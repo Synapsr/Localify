@@ -11,7 +11,6 @@ import type {
   AppConfigDto,
   AutostartStatusDto,
   DeepLinkPayloadDto,
-  AppUpdateCheckDto,
   BootstrapDto,
   CheckPublicUrlSlugRequest,
   CliAccessDto,
@@ -109,6 +108,8 @@ import type {
   ShellEnvironmentDto,
   TerminalWriteRequest,
   UpdateAutostartRequest,
+  UpdateSettingsRequest,
+  UpdateStatusDto,
   UnregisterDomainResultDto,
   UpdateDomainRequest,
   UpdateLauncherPreferencesRequest,
@@ -116,7 +117,10 @@ import type {
 } from "../types/localify";
 
 import { addProjectServiceRequestSchema } from "./validators/validator.add-project-service";
-import { updateAutostartRequestSchema } from "./validators/validator.autostart";
+import {
+  updateAutostartRequestSchema,
+  updateSettingsRequestSchema,
+} from "./validators/validator.autostart";
 import {
   checkPublicUrlSlugRequestSchema,
   createPublicUrlRequestSchema,
@@ -220,8 +224,11 @@ export interface DesktopClient {
   getBootstrap(): Promise<BootstrapDto>;
   getAutostartStatus(): Promise<AutostartStatusDto>;
   setAutostartEnabled(request: UpdateAutostartRequest): Promise<AutostartStatusDto>;
-  checkAppUpdate(): Promise<AppUpdateCheckDto>;
-  installAppUpdate(): Promise<void>;
+  getUpdateStatus(): Promise<UpdateStatusDto>;
+  setAutomaticUpdates(request: UpdateSettingsRequest): Promise<UpdateStatusDto>;
+  checkForUpdates(): Promise<UpdateStatusDto>;
+  /** Hands the install off and quits; rejects, and stays open, when it can't. */
+  restartToUpdate(): Promise<void>;
   readInstallAttributionClipboard(): Promise<string | null>;
   consumePendingDeepLink(): Promise<DeepLinkPayloadDto | null>;
   getConfig(): Promise<AppConfigDto>;
@@ -358,8 +365,13 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("set_autostart_enabled", {
         request: updateAutostartRequestSchema.parse(request),
       }),
-    checkAppUpdate: () => tauriInvoke("check_app_update"),
-    installAppUpdate: () => tauriInvoke("install_app_update"),
+    getUpdateStatus: () => tauriInvoke("get_update_status"),
+    setAutomaticUpdates: (request) =>
+      tauriInvoke("set_automatic_updates", {
+        request: updateSettingsRequestSchema.parse(request),
+      }),
+    checkForUpdates: () => tauriInvoke("check_for_updates"),
+    restartToUpdate: () => tauriInvoke("restart_to_update"),
     readInstallAttributionClipboard: () => tauriInvoke("read_install_attribution_clipboard"),
     consumePendingDeepLink: () => tauriInvoke("consume_pending_deep_link"),
     getConfig: () => tauriInvoke("get_config"),

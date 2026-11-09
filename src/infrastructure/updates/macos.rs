@@ -65,12 +65,21 @@ impl InstallTarget {
     /// The bundle holding this very binary, when it is the production app
     /// at a supported place, owned and replaceable by this account.
     pub fn current() -> Result<Self, TargetError> {
+        let exe = std::env::current_exe()
+            .map_err(|error| TargetError::Unreadable("this binary".into(), error.to_string()))?;
+        Self::of(&exe)
+    }
+
+    /// The bundle holding the `localify` at `cli`, on the same terms as
+    /// [`Self::current`]: the open app asks it of its own bundle's CLI,
+    /// which is what installs when it hands off.
+    pub fn of(cli: &Path) -> Result<Self, TargetError> {
         if BRANDING.is_dev_profile() || cfg!(debug_assertions) {
             return Err(TargetError::DevBuild);
         }
-        let exe = std::env::current_exe()
-            .and_then(std::fs::canonicalize)
-            .map_err(|error| TargetError::Unreadable("this binary".into(), error.to_string()))?;
+        let exe = std::fs::canonicalize(cli).map_err(|error| {
+            TargetError::Unreadable(cli.display().to_string(), error.to_string())
+        })?;
         let home = user_home_dir().unwrap_or_default();
         let allowed = [
             PathBuf::from("/Applications/Localify.app"),

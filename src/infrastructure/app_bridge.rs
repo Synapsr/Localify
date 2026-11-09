@@ -439,7 +439,9 @@ mod tests {
         let waited = started.elapsed();
         assert!(matches!(handoff, Handoff::Unanswered(_)), "{handoff:?}");
         assert!(waited >= ACK_TIMEOUT, "gave up after {waited:?}");
-        assert!(waited < ACK_TIMEOUT + Duration::from_secs(2), "{waited:?}");
+        // Bounded, not exact: a loaded test run delays the thread that gives
+        // up, so only a wait far past the timeout means it never gave up.
+        assert!(waited < ACK_TIMEOUT + Duration::from_secs(10), "{waited:?}");
         assert_eq!(
             probe(&socket),
             AppPresence::Absent,

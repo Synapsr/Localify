@@ -6,6 +6,8 @@
 // the macOS installer, but build everywhere so their tests run on Linux too.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+#[allow(dead_code)] // Used by the desktop through the library crate.
+pub mod app_lock;
 pub mod extract;
 #[cfg(target_os = "macos")]
 pub mod install;
@@ -101,13 +103,6 @@ impl UpdatePaths {
     }
 }
 
-/// The lock the app takes as its first step and holds for its lifetime,
-/// so the installer never replaces it while it runs.
-#[allow(dead_code)] // Used by the desktop through the library crate.
-pub fn app_lock_path() -> Option<PathBuf> {
-    UpdatePaths::for_user().map(|paths| paths.app_lock())
-}
-
 /// Appends a line to `updater.log`. Logging never fails an update.
 pub fn log(paths: &UpdatePaths, message: &str) {
     let _ = std::fs::create_dir_all(paths.dir());
@@ -137,7 +132,8 @@ pub(crate) fn random_u64() -> u64 {
     hasher.finish()
 }
 
-/// `[updates] automatic`. A config that can't be read counts as off.
+/// `[updates] automatic`. A config that is missing or can't be read counts
+/// as off.
 pub fn automatic(config_path: &Path) -> bool {
     ConfigStore::new(config_path.to_path_buf())
         .load()
@@ -172,6 +168,13 @@ pub struct UpdateStatus {
     /// check failed.
     pub reason: Option<String>,
     pub automatic: bool,
+    /// When the last check ran, in Unix seconds.
+    #[serde(rename = "lastCheckAt", default)]
+    pub last_check_at: Option<u64>,
+    /// Whether this copy may be replaced at all. When it may not, `reason`
+    /// says why, and only a manual install updates it.
+    #[serde(rename = "canInstall", default)]
+    pub can_install: bool,
 }
 
 /// `state` in [`UpdateStatus`].
@@ -210,6 +213,7 @@ pub fn describe(
         .as_ref()
         .and_then(|release| parse_version(&release.version))
         .filter(|offered| rules::offer_is_newer(offered, installed, state.highest().as_ref()));
+    let can_install = blocker.is_none();
     let stranded = || {
         state
             .stranded_previous
@@ -237,6 +241,8 @@ pub fn describe(
         state: phase,
         reason,
         automatic,
+        last_check_at: state.last_check_at,
+        can_install,
     }
 }
 
@@ -253,6 +259,8 @@ pub fn describe_unreadable(
         state: UpdatePhase::Failed,
         reason: Some(format!("{error:#}")),
         automatic,
+        last_check_at: None,
+        can_install: false,
     }
 }
 
@@ -434,6 +442,21 @@ fn blocker() -> Option<String> {
     Some(LINUX_REASON.to_string())
 }
 
+/// Why the bundle whose `localify` is `cli` can't be replaced, if it
+/// can't: [`blocker`]'s rules, for another copy than this binary's.
+#[allow(dead_code)] // Used by the desktop through the library crate.
+pub fn blocker_of(cli: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return macos::InstallTarget::of(cli)
+        .err()
+        .map(|error| error.to_string());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cli;
+        Some(LINUX_REASON.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::release::Release;
@@ -455,6 +478,15 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_or_unreadable_config_reads_automatic_updates_off() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!automatic(&dir.path().join("config.toml")));
+        let broken = dir.path().join("broken.toml");
+        std::fs::write(&broken, "[updates\nautomatic = true\n").unwrap();
+        assert!(!automatic(&broken));
+    }
+
+    #[test]
     fn a_newer_release_is_available_and_says_why_it_waits() {
         let status = describe(&v("1.6.0"), &checked("1.7.0"), false, None, Activity::Idle);
         assert_eq!(status.state, UpdatePhase::Available);
@@ -472,6 +504,8 @@ mod tests {
             Activity::Idle,
         );
         assert_eq!(linux.reason.as_deref(), Some(LINUX_REASON));
+        assert!(on.can_install);
+        assert!(!linux.can_install);
     }
 
     #[test]
@@ -510,6 +544,7 @@ mod tests {
         let status = updater.status();
         assert_eq!(status.state, UpdatePhase::Failed);
         assert_eq!(status.available, None);
+        assert!(!status.can_install);
         let reason = status.reason.unwrap();
         assert!(
             reason.contains("updates.json") && reason.contains("delete it"),
@@ -544,6 +579,8 @@ mod tests {
                 "state": "available",
                 "reason": null,
                 "automatic": true,
+                "lastCheckAt": 1,
+                "canInstall": true,
             })
         );
     }

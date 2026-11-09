@@ -5,3 +5,7 @@ export const updateAutostartRequestSchema = z.object({
 });
 
 export type UpdateAutostartInput = z.infer<typeof updateAutostartRequestSchema>;
+
+export const updateSettingsRequestSchema = z.object({
+  automatic: z.boolean(),
+});

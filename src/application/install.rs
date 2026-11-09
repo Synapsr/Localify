@@ -48,8 +48,10 @@ impl<'a> Install<'a> {
         let lan_ip = self.network.lan_ip().unwrap_or(Ipv4Addr::LOCALHOST);
         let dns_port = self.dns_port;
 
-        self.create_directories(&mut steps)?;
+        // Before anything is created: whether this is a new install, which
+        // decides automatic updates, is read from what is already there.
         self.ensure_config_file(&mut steps)?;
+        self.create_directories(&mut steps)?;
         self.init_root_ca(&mut steps);
         steps.extend(self.system.apply_system_changes()?);
         self.report_ca_trust(&mut steps);

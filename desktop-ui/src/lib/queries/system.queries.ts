@@ -16,6 +16,8 @@ import type {
   SettingsImportResultDto,
   StepDto,
   UpdateAutostartRequest,
+  UpdateSettingsRequest,
+  UpdateStatusDto,
   UpdateLauncherPreferencesRequest,
   UninstallPreviewDto,
 } from "../../types/localify";
@@ -32,7 +34,11 @@ const systemQueryKeys = {
   agentMcpStatus: () => [...systemQueryKeys.all(), "agent-mcp-status"] as const,
   autostartStatus: () => [...systemQueryKeys.all(), "autostart-status"] as const,
   uninstallPreview: () => [...systemQueryKeys.all(), "uninstall-preview"] as const,
+  updateStatus: () => [...systemQueryKeys.all(), "update-status"] as const,
 } as const;
+
+/** The daemon checks every few hours: a slow poll still shows its answer and an install. */
+const UPDATE_STATUS_POLL_MS = 5 * 60_000;
 
 const systemMutationInvalidations = [
   daemonQueries.all(),
@@ -58,6 +64,12 @@ export const systemQueries = {
     queryOptions<UninstallPreviewDto, Error>({
       queryKey: systemQueryKeys.uninstallPreview(),
       queryFn: () => tauriClient.getUninstallPreview(),
+    }),
+  updateStatus: () =>
+    queryOptions<UpdateStatusDto, Error>({
+      queryKey: systemQueryKeys.updateStatus(),
+      queryFn: () => tauriClient.getUpdateStatus(),
+      refetchInterval: UPDATE_STATUS_POLL_MS,
     }),
 } as const;
 
@@ -113,6 +125,23 @@ export const systemMutations = {
     mutationOptions<AutostartStatusDto, Error, UpdateAutostartRequest>({
       mutationFn: (request) => tauriClient.setAutostartEnabled(request),
       onSuccess: async () => invalidateBootstrapAnd(queryClient, systemMutationInvalidations),
+    }),
+  setAutomaticUpdates: (queryClient: QueryClient) =>
+    mutationOptions<UpdateStatusDto, Error, UpdateSettingsRequest>({
+      mutationFn: (request) => tauriClient.setAutomaticUpdates(request),
+      onSuccess: (status) => queryClient.setQueryData(systemQueryKeys.updateStatus(), status),
+    }),
+  checkForUpdates: (queryClient: QueryClient) =>
+    mutationOptions<UpdateStatusDto, Error, void>({
+      mutationFn: () => tauriClient.checkForUpdates(),
+      onSuccess: (status) => queryClient.setQueryData(systemQueryKeys.updateStatus(), status),
+      // A failed check is in the status too.
+      onError: async () =>
+        queryClient.invalidateQueries({ queryKey: systemQueryKeys.updateStatus() }),
+    }),
+  restartToUpdate: () =>
+    mutationOptions<void, Error, void>({
+      mutationFn: () => tauriClient.restartToUpdate(),
     }),
   uninstall: (queryClient: QueryClient) =>
     mutationOptions({

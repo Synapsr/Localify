@@ -166,8 +166,8 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UpdatesConfig {
     /// Install new versions without asking. A config without the key
-    /// predates the feature and keeps updating by hand: `localify install`
-    /// writes it on for a new install.
+    /// predates the feature and keeps updating by hand: the app's first
+    /// start, or `localify install`, writes it on for a new install.
     #[serde(default)]
     pub automatic: bool,
 }

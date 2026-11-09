@@ -9,7 +9,6 @@ import {
   loadStoredOnboardingCompleted,
   markStoredOnboardingCompleted,
 } from "@/lib/util.onboarding-state";
-import { AppUpdateProvider } from "@/providers/app-update-provider";
 
 import { SpinnerIcon } from "./icons";
 import { Onboarding } from "./onboarding";
@@ -83,20 +82,13 @@ export const AppShell = ({ children }: AppShellProps) => {
     markStoredOnboardingCompleted();
   };
 
-  return (
-    <AppUpdateProvider
-      desktopName={data.environment.desktopName}
-      enabled={data.daemon.caInstalled || onboardingCompleted}
-    >
-      {needsSetup ? (
-        <Onboarding
-          bootstrap={data}
-          onActivated={handleOnboardingActivated}
-          startAtActivation={onboardingCompleted}
-        />
-      ) : (
-        <>{children}</>
-      )}
-    </AppUpdateProvider>
+  return needsSetup ? (
+    <Onboarding
+      bootstrap={data}
+      onActivated={handleOnboardingActivated}
+      startAtActivation={onboardingCompleted}
+    />
+  ) : (
+    <>{children}</>
   );
 };

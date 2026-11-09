@@ -1029,12 +1029,55 @@ fn normalized_label(value: &str) -> Option<String> {
 
 pub struct ConfigStore {
     path: PathBuf,
+    /// Where an earlier Localify leaves something behind. `None` is this
+    /// machine's places ([`previous_install_traces`]).
+    install_traces: Option<Vec<PathBuf>>,
 }
 
 impl ConfigStore {
     /// Create a new ConfigStore pointing at the given config file path
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            install_traces: None,
+        }
+    }
+
+    /// A store that looks for an earlier install at `traces` instead of
+    /// this machine's places.
+    #[cfg(test)]
+    pub fn with_install_traces(path: PathBuf, traces: Vec<PathBuf>) -> Self {
+        Self {
+            path,
+            install_traces: Some(traces),
+        }
+    }
+
+    /// Whether this is a new install: no config here, and nothing an
+    /// earlier Localify leaves behind. A place that can't be checked counts
+    /// as taken, so an install that predates automatic updates never gets
+    /// them without its owner's choice.
+    pub fn is_new_install(&self) -> bool {
+        let traces = self
+            .install_traces
+            .clone()
+            .unwrap_or_else(previous_install_traces);
+        std::iter::once(self.path.clone())
+            .chain(traces)
+            .all(|path| matches!(path.try_exists(), Ok(false)))
+    }
+
+    /// Writes a new install's config, with automatic updates on, when this
+    /// is a new install. The app does it before its welcome can save any
+    /// setting, which would otherwise write a config with them off. Returns
+    /// whether it wrote one.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn start_new_install(&self) -> Result<bool, ConfigError> {
+        if !self.is_new_install() {
+            return Ok(false);
+        }
+        self.save(&new_install_config(true))?;
+        Ok(true)
     }
 
     fn ensure_config_dir(&self) -> Result<(), ConfigError> {
@@ -1046,6 +1089,9 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// A config that doesn't exist yet loads as the defaults, with
+    /// automatic updates off: only [`Self::start_new_install`] and
+    /// `localify install` turn them on, for a new install.
     pub fn load(&self) -> Result<Config, ConfigError> {
         if !self.path.exists() {
             return Ok(Config::default());
@@ -1733,18 +1779,52 @@ fn map_config_error(e: ConfigError) -> ConfigLoadError {
     }
 }
 
+/// The config `localify install` or the app writes when there is none:
+/// automatic updates are on only for a new install.
+fn new_install_config(new_install: bool) -> Config {
+    let mut config = Config::default();
+    config.updates.automatic = new_install;
+    config
+}
+
+/// What an earlier Localify leaves on this machine: its root CA and
+/// certificates, the daemon's pid and log, the launchd service, the DNS
+/// resolver (or systemd-resolved's drop-in), the old `/etc` and
+/// `/var/log` folders, and on macOS the old root helper's plists, copies
+/// and run files. Not the data dir or the app's folder: the app makes them
+/// on its first start.
+pub fn previous_install_traces() -> Vec<PathBuf> {
+    let paths = LocalifyPaths::default();
+    let slug = BRANDING.slug();
+    let mut traces = vec![
+        paths.data_dir.join("ca.crt"),
+        paths.certs_dir,
+        paths.pid_file,
+        paths.log_file,
+        BRANDING.resolver_file(),
+        BRANDING.resolved_drop_in_file(),
+        PathBuf::from("/etc").join(slug),
+        PathBuf::from("/var/log").join(slug),
+    ];
+    if cfg!(target_os = "macos") {
+        use crate::infrastructure::macos_system::{
+            LegacyRoots, legacy_install_traces, service_plist_path,
+        };
+        traces.push(service_plist_path());
+        traces.extend(legacy_install_traces(&LegacyRoots::system()));
+    }
+    traces
+}
+
 impl ConfigLoader for ConfigStore {
     fn load(&self) -> Result<(DaemonConfig, LocalifyPaths), ConfigLoadError> {
         let config = ConfigStore::load(self).map_err(map_config_error)?;
         Ok((config.daemon, config.paths))
     }
 
-    /// A new install's config: automatic updates start on, unlike a config
-    /// that predates them.
     fn save_defaults(&self) -> Result<(), ConfigLoadError> {
-        let mut config = Config::default();
-        config.updates.automatic = true;
-        self.save(&config).map_err(map_config_error)
+        self.save(&new_install_config(self.is_new_install()))
+            .map_err(map_config_error)
     }
 
     fn exists(&self) -> bool {
@@ -1814,13 +1894,57 @@ mod tests {
 
     // --- [updates] automatic ---
 
+    /// A store on a machine where nothing of an earlier install is left.
+    fn new_machine() -> (tempfile::TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::with_install_traces(
+            dir.path().join("config.toml"),
+            vec![dir.path().join("etc-localify"), dir.path().join("ca.crt")],
+        );
+        (dir, store)
+    }
+
     #[test]
     fn a_new_install_writes_automatic_updates_on() {
-        let (_dir, store) = temp_store();
+        let (_dir, store) = new_machine();
         ConfigLoader::save_defaults(&store).unwrap();
         assert!(store.load().unwrap().updates.automatic);
         let text = fs::read_to_string(store.path.clone()).unwrap();
         assert!(text.contains("[updates]\nautomatic = true"), "{text}");
+    }
+
+    #[test]
+    fn an_install_over_an_earlier_ones_traces_keeps_automatic_updates_off() {
+        let (dir, store) = new_machine();
+        fs::create_dir(dir.path().join("etc-localify")).unwrap();
+        ConfigLoader::save_defaults(&store).unwrap();
+        assert!(!store.load().unwrap().updates.automatic);
+    }
+
+    #[test]
+    fn a_setting_saved_after_a_new_install_starts_keeps_automatic_updates_on() {
+        let (_dir, store) = new_machine();
+        assert!(store.start_new_install().unwrap());
+        let mut config = store.load().unwrap();
+        config.agent.connect_agents = false;
+        store.save(&config).unwrap();
+        assert!(store.load().unwrap().updates.automatic);
+        // Once there is a config, it is no longer a new install.
+        assert!(!store.start_new_install().unwrap());
+    }
+
+    #[test]
+    fn a_machine_with_an_earlier_install_does_not_start_as_a_new_one() {
+        let (dir, store) = new_machine();
+        fs::write(dir.path().join("ca.crt"), "").unwrap();
+        assert!(!store.start_new_install().unwrap());
+        assert!(!store.path.exists());
+    }
+
+    #[test]
+    fn a_missing_config_reads_automatic_updates_off() {
+        let (_dir, store) = temp_store();
+        assert!(!store.load().unwrap().updates.automatic);
     }
 
     #[test]
