@@ -71,6 +71,9 @@ pub struct Plan {
     pub trial_available: bool,
     pub limits: PlanCounts,
     pub usage: PlanCounts,
+    /// Left out by a cloud older than add-ons.
+    #[serde(default)]
+    pub addons: PlanAddons,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -78,6 +81,37 @@ pub struct Plan {
 pub struct PlanCounts {
     pub serving_machines: u32,
     pub public_urls: u32,
+}
+
+/// The add-on units the account holds: machines, and packs of 10 URLs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAddons {
+    pub machines: u32,
+    pub url_packs: u32,
+}
+
+/// `GET /v1/pricing`, the parts the clients read (`docs/public-urls.md`,
+/// "Pricing").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Pricing {
+    pub addons: AddonPricing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AddonPricing {
+    /// Per serving machine.
+    pub machine: Price,
+    /// Per pack of 10 public URLs.
+    pub urls: Price,
+}
+
+/// A monthly price in minor units: 300 is $3.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Price {
+    pub amount: u32,
+    /// `USD` or `EUR`.
+    pub currency: String,
 }
 
 /// `POST /v1/billing/checkout`: a checkout, or the portal when the plan is
@@ -214,15 +248,26 @@ impl CloudClient {
         self.http.send(Method::GET, "/v1/me", None).await
     }
 
-    /// `product` is `pro_monthly` or `pro_yearly`.
-    pub async fn checkout(&self, product: &str) -> Result<CheckoutPage, CloudError> {
+    /// `product` is `pro_monthly`, `pro_yearly`, `addon_machine` or
+    /// `addon_urls`; `units`, from 1 to 20, goes with an add-on only.
+    pub async fn checkout(
+        &self,
+        product: &str,
+        units: Option<u8>,
+    ) -> Result<CheckoutPage, CloudError> {
         self.http
             .send(
                 Method::POST,
                 "/v1/billing/checkout",
-                Some(json!({ "product": product })),
+                Some(checkout_body(product, units)),
             )
             .await
+    }
+
+    /// The live prices. The route takes no token, and picks the currency
+    /// from the caller's country.
+    pub async fn pricing(&self) -> Result<Pricing, CloudError> {
+        self.http.send(Method::GET, "/v1/pricing", None).await
     }
 
     /// A Polar customer portal session.
@@ -378,6 +423,13 @@ impl CloudClient {
 
     pub async fn remote_lease(&self) -> Result<LeaseGrant, CloudError> {
         self.http.send(Method::GET, "/v1/remote/lease", None).await
+    }
+}
+
+fn checkout_body(product: &str, units: Option<u8>) -> Value {
+    match units {
+        Some(units) => json!({ "product": product, "units": units }),
+        None => json!({ "product": product }),
     }
 }
 
@@ -656,7 +708,7 @@ mod tests {
             "plan":{"status":"trialing","entitled":true,"interval":"month",
             "trialEndsAt":"2026-11-14T10:00:00Z","renewsAt":null,"endsAt":null,
             "trialAvailable":false,"limits":{"servingMachines":2,"publicUrls":10},
-            "usage":{"servingMachines":1,"publicUrls":3},"addons":{"machines":0,"urlPacks":0}}}"#;
+            "usage":{"servingMachines":1,"publicUrls":3},"addons":{"machines":1,"urlPacks":2}}}"#;
         let (address, server) = serve_once("200 OK", plan);
 
         let me = block_on(client(&address).me()).unwrap().unwrap();
@@ -666,6 +718,13 @@ mod tests {
         let plan = me.plan.unwrap();
         assert_eq!((plan.status.as_str(), plan.entitled), ("trialing", true));
         assert_eq!(plan.usage.public_urls, 3);
+        assert_eq!(
+            plan.addons,
+            PlanAddons {
+                machines: 1,
+                url_packs: 2
+            }
+        );
 
         let older: Me = serde_json::from_str(
             r#"{"user":{"login":"teo"},"machine":{"id":"m1","name":"laptop"}}"#,
@@ -681,7 +740,7 @@ mod tests {
             r#"{"kind":"checkout","url":"https://polar.sh/checkout/x"}"#,
         );
 
-        let page = block_on(client(&address).checkout("pro_yearly"))
+        let page = block_on(client(&address).checkout("pro_yearly", None))
             .unwrap()
             .unwrap();
 
@@ -692,6 +751,47 @@ mod tests {
         );
         assert_eq!(body, r#"{"product":"pro_yearly"}"#);
         assert_eq!(page.kind, "checkout");
+    }
+
+    #[test]
+    fn an_addon_checkout_posts_its_units() {
+        let (address, server) = serve_once(
+            "200 OK",
+            r#"{"kind":"portal","url":"https://polar.sh/portal/x"}"#,
+        );
+
+        let page = block_on(client(&address).checkout("addon_urls", Some(3)))
+            .unwrap()
+            .unwrap();
+
+        let (_, body) = server.join().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"product": "addon_urls", "units": 3})
+        );
+        assert_eq!(page.kind, "portal");
+    }
+
+    #[test]
+    fn pricing_reads_the_addons_without_a_token() {
+        let (address, server) = serve_once(
+            "200 OK",
+            r#"{"currency":"EUR","pro":{"monthly":{"amount":799,"currency":"EUR"},
+               "yearly":{"amount":7900,"currency":"EUR"},"trialDays":7,
+               "includes":{"servingMachines":2,"publicUrls":10}},
+               "addons":{"machine":{"amount":300,"currency":"EUR","unit":1},
+                         "urls":{"amount":200,"currency":"EUR","unit":10}},
+               "updatedAt":"2026-11-09T10:00:00Z"}"#,
+        );
+        let client = CloudClient::new(CloudHttp::new(&address, None).unwrap());
+
+        let pricing = block_on(client.pricing()).unwrap().unwrap();
+
+        let (head, _) = server.join().unwrap();
+        assert!(head.starts_with("GET /v1/pricing HTTP/1.1"), "{head}");
+        assert!(!head.to_ascii_lowercase().contains("authorization:"));
+        assert_eq!(pricing.addons.machine.amount, 300);
+        assert_eq!(pricing.addons.urls.currency, "EUR");
     }
 
     #[test]

@@ -1193,6 +1193,8 @@ pub fn run() {
             commands::sign_out_cloud,
             commands::get_cloud_plan,
             commands::start_cloud_checkout,
+            commands::start_cloud_addon_checkout,
+            commands::get_cloud_addon_pricing,
             commands::open_cloud_billing_portal,
             remote::get_remote_status,
             remote::get_remote_machines,

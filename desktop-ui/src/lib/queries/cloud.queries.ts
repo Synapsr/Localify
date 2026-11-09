@@ -2,6 +2,7 @@ import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react
 
 import type {
   CloudAccountDto,
+  CloudAddonPricingDto,
   CloudBillingPageDto,
   CloudPlanDto,
   CloudSignInPollDto,
@@ -15,6 +16,7 @@ import type {
   PublicUrlSlugSuggestionDto,
   PublicUrlWithPasswordDto,
   SetPublicUrlProtectionRequest,
+  StartCloudAddonCheckoutRequest,
   StartCloudCheckoutRequest,
 } from "../../types/localify";
 
@@ -43,6 +45,7 @@ const cloudQueryKeys = {
   all: () => ["cloud"] as const,
   account: () => [...cloudQueryKeys.all(), "account"] as const,
   plan: () => [...cloudQueryKeys.all(), "plan"] as const,
+  addonPricing: () => [...cloudQueryKeys.all(), "addon-pricing"] as const,
   publicUrls: () => [...cloudQueryKeys.all(), "public-urls"] as const,
   slugSuggestion: (localDomain: string) =>
     [...cloudQueryKeys.all(), "slug-suggestion", localDomain] as const,
@@ -77,6 +80,13 @@ export const cloudQueries = {
       staleTime: 30_000,
       refetchInterval: () => (isWatchingCheckout() ? CHECKOUT_POLL_MS : false),
       refetchOnWindowFocus: () => (isWatchingCheckout() ? "always" : true),
+    }),
+  /** Calls Localify Cloud; Rust answers the list prices when it cannot. */
+  addonPricing: () =>
+    queryOptions<CloudAddonPricingDto, Error>({
+      queryKey: cloudQueryKeys.addonPricing(),
+      queryFn: () => tauriClient.getCloudAddonPricing(),
+      staleTime: 60 * 60_000,
     }),
   /** Calls Localify Cloud: only while signed in. */
   publicUrls: () =>
@@ -113,6 +123,12 @@ export const cloudMutations = {
   startCheckout: (queryClient: QueryClient) =>
     mutationOptions<CloudBillingPageDto, Error, StartCloudCheckoutRequest>({
       mutationFn: (request) => tauriClient.startCloudCheckout(request),
+      onSuccess: async () => watchCheckout(queryClient),
+    }),
+  /** Opens an add-on's checkout (or the portal when the account has it) in the browser. */
+  startAddonCheckout: (queryClient: QueryClient) =>
+    mutationOptions<CloudBillingPageDto, Error, StartCloudAddonCheckoutRequest>({
+      mutationFn: (request) => tauriClient.startCloudAddonCheckout(request),
       onSuccess: async () => watchCheckout(queryClient),
     }),
   openBillingPortal: (queryClient: QueryClient) =>

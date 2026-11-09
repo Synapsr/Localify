@@ -158,7 +158,7 @@ export const SettingsCloud = () => {
     if (account.isPending) return "Checking your account…";
     if (account.error) return account.error.message;
     if (signedIn && account.data) return signedInSummary(account.data);
-    return "Open a local domain from any device, at a public URL. Invite-only for now.";
+    return "Open a local domain from any device, at a public URL. Sign in with GitHub to start.";
   })();
 
   const action = (() => {
@@ -305,8 +305,8 @@ const SignInStoppedNotice = ({
       description: "Sign in again when you are ready.",
     },
     notAllowed: {
-      title: "Localify Cloud is invite-only for now",
-      description: message ?? "This GitHub account is not on the invite list yet.",
+      title: "This GitHub account cannot sign in",
+      description: message ?? "Localify Cloud refused it. Sign in again with another account.",
     },
     expired: {
       title: "The code expired",

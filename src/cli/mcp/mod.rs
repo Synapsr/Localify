@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::application::cloud_errors::RAISE_LIMIT;
 use crate::branding::BRANDING;
 use tools::{TOOLS, Tool, ToolArgs};
 
@@ -130,8 +131,15 @@ fn call_tool(params: &Value, runner: &CliRunner) -> Result<Value> {
 }
 
 /// Paying is for a person (ADR 0018): when a command says the plan is
-/// needed, the agent learns what it costs and to ask the user.
+/// needed, the agent learns what it costs and to ask the user; when a limit
+/// can be raised, the command that raises it stays in the text, for the
+/// agent to suggest.
 fn for_an_agent(text: String) -> String {
+    if text.contains(RAISE_LIMIT) {
+        return format!(
+            "{text}\n\nRaising the limit is a purchase, so it is the user's call: suggest they run that command themselves, then try again. Do not start a checkout or pass on a checkout link."
+        );
+    }
     let subscribe = format!("{} subscribe", BRANDING.cli_command());
     if !text.contains(&subscribe) {
         return text;
@@ -211,6 +219,8 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::cloud_errors::with_next_step;
+    use crate::application::ports::{CloudApiError, UpgradeHint};
 
     fn runner() -> CliRunner {
         CliRunner {
@@ -319,6 +329,29 @@ mod tests {
         assert!(text.starts_with(&refused));
         assert!(text.contains("$7.99") && text.contains("ask the user"));
         assert_eq!(for_an_agent("Port taken.".into()), "Port taken.");
+    }
+
+    #[test]
+    fn a_limit_the_user_can_raise_keeps_its_command_for_the_agent() {
+        let refused = with_next_step(CloudApiError::Rejected {
+            status: 403,
+            code: "quota_exceeded".into(),
+            message: "You already have 10 public URLs.".into(),
+            upgrade: Some(UpgradeHint {
+                kind: "addon_urls".into(),
+                command: "localify billing".into(),
+            }),
+        })
+        .to_string();
+
+        let text = for_an_agent(refused.clone());
+
+        assert!(text.starts_with(&refused));
+        assert!(text.contains("localify billing"), "{text}");
+        assert!(
+            text.contains("the user's call") && !text.contains("$7.99"),
+            "{text}"
+        );
     }
 
     #[test]

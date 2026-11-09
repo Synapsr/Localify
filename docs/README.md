@@ -78,7 +78,7 @@ run them as root, and start the daemon yourself with `localify start`.
 | `localify project env remove <env> [--delete-worktree]` | Remove a worktree environment, and the worktree |
 | `localify project env prune`       | Remove environments whose folder is gone |
 | `localify login` / `logout` / `whoami` | Sign this machine in to Localify Cloud with GitHub, or out; `whoami` shows the plan |
-| `localify subscribe [--yearly]` / `billing` | Start Localify Cloud Pro after a 7-day trial, or manage the subscription |
+| `localify subscribe [--yearly \| --machines <n> \| --url-packs <n>]` / `billing` | Start Localify Cloud Pro after a 7-day trial, add serving machines or packs of 10 URLs to it, or manage the subscription |
 | `localify public-url create <domain> ...` | Give a project domain a [public URL](#public-urls) |
 | `localify public-url list\|remove\|protect\|unprotect\|claim` | Manage your public URLs |
 | `localify agent install`           | Connect coding agents to Localify's MCP server |
@@ -652,7 +652,9 @@ laptop or phone on another network: `https://<slug>.localify.fyi` reaches
 `web.journal.localify` on the machine that serves it. It needs a Localify Cloud
 account, which you create by signing in with GitHub. Serving takes Localify Cloud
 Pro, after a 7-day free trial: `localify subscribe` starts it, and `localify billing`
-manages it. Prices are on [localify.dev/pricing](https://localify.dev/pricing).
+manages it. On Pro, `localify subscribe --machines <n>` adds serving machines and
+`localify subscribe --url-packs <n>` adds packs of 10 public URLs, billed monthly.
+Prices are on [localify.dev/pricing](https://localify.dev/pricing).
 
 ```bash
 localify login                                   # shows a code to enter on github.com

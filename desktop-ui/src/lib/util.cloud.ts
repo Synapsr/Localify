@@ -95,7 +95,13 @@ function describeBlock(block: CloudRuntimeBlockDto): CloudStatus {
     case "subscription_required":
       return { tone: "error", label: "Needs a plan", detail: block.message };
     case "serving_slots_full":
-      return { tone: "error", label: "No serving slot left", detail: block.message };
+      return {
+        tone: "error",
+        label: "No serving slot left",
+        detail: block.upgrade
+          ? `${block.message} Or raise the limit with: ${block.upgrade.command}`
+          : block.message,
+      };
     case "capacity":
       return {
         tone: "pending",

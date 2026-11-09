@@ -9,8 +9,11 @@ import { Button } from "@/components/ui/button";
 import { useCloudPlan } from "@/hooks/use-cloud-plan";
 import { cloudMutations } from "@/lib/queries";
 import { describePlan } from "@/lib/util.cloud";
+import { canAddCapacity } from "@/lib/util.cloud-addons";
 
-/** Settings → Localify Cloud: the plan, its usage, and one action. */
+import { SettingsCloudAddons } from "./settings-cloud-addons";
+
+/** Settings → Localify Cloud: the plan, its usage, one action, and add-ons on Pro. */
 export const SettingsCloudPlan = () => {
   const plan = useCloudPlan(true);
 
@@ -61,6 +64,7 @@ const PlanDetails = ({ plan }: { plan: CloudPlanDto }) => {
           <Usage label="Public URLs" used={plan.usage.publicUrls} limit={plan.limits.publicUrls} />
         </dl>
       ) : null}
+      {canAddCapacity(plan) ? <SettingsCloudAddons plan={plan} /> : null}
     </section>
   );
 };

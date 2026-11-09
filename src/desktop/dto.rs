@@ -1375,6 +1375,17 @@ pub struct CloudRuntimeBlockDto {
     /// `subscription_required`, `serving_slots_full` or `capacity`.
     pub reason: String,
     pub message: String,
+    /// What lifts the block, when the account can buy it.
+    pub upgrade: Option<CloudUpgradeDto>,
+}
+
+/// The command Localify Cloud names to lift a refusal, for a person to run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudUpgradeDto {
+    /// `pro`, `addon_machine` or `addon_urls`.
+    pub kind: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1418,12 +1429,58 @@ pub struct CloudPlanDto {
     pub trial_available: bool,
     pub limits: CloudPlanCountsDto,
     pub usage: CloudPlanCountsDto,
+    /// The add-on units the account holds, counted in `limits`.
+    pub addons: CloudPlanAddonsDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudPlanAddonsDto {
+    pub machines: u32,
+    /// Packs of 10 public URLs.
+    pub url_packs: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartCloudCheckoutRequest {
     pub interval: CloudPlanIntervalDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudAddonDto {
+    /// One serving machine per unit.
+    Machine,
+    /// Ten public URLs per unit.
+    Urls,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartCloudAddonCheckoutRequest {
+    pub addon: CloudAddonDto,
+    /// 1 to 20.
+    pub units: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CloudCurrencyDto {
+    #[serde(rename = "USD")]
+    Usd,
+    #[serde(rename = "EUR")]
+    Eur,
+}
+
+/// The add-ons' monthly prices per unit, in minor units: 300 is $3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAddonPricingDto {
+    pub currency: CloudCurrencyDto,
+    pub machine: u32,
+    pub url_pack: u32,
+    /// False for the list prices, shown while Localify Cloud cannot answer.
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

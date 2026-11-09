@@ -275,7 +275,7 @@ type Plan = {
 };
 ```
 
-**Pricing.** `GET /v1/pricing` gives the website the live prices of Pro and both add-ons. It takes no token, and answers `GET` from `https://localify.dev` and `https://www.localify.dev` with CORS (`OPTIONS` too). Nothing else reads it, and no other route waits on it or on Polar for it.
+**Pricing.** `GET /v1/pricing` gives the website the live prices of Pro and both add-ons, and the desktop app those of the add-ons, read by `DesktopApi`. It takes no token, and answers `GET` from `https://localify.dev` and `https://www.localify.dev` with CORS (`OPTIONS` too). Nothing else reads it, and no other route waits on it or on Polar for it.
 
 - **Currency:** `?currency=usd` or `eur`, in any case; otherwise, or for any other value, the visitor's `CF-IPCountry`: euros for the 27 EU countries and the rest of the EEA (Iceland, Liechtenstein, Norway), dollars everywhere else, Switzerland and the United Kingdom included. It is only what the page shows: Polar picks the checkout's currency from the buyer's address itself. A server that renders the page passes `?currency=`, since its own country is not the visitor's.
 - **Source:** one `GET /v1/products/?id=…` reads the four configured products (Pro monthly and yearly, both add-ons). A fixed price gives its `price_amount`, a unit-based one the `unit_amount` of its first tier, rounded to a whole minor unit; archived prices are skipped. `trialDays` comes from the monthly product's trial. A product or a currency missing fails the read rather than giving half an answer.
@@ -610,6 +610,8 @@ localify login                      # device flow: prints the code and URL, open
 localify logout
 localify whoami                     # login, machine, and the plan: status, dates, limits and usage
 localify subscribe [--yearly]       # opens the Polar checkout for Pro (monthly unless --yearly), waits for the plan
+localify subscribe --machines <n>   # opens the checkout for n serving machines (1 to 20), waits for the new limit
+localify subscribe --url-packs <n>  # opens the checkout for n packs of 10 URLs (1 to 20), waits for the new limit
 localify billing                    # opens the Polar customer portal
 localify public-url list
 localify public-url create <local-domain> [--wildcard] [--slug <slug>] [--password <p> | --public]
@@ -631,16 +633,18 @@ localify public-url claim <url-or-slug-or-id>
 
 When it gets the portal instead (`kind: "portal"`), it says the plan is already active and opens the portal, where the interval can be switched. Without a terminal, it prints the URL (JSON: `{kind, url}`) and returns without waiting.
 
+`subscribe --machines <n>` and `subscribe --url-packs <n>` buy an add-on the same way: they read the plan's limit first, call `POST /v1/billing/checkout` with `addon_machine` or `addon_urls` and `units: n`, open the page, and poll `GET /v1/me` every 5 seconds for up to 15 minutes until that limit changes. The portal (`kind: "portal"`) means the account already has that add-on: its quantity is changed there, and the command waits the same way. Neither combines with `--yearly` or with the other. A refusal prints the API's sentence, such as `409 addons_unavailable` as it comes, followed by the command its `upgrade` names when the sentence does not already give it.
+
 `billing` calls `POST /v1/billing/portal` and opens the URL the same way. `whoami` prints the plan the way `/v1/me` gives it, for example:
 
 - `Pro (trial), ends 14 Nov 2026 · 1 of 2 serving machines · 3 of 10 URLs`;
 - `No plan: public URLs need Localify Cloud Pro. Start a 7-day trial with localify subscribe.`
 
-Every `402 subscription_required` from `create` or `claim` prints that same line, `blocked: serving_slots_full` names the machines that hold the slots, and `403 banned` says the account is suspended and gives `abuse@localify.dev`.
+Every `402 subscription_required` from `create` or `claim` prints that same line, `blocked: serving_slots_full` names the machines that hold the slots, and `403 banned` says the account is suspended and gives `abuse@localify.dev`. When `403 quota_exceeded` or `blocked: serving_slots_full` carries an `upgrade`, the message ends with `Or raise the limit with: <upgrade.command>`.
 
 ## MCP
 
-One tool per command except `login`, `logout`, `unprotect`, `subscribe` and `billing`: signing in, opening a URL to everyone and paying are for a person to decide (ADR 0018). When a tool gets `402 subscription_required`, its error tells the agent the plan's price and trial, and to ask the user to run `localify subscribe`. An agent never starts a checkout or passes on a checkout link it made. `public_url_create` has no `public` option, so an agent always creates a protected URL and receives the link with its password, and the password, to pass on. The instructions steer an agent that wants several services or worktrees of a project to one wildcard URL on the project's namespace. `public_url_remove` is destructive.
+One tool per command except `login`, `logout`, `unprotect`, `subscribe` and `billing`: signing in, opening a URL to everyone and paying are for a person to decide (ADR 0018). When a tool gets `402 subscription_required`, its error tells the agent the plan's price and trial, and to ask the user to run `localify subscribe`. When it gets a refusal with an `upgrade`, its error keeps the command, and tells the agent to suggest that the user run it. An agent never starts a checkout or passes on a checkout link it made. `public_url_create` has no `public` option, so an agent always creates a protected URL and receives the link with its password, and the password, to pass on. The instructions steer an agent that wants several services or worktrees of a project to one wildcard URL on the project's namespace. `public_url_remove` is destructive.
 
 ## Desktop app
 
@@ -649,7 +653,8 @@ One tool per command except `login`, `logout`, `unprotect`, `subscribe` and `bil
     - its status in words: no plan; trial, ends `<date>`; Pro monthly or yearly, renews `<date>`; ending `<date>`; payment failed, update the card; team access;
     - serving machines and URLs used against the limits;
     - one action. Without a plan: `Start 7-day free trial`, with a monthly / yearly choice ($7.99 / $79), or `Subscribe` once the trial is used. With a plan: `Manage billing`.
-  - **After a checkout or the portal opens:** both open in the browser through `DesktopApi`. The app polls `/v1/me` every 5 seconds for 15 minutes, and again whenever its window regains focus. When the plan becomes entitled, it sends `public_refresh`.
+    - **Add capacity**, on an entitled Pro plan (not an override): `+ Serving machines` and `+ Public URLs (packs of 10)`, each with a quantity from 1 to 20, its monthly price from `GET /v1/pricing` (asked by `DesktopApi`, without the token; the list prices $3 and $2, in euros in the EEA, when it cannot answer), and a button that opens the checkout, or the portal when the account already has that add-on. `Manage add-ons` opens the portal when the plan has add-ons. A refusal, such as `addons_unavailable`, shows the API's sentence under the button.
+  - **After a checkout or the portal opens:** both open in the browser through `DesktopApi`, for Pro and for add-ons alike. The app polls `/v1/me` every 5 seconds for 15 minutes, and again whenever its window regains focus. When the plan becomes entitled, it sends `public_refresh`.
 - **Domain detail → Public URL:** one URL per project, as locally. Opened on the project's namespace or on any domain under it, the dialog creates or shows the project's wildcard URL on the namespace; any other domain gets a URL of its own. The project menu opens it on the namespace, even when no service registers it, as in a monorepo.
   - **Paywall:** without an entitled plan, the dialog shows no create form. It says what a public URL does, the price, the 7-day trial and that a card is asked. It has the same trial button as the plan card. URLs already created show their state, so a suspended one says why. When this Mac has something to serve but every serving slot is taken, the dialog names the machines holding them. It offers to remove a URL there or to serve it from this Mac, and to add a machine when the runtime's `upgrade` offers the machine add-on.
   - **Create:** the exact public URL of the opened domain at the top (`https://<slug>--<label>.localify.fyi` under the namespace), with the project URL below it, from `GET /v1/slugs?localDomain=`. A pencil opens the name: an input with `.localify.fyi` after it, checked as `PublicSlug` checks it and then with `GET /v1/slugs/<slug>` 300 ms after the last key, showing Available, Taken or the format rule, and a button back to the suggestion. Creating waits for a free name; a name taken in the meantime reopens the editor on it. A domain whose label does not fit beside the chosen name (61 characters minus its length) is said inline. One Password switch, on by default: the password is generated and shown once with its link; off says that anyone with the link opens the project's services. There is no custom password at creation; it can be changed after.

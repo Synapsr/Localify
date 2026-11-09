@@ -16,6 +16,7 @@ import type {
   CheckPublicUrlSlugRequest,
   CliAccessDto,
   CloudAccountDto,
+  CloudAddonPricingDto,
   CloudBillingPageDto,
   CloudPlanDto,
   CloudSignInPollDto,
@@ -86,6 +87,7 @@ import type {
   SettingsImportPreviewRequest,
   SettingsImportRequest,
   SettingsImportResultDto,
+  StartCloudAddonCheckoutRequest,
   StartCloudCheckoutRequest,
   StartDaemonRequest,
   StepDto,
@@ -118,6 +120,7 @@ import {
   pollCloudSignInRequestSchema,
   publicUrlRequestSchema,
   setPublicUrlProtectionRequestSchema,
+  startCloudAddonCheckoutRequestSchema,
   startCloudCheckoutRequestSchema,
   suggestPublicUrlSlugRequestSchema,
 } from "./validators/validator.cloud";
@@ -243,6 +246,10 @@ export interface DesktopClient {
   getCloudPlan(): Promise<CloudPlanDto | null>;
   /** Opens the Polar checkout, or the portal when the plan is active, in the browser. */
   startCloudCheckout(request: StartCloudCheckoutRequest): Promise<CloudBillingPageDto>;
+  /** Opens an add-on's checkout, or the portal when the account has it, in the browser. */
+  startCloudAddonCheckout(request: StartCloudAddonCheckoutRequest): Promise<CloudBillingPageDto>;
+  /** The add-ons' prices from Localify Cloud, or the list prices when it cannot answer. */
+  getCloudAddonPricing(): Promise<CloudAddonPricingDto>;
   openCloudBillingPortal(): Promise<void>;
   /** Opens an http(s) link in the default browser, through Tauri's opener plugin. */
   openExternalUrl(url: string): Promise<void>;
@@ -388,6 +395,11 @@ export function createDesktopClient(): DesktopClient {
       tauriInvoke("start_cloud_checkout", {
         request: startCloudCheckoutRequestSchema.parse(request),
       }),
+    startCloudAddonCheckout: (request) =>
+      tauriInvoke("start_cloud_addon_checkout", {
+        request: startCloudAddonCheckoutRequestSchema.parse(request),
+      }),
+    getCloudAddonPricing: () => tauriInvoke("get_cloud_addon_pricing"),
     openCloudBillingPortal: () => tauriInvoke("open_cloud_billing_portal"),
     openExternalUrl: (url) => tauriInvoke("plugin:opener|open_url", { url }),
     refreshPublicTunnel: () => tauriInvoke("refresh_public_tunnel"),

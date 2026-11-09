@@ -12,6 +12,7 @@ export {
   Spinner as SpinnerIcon,
   X as XIcon,
   Plus as PlusIcon,
+  Minus as MinusIcon,
   PlusSolid as PlusSolidIcon,
   Check as CheckIcon,
   Trash as TrashIcon,

@@ -13,6 +13,8 @@ use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use super::types::Upgrade;
+
 pub const DEFAULT_API_BASE: &str = "https://api.localify.dev";
 /// Points the CLI, the app and the daemon at another API, such as
 /// `wrangler dev` while working on the cloud.
@@ -51,6 +53,9 @@ pub enum CloudError {
         message: String,
         /// Seconds to wait before the next poll, with `slow_down`.
         interval: Option<u64>,
+        /// What lifts the refusal, with `402 subscription_required` and
+        /// `403 quota_exceeded`, when the account can buy it.
+        upgrade: Option<Upgrade>,
     },
     #[error(
         "Could not reach Localify Cloud at {api_base}: {reason}. Check the connection and try again."
@@ -223,6 +228,8 @@ struct ErrorBody {
     message: String,
     #[serde(default)]
     interval: Option<u64>,
+    #[serde(default)]
+    upgrade: Option<Upgrade>,
 }
 
 fn api_error(status: StatusCode, body: &[u8]) -> CloudError {
@@ -232,12 +239,14 @@ fn api_error(status: StatusCode, body: &[u8]) -> CloudError {
             code: body.error,
             message: body.message,
             interval: body.interval,
+            upgrade: body.upgrade,
         },
         Err(_) => CloudError::Api {
             status: status.as_u16(),
             code: format!("http_{}", status.as_u16()),
             message: format!("Localify Cloud answered {status}. Try again in a moment."),
             interval: None,
+            upgrade: None,
         },
     }
 }
@@ -295,6 +304,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_refusal_keeps_its_upgrade() {
+        let error = api_error(
+            StatusCode::FORBIDDEN,
+            br#"{"error":"quota_exceeded","message":"10 URLs.","upgrade":{"kind":"addon_urls","command":"localify billing"}}"#,
+        );
+        let CloudError::Api { upgrade, .. } = error else {
+            panic!("not an API error");
+        };
+        assert_eq!(
+            upgrade,
+            Some(Upgrade {
+                kind: "addon_urls".into(),
+                command: "localify billing".into()
+            })
+        );
     }
 
     #[test]

@@ -22,11 +22,11 @@ use localify::desktop::dto::{
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use localify::desktop::dto::{
-    CheckPublicUrlSlugRequest, CloudAccountDto, CloudBillingPageDto, CloudPlanDto,
-    CloudSignInPollDto, CloudSignInStartDto, CloudSignOutDto, CreatePublicUrlRequest,
+    CheckPublicUrlSlugRequest, CloudAccountDto, CloudAddonPricingDto, CloudBillingPageDto,
+    CloudPlanDto, CloudSignInPollDto, CloudSignInStartDto, CloudSignOutDto, CreatePublicUrlRequest,
     PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest, PublicUrlSlugCheckDto,
     PublicUrlSlugSuggestionDto, PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest,
-    StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
+    StartCloudAddonCheckoutRequest, StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -627,6 +627,29 @@ pub async fn start_cloud_checkout(
 ) -> Result<CloudBillingPageDto, String> {
     let api = state.api.clone();
     async_runtime::spawn_blocking(move || api.start_cloud_checkout(request).map_err(map_error))
+        .await
+        .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn start_cloud_addon_checkout(
+    state: tauri::State<'_, AppState>,
+    request: StartCloudAddonCheckoutRequest,
+) -> Result<CloudBillingPageDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || {
+        api.start_cloud_addon_checkout(request).map_err(map_error)
+    })
+    .await
+    .map_err(map_error)?
+}
+
+#[tauri::command]
+pub async fn get_cloud_addon_pricing(
+    state: tauri::State<'_, AppState>,
+) -> Result<CloudAddonPricingDto, String> {
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || api.cloud_addon_pricing().map_err(map_error))
         .await
         .map_err(map_error)?
 }
