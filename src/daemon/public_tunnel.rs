@@ -488,6 +488,7 @@ fn refused(
             status: 402,
             code,
             message,
+            upgrade,
             ..
         } if code == "subscription_required" => {
             stand_down(tunnel, access, desired, true, None);
@@ -496,6 +497,7 @@ fn refused(
             parts.blocked = Some(RuntimeBlock {
                 reason: code,
                 message,
+                upgrade,
             });
         }
         // Only the API's own refusals, by their code: a 403 from anything in
@@ -1183,7 +1185,8 @@ mod tests {
             status.blocked,
             Some(RuntimeBlock {
                 reason: "subscription_required".into(),
-                message: "Not now.".into()
+                message: "Not now.".into(),
+                upgrade: None,
             })
         );
         assert!(status.served_urls.is_empty());

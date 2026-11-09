@@ -14,7 +14,9 @@ mod daemon;
 mod domain;
 mod infrastructure;
 
+use application::ports::Addon;
 use cli::context::AppContext;
+use domain::AddonUnits;
 use infrastructure::config::{Config, ConfigStore};
 use infrastructure::paths::LocalifyPaths;
 
@@ -388,11 +390,19 @@ enum Commands {
         json: bool,
     },
 
-    /// Start Localify Cloud Pro, after a 7-day trial: opens the checkout and waits for the plan
+    /// Start Localify Cloud Pro, after a 7-day trial, or add serving machines or public URLs to it: opens the checkout and waits for the plan
     Subscribe {
         /// Pay yearly ($79) instead of monthly ($7.99)
         #[arg(long)]
         yearly: bool,
+
+        /// Add N serving machines to Pro, 1 to 20 ($3 a month each). Changes the quantity in the customer portal when the account already has some.
+        #[arg(long, value_name = "N", value_parser = parse_addon_units, conflicts_with_all = ["yearly", "url_packs"])]
+        machines: Option<AddonUnits>,
+
+        /// Add N packs of 10 public URLs to Pro, 1 to 20 packs ($2 a month each): 2 adds 20 URLs. Changes the quantity in the customer portal when the account already has some.
+        #[arg(long, value_name = "N", value_parser = parse_addon_units, conflicts_with = "yearly")]
+        url_packs: Option<AddonUnits>,
 
         /// Print JSON (the default when stdout is not a terminal)
         #[arg(long)]
@@ -863,6 +873,14 @@ fn cloud_adapters(
     paths: &LocalifyPaths,
 ) -> infrastructure::cloud_adapters::CloudAdapters {
     infrastructure::cloud_adapters::CloudAdapters::new(config_path, paths)
+}
+
+/// `--machines` and `--url-packs`: a whole number from 1 to 20.
+fn parse_addon_units(value: &str) -> Result<AddonUnits, String> {
+    let units = value
+        .parse::<u32>()
+        .map_err(|_| format!("'{value}' is not a whole number from 1 to 20"))?;
+    AddonUnits::new(units).map_err(|error| error.to_string())
 }
 
 /// Load config from file, or return defaults if the file doesn't exist.
@@ -1386,8 +1404,18 @@ fn main() -> Result<()> {
         Commands::Login { json } => cli::cloud::login(json, &cloud_adapters(config_path, &paths)),
         Commands::Logout { json } => cli::cloud::logout(json, &cloud_adapters(config_path, &paths)),
         Commands::Whoami { json } => cli::cloud::whoami(json, &cloud_adapters(config_path, &paths)),
-        Commands::Subscribe { yearly, json } => {
-            cli::cloud::subscribe(yearly, json, &cloud_adapters(config_path, &paths))
+        Commands::Subscribe {
+            yearly,
+            machines,
+            url_packs,
+            json,
+        } => {
+            let cloud = cloud_adapters(config_path, &paths);
+            match (machines, url_packs) {
+                (Some(units), _) => cli::cloud::buy_addon(Addon::Machine, units, json, &cloud),
+                (_, Some(units)) => cli::cloud::buy_addon(Addon::Urls, units, json, &cloud),
+                (None, None) => cli::cloud::subscribe(yearly, json, &cloud),
+            }
         }
         Commands::Billing { json } => {
             cli::cloud::billing(json, &cloud_adapters(config_path, &paths))
@@ -1447,5 +1475,62 @@ fn main() -> Result<()> {
             }
         }
         Commands::Completions { .. } | Commands::ShellEnv { .. } => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subscribe(args: &[&str]) -> Result<Commands, clap::Error> {
+        let argv = ["localify", "subscribe"].iter().chain(args);
+        Cli::try_parse_from(argv).map(|cli| cli.command)
+    }
+
+    #[test]
+    fn subscribe_buys_machines_or_url_packs() {
+        let Ok(Commands::Subscribe {
+            machines,
+            url_packs,
+            yearly,
+            ..
+        }) = subscribe(&["--machines", "3"])
+        else {
+            panic!("--machines did not parse");
+        };
+        assert_eq!(machines.map(AddonUnits::value), Some(3));
+        assert_eq!((url_packs, yearly), (None, false));
+
+        let Ok(Commands::Subscribe { url_packs, .. }) = subscribe(&["--url-packs", "20"]) else {
+            panic!("--url-packs did not parse");
+        };
+        assert_eq!(url_packs.map(AddonUnits::value), Some(20));
+
+        let Ok(Commands::Subscribe {
+            machines,
+            url_packs,
+            yearly,
+            ..
+        }) = subscribe(&["--yearly"])
+        else {
+            panic!("--yearly did not parse");
+        };
+        assert_eq!((machines, url_packs, yearly), (None, None, true));
+    }
+
+    #[test]
+    fn subscribe_refuses_units_out_of_range_and_mixed_products() {
+        for args in [
+            &["--machines", "0"][..],
+            &["--machines", "21"],
+            &["--url-packs", "two"],
+            &["--machines", "1", "--url-packs", "1"],
+            &["--yearly", "--machines", "1"],
+            &["--yearly", "--url-packs", "1"],
+        ] {
+            assert!(subscribe(args).is_err(), "{args:?} parsed");
+        }
+        let error = subscribe(&["--machines", "21"]).err().unwrap().to_string();
+        assert!(error.contains("1 to 20"), "{error}");
     }
 }

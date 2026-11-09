@@ -17,15 +17,15 @@ use crate::domain::{
 };
 
 use super::ports::{
-    BillingPage, BillingPageKind, CertificateError, CertificateManager, CloudAccount,
-    CloudAccountStore, CloudApi, CloudApiError, ConfigLoadError, ConfigLoader, DaemonConnection,
-    DaemonConnectionError, DaemonControl, DaemonRuntimeInfo, DeviceAuthorization, DeviceTokenPoll,
-    DnsConfigError, DnsManager, DomainRepository, IosSimulatorTrust, LocalDomainOwner,
-    LocalDomains, NetworkInfo, NewPublicUrl, Plan, PlanCounts, PlanInterval, PlanStatus,
-    Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
-    PublicUrlState, PublicUrlWithPassword, RegistrationProvider, RepositoryError, RuntimeState,
-    SavedPasswords, ServingMachine, SignInRequest, SlugSuggestion, SystemSetup, TunnelState,
-    TunnelStatus,
+    Addon, AddonPrices, BillingPage, BillingPageKind, CertificateError, CertificateManager,
+    CheckoutProduct, CloudAccount, CloudAccountStore, CloudApi, CloudApiError, ConfigLoadError,
+    ConfigLoader, Currency, DaemonConnection, DaemonConnectionError, DaemonControl,
+    DaemonRuntimeInfo, DeviceAuthorization, DeviceTokenPoll, DnsConfigError, DnsManager,
+    DomainRepository, IosSimulatorTrust, LocalDomainOwner, LocalDomains, NetworkInfo, NewPublicUrl,
+    Plan, PlanAddons, PlanCounts, PlanInterval, PlanStatus, Protection, ProtectionChoice,
+    ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords, PublicUrlState,
+    PublicUrlWithPassword, RegistrationProvider, RepositoryError, RuntimeState, SavedPasswords,
+    ServingMachine, SignInRequest, SlugSuggestion, SystemSetup, TunnelState, TunnelStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -622,6 +622,7 @@ pub fn plan(status: PlanStatus, entitled: bool) -> Plan {
             serving_machines: 1,
             public_urls: 1,
         },
+        addons: PlanAddons::default(),
     }
 }
 
@@ -638,6 +639,8 @@ pub struct InMemoryCloudApi {
     /// `public_url` fixtures are at version 1.
     last_version: Cell<u32>,
     plan: RefCell<Option<Plan>>,
+    /// The units of the last add-on checkout.
+    last_units: Cell<Option<u8>>,
 }
 
 const GENERATED_PASSWORD: &str = "four-random-words-here";
@@ -653,7 +656,12 @@ impl InMemoryCloudApi {
             calls: RefCell::new(Vec::new()),
             last_version: Cell::new(1),
             plan: RefCell::new(None),
+            last_units: Cell::new(None),
         }
+    }
+
+    pub fn last_units(&self) -> Option<u8> {
+        self.last_units.get()
     }
 
     /// What `GET /v1/me` reports as the plan; `None`, as an older cloud, by
@@ -673,7 +681,8 @@ impl InMemoryCloudApi {
         self
     }
 
-    /// The next call about public URLs fails with `error`.
+    /// The next call to Localify Cloud, other than the device flow and
+    /// signing out, fails with `error`.
     pub fn with_error(self, error: CloudApiError) -> Self {
         *self.next_error.borrow_mut() = Some(error);
         self
@@ -732,6 +741,7 @@ impl InMemoryCloudApi {
                     status: 404,
                     code: "not_found".into(),
                     message: "No such public URL.".into(),
+                    upgrade: None,
                 })?;
         change(url);
         Ok(url.clone())
@@ -775,22 +785,31 @@ impl CloudApi for InMemoryCloudApi {
         Ok(self.plan.borrow().clone())
     }
 
-    /// A checkout, or the portal when the plan is entitled, as the API does.
+    /// A checkout, or the portal when the account already has what it asks
+    /// for, as the API does.
     fn checkout(
         &self,
         _account: &CloudAccount,
-        interval: PlanInterval,
+        product: CheckoutProduct,
     ) -> Result<BillingPage, CloudApiError> {
-        self.call(match interval {
-            PlanInterval::Month => "checkout:month",
-            PlanInterval::Year => "checkout:year",
+        self.call(match product {
+            CheckoutProduct::Pro(PlanInterval::Month) => "checkout:month",
+            CheckoutProduct::Pro(PlanInterval::Year) => "checkout:year",
+            CheckoutProduct::Addon(Addon::Machine, _) => "checkout:addon_machine",
+            CheckoutProduct::Addon(Addon::Urls, _) => "checkout:addon_urls",
         })?;
-        let entitled = self
-            .plan
-            .borrow()
-            .as_ref()
-            .is_some_and(|plan| plan.entitled);
-        Ok(if entitled {
+        let plan = self.plan.borrow();
+        let has_it = match product {
+            CheckoutProduct::Pro(_) => plan.as_ref().is_some_and(|plan| plan.entitled),
+            CheckoutProduct::Addon(addon, units) => {
+                self.last_units.set(Some(units.value()));
+                plan.as_ref().is_some_and(|plan| match addon {
+                    Addon::Machine => plan.addons.machines > 0,
+                    Addon::Urls => plan.addons.url_packs > 0,
+                })
+            }
+        };
+        Ok(if has_it {
             BillingPage {
                 kind: BillingPageKind::Portal,
                 url: "https://polar.sh/portal".into(),
@@ -806,6 +825,16 @@ impl CloudApi for InMemoryCloudApi {
     fn billing_portal(&self, _account: &CloudAccount) -> Result<String, CloudApiError> {
         self.call("portal")?;
         Ok("https://polar.sh/portal".into())
+    }
+
+    /// Euros, at prices other than the list ones, to tell them apart.
+    fn addon_prices(&self, _account: &CloudAccount) -> Result<AddonPrices, CloudApiError> {
+        self.call("pricing")?;
+        Ok(AddonPrices {
+            currency: Currency::Eur,
+            machine: 350,
+            url_pack: 250,
+        })
     }
 
     /// The domain's first label, then `<label>-teo-goulois` when taken.

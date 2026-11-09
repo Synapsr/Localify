@@ -5,8 +5,9 @@ import { toast } from "sonner";
 import { cloudMutations, cloudQueries, entitlementChange } from "@/lib/queries";
 
 /**
- * The account's plan, read only while signed in. When its entitlement changes, however it
- * changed, the daemon is told to fetch what this Mac may serve, and the URLs are read again.
+ * The account's plan, read only while signed in. When its entitlement or its limits change,
+ * however they changed, the daemon is told to fetch what this Mac may serve, and the URLs
+ * are read again: a machine add-on frees a serving slot for a blocked Mac.
  */
 export function useCloudPlan(signedIn: boolean) {
   const queryClient = useQueryClient();
@@ -19,6 +20,11 @@ export function useCloudPlan(signedIn: boolean) {
     if (change === "entitled") {
       toast.success("Localify Cloud Pro is active", {
         description: "This Mac serves its public URLs.",
+      });
+    }
+    if (change === "limits" && plan.data) {
+      toast.success("Localify Cloud limits changed", {
+        description: `${plan.data.limits.servingMachines} serving machines, ${plan.data.limits.publicUrls} public URLs.`,
       });
     }
     refreshTunnel(undefined, {

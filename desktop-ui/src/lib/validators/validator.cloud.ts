@@ -21,6 +21,11 @@ export const startCloudCheckoutRequestSchema = z.object({
   interval: z.enum(["month", "year"]),
 });
 
+export const startCloudAddonCheckoutRequestSchema = z.object({
+  addon: z.enum(["machine", "urls"]),
+  units: z.number().int().min(1).max(20),
+});
+
 export const pollCloudSignInRequestSchema = z.object({
   deviceCode: z.string().trim().min(1, "Device code is required"),
 });

@@ -345,6 +345,7 @@ mod tests {
             status: 401,
             code: "unauthorized".into(),
             message: "Sign in again.".into(),
+            upgrade: None,
         });
         let store = InMemoryCloudAccountStore::signed_in();
         let tunnel = InMemoryPublicTunnel::running();
@@ -364,6 +365,7 @@ mod tests {
             status: 500,
             code: "internal".into(),
             message: "Something broke.".into(),
+            upgrade: None,
         });
         let store = InMemoryCloudAccountStore::signed_in();
         let tunnel = InMemoryPublicTunnel::running();

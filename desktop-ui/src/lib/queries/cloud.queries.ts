@@ -2,6 +2,7 @@ import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react
 
 import type {
   CloudAccountDto,
+  CloudAddonPricingDto,
   CloudBillingPageDto,
   CloudPlanDto,
   CloudSignInPollDto,
@@ -15,6 +16,7 @@ import type {
   PublicUrlSlugSuggestionDto,
   PublicUrlWithPasswordDto,
   SetPublicUrlProtectionRequest,
+  StartCloudAddonCheckoutRequest,
   StartCloudCheckoutRequest,
 } from "../../types/localify";
 
@@ -34,8 +36,8 @@ function isWatchingCheckout(): boolean {
 }
 
 /**
- * Whether the plan's entitlement changed since the last answer any screen saw, however it
- * changed. The checkout watch only makes the app ask more often.
+ * Whether the plan's entitlement or limits changed since the last answer any screen saw,
+ * however they changed. The checkout watch only makes the app ask more often.
  */
 export const entitlementChange = createEntitlementTracker();
 
@@ -43,6 +45,7 @@ const cloudQueryKeys = {
   all: () => ["cloud"] as const,
   account: () => [...cloudQueryKeys.all(), "account"] as const,
   plan: () => [...cloudQueryKeys.all(), "plan"] as const,
+  addonPricing: () => [...cloudQueryKeys.all(), "addon-pricing"] as const,
   publicUrls: () => [...cloudQueryKeys.all(), "public-urls"] as const,
   slugSuggestion: (localDomain: string) =>
     [...cloudQueryKeys.all(), "slug-suggestion", localDomain] as const,
@@ -77,6 +80,13 @@ export const cloudQueries = {
       staleTime: 30_000,
       refetchInterval: () => (isWatchingCheckout() ? CHECKOUT_POLL_MS : false),
       refetchOnWindowFocus: () => (isWatchingCheckout() ? "always" : true),
+    }),
+  /** Calls Localify Cloud; Rust answers the list prices when it cannot. */
+  addonPricing: () =>
+    queryOptions<CloudAddonPricingDto, Error>({
+      queryKey: cloudQueryKeys.addonPricing(),
+      queryFn: () => tauriClient.getCloudAddonPricing(),
+      staleTime: 60 * 60_000,
     }),
   /** Calls Localify Cloud: only while signed in. */
   publicUrls: () =>
@@ -115,13 +125,19 @@ export const cloudMutations = {
       mutationFn: (request) => tauriClient.startCloudCheckout(request),
       onSuccess: async () => watchCheckout(queryClient),
     }),
+  /** Opens an add-on's checkout (or the portal when the account has it) in the browser. */
+  startAddonCheckout: (queryClient: QueryClient) =>
+    mutationOptions<CloudBillingPageDto, Error, StartCloudAddonCheckoutRequest>({
+      mutationFn: (request) => tauriClient.startCloudAddonCheckout(request),
+      onSuccess: async () => watchCheckout(queryClient),
+    }),
   openBillingPortal: (queryClient: QueryClient) =>
     mutationOptions<void, Error, void>({
       mutationFn: () => tauriClient.openCloudBillingPortal(),
       onSuccess: async () => watchCheckout(queryClient),
     }),
   /**
-   * After the plan's entitlement changed: the daemon fetches what this Mac serves, and the
+   * After the plan's entitlement or limits changed: the daemon fetches what this Mac serves, and the
    * account, the plan and the URLs, whose state follows the plan, are read again.
    */
   refreshTunnel: (queryClient: QueryClient) =>

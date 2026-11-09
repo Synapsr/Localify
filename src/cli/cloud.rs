@@ -1,5 +1,6 @@
 //! `localify login`, `logout`, `whoami`, `subscribe` and `billing`: this
-//! machine's Localify Cloud account (ADR 0020) and its plan (ADR 0024).
+//! machine's Localify Cloud account (ADR 0020), its plan and its add-ons
+//! (ADR 0024).
 
 use std::process::{Command, Stdio};
 use std::thread;
@@ -10,15 +11,17 @@ use serde::Serialize;
 
 use super::output::{can_prompt, note, print_json, wants_json};
 use crate::application::cloud_account::{AccountStatus, SignInPoll, TunnelRefresh};
-use crate::application::cloud_errors::no_plan_line;
+use crate::application::cloud_errors::{no_plan_line, raise_limit_line};
 use crate::application::ports::{
-    BillingPageKind, DeviceAuthorization, Plan, PlanInterval, PlanStatus, PublicUrlState,
-    RuntimeState, TunnelState, TunnelStatus,
+    Addon, BillingPage, BillingPageKind, DeviceAuthorization, Plan, PlanInterval, PlanStatus,
+    PublicUrlState, RuntimeState, TunnelState, TunnelStatus,
 };
 use crate::branding::BRANDING;
+use crate::domain::AddonUnits;
 use crate::infrastructure::cloud_adapters::{CloudAdapters, computer_name};
 
-/// `subscribe` asks for the plan this often after opening the checkout.
+/// `subscribe` asks for the plan this often after opening the checkout, for
+/// this long.
 const PLAN_POLL: Duration = Duration::from_secs(5);
 const PLAN_WAIT: Duration = Duration::from_secs(15 * 60);
 
@@ -49,9 +52,9 @@ pub fn login(json_flag: bool, cloud: &CloudAdapters) -> Result<()> {
             SignInPoll::Denied(message) => {
                 bail!("{message} To sign in after all, run `{cli} login` again.")
             }
-            SignInPoll::NotAllowed(message) => bail!(
-                "{message} Localify Cloud is invite-only for now: ask the Localify team to add this GitHub account."
-            ),
+            SignInPoll::NotAllowed(message) => {
+                bail!("{message} To sign in with another GitHub account, run `{cli} login` again.")
+            }
             SignInPoll::Expired(message) => {
                 bail!("{message} Run `{cli} login` again for a new code.")
             }
@@ -151,12 +154,7 @@ pub fn subscribe(yearly: bool, json_flag: bool, cloud: &CloudAdapters) -> Result
     };
     let page = billing.subscribe(interval)?;
     if json || !can_prompt() {
-        return if json {
-            print_json(&page)
-        } else {
-            println!("{}", page.url);
-            Ok(())
-        };
+        return print_page(&page, json);
     }
     if page.kind == BillingPageKind::Portal {
         println!(
@@ -171,10 +169,95 @@ pub fn subscribe(yearly: bool, json_flag: bool, cloud: &CloudAdapters) -> Result
         page.url
     );
     open_in_browser(&page.url);
-    let plan = wait_for_plan(cloud)?;
+    let plan = wait_for_plan(cloud, |plan| plan.entitled, "The plan is not active yet")?;
     println!("Localify Cloud Pro is active. {}", plan_line(&plan));
     print_refresh(&billing.refresh_tunnel(), false);
     Ok(())
+}
+
+/// Opens the Polar checkout for an add-on on a terminal, or the customer
+/// portal when the account already has it, and waits for the new limit;
+/// otherwise prints the page and returns, as `subscribe` does.
+pub fn buy_addon(
+    addon: Addon,
+    units: AddonUnits,
+    json_flag: bool,
+    cloud: &CloudAdapters,
+) -> Result<()> {
+    let json = wants_json(json_flag);
+    let billing = cloud.billing();
+    let waits = !json && can_prompt();
+    // The limit before, to tell when the new one arrives.
+    let before = if waits {
+        billing.plan()?.map(|plan| addon_limit(&plan, addon))
+    } else {
+        None
+    };
+    let page = billing.buy_addon(addon, units)?;
+    if !waits {
+        return print_page(&page, json);
+    }
+    match page.kind {
+        BillingPageKind::Checkout => println!(
+            "Opening the Polar checkout for {}:\n\n    {}\n",
+            addon_units_label(addon, units),
+            page.url
+        ),
+        BillingPageKind::Portal => println!(
+            "This account already has {}. Change how many in the customer portal:\n\n    {}\n",
+            addon_label(addon),
+            page.url
+        ),
+    }
+    open_in_browser(&page.url);
+    let Some(before) = before else {
+        return Ok(());
+    };
+    println!("Waiting for the new limit (up to 15 min)...");
+    let plan = wait_for_plan(
+        cloud,
+        |plan| addon_limit(plan, addon) != before,
+        "The new limit does not show yet",
+    )?;
+    println!("The plan's limits changed. {}", plan_line(&plan));
+    print_refresh(&billing.refresh_tunnel(), false);
+    Ok(())
+}
+
+/// Without a terminal or with `--json`: the page, for whoever runs the
+/// command to open.
+fn print_page(page: &BillingPage, json: bool) -> Result<()> {
+    if json {
+        return print_json(page);
+    }
+    println!("{}", page.url);
+    Ok(())
+}
+
+/// The limit an add-on raises.
+fn addon_limit(plan: &Plan, addon: Addon) -> u32 {
+    match addon {
+        Addon::Machine => plan.limits.serving_machines,
+        Addon::Urls => plan.limits.public_urls,
+    }
+}
+
+fn addon_label(addon: Addon) -> &'static str {
+    match addon {
+        Addon::Machine => "extra serving machines",
+        Addon::Urls => "extra public URLs",
+    }
+}
+
+/// `3 more serving machines`, or `2 packs of 10 public URLs (20 URLs)`.
+fn addon_units_label(addon: Addon, units: AddonUnits) -> String {
+    let n = units.value();
+    match (addon, n) {
+        (Addon::Machine, 1) => "1 more serving machine".to_string(),
+        (Addon::Machine, n) => format!("{n} more serving machines"),
+        (Addon::Urls, 1) => "1 pack of 10 public URLs".to_string(),
+        (Addon::Urls, n) => format!("{n} packs of 10 public URLs ({} URLs)", u32::from(n) * 10),
+    }
 }
 
 /// Opens the Polar customer portal on a terminal; prints its URL otherwise.
@@ -195,24 +278,42 @@ pub fn billing(json_flag: bool, cloud: &CloudAdapters) -> Result<()> {
     Ok(())
 }
 
-/// Polls `GET /v1/me` until the plan is entitled. The success page grants
-/// nothing: access starts when Localify Cloud sees the subscription.
-fn wait_for_plan(cloud: &CloudAdapters) -> Result<Plan> {
-    let deadline = Instant::now() + PLAN_WAIT;
+/// Polls `GET /v1/me` until the plan is `done`. The success page grants
+/// nothing: the plan changes when Localify Cloud sees the subscription.
+fn wait_for_plan(
+    cloud: &CloudAdapters,
+    done: impl Fn(&Plan) -> bool,
+    not_yet: &str,
+) -> Result<Plan> {
     let billing = cloud.billing();
+    match poll_plan(|| billing.plan(), done, PLAN_POLL, PLAN_WAIT) {
+        Some(plan) => Ok(plan),
+        None => bail!(
+            "{not_yet}. Once the checkout is done, check with: {} whoami",
+            BRANDING.cli_command()
+        ),
+    }
+}
+
+/// Reads the plan every `poll` until it is `done`, for `wait` at most;
+/// `None` once `wait` is over. A failed read is retried: the checkout is
+/// still open in the browser.
+fn poll_plan(
+    mut read: impl FnMut() -> Result<Option<Plan>>,
+    done: impl Fn(&Plan) -> bool,
+    poll: Duration,
+    wait: Duration,
+) -> Option<Plan> {
+    let deadline = Instant::now() + wait;
     loop {
-        thread::sleep(PLAN_POLL);
-        // A failed poll is retried: the checkout is still open in the browser.
-        if let Ok(Some(plan)) = billing.plan()
-            && plan.entitled
+        thread::sleep(poll);
+        if let Ok(Some(plan)) = read()
+            && done(&plan)
         {
-            return Ok(plan);
+            return Some(plan);
         }
         if Instant::now() >= deadline {
-            bail!(
-                "The plan is not active yet. Once the checkout is done, check with: {} whoami",
-                BRANDING.cli_command()
-            );
+            return None;
         }
     }
 }
@@ -295,8 +396,13 @@ fn blocked_line(tunnel: &TunnelStatus, cloud: &CloudAdapters) -> Option<String> 
             } else {
                 holders.join(", ")
             };
+            let raise = blocked
+                .upgrade
+                .as_ref()
+                .map(|upgrade| format!(" {}", raise_limit_line(upgrade)))
+                .unwrap_or_default();
             format!(
-                "Every serving slot is taken, by {holders}. Remove a URL one of them serves, or serve it from here: {cli} public-url claim <url>"
+                "Every serving slot is taken, by {holders}. Remove a URL one of them serves, or serve it from here: {cli} public-url claim <url>{raise}"
             )
         }
         "capacity" => {
@@ -420,7 +526,7 @@ fn open_in_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::ports::PlanCounts;
+    use crate::application::ports::{PlanAddons, PlanCounts};
 
     fn plan(status: PlanStatus) -> Plan {
         Plan {
@@ -439,6 +545,7 @@ mod tests {
                 serving_machines: 1,
                 public_urls: 3,
             },
+            addons: PlanAddons::default(),
         }
     }
 
@@ -456,6 +563,81 @@ mod tests {
         used.trial_available = false;
         assert!(plan_line(&used).contains("subscribe") && !plan_line(&used).contains("trial"));
         assert!(plan_line(&plan(PlanStatus::Override)).starts_with("Team access ·"));
+    }
+
+    #[test]
+    fn an_addon_waits_for_the_limit_it_raises() {
+        let mut plan = plan(PlanStatus::Active);
+        assert_eq!(addon_limit(&plan, Addon::Machine), 2);
+        plan.limits.public_urls = 30;
+        assert_eq!(addon_limit(&plan, Addon::Urls), 30);
+    }
+
+    #[test]
+    fn polling_stops_once_the_new_limit_shows() {
+        let raised = {
+            let mut plan = plan(PlanStatus::Active);
+            plan.limits.serving_machines = 4;
+            plan
+        };
+        let mut answers = vec![
+            Ok(Some(raised)),
+            Ok(Some(plan(PlanStatus::Active))),
+            Ok(None),
+            Err(anyhow::anyhow!("offline")),
+        ];
+        let mut reads = 0;
+
+        let plan = poll_plan(
+            || {
+                reads += 1;
+                answers.pop().unwrap()
+            },
+            |plan| addon_limit(plan, Addon::Machine) != 2,
+            Duration::ZERO,
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(plan.map(|plan| plan.limits.serving_machines), Some(4));
+        assert_eq!(
+            reads, 4,
+            "failed and unchanged reads are retried, then it stops"
+        );
+    }
+
+    #[test]
+    fn polling_gives_up_when_the_wait_is_over() {
+        let mut reads = 0;
+
+        let plan = poll_plan(
+            || {
+                reads += 1;
+                Ok(Some(plan(PlanStatus::Active)))
+            },
+            |plan| addon_limit(plan, Addon::Machine) != 2,
+            Duration::from_millis(1),
+            Duration::from_millis(20),
+        );
+
+        assert_eq!(plan, None);
+        assert!(reads >= 1);
+    }
+
+    #[test]
+    fn addon_units_read_as_what_they_buy() {
+        let units = |n| AddonUnits::new(n).unwrap();
+        assert_eq!(
+            addon_units_label(Addon::Machine, units(1)),
+            "1 more serving machine"
+        );
+        assert_eq!(
+            addon_units_label(Addon::Machine, units(3)),
+            "3 more serving machines"
+        );
+        assert_eq!(
+            addon_units_label(Addon::Urls, units(2)),
+            "2 packs of 10 public URLs (20 URLs)"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use super::DaemonConnectionError;
+use super::{DaemonConnectionError, UpgradeHint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +35,9 @@ pub enum RuntimeState {
 pub struct RuntimeBlock {
     pub reason: String,
     pub message: String,
+    /// What lifts the block, when the account can buy it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<UpgradeHint>,
 }
 
 /// How the tunnel that carries this machine's public traffic is doing.

@@ -24,8 +24,8 @@ use crate::application::ports::DaemonControl;
 #[cfg(target_os = "macos")]
 use crate::application::ports::IosSimulatorTrust;
 use crate::application::ports::{
-    BillingPageKind, Plan, PlanCounts, PlanInterval, PlanStatus, ProtectionChoice, ProtectionMode,
-    PublicUrlState, RuntimeState, TunnelState,
+    Addon, BillingPage, BillingPageKind, Currency, Plan, PlanCounts, PlanInterval, PlanStatus,
+    ProtectionChoice, ProtectionMode, PublicUrlState, RuntimeState, TunnelState, UpgradeHint,
 };
 use crate::application::public_urls::{CreatePublicUrl, PublicUrlView};
 use crate::application::register_domain::RegisterDomain;
@@ -67,13 +67,15 @@ use crate::desktop::dto::{
     UpdateLauncherPreferencesRequest, UpdateProjectRequest,
 };
 use crate::desktop::dto::{
-    CheckPublicUrlSlugRequest, CloudAccountDto, CloudBillingPageDto, CloudBillingPageKindDto,
+    CheckPublicUrlSlugRequest, CloudAccountDto, CloudAddonDto, CloudAddonPricingDto,
+    CloudBillingPageDto, CloudBillingPageKindDto, CloudCurrencyDto, CloudPlanAddonsDto,
     CloudPlanCountsDto, CloudPlanDto, CloudPlanIntervalDto, CloudPlanStatusDto,
     CloudRuntimeBlockDto, CloudRuntimeStateDto, CloudSignInPollDto, CloudSignInStartDto,
-    CloudSignInStatusDto, CloudSignOutDto, CreatePublicUrlRequest, PollCloudSignInRequest,
-    PublicUrlDto, PublicUrlIdRequest, PublicUrlProtectionDto, PublicUrlProtectionModeDto,
-    PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto, PublicUrlStateDto, PublicUrlWithPasswordDto,
-    SetPublicUrlProtectionRequest, StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
+    CloudSignInStatusDto, CloudSignOutDto, CloudUpgradeDto, CreatePublicUrlRequest,
+    PollCloudSignInRequest, PublicUrlDto, PublicUrlIdRequest, PublicUrlProtectionDto,
+    PublicUrlProtectionModeDto, PublicUrlSlugCheckDto, PublicUrlSlugSuggestionDto,
+    PublicUrlStateDto, PublicUrlWithPasswordDto, SetPublicUrlProtectionRequest,
+    StartCloudAddonCheckoutRequest, StartCloudCheckoutRequest, SuggestPublicUrlSlugRequest,
     TunnelStateDto, TunnelStatusDto,
 };
 use crate::desktop::node_trust;
@@ -81,7 +83,9 @@ use crate::desktop::port_conflicts::{
     PortConflictProcess, kill_daemon_port_conflict, list_daemon_port_conflicts,
 };
 use crate::desktop::{LauncherPreferencesStore, ProjectRootStore};
-use crate::domain::{DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget};
+use crate::domain::{
+    AddonUnits, DomainPattern, DomainRegistration, PathPrefix, Route, RouteTarget,
+};
 use crate::infrastructure::certs::CertificateService;
 use crate::infrastructure::cloud_adapters::{CloudAdapters, computer_name};
 use crate::infrastructure::config::{
@@ -94,6 +98,7 @@ use crate::infrastructure::filesystem::FileSystemSetup;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::ios_simulator_trust::trust_booted_ios_simulators;
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
+use crate::infrastructure::locale_currency::local_currency;
 use crate::infrastructure::macos_system::{
     self, Approval, CliLink, LegacyInstall, SystemChanges, SystemRequest,
 };
@@ -475,12 +480,37 @@ impl DesktopApi {
         };
         let page = self.cloud()?.billing().subscribe(interval)?;
         self.open_project_url_with_preferred_browser(&page.url)?;
-        Ok(CloudBillingPageDto {
-            kind: match page.kind {
-                BillingPageKind::Checkout => CloudBillingPageKindDto::Checkout,
-                BillingPageKind::Portal => CloudBillingPageKindDto::Portal,
+        Ok(map_billing_page(page))
+    }
+
+    /// Opens the Polar checkout for an add-on in the browser, or the
+    /// customer portal when the account already has it.
+    pub fn start_cloud_addon_checkout(
+        &self,
+        request: StartCloudAddonCheckoutRequest,
+    ) -> Result<CloudBillingPageDto> {
+        let addon = match request.addon {
+            CloudAddonDto::Machine => Addon::Machine,
+            CloudAddonDto::Urls => Addon::Urls,
+        };
+        let units = AddonUnits::new(request.units)?;
+        let page = self.cloud()?.billing().buy_addon(addon, units)?;
+        self.open_project_url_with_preferred_browser(&page.url)?;
+        Ok(map_billing_page(page))
+    }
+
+    /// The add-ons' monthly prices from Localify Cloud, or the list prices
+    /// in this Mac's region's currency when it cannot answer.
+    pub fn cloud_addon_pricing(&self) -> Result<CloudAddonPricingDto> {
+        let pricing = self.cloud()?.billing().addon_prices(local_currency());
+        Ok(CloudAddonPricingDto {
+            currency: match pricing.prices.currency {
+                Currency::Usd => CloudCurrencyDto::Usd,
+                Currency::Eur => CloudCurrencyDto::Eur,
             },
-            url: page.url,
+            machine: pricing.prices.machine,
+            url_pack: pricing.prices.url_pack,
+            live: pricing.live,
         })
     }
 
@@ -4168,8 +4198,26 @@ fn map_cloud_account(status: AccountStatus) -> CloudAccountDto {
             blocked: status.tunnel.blocked.map(|blocked| CloudRuntimeBlockDto {
                 reason: blocked.reason,
                 message: blocked.message,
+                upgrade: blocked.upgrade.map(map_upgrade),
             }),
         },
+    }
+}
+
+fn map_upgrade(upgrade: UpgradeHint) -> CloudUpgradeDto {
+    CloudUpgradeDto {
+        kind: upgrade.kind,
+        command: upgrade.command,
+    }
+}
+
+fn map_billing_page(page: BillingPage) -> CloudBillingPageDto {
+    CloudBillingPageDto {
+        kind: match page.kind {
+            BillingPageKind::Checkout => CloudBillingPageKindDto::Checkout,
+            BillingPageKind::Portal => CloudBillingPageKindDto::Portal,
+        },
+        url: page.url,
     }
 }
 
@@ -4198,6 +4246,10 @@ fn map_cloud_plan(plan: Plan) -> CloudPlanDto {
         trial_available: plan.trial_available,
         limits: counts(plan.limits),
         usage: counts(plan.usage),
+        addons: CloudPlanAddonsDto {
+            machines: plan.addons.machines,
+            url_packs: plan.addons.url_packs,
+        },
     }
 }
 

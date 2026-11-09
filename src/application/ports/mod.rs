@@ -16,10 +16,11 @@ pub mod system_setup;
 pub use certificate_manager::{CertificateError, CertificateManager};
 pub use cloud_account_store::CloudAccountStore;
 pub use cloud_api::{
-    BillingPage, BillingPageKind, CloudAccount, CloudApi, CloudApiError, DeviceAuthorization,
-    DeviceTokenPoll, NewPublicUrl, Plan, PlanCounts, PlanInterval, PlanStatus, Protection,
-    ProtectionChoice, ProtectionMode, PublicUrl, PublicUrlState, PublicUrlWithPassword,
-    ServingMachine, SignInRequest, SlugSuggestion,
+    Addon, AddonPrices, BillingPage, BillingPageKind, CheckoutProduct, CloudAccount, CloudApi,
+    CloudApiError, Currency, DeviceAuthorization, DeviceTokenPoll, NewPublicUrl, Plan, PlanAddons,
+    PlanCounts, PlanInterval, PlanStatus, Protection, ProtectionChoice, ProtectionMode, PublicUrl,
+    PublicUrlState, PublicUrlWithPassword, ServingMachine, SignInRequest, SlugSuggestion,
+    UpgradeHint,
 };
 pub use config_loader::{ConfigLoadError, ConfigLoader};
 pub use daemon_connection::{

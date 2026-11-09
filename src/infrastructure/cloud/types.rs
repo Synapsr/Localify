@@ -134,6 +134,20 @@ pub enum RuntimeV2State {
 pub struct RuntimeBlock {
     pub reason: String,
     pub message: String,
+    /// What lifts the block, when the account can buy it. Left out by a
+    /// cloud older than add-ons, and by a daemon older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<Upgrade>,
+}
+
+/// The `upgrade` of a refusal or a block: `kind` is `pro`, `addon_machine`
+/// or `addon_urls`, and `command` the one a person runs, such as
+/// `localify billing` (`docs/public-urls.md`, "API").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Upgrade {
+    pub kind: String,
+    pub command: String,
 }
 
 /// The tunnel generation to serve with. The token comes only when the
@@ -246,6 +260,26 @@ mod tests {
         let url: PublicUrl = serde_json::from_str(&versioned).unwrap();
         assert_eq!(url.protection.version, Some(3));
         assert_eq!(url.state, Some(PublicUrlState::TakenDown));
+    }
+
+    #[test]
+    fn a_block_keeps_its_upgrade_through_the_daemon() {
+        let block: RuntimeBlock = serde_json::from_str(
+            r#"{"reason":"serving_slots_full","message":"Every slot is taken.",
+                "upgrade":{"kind":"addon_machine","command":"localify billing"}}"#,
+        )
+        .unwrap();
+        assert_eq!(block.upgrade.as_ref().unwrap().command, "localify billing");
+
+        // `public_status` carries it to the CLI and the app, and leaves it
+        // out when there is none, as an older daemon does.
+        let again: RuntimeBlock =
+            serde_json::from_str(&serde_json::to_string(&block).unwrap()).unwrap();
+        assert_eq!(again, block);
+        let older: RuntimeBlock =
+            serde_json::from_str(r#"{"reason":"capacity","message":"Full."}"#).unwrap();
+        assert_eq!(older.upgrade, None);
+        assert!(!serde_json::to_string(&older).unwrap().contains("upgrade"));
     }
 
     #[test]

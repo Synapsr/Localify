@@ -187,7 +187,8 @@ mod tests {
             Runtime::Blocked {
                 block: RuntimeBlock {
                     reason: "capacity".into(),
-                    message: "Full.".into()
+                    message: "Full.".into(),
+                    upgrade: None,
                 },
                 retry_after: Some(Duration::from_secs(60)),
             }

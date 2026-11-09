@@ -922,6 +922,14 @@ export type CloudRuntimeStateDto = "idle" | "provisioning" | "ready" | "blocked"
 export interface CloudRuntimeBlockDto {
   reason: "subscription_required" | "serving_slots_full" | "capacity" | (string & {});
   message: string;
+  /** What lifts the block, when the account can buy it. */
+  upgrade: CloudUpgradeDto | null;
+}
+
+/** The command Localify Cloud names to lift a refusal, for a person to run. */
+export interface CloudUpgradeDto {
+  kind: "pro" | "addon_machine" | "addon_urls" | (string & {});
+  command: string;
 }
 
 export type CloudPlanStatusDto =
@@ -953,10 +961,36 @@ export interface CloudPlanDto {
   trialAvailable: boolean;
   limits: CloudPlanCountsDto;
   usage: CloudPlanCountsDto;
+  /** The add-on units the account holds, counted in `limits`. */
+  addons: CloudPlanAddonsDto;
+}
+
+export interface CloudPlanAddonsDto {
+  machines: number;
+  /** Packs of 10 public URLs. */
+  urlPacks: number;
 }
 
 export interface StartCloudCheckoutRequest {
   interval: CloudPlanIntervalDto;
+}
+
+/** "machine": one serving machine per unit; "urls": 10 public URLs per unit. */
+export type CloudAddonDto = "machine" | "urls";
+
+export interface StartCloudAddonCheckoutRequest {
+  addon: CloudAddonDto;
+  /** 1 to 20. */
+  units: number;
+}
+
+/** The add-ons' monthly prices per unit, in minor units: 300 is $3. */
+export interface CloudAddonPricingDto {
+  currency: "USD" | "EUR";
+  machine: number;
+  urlPack: number;
+  /** False for the list prices, shown while Localify Cloud cannot answer. */
+  live: boolean;
 }
 
 /** The page Localify opened in the browser: "portal" when the plan was already active. */

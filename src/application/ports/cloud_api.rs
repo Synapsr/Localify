@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::domain::{DomainName, PublicSlug};
+use crate::domain::{AddonUnits, DomainName, PublicSlug};
 
 /// A signed-in machine: where its API is, its token, and who it is.
 #[derive(Clone, PartialEq, Eq)]
@@ -141,6 +141,9 @@ pub struct Plan {
     pub trial_available: bool,
     pub limits: PlanCounts,
     pub usage: PlanCounts,
+    /// The add-ons the account holds, counted in `limits` while Pro is
+    /// entitled.
+    pub addons: PlanAddons,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -171,6 +174,61 @@ pub struct PlanCounts {
     pub public_urls: u32,
 }
 
+/// Add-on units the account holds: serving machines, and packs of 10 URLs.
+/// Zero from a Localify Cloud older than add-ons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAddons {
+    pub machines: u32,
+    pub url_packs: u32,
+}
+
+/// What raises a Pro plan's limits, on top of what it includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Addon {
+    /// One more serving machine per unit.
+    Machine,
+    /// Ten more public URLs per unit.
+    Urls,
+}
+
+/// What a checkout sells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutProduct {
+    Pro(PlanInterval),
+    Addon(Addon, AddonUnits),
+}
+
+/// The `upgrade` of a refusal: the command that lifts it, for a person to
+/// run (`docs/public-urls.md`, "API"). Localify Cloud never sends a checkout
+/// link here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpgradeHint {
+    /// `pro`, `addon_machine` or `addon_urls`.
+    pub kind: String,
+    /// Such as `localify billing`.
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Currency {
+    #[serde(rename = "USD")]
+    Usd,
+    #[serde(rename = "EUR")]
+    Eur,
+}
+
+/// The monthly price of one unit of each add-on, in minor units: 300 is $3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonPrices {
+    pub currency: Currency,
+    pub machine: u32,
+    pub url_pack: u32,
+}
+
 /// The page that takes the person to Polar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,10 +240,11 @@ pub struct BillingPage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BillingPageKind {
-    /// A checkout for Pro, with its trial when the account still has one.
+    /// A checkout for Pro, with its trial when the account still has one, or
+    /// for an add-on.
     Checkout,
-    /// The customer portal: the plan is already entitled, or the person
-    /// manages it.
+    /// The customer portal: the plan is already entitled, the account
+    /// already has that add-on, or the person manages it.
     Portal,
 }
 
@@ -246,6 +305,8 @@ pub enum CloudApiError {
         status: u16,
         code: String,
         message: String,
+        /// What lifts the refusal, when the account can buy it.
+        upgrade: Option<UpgradeHint>,
     },
     /// Anything else, such as a response this version cannot read.
     #[error("{0}")]
@@ -261,13 +322,16 @@ pub trait CloudApi {
     fn sign_out(&self, account: &CloudAccount) -> Result<(), CloudApiError>;
     /// `None` from a Localify Cloud older than the paid plan.
     fn plan(&self, account: &CloudAccount) -> Result<Option<Plan>, CloudApiError>;
-    /// A Polar checkout for Pro at `interval`, or the customer portal when
-    /// the plan is already entitled.
+    /// A Polar checkout for `product`, or the customer portal when the
+    /// account already has it: an entitled Pro plan, or that add-on.
     fn checkout(
         &self,
         account: &CloudAccount,
-        interval: PlanInterval,
+        product: CheckoutProduct,
     ) -> Result<BillingPage, CloudApiError>;
+    /// The add-ons' live prices, in the currency Localify Cloud picks for
+    /// this machine's country. Asks without the token.
+    fn addon_prices(&self, account: &CloudAccount) -> Result<AddonPrices, CloudApiError>;
     /// The URL of a Polar customer portal session.
     fn billing_portal(&self, account: &CloudAccount) -> Result<String, CloudApiError>;
     /// The first free slug that mirrors the local domain's name, as

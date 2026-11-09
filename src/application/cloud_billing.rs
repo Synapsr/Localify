@@ -4,16 +4,32 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 
 use super::cloud_account::{TunnelRefresh, refresh_tunnel};
-use super::cloud_errors::with_next_step;
+use super::cloud_errors::{with_next_step, with_upgrade_command};
 use super::ports::{
-    BillingPage, CloudAccount, CloudAccountStore, CloudApi, CloudApiError, Plan, PlanInterval,
-    PublicTunnel,
+    Addon, AddonPrices, BillingPage, CheckoutProduct, CloudAccount, CloudAccountStore, CloudApi,
+    CloudApiError, Currency, Plan, PlanInterval, PublicTunnel,
 };
 use crate::branding::BRANDING;
+use crate::domain::AddonUnits;
 
 /// The API asks to retry a checkout another request is creating after 2 s.
 const CHECKOUT_RETRY: Duration = Duration::from_secs(2);
 const CHECKOUT_ATTEMPTS: u32 = 3;
+
+/// The add-ons' list prices, in minor units, for when Localify Cloud cannot
+/// give the live ones: $3 a serving machine, $2 a pack of 10 URLs, or the
+/// same in euros.
+const LIST_PRICE_MACHINE: u32 = 300;
+const LIST_PRICE_URL_PACK: u32 = 200;
+
+/// The add-ons' prices, and whether Localify Cloud gave them.
+#[allow(dead_code)] // Only the app shows prices; the CLI target does not build the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddonPricing {
+    pub prices: AddonPrices,
+    /// False for the list prices, shown while the cloud cannot answer.
+    pub live: bool,
+}
 
 /// Use case: the account's Localify Cloud plan, and the Polar pages that
 /// start or manage it (ADR 0024). Paying is for a person: the CLI and the app
@@ -47,21 +63,38 @@ impl<'a> CloudBilling<'a> {
     }
 
     /// A checkout for Pro, or the customer portal when the plan is already
-    /// entitled, where the interval is switched. Waits out another checkout
-    /// being created for the same account.
+    /// entitled, where the interval is switched.
     pub fn subscribe(&self, interval: PlanInterval) -> Result<BillingPage> {
-        let account = self.account()?;
-        let mut attempt = 1;
-        loop {
-            match self.api.checkout(&account, interval) {
-                Err(CloudApiError::Rejected { code, .. })
-                    if code == "checkout_in_progress" && attempt < CHECKOUT_ATTEMPTS =>
-                {
-                    attempt += 1;
-                    thread::sleep(self.checkout_retry);
-                }
-                result => return result.map_err(billing_error),
-            }
+        self.checkout(CheckoutProduct::Pro(interval), billing_error)
+    }
+
+    /// A checkout for `units` of an add-on, or the customer portal when the
+    /// account already has that add-on, where its quantity is changed.
+    pub fn buy_addon(&self, addon: Addon, units: AddonUnits) -> Result<BillingPage> {
+        self.checkout(CheckoutProduct::Addon(addon, units), addon_error)
+    }
+
+    /// The add-ons' monthly prices: live from Localify Cloud, or the list
+    /// prices in `fallback` when it cannot say. Never fails, since a price
+    /// only helps the sentence.
+    #[allow(dead_code)] // Only the app shows prices.
+    pub fn addon_prices(&self, fallback: Currency) -> AddonPricing {
+        let live = self
+            .store
+            .load()
+            .ok()
+            .flatten()
+            .and_then(|account| self.api.addon_prices(&account).ok());
+        match live {
+            Some(prices) => AddonPricing { prices, live: true },
+            None => AddonPricing {
+                prices: AddonPrices {
+                    currency: fallback,
+                    machine: LIST_PRICE_MACHINE,
+                    url_pack: LIST_PRICE_URL_PACK,
+                },
+                live: false,
+            },
         }
     }
 
@@ -77,6 +110,28 @@ impl<'a> CloudBilling<'a> {
         refresh_tunnel(self.tunnel)
     }
 
+    /// Waits out another checkout being created for the same account, and
+    /// says any other refusal with `refusal`.
+    fn checkout(
+        &self,
+        product: CheckoutProduct,
+        refusal: fn(CloudApiError) -> anyhow::Error,
+    ) -> Result<BillingPage> {
+        let account = self.account()?;
+        let mut attempt = 1;
+        loop {
+            match self.api.checkout(&account, product) {
+                Err(CloudApiError::Rejected { code, .. })
+                    if code == "checkout_in_progress" && attempt < CHECKOUT_ATTEMPTS =>
+                {
+                    attempt += 1;
+                    thread::sleep(self.checkout_retry);
+                }
+                result => return result.map_err(refusal),
+            }
+        }
+    }
+
     fn account(&self) -> Result<CloudAccount> {
         self.store.load()?.with_context(|| {
             format!(
@@ -84,6 +139,26 @@ impl<'a> CloudBilling<'a> {
                 BRANDING.cli_command()
             )
         })
+    }
+}
+
+/// For an add-on, the API's own sentence stands: `addons_unavailable` while
+/// sales are off, `402 subscription_required` without Pro, with the command
+/// its `upgrade` names.
+fn addon_error(error: CloudApiError) -> anyhow::Error {
+    match &error {
+        CloudApiError::Rejected {
+            message,
+            upgrade: upgrade @ Some(_),
+            ..
+        } => anyhow!(with_upgrade_command(message, upgrade.as_ref())),
+        CloudApiError::Rejected { code, message, .. } if code == "addons_unavailable" => {
+            anyhow!("{message}")
+        }
+        CloudApiError::Rejected { code, message, .. } if code == "checkout_in_progress" => {
+            anyhow!("{message} Try again in a few seconds.")
+        }
+        _ => billing_error(error),
     }
 }
 
@@ -108,7 +183,7 @@ fn billing_error(error: CloudApiError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::ports::{BillingPageKind, PlanStatus};
+    use crate::application::ports::{BillingPageKind, PlanStatus, UpgradeHint};
     use crate::application::testkit::*;
 
     fn rejected(status: u16, code: &str) -> CloudApiError {
@@ -116,7 +191,99 @@ mod tests {
             status,
             code: code.into(),
             message: "The API's sentence.".into(),
+            upgrade: None,
         }
+    }
+
+    fn signed_in() -> (InMemoryCloudAccountStore, InMemoryPublicTunnel) {
+        (
+            InMemoryCloudAccountStore::signed_in(),
+            InMemoryPublicTunnel::running(),
+        )
+    }
+
+    fn units(units: u32) -> AddonUnits {
+        AddonUnits::new(units).unwrap()
+    }
+
+    #[test]
+    fn an_addon_checkout_asks_for_its_units() {
+        let api = InMemoryCloudApi::new();
+        api.set_plan(Some(plan(PlanStatus::Active, true)));
+        let (store, tunnel) = signed_in();
+
+        let page = CloudBilling::new(&api, &store, &tunnel)
+            .buy_addon(Addon::Urls, units(3))
+            .unwrap();
+
+        assert_eq!(page.kind, BillingPageKind::Checkout);
+        assert_eq!(api.calls(), ["checkout:addon_urls"]);
+        assert_eq!(api.last_units(), Some(3));
+    }
+
+    #[test]
+    fn an_addon_the_account_has_opens_the_portal() {
+        let api = InMemoryCloudApi::new();
+        let mut held = plan(PlanStatus::Active, true);
+        held.addons.machines = 2;
+        api.set_plan(Some(held));
+        let (store, tunnel) = signed_in();
+
+        let page = CloudBilling::new(&api, &store, &tunnel)
+            .buy_addon(Addon::Machine, units(1))
+            .unwrap();
+
+        assert_eq!(page.kind, BillingPageKind::Portal);
+    }
+
+    #[test]
+    fn addon_refusals_keep_the_api_sentence_and_its_command() {
+        let (store, tunnel) = signed_in();
+        let api = InMemoryCloudApi::new().with_error(CloudApiError::Rejected {
+            status: 402,
+            code: "subscription_required".into(),
+            message: "Add-ons extend Localify Cloud Pro.".into(),
+            upgrade: Some(UpgradeHint {
+                kind: "pro".into(),
+                command: "localify subscribe".into(),
+            }),
+        });
+        let error = CloudBilling::new(&api, &store, &tunnel)
+            .buy_addon(Addon::Machine, units(1))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Add-ons extend Localify Cloud Pro. Run: localify subscribe"
+        );
+
+        let api = InMemoryCloudApi::new().with_error(rejected(409, "addons_unavailable"));
+        let error = CloudBilling::new(&api, &store, &tunnel)
+            .buy_addon(Addon::Urls, units(1))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "The API's sentence.");
+    }
+
+    #[test]
+    fn prices_fall_back_to_the_list_prices_in_the_local_currency() {
+        let (store, tunnel) = signed_in();
+        let api = InMemoryCloudApi::new();
+        let live = CloudBilling::new(&api, &store, &tunnel).addon_prices(Currency::Usd);
+        assert!(live.live);
+        assert_eq!(live.prices.currency, Currency::Eur);
+
+        let api = InMemoryCloudApi::new().with_error(rejected(503, "pricing_unavailable"));
+        let fallback = CloudBilling::new(&api, &store, &tunnel).addon_prices(Currency::Eur);
+        assert_eq!(
+            fallback,
+            AddonPricing {
+                prices: AddonPrices {
+                    currency: Currency::Eur,
+                    machine: 300,
+                    url_pack: 200,
+                },
+                live: false,
+            }
+        );
     }
 
     #[test]

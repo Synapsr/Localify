@@ -18,6 +18,9 @@ pub mod launch_rev;
 pub mod launch_sessions;
 pub mod linux_system;
 pub mod local_dev;
+// Only the app shows prices; the binary does not build it.
+#[allow(dead_code)]
+pub mod locale_currency;
 pub mod macos_system;
 pub mod managed_daemon;
 pub mod mgmt_client;

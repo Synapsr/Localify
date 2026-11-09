@@ -11,12 +11,13 @@ use anyhow::Result;
 use crate::application::cloud_account::CloudAccounts;
 use crate::application::cloud_billing::CloudBilling;
 use crate::application::ports::{
-    BillingPage, BillingPageKind, CloudAccount, CloudAccountStore, CloudApi, CloudApiError,
-    DaemonConnection, DaemonConnectionError, DeviceAuthorization, DeviceTokenPoll,
-    LocalDomainOwner, LocalDomains, NewPublicUrl, Plan, PlanCounts, PlanInterval, PlanStatus,
-    Protection, ProtectionChoice, ProtectionMode, PublicTunnel, PublicUrl, PublicUrlPasswords,
-    PublicUrlState, PublicUrlWithPassword, RuntimeBlock, RuntimeState, SavedPassword,
-    SavedPasswords, ServingMachine, SignInRequest, SlugSuggestion, TunnelState, TunnelStatus,
+    Addon, AddonPrices, BillingPage, BillingPageKind, CheckoutProduct, CloudAccount,
+    CloudAccountStore, CloudApi, CloudApiError, Currency, DaemonConnection, DaemonConnectionError,
+    DeviceAuthorization, DeviceTokenPoll, LocalDomainOwner, LocalDomains, NewPublicUrl, Plan,
+    PlanAddons, PlanCounts, PlanInterval, PlanStatus, Protection, ProtectionChoice, ProtectionMode,
+    PublicTunnel, PublicUrl, PublicUrlPasswords, PublicUrlState, PublicUrlWithPassword,
+    RuntimeBlock, RuntimeState, SavedPassword, SavedPasswords, ServingMachine, SignInRequest,
+    SlugSuggestion, TunnelState, TunnelStatus, UpgradeHint,
 };
 use crate::application::public_urls::PublicUrls;
 use crate::config::LocalifyPaths;
@@ -166,16 +167,17 @@ impl CloudApi for HttpCloudApi {
     fn checkout(
         &self,
         account: &CloudAccount,
-        interval: PlanInterval,
+        product: CheckoutProduct,
     ) -> Result<BillingPage, CloudApiError> {
-        let product = match interval {
-            PlanInterval::Month => "pro_monthly",
-            PlanInterval::Year => "pro_yearly",
+        let (product, units) = match product {
+            CheckoutProduct::Pro(PlanInterval::Month) => ("pro_monthly", None),
+            CheckoutProduct::Pro(PlanInterval::Year) => ("pro_yearly", None),
+            CheckoutProduct::Addon(Addon::Machine, units) => ("addon_machine", Some(units.value())),
+            CheckoutProduct::Addon(Addon::Urls, units) => ("addon_urls", Some(units.value())),
         };
-        let page = Self::signed_in(
-            account,
-            |client| async move { client.checkout(product).await },
-        )?;
+        let page = Self::signed_in(account, |client| async move {
+            client.checkout(product, units).await
+        })?;
         let kind = match page.kind.as_str() {
             "checkout" => BillingPageKind::Checkout,
             "portal" => BillingPageKind::Portal,
@@ -193,6 +195,21 @@ impl CloudApi for HttpCloudApi {
             |client| async move { client.billing_portal().await },
         )
         .and_then(https_url)
+    }
+
+    fn addon_prices(&self, account: &CloudAccount) -> Result<AddonPrices, CloudApiError> {
+        let pricing = Self::call(&account.api_base, None, |client| async move {
+            client.pricing().await
+        })?;
+        let addons = pricing.addons;
+        if addons.machine.currency != addons.urls.currency {
+            return Err(unreadable("add-on prices in two currencies"));
+        }
+        Ok(AddonPrices {
+            currency: currency(&addons.machine.currency)?,
+            machine: addons.machine.amount,
+            url_pack: addons.urls.amount,
+        })
     }
 
     fn suggest_slug(
@@ -296,14 +313,31 @@ fn api_error(error: CloudError) -> CloudApiError {
             status,
             code,
             message,
+            upgrade,
             ..
         } => CloudApiError::Rejected {
             status,
             code,
             message,
+            upgrade: upgrade.map(upgrade_hint),
         },
         error @ CloudError::Unreachable { .. } => CloudApiError::Unreachable(error.to_string()),
         error @ CloudError::InvalidResponse(_) => CloudApiError::Failed(error.to_string()),
+    }
+}
+
+fn upgrade_hint(upgrade: types::Upgrade) -> UpgradeHint {
+    UpgradeHint {
+        kind: upgrade.kind,
+        command: upgrade.command,
+    }
+}
+
+fn currency(code: &str) -> Result<Currency, CloudApiError> {
+    match code {
+        "USD" => Ok(Currency::Usd),
+        "EUR" => Ok(Currency::Eur),
+        other => Err(unreadable(&format!("the currency '{other}'"))),
     }
 }
 
@@ -355,6 +389,10 @@ fn plan(plan: api::Plan) -> Result<Plan, CloudApiError> {
         trial_available: plan.trial_available,
         limits: counts(plan.limits),
         usage: counts(plan.usage),
+        addons: PlanAddons {
+            machines: plan.addons.machines,
+            url_packs: plan.addons.url_packs,
+        },
     })
 }
 
@@ -482,6 +520,7 @@ impl PublicTunnel for MgmtSocketClient {
             blocked: status.blocked.map(|blocked| RuntimeBlock {
                 reason: blocked.reason,
                 message: blocked.message,
+                upgrade: blocked.upgrade.map(upgrade_hint),
             }),
         })
     }

@@ -747,6 +747,7 @@ mod tests {
                 status: 404,
                 code: "not_found".into(),
                 message: "No such public URL.".into(),
+                upgrade: None,
             }),
             ..World::new()
         };
@@ -766,6 +767,7 @@ mod tests {
                 status: 409,
                 code: "slug_taken".into(),
                 message: "journal-a8f3 is taken. Choose another slug.".into(),
+                upgrade: None,
             }),
             ..World::new()
         };
