@@ -27,6 +27,9 @@ use crate::infrastructure::process::{
 use crate::infrastructure::runs::finish::{
     CLEANUP_WAIT, Finish, Finisher, Membership, RunSession, membership,
 };
+use crate::infrastructure::runs::launches::{
+    LaunchExit, LaunchRecords, TEMPORARY_MAX_AGE, sweep_temporaries,
+};
 use crate::infrastructure::runs::output::{self, plain_lines};
 use crate::infrastructure::runs::{RunId, run_dir};
 
@@ -324,10 +327,16 @@ impl RunningServiceStore {
         run_dir(&self.dir, run_id)
     }
 
+    /// `services/launches/`: the launch records, and the messages of detached
+    /// executors.
+    pub fn launches(&self) -> LaunchRecords {
+        LaunchRecords::new(self.dir.join("launches"))
+    }
+
     /// Where a detached executor writes its own messages, before and during
     /// its run: `services/launches/<launchId>.log`.
     pub fn launch_log(&self, launch_id: &RunId) -> Result<PathBuf> {
-        let dir = self.dir.join("launches");
+        let dir = self.launches().dir().to_path_buf();
         fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create '{}'", dir.display()))?;
         Ok(dir.join(format!("{launch_id}.log")))
@@ -467,8 +476,9 @@ impl RunningServiceStore {
         })
     }
 
-    /// Records how a run ended. Does nothing when another run has taken the
-    /// record over since, or when its end is already recorded.
+    /// Records how a run ended, in its record unless another run has taken
+    /// it over since or its end is already recorded, and in its launch
+    /// record unless a finisher added an exit there first.
     pub fn mark_exited(&self, key: &ServiceKey, run_id: &RunId, code: Option<i32>) -> Result<()> {
         self.update(key, run_id, |record| {
             if record.exit.is_some() {
@@ -479,7 +489,9 @@ impl RunningServiceStore {
                 code,
             });
             true
-        })
+        })?;
+        self.launches()
+            .add_exit(run_id, LaunchExit::now(code, None, None))
     }
 
     /// Changes the record of `run_id`, under the service's record lock, so no
@@ -508,7 +520,7 @@ impl RunningServiceStore {
     /// An exclusive `flock` held for one read-modify-write of a service's
     /// record. The `@` keeps its name apart from any record or run lock, since
     /// record names never hold one.
-    fn lock_record(&self, key: &ServiceKey) -> Result<File> {
+    pub(crate) fn lock_record(&self, key: &ServiceKey) -> Result<File> {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("Failed to create '{}'", self.dir.display()))?;
         let path = self.dir.join(format!("{}@record.lock", record_name(key)));
@@ -680,6 +692,32 @@ impl RunningServiceStore {
             finished.push((service.key.clone(), finish));
         }
         Ok(finished)
+    }
+
+    /// The daemon's housekeeping: the temporary files a crash left in
+    /// `launches/` and in each run's folder, once an hour old, and the launch
+    /// records past their retention. Returns how many files went.
+    pub fn sweep_leftovers(&self) -> Result<usize> {
+        let launches = self.launches();
+        let mut removed = sweep_temporaries(launches.dir(), TEMPORARY_MAX_AGE)?;
+        if let Ok(runs) = fs::read_dir(self.dir.join("output")) {
+            for run in runs.flatten() {
+                removed += sweep_temporaries(&run.path(), TEMPORARY_MAX_AGE)?;
+            }
+        }
+        removed += self.prune_launches()?;
+        Ok(removed)
+    }
+
+    /// Removes the launch records past their retention, but never one of a
+    /// run its service's record still names.
+    pub fn prune_launches(&self) -> Result<usize> {
+        let current: HashSet<RunId> = self
+            .list()?
+            .iter()
+            .filter_map(|record| record.run_id().cloned())
+            .collect();
+        self.launches().prune(&current)
     }
 
     /// Stops the service if it runs, then forgets it and deletes its output.

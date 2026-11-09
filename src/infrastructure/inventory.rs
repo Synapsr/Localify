@@ -29,7 +29,7 @@ use crate::infrastructure::config::{
     Config, ConfigStore, ConfiguredProjectEnvironment, ConfiguredService,
 };
 use crate::infrastructure::launch_plan::{self, LaunchPlan, service_with_project_root};
-use crate::infrastructure::launch_profiles::LaunchProfiles;
+use crate::infrastructure::launch_profiles::{LaunchProfiles, allowed_remotely};
 use crate::infrastructure::launch_rev::{LaunchDefinition, LaunchRevKey, random_bytes};
 use crate::infrastructure::running_services::{
     RunState, RunningService, RunningServiceStore, ServiceKey, ServiceOrigin,
@@ -330,8 +330,8 @@ fn service_facts(
         run: record.map(|record| run_facts(observed.store, record, profiles)),
         public_url: public_url_facts(&service.primary_domain, observed.public),
         profiles: ProfileChecks {
-            start: profile_allowed(profiles, None),
-            restart: profile_allowed(
+            start: allowed_remotely(profiles, None),
+            restart: allowed_remotely(
                 profiles,
                 record.and_then(|record| record.profile.as_deref()),
             ),
@@ -369,19 +369,6 @@ fn run_facts(
             at: rfc3339(exit.at),
             code: exit.code,
         }),
-    }
-}
-
-/// A profile a remote launch may use: it resolves under the effective rules
-/// of `LaunchProfiles::load` and is not dangerous. `None` is the effective
-/// default, which is never dangerous. Profiles that do not load allow none.
-fn profile_allowed(profiles: &Result<Option<LaunchProfiles>>, name: Option<&str>) -> bool {
-    match profiles {
-        Err(_) => false,
-        Ok(None) => name.is_none(),
-        Ok(Some(profiles)) => profiles
-            .select(name)
-            .is_ok_and(|profile| profile.is_none_or(|profile| !profile.danger)),
     }
 }
 
@@ -916,20 +903,20 @@ domain = "web.feature.localify"
         fs::write(dir.path().join(".infisical.yaml"), "workspaceId: w\n").unwrap();
         let implicit = LaunchProfiles::load(dir.path());
 
-        assert!(profile_allowed(&implicit, None));
-        assert!(profile_allowed(&implicit, Some("staging")));
-        assert!(!profile_allowed(&implicit, Some("prod")));
-        assert!(!profile_allowed(&implicit, Some("removed")));
+        assert!(allowed_remotely(&implicit, None));
+        assert!(allowed_remotely(&implicit, Some("staging")));
+        assert!(!allowed_remotely(&implicit, Some("prod")));
+        assert!(!allowed_remotely(&implicit, Some("removed")));
         assert!(profile_danger(&implicit, Some("prod")));
         assert!(!profile_danger(&implicit, Some("staging")));
 
-        assert!(profile_allowed(&Ok(None), None));
-        assert!(!profile_allowed(&Ok(None), Some("default")));
+        assert!(allowed_remotely(&Ok(None), None));
+        assert!(!allowed_remotely(&Ok(None), Some("default")));
 
         fs::write(dir.path().join("localify.toml"), "[profiles.x]\nbad = 1\n").unwrap();
         let invalid = LaunchProfiles::load(dir.path());
         assert!(invalid.is_err());
-        assert!(!profile_allowed(&invalid, None));
+        assert!(!allowed_remotely(&invalid, None));
     }
 
     fn public_url(id: &str, local_domain: &str, wildcard: bool, extra: &str) -> PublicUrl {

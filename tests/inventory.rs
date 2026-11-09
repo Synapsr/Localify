@@ -14,8 +14,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use localify::branding::BRANDING;
 use serde_json::Value;
 
 /// Tries for a daemon on fresh ports.
@@ -333,4 +334,115 @@ fn the_daemon_reports_each_state_and_revision_of_a_service() {
     assert_ne!(with_profiles, config_rev);
     assert_ne!(edited, with_profiles);
     assert!(!snapshot.to_string().contains("inline-secret"));
+}
+
+/// A remote launch of `profile` that expects revision `rev`, as the daemon
+/// will dispatch one.
+fn remote_launch(sandbox: &Sandbox, id: &str, rev: &str, profile: &str) -> std::process::Output {
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 15_000;
+    sandbox
+        .localify(&[
+            "dev",
+            "web",
+            "--project",
+            "app",
+            "--profile",
+            profile,
+            &format!("--remote-launch={id}"),
+            "--launch-expires",
+            &expires.to_string(),
+            "--expect-rev",
+            rev,
+            "--request",
+            "machine-a:request-1",
+        ])
+        .output()
+        .unwrap()
+}
+
+/// `services/launches/<id>.json`.
+fn launch_record(sandbox: &Sandbox, id: &str) -> Value {
+    let services = if cfg!(target_os = "macos") {
+        sandbox
+            .root
+            .join("Library/Application Support")
+            .join(BRANDING.desktop_state_dir_name)
+            .join("services")
+    } else {
+        sandbox
+            .root
+            .join("state")
+            .join(BRANDING.slug)
+            .join("services")
+    };
+    let path = services.join("launches").join(format!("{id}.json"));
+    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap()
+}
+
+const STAGE: &str = r#"[profiles.default]
+sources = []
+
+[profiles.stage]
+sources = []
+"#;
+
+#[test]
+fn a_remote_launch_runs_only_the_definition_and_profile_it_was_checked_against() {
+    let mut sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    drop(sandbox.service.take());
+    fs::write(sandbox.app.join("localify.toml"), STAGE).unwrap();
+    let rev = sandbox.item()["service"]["configRev"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The executor computes the revision the inventory shows, and runs.
+    let admitted = "AAAAAAAAAAAAAAAAAAAAAA";
+    let output = remote_launch(&sandbox, admitted, &rev, "stage");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record = launch_record(&sandbox, admitted);
+    assert_eq!(record["outcome"], "admitted");
+    assert_eq!(record["requestedBy"]["machineId"], "machine-a");
+    assert_eq!(record["requestedBy"]["requestId"], "request-1");
+    assert_eq!(record["exit"]["code"], 0);
+    assert_eq!(sandbox.item()["run"]["runId"], admitted);
+
+    // The profile turned dangerous after the target checked it: the revision
+    // it expected is gone.
+    fs::write(
+        sandbox.app.join("localify.toml"),
+        STAGE.replace("[profiles.stage]\n", "[profiles.stage]\ndanger = true\n"),
+    )
+    .unwrap();
+    let stale = "BAAAAAAAAAAAAAAAAAAAAA";
+    let output = remote_launch(&sandbox, stale, &rev, "stage");
+    assert!(!output.status.success());
+    assert_eq!(launch_record(&sandbox, stale)["outcome"], "refused");
+    assert_eq!(launch_record(&sandbox, stale)["code"], "conflict");
+
+    // Checked against the new revision, a dangerous profile is still refused.
+    let fresh = sandbox.item()["service"]["configRev"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(fresh, rev);
+    let dangerous = "CAAAAAAAAAAAAAAAAAAAAA";
+    let output = remote_launch(&sandbox, dangerous, &fresh, "stage");
+    assert!(!output.status.success());
+    assert_eq!(
+        launch_record(&sandbox, dangerous)["code"],
+        "refused_profile"
+    );
+
+    // Neither started a run.
+    assert_eq!(sandbox.item()["run"]["runId"], admitted);
 }

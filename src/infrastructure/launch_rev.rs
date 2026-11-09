@@ -144,8 +144,9 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// (argv, folder and the arguments Localify adds); the profile it would
 /// choose; every effective launch profile of its checkout as
 /// [`LaunchProfiles::load`] gives them; and the `package.json` files the
-/// plan was resolved from. The executor of a remote launch (PR 4) builds the
-/// same one, then runs the plan it checked without resolving it again.
+/// plan was resolved from. `localify dev --expect-rev` builds the same one,
+/// for the effective default profile as the inventory does, from what it
+/// loaded under its run lock, then runs that plan without resolving it again.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchDefinition {

@@ -16,9 +16,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 pub use config::{
-    DEFAULT_INFISICAL_PATH, LaunchProfile, LaunchProfiles, ProfileSource, expand_service_template,
-    infisical_env, infisical_path, launch_profiles_file_name, render_launch_profiles,
-    validate_launch_profiles,
+    DEFAULT_INFISICAL_PATH, LaunchProfile, LaunchProfiles, ProfileSource, allowed_remotely,
+    expand_service_template, infisical_env, infisical_path, launch_profiles_file_name,
+    render_launch_profiles, validate_launch_profiles,
 };
 pub use infisical::{InfisicalCli, InfisicalFolder, project_file as infisical_project_file};
 pub use proton_pass::ProtonPassCli;

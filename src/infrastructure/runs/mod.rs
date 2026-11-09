@@ -4,9 +4,11 @@
 //! Each run has a folder, `services/output/<runId>/`, made before its record
 //! is written and deleted only when the next run of the service registers or
 //! the service is forgotten. It holds the run's `finalize.lock`, its `end.json`
-//! once finalized, and for a background run its output segments.
+//! once finalized, and for a background run its output segments. Each
+//! dispatched launch has a record in `services/launches/` (see `launches`).
 
 pub mod finish;
+pub mod launches;
 pub mod output;
 
 use std::fmt;

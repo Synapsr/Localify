@@ -275,6 +275,30 @@ enum Commands {
         #[arg(long, hide = true, value_name = "ID")]
         launch_id: Option<String>,
 
+        /// For the daemon and the app bridge: a launch a paired machine asked for, in place of --launch-id. Only adds restrictions (docs/remote-machines.md, "The run lock and launch fencing").
+        #[arg(
+            long,
+            hide = true,
+            value_name = "ID",
+            conflicts_with = "launch_id",
+            requires = "launch_expires",
+            requires = "expect_rev",
+            requires = "request"
+        )]
+        remote_launch: Option<String>,
+
+        /// For dispatchers: when the launch expires, in Unix milliseconds. An executor that gets it later starts nothing.
+        #[arg(long, hide = true, value_name = "UNIX_MS")]
+        launch_expires: Option<u64>,
+
+        /// For dispatchers: the configRev the launch was checked against. Any other revision starts nothing.
+        #[arg(long, hide = true, value_name = "CONFIG_REV")]
+        expect_rev: Option<String>,
+
+        /// For --remote-launch: the paired machine and its request, as <machineId>:<requestId>.
+        #[arg(long, hide = true, value_name = "MACHINE:REQUEST")]
+        request: Option<String>,
+
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
@@ -1223,7 +1247,7 @@ fn main() -> Result<()> {
                 init_domain: None,
                 override_command: command,
                 launch_profile: launch_profile.into_args(),
-                launch_id: None,
+                dispatch: cli::launch_fence::DispatchFlags::default(),
                 replace: cli::services::Replace::for_launch(None)?,
             },
             config_path,
@@ -1239,10 +1263,12 @@ fn main() -> Result<()> {
             project,
             env,
             launch_id,
+            remote_launch,
             replace,
             ..
         } => exit_with(cli::background::start_detached(
-            launch_id.as_deref(),
+            // Every flag but --detach reaches the executor as given.
+            launch_id.or(remote_launch).as_deref(),
             cli::background::Detached {
                 target: cli::services::RunTarget {
                     service: service.as_deref(),
@@ -1266,11 +1292,19 @@ fn main() -> Result<()> {
             launch_profile,
             command,
             launch_id,
+            remote_launch,
+            launch_expires,
+            expect_rev,
+            request,
             replace,
             ..
         } => {
             if !command.is_empty()
                 || launch_id.is_some()
+                || remote_launch.is_some()
+                || launch_expires.is_some()
+                || expect_rev.is_some()
+                || request.is_some()
                 || !launch_profile.env_file.is_empty()
                 || launch_profile.confirm_profile.is_some()
                 || launch_profile.no_masking
@@ -1300,6 +1334,10 @@ fn main() -> Result<()> {
             launch_profile,
             command,
             launch_id,
+            remote_launch,
+            launch_expires,
+            expect_rev,
+            request,
             replace,
             ..
         } => exit_with(cli::services::run(
@@ -1311,7 +1349,13 @@ fn main() -> Result<()> {
                 init_domain: domain,
                 override_command: command,
                 launch_profile: launch_profile.into_args(),
-                launch_id,
+                dispatch: cli::launch_fence::DispatchFlags {
+                    launch_id,
+                    remote_launch,
+                    launch_expires,
+                    expect_rev,
+                    request,
+                },
                 replace: cli::services::Replace::for_launch(
                     replace.as_ref().map(|id| id.as_deref()),
                 )?,

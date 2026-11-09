@@ -38,6 +38,7 @@ use crate::infrastructure::running_services::{
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::{Finish, KILL_WAIT, STOP_GRACE};
+use crate::infrastructure::runs::launches::LaunchExit;
 use crate::infrastructure::runs::output::{
     self, EndReason, FinalizeLock, ReaderLock, RunEnd, StreamSink, StreamWriter,
 };
@@ -482,7 +483,7 @@ impl Finishing {
         let record = self.record();
         let registered = record.is_some();
         let (output, error) = match record {
-            Some(record) => match self.finish(&record, code) {
+            Some(record) => match self.finish(&record, code, signal) {
                 Ok((reason, cut_off)) => (Some(reason), cut_off),
                 Err(error) => (None, Some(format!("{error:#}"))),
             },
@@ -519,6 +520,7 @@ impl Finishing {
         self,
         record: &RunningService,
         code: Option<i32>,
+        signal: Option<i32>,
     ) -> Result<(EndReason, Option<String>)> {
         // A process nothing proves to be the run's keeps it open: never
         // finalized under it, never signalled.
@@ -547,6 +549,9 @@ impl Finishing {
             }
         }
         drop(self.reader_lock);
+        self.store
+            .launches()
+            .add_exit(&self.run_id, LaunchExit::now(code, signal, None))?;
         self.store.mark_exited(&record.key, &self.run_id, code)?;
         Ok((reason, cut_off))
     }

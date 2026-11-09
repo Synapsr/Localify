@@ -111,7 +111,26 @@ pub fn prepare(
     current_dir: &Path,
 ) -> Result<Option<PreparedProfile>> {
     let profiles = LaunchProfiles::load(project_root)?;
-    let profile = match (&profiles, args.profile.as_deref()) {
+    prepare_loaded(
+        args,
+        profiles.as_ref(),
+        project_root,
+        service_dir,
+        current_dir,
+    )
+}
+
+/// [`prepare`], from the profiles of `project_root` as they were already
+/// loaded: `localify dev` loads them once, under its run lock, checks its
+/// launch against them, then runs from them, never from a second read.
+pub fn prepare_loaded(
+    args: &LaunchProfileArgs,
+    profiles: Option<&LaunchProfiles>,
+    project_root: &Path,
+    service_dir: &Path,
+    current_dir: &Path,
+) -> Result<Option<PreparedProfile>> {
+    let profile = match (profiles, args.profile.as_deref()) {
         (Some(profiles), requested) => profiles.select(requested)?,
         (None, Some(requested)) => bail!(
             "--profile {requested} needs launch profiles, but '{}' does not exist.\n\
