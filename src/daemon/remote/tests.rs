@@ -61,6 +61,7 @@ fn fast() -> Timings {
         access_expiry: ms(1500),
         access_every: ms(60_000),
         access_after_refusal: ms(60_000),
+        status_wait: ms(120_000),
     }
 }
 
@@ -354,7 +355,7 @@ async fn paced_against_the_relay(frames: usize, size: usize, check_takes: Durati
     ));
     let mut sent = 0;
     while sent < frames {
-        if outbox.push("x".repeat(size)) {
+        if outbox.push_for(None, "x".repeat(size)) {
             sent += 1;
         } else {
             tokio::time::sleep(Duration::from_millis(5)).await;

@@ -166,6 +166,9 @@ pub struct Timings {
     pub access_every: Duration,
     /// After a refusal, a peer asks again only after this.
     pub access_after_refusal: Duration,
+    /// How long a viewer asks `control.status` for a control whose outcome
+    /// it lost, all of it together.
+    pub status_wait: Duration,
 }
 
 impl Default for Timings {
@@ -203,6 +206,7 @@ impl Default for Timings {
             access_expiry: seconds(120),
             access_every: seconds(10 * 60),
             access_after_refusal: seconds(3600),
+            status_wait: seconds(120),
         }
     }
 }
@@ -319,6 +323,10 @@ struct Shared {
     /// The pairing attempts of the last hour on this machine as a target.
     /// The link keeps them, so a new connection does not reset the limit.
     pair_attempts: Mutex<VecDeque<Instant>>,
+    /// The controls and status queries going on this machine as a target.
+    /// The link keeps them, so neither a new session nor a new connection
+    /// resets the bounds while that work goes on.
+    control_slots: Arc<actor::ControlSlots>,
     refresh: Notify,
     #[cfg(test)]
     wake: std::sync::atomic::AtomicBool,
@@ -334,6 +342,9 @@ struct Shared {
     /// Holds the next access answer before it takes the settings lock.
     #[cfg(test)]
     answer_pause: Mutex<Option<AnswerPause>>,
+    /// While set, the relay writer sends nothing, as a stuck socket.
+    #[cfg(test)]
+    writer_hold: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Where a test holds an access answer: `reached` fires there, and the
@@ -505,6 +516,7 @@ impl RemoteLink {
                 access_history: Mutex::new(access::History::default()),
                 sent_revisions: Mutex::new(local::SentRevisions::default()),
                 pair_attempts: Mutex::new(VecDeque::new()),
+                control_slots: Arc::default(),
                 refresh: Notify::new(),
                 #[cfg(test)]
                 wake: std::sync::atomic::AtomicBool::new(false),
@@ -516,6 +528,8 @@ impl RemoteLink {
                 proto: Mutex::new(ProtoRange::OURS),
                 #[cfg(test)]
                 answer_pause: Mutex::new(None),
+                #[cfg(test)]
+                writer_hold: Arc::default(),
             }),
         }
     }

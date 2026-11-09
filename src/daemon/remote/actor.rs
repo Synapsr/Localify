@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::control::ControlEvent;
+pub use self::control::ControlSlots;
 use self::viewer::Tap;
 pub use self::viewer::{TapEvent, TapRequest, WINDOW};
 use super::access::Waiting;
@@ -422,7 +423,12 @@ pub async fn run(
 ) -> Ending {
     let timings = shared.timings;
     let (sink, mut stream) = socket.split();
-    let (out, queue) = pacer::queue();
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let (out, mut queue) = pacer::queue();
+    #[cfg(test)]
+    {
+        queue.hold = Some(Arc::clone(&shared.writer_hold));
+    }
     let drained = out.drained();
     let bucket = Bucket::paced(Instant::now());
     let mut writer = tokio::spawn(pacer::run(sink, queue, bucket));
@@ -488,7 +494,9 @@ pub async fn run(
                 }
                 actor.on_tick();
             }
-            _ = ping.tick() => actor.send_text("ping".to_string()),
+            _ = ping.tick() => {
+                actor.send_text("ping".to_string());
+            }
             _ = poll.tick() => actor.on_poll(),
             // The writer took a frame: room for pages or output.
             _ = drained.notified() => {}
@@ -528,12 +536,21 @@ impl Actor {
     }
 
     /// Queues a frame. A full queue means the socket is stuck: the
-    /// connection ends, and the link connects again.
-    fn send_text(&mut self, text: String) {
-        if !self.out.push(text) && self.failed.is_none() {
+    /// connection ends, and the link connects again. Returns whether the
+    /// frame went in.
+    fn send_text(&mut self, text: String) -> bool {
+        self.send_tagged(None, text)
+    }
+
+    /// [`Actor::send_text`] for a frame that seals a message of session
+    /// `tag`, so it can be discarded while it waits.
+    fn send_tagged(&mut self, tag: Option<pacer::Tag>, text: String) -> bool {
+        let queued = self.out.push_for(tag, text);
+        if !queued && self.failed.is_none() {
             warn!("The relay socket stopped taking frames; reconnecting");
             self.failed = Some(Ending::Lost);
         }
+        queued
     }
 
     /// Whether `cloud.json` no longer holds this connection's sign-in.
@@ -558,7 +575,7 @@ impl Actor {
         kind: FrameKind,
         purpose: Option<Purpose>,
         data: Option<&[u8]>,
-    ) {
+    ) -> bool {
         let frame = Send {
             to: to.to_string(),
             sid: sid.encode(),
@@ -566,14 +583,21 @@ impl Actor {
             purpose,
             data: data.map(|data| URL_SAFE_NO_PAD.encode(data)),
         };
+        // A session message can be discarded while it waits; a handshake
+        // or a `close` never is.
+        let tag = (kind == FrameKind::Msg).then(|| (to.to_string(), sid));
         match serde_json::to_string(&frame) {
-            Ok(text) => self.send_text(text),
-            Err(error) => warn!(error = %error, "Could not encode a relay frame"),
+            Ok(text) => self.send_tagged(tag, text),
+            Err(error) => {
+                warn!(error = %error, "Could not encode a relay frame");
+                false
+            }
         }
     }
 
-    /// Encrypts and sends one session message. `false` when the session
-    /// cannot send: it is not open, or the message is out of bounds.
+    /// Encrypts and queues one session message. `false` when the session
+    /// cannot send: it is not open, the message is out of bounds, or the
+    /// send queue did not take it.
     fn send_message(&mut self, key: &Key, message: &SessionMessage) -> bool {
         let Ok(plaintext) = serde_json::to_vec(message) else {
             return false;
@@ -589,8 +613,7 @@ impl Actor {
         };
         session.messages += 1;
         let (peer, sid) = (session.peer.clone(), session.sid);
-        self.send_frame(&peer, sid, FrameKind::Msg, None, Some(&sealed));
-        true
+        self.send_frame(&peer, sid, FrameKind::Msg, None, Some(&sealed))
     }
 
     // --- Relay frames --------------------------------------------------------
@@ -1623,7 +1646,10 @@ impl Actor {
                 events,
                 reply,
             } => {
-                let _ = reply.send(self.on_tap(&peer, request, events));
+                // A caller that left before it heard the id cannot untap it.
+                if let Err(Ok(id)) = reply.send(self.on_tap(&peer, request, events)) {
+                    self.untap(&peer, &id);
+                }
             }
             Command::Untap { peer, id } => self.untap(&peer, &id),
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
@@ -1631,7 +1657,14 @@ impl Actor {
             Command::ControlDone { key, re, event } => self.on_control_done(&key, &re, event),
             Command::SettingsChanged { reply } => {
                 self.reload_settings();
-                let _ = reply.send(());
+                // A writer barrier: confirmed once every frame queued before
+                // was written or discarded. Not one of `tasks`, so a
+                // reconnect cannot confirm it before the writer is done.
+                let flushed = self.out.flushed();
+                tokio::spawn(async move {
+                    flushed.await;
+                    let _ = reply.send(());
+                });
             }
             Command::AccessAnswer {
                 request_id,
@@ -1914,7 +1947,9 @@ impl Actor {
     fn end(&mut self, key: &Key, how: End, failure: &Failure) {
         match how {
             End::Silent => {}
-            End::Close => self.send_frame(&key.0, key.1, FrameKind::Close, None, None),
+            End::Close => {
+                self.send_frame(&key.0, key.1, FrameKind::Close, None, None);
+            }
             End::Bye(reason) => {
                 if !self.send_message(key, &SessionMessage::Bye { reason }) {
                     self.send_frame(&key.0, key.1, FrameKind::Close, None, None);

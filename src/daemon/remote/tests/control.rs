@@ -880,6 +880,222 @@ async fn an_unknown_outcome_is_asked_again_until_it_comes() {
     .await;
 }
 
+/// The bounds are the link's, not a session's: work a viewer asked for in
+/// a session that ended still counts while it goes on, so reconnecting and
+/// asking again is `busy` at once.
+#[tokio::test]
+async fn work_of_an_ended_session_still_counts_against_the_bound() {
+    let cloud = FakeCloud::start().await;
+    let (a, _b) = controlled(&cloud, None).await;
+    // B's next lease is slow: its four controls wait for it, in turn.
+    cloud.set_lease_delay(Duration::from_secs(8));
+    let mut waiting = Vec::new();
+    for _ in 0..4 {
+        let mut pending = a.link.control("mB", ask(ControlAction::Start, None));
+        let sent = pending.recv().await;
+        assert!(matches!(sent, Some(ControlEvent::Sent { .. })), "{sent:?}");
+        waiting.push(pending);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    cloud.set_lease_delay(Duration::ZERO);
+
+    // A's connection drops: B ends its session, the four still wait.
+    let connections = cloud.connections();
+    cloud.close("mA", 1012, "restart");
+    wait_until("A is back", || {
+        cloud.connections() > connections && cloud.connected("mA") && a.sees("mB")
+    })
+    .await;
+    a.link.open("mB", true).await.unwrap();
+    let asked = Instant::now();
+    let again = control(&a, ask(ControlAction::Start, None)).await;
+
+    assert_eq!(
+        ended(&again),
+        (ControlOutcome::Refused, Some("busy".into()))
+    );
+    assert!(asked.elapsed() < Duration::from_secs(2), "refused at once");
+}
+
+/// A peer past its entry limit is refused `too_many` before the target
+/// asks for a lease, so new request ids cost it nothing.
+#[tokio::test]
+async fn a_new_request_past_the_entry_limit_is_refused_before_its_lease() {
+    let cloud = FakeCloud::start().await;
+    let (a, _b) = controlled(&cloud, None).await;
+    for _ in 0..20 {
+        // Each leaves an entry: nothing runs, so each stop conflicts.
+        let seen = control(&a, ask(ControlAction::Stop, Some(RUN))).await;
+        assert_eq!(ended(&seen).0, ControlOutcome::Conflict, "{seen:?}");
+    }
+    cloud.set_lease_delay(Duration::from_secs(10));
+
+    let asked = Instant::now();
+    let seen = control(&a, ask(ControlAction::Stop, Some(RUN))).await;
+
+    assert_eq!(
+        ended(&seen),
+        (ControlOutcome::Refused, Some("too_many".into()))
+    );
+    assert!(asked.elapsed() < Duration::from_secs(2), "before any lease");
+}
+
+/// `sent` means the send queue took the control. One the session cannot
+/// send is refused at once, never announced, and never kept to go later.
+#[tokio::test]
+async fn a_control_the_session_cannot_send_is_refused_and_never_announced() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, None).await;
+    let mut too_large = ask(ControlAction::Start, None);
+    too_large.service.project_id = "p".repeat(40 * 1024);
+
+    let seen = control(&a, too_large).await;
+
+    assert_eq!(seen.len(), 1, "never announced as sent: {seen:?}");
+    assert_eq!(
+        ended(&seen),
+        (ControlOutcome::Refused, Some("bad_request".into()))
+    );
+    let next = control(&a, ask(ControlAction::Start, None)).await;
+    assert_eq!(ended(&next), (ControlOutcome::Done, None));
+    assert_eq!(handed(&b), 1, "only the second one ran");
+}
+
+/// One deadline bounds the whole reconciliation, lease, query and answer
+/// included: a target that never answers a `control.status` gives `lost`
+/// once the wait is over, not an answer's wait later.
+#[tokio::test]
+async fn asking_control_status_again_ends_at_its_deadline() {
+    let cloud = FakeCloud::start().await;
+    let timings = crate::daemon::remote::Timings {
+        status_wait: Duration::from_secs(3),
+        ..super::fast()
+    };
+    let a = super::daemon_with(&cloud, "mA", "laptop", timings).await;
+    let b = super::daemon(&cloud, "mB", "teo-mini").await;
+    wait_until("both see each other", || a.sees("mB") && b.sees("mA")).await;
+    pair(&a, &b).await;
+    switches(&b, false).await;
+    let (_release, held) = std::sync::mpsc::channel();
+    b.source.host().state().status_hold = Some(held);
+
+    let asked = Instant::now();
+    let ended = a.link.control_status("mB", &request_id(1)).await;
+
+    assert!(matches!(ended, ControlEvent::Lost { .. }), "{ended:?}");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+}
+
+/// A client that stops reading an `unknown` control stops the asking: no
+/// `control.status` reaches the target afterwards.
+#[tokio::test]
+async fn a_client_that_leaves_stops_the_status_queries() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, Some(run(RunOrigin::App))).await;
+    let (release, held) = std::sync::mpsc::channel();
+    b.source.host().state().stop_hold = Some(held);
+    let mut pending = a.link.control("mB", ask(ControlAction::Stop, Some(RUN)));
+    wait_until("the stop is held", || {
+        b.source.host().state().stop_hold.is_none()
+    })
+    .await;
+    cloud.close("mA", 1012, "restart");
+    while !matches!(pending.recv().await, Some(ControlEvent::Unknown { .. })) {}
+    wait_until("A asks B", || b.source.host().state().statuses >= 1).await;
+
+    drop(pending);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = b.source.host().state().statuses;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(b.source.host().state().statuses, asked, "no more queries");
+    release.send(()).unwrap();
+}
+
+/// `share` saved off before B's link acted on it: a control that completes
+/// meanwhile acts on the revocation first, so its viewer hears
+/// `not_shared` rather than nothing.
+#[tokio::test]
+async fn a_completion_before_the_revocation_is_acted_on_still_answers_not_shared() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, None).await;
+    b.source.host().state().exit_code = Some(3);
+    let release = hold(&b);
+    let pending = a.link.control("mB", ask(ControlAction::Start, None));
+    wait_until("the start reached the app", || handed(&b) == 1).await;
+
+    // Saved as another writer would: nothing tells B's link yet.
+    b.store()
+        .update_settings(
+            "mB",
+            SettingsChange {
+                share: Some(false),
+                ..SettingsChange::default()
+            },
+        )
+        .unwrap();
+    release.send(()).unwrap();
+    let seen = events(pending).await;
+
+    assert!(
+        matches!(seen.last(), Some(ControlEvent::Lost { code, .. }) if code == "not_shared"),
+        "{seen:?}"
+    );
+    assert!(!format!("{seen:?}").contains("the last line"), "{seen:?}");
+}
+
+/// Turning `share` off is a writer barrier: an answer already sealed and
+/// waiting in B's send queue is discarded, with its session, and the change
+/// is confirmed only once the writer is past it.
+#[tokio::test]
+async fn turning_share_off_discards_answers_still_queued() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, None).await;
+    b.source.host().state().exit_code = Some(3);
+    let release = hold(&b);
+    let pending = a.link.control("mB", ask(ControlAction::Start, None));
+    wait_until("the start reached the app", || handed(&b) == 1).await;
+
+    // B's socket stops taking frames: the result waits in its queue.
+    let writer = Arc::clone(&b.link.shared.writer_hold);
+    writer.store(true, Ordering::SeqCst);
+    release.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let link = b.link.clone();
+    let mut change = tokio::spawn(async move {
+        link.change_settings(SettingsChange {
+            share: Some(false),
+            ..SettingsChange::default()
+        })
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut change)
+            .await
+            .is_err(),
+        "confirmed while its writer still held what it discards"
+    );
+    writer.store(false, Ordering::SeqCst);
+    change.await.unwrap().unwrap();
+    let seen = events(pending).await;
+
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ControlEvent::Result { .. })),
+        "{seen:?}"
+    );
+    assert!(
+        matches!(seen.last(), Some(ControlEvent::Lost { code, .. }) if code == "not_shared"),
+        "{seen:?}"
+    );
+}
+
 // --- The shell environment of background starts ------------------------------
 
 /// Background starts read the user's shell environment once. When that

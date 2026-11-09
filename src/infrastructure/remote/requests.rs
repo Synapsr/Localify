@@ -275,36 +275,85 @@ impl RequestEntries {
         Ok(entry)
     }
 
-    /// Removes the entries past their retention. Returns how many went.
-    pub fn sweep(&self) -> Result<usize> {
-        let peers = match fs::read_dir(&self.dir) {
+    /// Removes the entries past their retention, looking at `budget`
+    /// entries at most, in name order, after `from`. The pass says where
+    /// the next one goes on, `None` once it reached the end, so a large
+    /// folder is swept over several passes rather than walked whole.
+    pub fn sweep(&self, from: Option<&SweepCursor>, budget: usize) -> Result<SweepPass> {
+        let mut pass = SweepPass {
+            removed: 0,
+            resume: None,
+        };
+        let peers = match sorted_names(&self.dir) {
             Ok(peers) => peers,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(pass),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("Failed to read '{}'", self.dir.display()));
             }
         };
-        let mut removed = 0;
-        for peer in peers.flatten() {
-            let Ok(entries) = fs::read_dir(peer.path()) else {
+        let mut looked = 0;
+        for peer in peers {
+            if from.is_some_and(|from| peer < from.peer) {
+                continue;
+            }
+            let Ok(names) = sorted_names(&self.dir.join(&peer)) else {
                 continue;
             };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let stale = path
-                    .extension()
-                    .is_some_and(|extension| extension == "json")
-                    && is_past_retention(&path)
-                    || path.extension().is_some_and(|extension| extension == "tmp")
-                        && is_older_than(&path, Duration::from_secs(3600));
-                if stale && fs::remove_file(&path).is_ok() {
-                    removed += 1;
+            for name in names {
+                if from.is_some_and(|from| peer == from.peer && name <= from.name) {
+                    continue;
                 }
+                if looked == budget {
+                    return Ok(pass);
+                }
+                looked += 1;
+                let path = self.dir.join(&peer).join(&name);
+                if is_stale(&path) && fs::remove_file(&path).is_ok() {
+                    pass.removed += 1;
+                }
+                pass.resume = Some(SweepCursor {
+                    peer: peer.clone(),
+                    name,
+                });
             }
         }
-        Ok(removed)
+        pass.resume = None;
+        Ok(pass)
     }
+}
+
+/// Where a sweep goes on: after this entry of this peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepCursor {
+    peer: String,
+    name: String,
+}
+
+/// What one sweep did.
+#[derive(Debug)]
+pub struct SweepPass {
+    pub removed: usize,
+    /// Where the next pass goes on, while entries are left to look at.
+    pub resume: Option<SweepCursor>,
+}
+
+/// An entry past its retention, or a temporary file left over an hour.
+fn is_stale(path: &Path) -> bool {
+    let extension = path.extension();
+    extension.is_some_and(|extension| extension == "json") && is_past_retention(path)
+        || extension.is_some_and(|extension| extension == "tmp")
+            && is_older_than(path, Duration::from_secs(3600))
+}
+
+/// The names in `dir`, sorted, so a sweep can go on where it stopped.
+fn sorted_names(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names: Vec<String> = fs::read_dir(dir)?
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 /// A machine id as a folder name: letters, digits, `-` and `_`.
@@ -475,7 +524,7 @@ mod tests {
             .unwrap();
 
         assert!(entries.read("mA", REQUEST).unwrap().is_none());
-        assert_eq!(entries.sweep().unwrap(), 1);
+        assert_eq!(entries.sweep(None, usize::MAX).unwrap().removed, 1);
         assert!(!path.exists());
     }
 
@@ -510,6 +559,40 @@ mod tests {
             Published::New
         ));
         assert!(dir.path().join("mA").join(format!("{other}.json")).exists());
-        assert_eq!(entries.sweep().unwrap(), 1);
+        assert_eq!(entries.sweep(None, usize::MAX).unwrap().removed, 1);
+    }
+
+    /// A sweep looks at a bounded number of entries a pass, and the next
+    /// pass goes on where it stopped, across peers, until every stale entry
+    /// went.
+    #[test]
+    fn a_sweep_has_a_budget_and_goes_on_where_it_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = RequestEntries::new(dir.path().to_path_buf());
+        let old = SystemTime::now() - RETENTION - Duration::from_secs(1);
+        for (peer, n) in [("mA", 0), ("mA", 1), ("mA", 2), ("mB", 3), ("mB", 4)] {
+            let request = format!("{}{n}", "C".repeat(21));
+            entries
+                .publish(peer, &request, &entry(ControlAction::Stop))
+                .unwrap();
+            File::options()
+                .write(true)
+                .open(dir.path().join(peer).join(format!("{request}.json")))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+
+        let first = entries.sweep(None, 2).unwrap();
+        assert_eq!(first.removed, 2);
+        assert!(first.resume.is_some());
+        let second = entries.sweep(first.resume.as_ref(), 2).unwrap();
+        assert_eq!(second.removed, 2);
+        let third = entries.sweep(second.resume.as_ref(), 2).unwrap();
+        assert_eq!(third.removed, 1);
+        assert!(third.resume.is_none(), "the pass reached the end");
+        for peer in ["mA", "mB"] {
+            assert_eq!(fs::read_dir(dir.path().join(peer)).unwrap().count(), 0);
+        }
     }
 }

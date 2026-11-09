@@ -272,7 +272,8 @@ impl Actor {
 
     /// Carries a request to `peer`, over its session or a new one. Returns
     /// the request's id. A control goes only over a session already open,
-    /// and is sent before this returns: it is never queued.
+    /// and is in the send queue before this returns: it is never queued
+    /// here, so `Ok` means it was handed to the connection.
     pub(super) fn on_tap(
         &mut self,
         peer: &str,
@@ -296,18 +297,39 @@ impl Actor {
         }
         self.taps_made += 1;
         let id = format!("r{}", self.taps_made);
-        let session = self
-            .sessions
-            .get_mut(&key)
-            .ok_or_else(|| Failure::new("closed", "The session ended."))?;
         let tap = Tap {
             request,
             events,
             sent: false,
         };
+        if control {
+            self.send_control(&key, &id, tap)?;
+            return Ok(id);
+        }
+        let session = self
+            .sessions
+            .get_mut(&key)
+            .ok_or_else(|| Failure::new("closed", "The session ended."))?;
         session.taps.insert(id.clone(), tap);
         self.send_taps(&key);
         Ok(id)
+    }
+
+    /// A control, sent now or not at all: ahead of any request still
+    /// waiting for room, and kept only once the send queue took it.
+    fn send_control(&mut self, key: &Key, id: &str, mut tap: Tap) -> Result<(), Failure> {
+        let clock = self.sessions.get(key).and_then(|session| session.clock);
+        let message = tap.message(id, clock.as_ref());
+        if !self.send_message(key, &message) {
+            return Err(self.unsent());
+        }
+        tap.sent = true;
+        let session = self
+            .sessions
+            .get_mut(key)
+            .ok_or_else(|| Failure::new("closed", "The session ended."))?;
+        session.taps.insert(id.to_string(), tap);
+        Ok(())
     }
 
     /// Why a control cannot go to `peer` now: there is no session to it.
@@ -416,7 +438,34 @@ impl Actor {
         }
         tap.sent = true;
         let message = tap.message(id, session.clock.as_ref());
-        self.send_message(key, &message);
+        if !self.send_message(key, &message) {
+            // Not sent: the request ends here rather than wait for nothing.
+            let tap = self
+                .sessions
+                .get_mut(key)
+                .and_then(|session| session.taps.remove(id));
+            let failure = self.unsent();
+            if let Some(tap) = tap {
+                tap.end(&failure);
+            }
+            self.close_if_unused(key);
+        }
+    }
+
+    /// Why a request the session took could not be sent: the connection
+    /// is ending, or the request is too large for a session message.
+    fn unsent(&self) -> Failure {
+        if self.failed.is_some() {
+            Failure::new(
+                "not_connected",
+                "The connection to it ended. Nothing was sent.",
+            )
+        } else {
+            Failure::new(
+                "bad_request",
+                "This request is too large to send. Nothing was sent.",
+            )
+        }
     }
 
     /// An answer from the target, to the request it names.

@@ -219,7 +219,7 @@ pub(super) struct Shelf {
     /// `share`, as this task last learned it: from a settings change, which
     /// waits for this task to act on it before it answers, and from the file
     /// each second, for a change made some other way.
-    sharing: bool,
+    pub(super) sharing: bool,
     /// A snapshot is being built: one at a time.
     building: bool,
     /// While watched, the next look for changes.
@@ -266,6 +266,7 @@ impl Actor {
     fn on_share(&mut self, share: bool) {
         self.shelf.sharing = share;
         if !share {
+            self.cut_queued(NOT_SHARED);
             self.end_served("not_shared", NOT_SHARED);
             self.drop_control_answers(NOT_SHARED);
         }
@@ -878,6 +879,27 @@ impl Actor {
         let due = self.shelf.next_look.is_none_or(|at| now >= at);
         if watched && due {
             self.build_snapshot();
+        }
+    }
+
+    /// `share` was turned off: a viewer's session with messages still in
+    /// the send queue has them discarded, and ends with a relay `close`,
+    /// since its viewer could read nothing sealed after them. What was
+    /// already written is the viewer's; nothing queued before the change
+    /// leaves once it is confirmed.
+    fn cut_queued(&mut self, message: &str) {
+        let viewers: Vec<Key> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.role == Role::Target && session.purpose == Purpose::Session
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in viewers {
+            if self.out.discard(&key) {
+                self.end(&key, End::Close, &Failure::new("not_shared", message));
+            }
         }
     }
 

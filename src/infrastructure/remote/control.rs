@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow};
 
 use super::requests::{
-    Fingerprint, LinkedLaunch, Published, Report, RequestEntries, RequestEntry, Stopped, Via,
+    Fingerprint, LinkedLaunch, Published, Report, RequestEntries, RequestEntry, Stopped,
+    SweepCursor, Via,
 };
 use super::wire::{Control, ControlAction, ControlOutcome, ControlPhase};
 use crate::application::inventory::{
@@ -57,8 +58,10 @@ const MESSAGE_BUDGET: usize = 16 * 1024;
 /// each one is kept 24 hours.
 const ENTRIES_PER_WINDOW: usize = 20;
 const ENTRY_WINDOW: Duration = Duration::from_secs(10 * 60);
-/// Entries past their retention are swept at most this often.
+/// Entries past their retention are swept at most this often, looking at
+/// this many entries a pass.
 const SWEEP_EVERY: Duration = Duration::from_secs(10 * 60);
+const SWEEP_BUDGET: usize = 512;
 
 const EXPIRED: &str = "The request took too long to reach this machine. Nothing was started.";
 const BUSY: &str = "Something else is starting or stopping this service here.";
@@ -178,8 +181,43 @@ pub struct ControlRunner {
     /// When each peer created its last request entries, within
     /// [`ENTRY_WINDOW`].
     created: Mutex<HashMap<String, VecDeque<Instant>>>,
-    /// When entries past their retention were last swept.
-    swept: Mutex<Option<Instant>>,
+    /// When entries past their retention were last swept, and where the
+    /// next pass goes on.
+    swept: Mutex<SweepState>,
+}
+
+/// When the last sweep ran, and where the next one goes on.
+#[derive(Default)]
+struct SweepState {
+    at: Option<Instant>,
+    resume: Option<SweepCursor>,
+}
+
+/// `too_many` when `peer` created [`ENTRIES_PER_WINDOW`] entries within
+/// [`ENTRY_WINDOW`], with how long until one more fits.
+fn too_many(
+    created: &mut HashMap<String, VecDeque<Instant>>,
+    peer: &str,
+    now: Instant,
+) -> Option<Report> {
+    created.retain(|_, times| {
+        times.retain(|at| now.duration_since(*at) < ENTRY_WINDOW);
+        !times.is_empty()
+    });
+    let times = created.get(peer)?;
+    if times.len() < ENTRIES_PER_WINDOW {
+        return None;
+    }
+    let free = times.front().map_or(ENTRY_WINDOW, |oldest| {
+        ENTRY_WINDOW.saturating_sub(now.duration_since(*oldest))
+    });
+    Some(Report::refused(
+        "too_many",
+        format!(
+            "That machine sent too many controls here lately. Try again in {} s.",
+            free.as_secs().max(1)
+        ),
+    ))
 }
 
 /// What a control reads again as it goes, on this machine now.
@@ -220,7 +258,7 @@ impl ControlRunner {
             busy: Mutex::new(HashSet::new()),
             working: Mutex::new(HashSet::new()),
             created: Mutex::new(HashMap::new()),
-            swept: Mutex::new(None),
+            swept: Mutex::new(SweepState::default()),
         }
     }
 
@@ -278,44 +316,51 @@ impl ControlRunner {
         }
     }
 
+    /// Whether a control under `request_id` may go on, before the target
+    /// asks for its lease: a request id with an entry always may (it gets
+    /// its report), a new one only while `peer` is within its entry limit.
+    /// [`ControlRunner::run`] counts the entry when it publishes it.
+    pub fn admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        if matches!(self.entries.read(peer, request_id), Ok(Some(_))) {
+            return Ok(());
+        }
+        let mut created = lock(&self.created);
+        match too_many(&mut created, peer, Instant::now()) {
+            Some(refused) => Err(refused),
+            None => Ok(()),
+        }
+    }
+
     /// A new request entry for `peer`, unless it made too many lately:
     /// each one is kept 24 hours, so fresh request ids cannot fill the disk.
     fn count_entry(&self, peer: &str) -> Result<(), Report> {
         let now = Instant::now();
         let mut created = lock(&self.created);
-        created.retain(|_, times| {
-            times.retain(|at| now.duration_since(*at) < ENTRY_WINDOW);
-            !times.is_empty()
-        });
-        let times = created.entry(peer.to_string()).or_default();
-        if times.len() >= ENTRIES_PER_WINDOW {
-            let free = times.front().map_or(ENTRY_WINDOW, |oldest| {
-                ENTRY_WINDOW.saturating_sub(now.duration_since(*oldest))
-            });
-            return Err(Report::refused(
-                "too_many",
-                format!(
-                    "That machine sent too many controls here lately. Try again in {} s.",
-                    free.as_secs().max(1)
-                ),
-            ));
+        if let Some(refused) = too_many(&mut created, peer, now) {
+            return Err(refused);
         }
-        times.push_back(now);
+        created.entry(peer.to_string()).or_default().push_back(now);
         Ok(())
     }
 
     /// Sweeps the entries past their retention, at most every
-    /// [`SWEEP_EVERY`]: a publication never scans them all.
+    /// [`SWEEP_EVERY`] and [`SWEEP_BUDGET`] entries a pass, on from where
+    /// the last pass stopped: a publication never scans them all.
     fn sweep_now_and_then(&self) {
         let now = Instant::now();
-        {
+        let from = {
             let mut swept = lock(&self.swept);
-            if swept.is_some_and(|at| now.duration_since(at) < SWEEP_EVERY) {
+            if swept
+                .at
+                .is_some_and(|at| now.duration_since(at) < SWEEP_EVERY)
+            {
                 return;
             }
-            *swept = Some(now);
-        }
-        let _ = self.entries.sweep();
+            swept.at = Some(now);
+            swept.resume.take()
+        };
+        let pass = self.entries.sweep(from.as_ref(), SWEEP_BUDGET);
+        lock(&self.swept).resume = pass.ok().and_then(|pass| pass.resume);
     }
 
     /// A request id that already has an entry: the same control gets its

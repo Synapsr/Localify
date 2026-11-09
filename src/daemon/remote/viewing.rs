@@ -29,9 +29,8 @@ const ANSWER_WAIT: Duration = Duration::from_secs(30);
 const ACK_EVERY: u64 = WINDOW as u64 / 4;
 /// How long a control waits for its result before it is `unknown`.
 pub const CONTROL_WAIT: Duration = Duration::from_secs(120);
-/// How long an `unknown` control keeps asking `control.status`, and how
-/// often.
-const STATUS_WAIT: Duration = Duration::from_secs(120);
+/// How often an `unknown` control asks `control.status`; for how long is
+/// `Timings::status_wait`.
 const STATUS_EVERY: Duration = Duration::from_secs(2);
 
 /// A target's whole inventory: every page of one revision.
@@ -260,6 +259,19 @@ fn control_answer(answer: SessionMessage) -> ControlEvent {
     }
 }
 
+/// Ends a request when dropped, whether it was answered or abandoned.
+struct Untap<'a> {
+    link: &'a RemoteLink,
+    peer: &'a str,
+    id: &'a str,
+}
+
+impl Drop for Untap<'_> {
+    fn drop(&mut self) {
+        self.link.untap(self.peer, self.id);
+    }
+}
+
 /// A control that was never sent.
 fn not_sent(failure: Failure) -> ControlEvent {
     ControlEvent::Result {
@@ -267,6 +279,19 @@ fn not_sent(failure: Failure) -> ControlEvent {
         code: Some(failure.code),
         message: plain_line(&failure.message),
         run_id: None,
+    }
+}
+
+/// A target that stopped sharing while it worked on the control: what it
+/// came to is not this viewer's to know, so the stream ends `lost`.
+fn stopped_sharing(ended: ControlEvent) -> ControlEvent {
+    match ended {
+        ControlEvent::Result {
+            code: Some(code),
+            message,
+            ..
+        } if code == "not_shared" => ControlEvent::Lost { code, message },
+        ended => ended,
     }
 }
 
@@ -697,8 +722,14 @@ impl RemoteLink {
             if sender.send(unknown).await.is_err() {
                 return;
             }
-            let ended = link.control_status(&peer, &request_id).await;
-            let _ = sender.send(ended).await;
+            // A client that left stops the asking, and what follows it.
+            let ended = tokio::select! {
+                _ = sender.closed() => return,
+                ended = link.control_status(&peer, &request_id) => stopped_sharing(ended),
+            };
+            if sender.send(ended).await.is_err() {
+                return;
+            }
             // Then the fresh state, whatever the outcome said.
             let _ = link.inventory(&peer).await;
         });
@@ -759,28 +790,34 @@ impl RemoteLink {
 
     /// `control.status` for `request_id`, on a session of its own, asked
     /// every [`STATUS_EVERY`] while the target cannot be reached or has no
-    /// outcome yet, for [`STATUS_WAIT`] at most. `unknown` is never the end:
-    /// past the wait, `lost` is.
+    /// outcome yet. `Timings::status_wait` bounds all of it, from the first
+    /// lease to the last answer: `unknown` is never the end, and past the
+    /// wait, `lost` is. Dropping the future stops it, and its query with it.
     pub(super) async fn control_status(&self, peer: &str, request_id: &str) -> ControlEvent {
-        let deadline = tokio::time::Instant::now() + STATUS_WAIT;
+        let deadline = tokio::time::Instant::now() + self.shared.timings.status_wait;
+        let mut pending = Failure::new("timeout", "The machine did not answer in time.");
         loop {
-            let pending = match self.status_once(peer, request_id).await {
-                Ok(ControlEvent::Result {
+            let asked = tokio::time::timeout_at(deadline, self.status_once(peer, request_id));
+            pending = match asked.await {
+                Err(_) => return lost_control(pending),
+                Ok(Ok(ControlEvent::Result {
                     outcome: ControlOutcome::Unknown,
                     message,
                     ..
-                }) => Failure::new(
+                })) => Failure::new(
                     "timeout",
                     format!(
                         "{message} It still had no outcome after 2 minutes; its state shows what happened."
                     ),
                 ),
-                Ok(event) => return event,
+                Ok(Ok(event)) => return event,
                 // Asking again changes nothing.
-                Err(failure) if matches!(failure.code.as_str(), "not_paired" | "key_mismatch") => {
+                Ok(Err(failure))
+                    if matches!(failure.code.as_str(), "not_paired" | "key_mismatch") =>
+                {
                     return lost_control(failure);
                 }
-                Err(failure) => failure,
+                Ok(Err(failure)) => failure,
             };
             if tokio::time::Instant::now() + STATUS_EVERY >= deadline {
                 return lost_control(pending);
@@ -789,13 +826,18 @@ impl RemoteLink {
         }
     }
 
+    /// One `control.status`, untapped however it ends, dropped included.
     async fn status_once(&self, peer: &str, request_id: &str) -> Result<ControlEvent, Failure> {
         let request = TapRequest::ControlStatus {
             request_id: request_id.to_string(),
         };
         let (id, mut events) = self.tap(peer, request).await?;
+        let _untap = Untap {
+            link: self,
+            peer,
+            id: &id,
+        };
         let answer = tokio::time::timeout(ANSWER_WAIT, events.recv()).await;
-        self.untap(peer, &id);
         match answer {
             Ok(Some(TapEvent::Answer(answer))) => Ok(control_answer(answer)),
             Ok(Some(TapEvent::Ended(failure))) => Err(failure),
