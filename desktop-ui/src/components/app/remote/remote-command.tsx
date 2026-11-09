@@ -9,7 +9,7 @@ export function RemoteCommand({ command }: { command: string }) {
   const { copy, copied } = useCopyToClipboard();
   return (
     <div className="flex items-center gap-1 rounded-md bg-muted px-2 py-1">
-      <code className="min-w-0 flex-1 font-mono text-xs break-all text-foreground select-all">
+      <code className="min-w-0 flex-1 font-mono text-xs break-words text-foreground select-all">
         {command}
       </code>
       <Button
