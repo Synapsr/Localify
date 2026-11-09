@@ -3,6 +3,43 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.6.0 - 2026-11-09
+
+### New
+
+- **Start, stop and restart your other machines' services from the app.** In another
+  machine's view, the Start, Stop and Restart buttons now work. A service starts in a new
+  tab of Localify on that machine when it is open, or in the background when that machine
+  allows it, and you follow it from here until it answers or says why it stopped. Nothing
+  is ever queued while the connection is down, and a service running in someone's
+  terminal is never taken over. Each machine decides in Settings → Remote access whether
+  others may control it.
+  [Remote machines](https://github.com/Synapsr/Localify/blob/main/docs/remote-machines.md)
+- **Ask another machine for access, from the button that needs it.** When a machine
+  doesn't allow remote controls yet, its buttons stay clickable and offer `Ask` with that
+  machine's name. Localify there shows who asks, with their fingerprint, and lets the
+  person allow it, refuse it, or stop that machine from asking again. When Localify is
+  closed there, the card gives the one command to run on it instead, for you or an agent
+  with access to it.
+- **Relaunch a service started before 1.5 so it works from here.** A service still
+  running from an older Localify shows "Relaunch to share". Relaunch it from another
+  machine, after a confirmation, and its output and controls work from then on.
+
+### Improved
+
+- **`localify dev --in-app` hands the service straight to the open app.** It opens in a
+  new tab without stealing focus, and only opens the app first when it isn't running.
+- **Reload shell environment also covers background starts.** The terminal panel's
+  `Reload shell environment` now also refreshes the `PATH` and setup Localify uses to
+  start services in the background for your other machines.
+
+### Fixed
+
+- `localify dev --detach --replace` no longer stops the running service when the new
+  start is refused, for example for an unknown profile or a broken `localify.toml`.
+- A service tab opened while another one was closing no longer disappears from the
+  terminal panel.
+
 ## 1.5.0 - 2026-11-09
 
 ### New
