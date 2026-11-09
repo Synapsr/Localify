@@ -9,6 +9,7 @@ const clientNamespaces = [
   "Footer",
   "HowItWorks",
   "InstallPrompt",
+  "TeamContact",
   "UseCases",
 ] as const;
 

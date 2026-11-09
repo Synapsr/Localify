@@ -25,4 +25,5 @@ assets/localify_file_browser_small.png
 .tmp
 
 apps/web/.env
+apps/web/.dev.vars
 apps/web/tsconfig.tsbuildinfo

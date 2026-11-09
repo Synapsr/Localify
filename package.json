@@ -27,6 +27,7 @@
     "web:preview": "pnpm --filter @localify/web run preview",
     "web:start": "pnpm --filter @localify/web start",
     "web:upload": "pnpm --filter @localify/web run upload",
+    "web:test": "pnpm --filter @localify/web test",
     "web:typecheck": "pnpm --filter @localify/web typecheck",
     "test:install-script": "sh scripts/test-install-script.sh",
     "cloud:dev": "pnpm --filter @localify/cloud dev",

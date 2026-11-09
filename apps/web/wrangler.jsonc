@@ -30,5 +30,22 @@
       "binding": "WORKER_SELF_REFERENCE",
       "service": "localify-web"
     }
+  ],
+  // Per-IP limits for /api/track and /api/contact, which post to Discord.
+  // Namespace ids are integers unique to the account: apps/cloud uses 1001-1006
+  // and 2001-2006.
+  "ratelimits": [
+    {
+      "name": "TRACK_LIMITER",
+      "namespace_id": "3001",
+      "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      "name": "CONTACT_LIMITER",
+      "namespace_id": "3002",
+      "simple": { "limit": 5, "period": 60 }
+    }
   ]
+  // DISCORD_CONTACT_WEBHOOK_URL is a secret (`wrangler secret put`); locally, in
+  // .dev.vars. Without it, both routes answer 503.
 }
