@@ -118,6 +118,20 @@ changed and stayed the same on two checks, the daemon exits with code 75, and la
 starts the new build. `ThrottleInterval` is 1 second, so launchd adds at most that. A
 daemon started another way, such as a dev build, is left alone.
 
+### Automatic updates
+
+Each Mac installs new versions by itself (ADR 0034). The daemon does it, so it works with the app closed.
+
+- **Setting:** `Install updates automatically` in Settings → General, stored as `[updates] automatic` in the config, on by default. The management socket's `update_settings {automatic}` changes it. With it off, nothing below installs; the app's `Check for updates` works as before.
+- **When it checks:** 2 minutes after the daemon starts, then every 6 hours plus or minus 30 minutes, and at once when `remote_machines` reports a paired machine on a newer version than this one, at most once every 10 minutes for that reason. A check reads the manifest the app's updater reads (`latest.json`, from the build's updater endpoint).
+- **What it installs:** only a version strictly newer than the running one, never a downgrade. It downloads `localify-desktop.app.tar.gz`, verifies its signature against the updater public key built into Localify, and extracts it to a staging folder next to the installed app, on the same volume. The extracted bundle's `CFBundleShortVersionString` must equal the manifest's version, and its code signature must pass `codesign --verify --deep --strict` with Localify's team identifier. Anything that fails is deleted, logged in `updater.log` and retried at the next scheduled check.
+- **Where:** the bundle that contains the daemon's own executable. A daemon not running from a `.app` bundle, such as a dev build or a Homebrew binary, never installs. The new bundle gets the owner and mode of the old one.
+- **Swap:** one `renamex_np(RENAME_SWAP)` exchanges the staged bundle and the installed one, so the path always holds a whole app. Before the swap, the daemon writes `<data dir>/update-pending.json` with both versions and a start count of 0. The new daemon's first step, before anything else, raises that count; once it answers on the management socket, it deletes the old bundle and the file. A daemon that finds the count at 3 swaps the old bundle back, turns the setting off with the reason shown in Settings, and exits, so launchd starts the old build.
+- **One installer at a time:** the daemon and the app both take `<data dir>/update.lock` before they install. The app's `Install update` button asks the daemon to install (`update_install`), and falls back to the app's own updater only when the daemon predates this.
+- **The app, after an install:** the daemon tells the open app through the app bridge (`{"cmd": "update_ready", "version"}`). The app shows "Localify <version> is installed" and relaunches by itself as soon as no service runs in its tabs. While one does, it shows `Restart to update` and waits. Background runs and the CLI are not affected: background runs survive the daemon's restart, and `localify` on `PATH` is the bundle's own binary.
+- **Linux:** no unattended install, since the CLI there is checked by SHA-256 only. A Linux daemon that sees a newer version in the manifest or among paired machines says "Update available: run the install command again" in `localify status` and in the app.
+
+
 ## Launch at Login
 
 Successful desktop activation registers Localify with the official Tauri
