@@ -620,7 +620,14 @@ mod tests {
                 .unwrap();
             let _ = extra.write_all(b"{\"cmd\":\"hello\"}\n");
             let mut answer = String::new();
-            matches!(extra.read_to_string(&mut answer), Ok(0))
+            // Closed unread: macOS reads the end, Linux may report a reset.
+            match extra.read_to_string(&mut answer) {
+                Ok(_) => answer.is_empty(),
+                Err(error) => matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+                ),
+            }
         });
 
         drop(silent);
