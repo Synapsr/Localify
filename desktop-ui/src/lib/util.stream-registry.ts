@@ -7,7 +7,10 @@ export interface StreamHandle {
   live(): boolean;
   /** The stream opened: its closer is kept, or called at once when it is no longer live. */
   opened(close: () => void): void;
-  /** The stream ended by itself: it is forgotten, and its later events are dropped. */
+  /**
+   * The stream settled (its last event came): it is forgotten, its later events are dropped,
+   * and its transport is closed, since the daemon may still hold it open after its last event.
+   */
   ended(): void;
 }
 
@@ -35,7 +38,9 @@ export function createStreamRegistry(): StreamRegistry {
           else close();
         },
         ended() {
+          const stream = streams.get(id);
           streams.delete(id);
+          stream?.close?.();
         },
       };
     },

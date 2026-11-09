@@ -32,16 +32,19 @@ test("a stream whose opening resolves after closeAll is closed at once", () => {
   assert.equal(registry.size(), 0);
 });
 
-test("a stream that ended by itself is forgotten, not closed again", () => {
+test("a stream that settled has its transport closed once, and is forgotten", () => {
+  // The daemon can send the last event, then keep the stream open while it fetches a
+  // snapshot: settling closes it, so leaving the machine finds nothing left open.
   const registry = createStreamRegistry();
   let closed = 0;
   const web = registry.add("web");
   web.opened(() => closed++);
   web.ended();
 
+  assert.equal(closed, 1);
   assert.equal(web.live(), false);
   assert.deepEqual(registry.closeAll(), []);
-  assert.equal(closed, 0);
+  assert.equal(closed, 1);
 });
 
 test("a stream that ended before its opening resolved is closed when it does", () => {
