@@ -1072,6 +1072,11 @@ impl ToolArgs {
         }
     }
 
+    /// Whether the call passed `name` with a value, of any type.
+    pub fn has(&self, name: &str) -> bool {
+        !matches!(self.values.get(name), None | Some(Value::Null))
+    }
+
     pub fn string(&self, name: &str) -> Result<Option<String>> {
         match self.values.get(name) {
             None | Some(Value::Null) => Ok(None),

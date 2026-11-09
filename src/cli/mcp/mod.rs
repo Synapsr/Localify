@@ -174,6 +174,20 @@ fn remote_hint(text: &str) -> Option<String> {
 }
 
 fn prepare(tool: &Tool, args: &ToolArgs) -> Result<(Vec<String>, Option<PathBuf>)> {
+    // A tool without `machine` would act on this machine instead: refuse it
+    // before building or running anything (docs/remote-machines.md, "MCP").
+    if args.has("machine") && !tool.params.iter().any(|param| param.name == "machine") {
+        let remote: Vec<&str> = TOOLS
+            .iter()
+            .filter(|tool| tool.params.iter().any(|param| param.name == "machine"))
+            .map(|tool| tool.name)
+            .collect();
+        bail!(
+            "{} acts on this machine only and takes no machine. Only {} act on another machine.",
+            tool.name,
+            remote.join(", ")
+        );
+    }
     let argv = (tool.build)(args)?;
     // A tool acting on another machine has no folder of this one to read.
     let here = args.string("machine")?.is_none();
@@ -396,6 +410,38 @@ mod tests {
         let (argv, cwd) = prepare(tool, &there).unwrap();
         assert_eq!(cwd, None);
         assert_eq!(argv, ["logs", "web", "--machine=teo-mini"]);
+    }
+
+    #[test]
+    fn a_tool_without_machine_refuses_one_instead_of_acting_here() {
+        let local_only: Vec<&Tool> = TOOLS
+            .iter()
+            .filter(|tool| !tool.params.iter().any(|param| param.name == "machine"))
+            .collect();
+        assert!(local_only.len() > 30, "{}", local_only.len());
+
+        for tool in local_only {
+            let response = handle_line(
+                &request(
+                    "tools/call",
+                    json!({
+                        "name": tool.name,
+                        "arguments": { "machine": "B", "cwd": "/", "command": ["true"] },
+                    }),
+                ),
+                &runner(),
+            )
+            .unwrap();
+
+            let text = response["result"]["content"][0]["text"].as_str().unwrap();
+            assert_eq!(response["result"]["isError"], true, "{}: {text}", tool.name);
+            assert!(
+                text.starts_with(&format!("{} acts on this machine only", tool.name))
+                    && text.contains("service_status"),
+                "{}: {text}",
+                tool.name
+            );
+        }
     }
 
     #[test]

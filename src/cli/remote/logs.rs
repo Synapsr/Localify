@@ -51,28 +51,52 @@ pub fn logs<O: Write, E: Write>(
     let mut reader = Reader {
         client,
         peer,
-        run_id: &run_id,
-        service: &item.service.name,
+        query: &query.service,
+        run_id,
+        service: item.service.name.clone(),
         console,
     };
-    let mut offset = match cursor {
-        Some(cursor) if cursor.run_id == run_id => reader.read_on(cursor.offset)?,
+    let first = match &cursor {
+        Some(cursor) if cursor.run_id == reader.run_id => reader.read_on(cursor.offset),
         Some(_) => {
             reader.note(&format!(
                 "'{}' restarted since that cursor: reading its current run from the start.",
-                item.service.name
+                reader.service
             ))?;
-            reader.read_on(0)?
+            reader.read_on(0)
         }
-        None => reader.tail(query.lines)?,
+        None => reader.tail(query.lines),
+    };
+    // The service restarted between the snapshot and the read: its new run
+    // is read as a cursor of another run would be.
+    let mut offset = match first {
+        Err(error) if is_gone(&error) => {
+            reader.move_to_current_run()?;
+            match cursor {
+                Some(_) => reader.read_on(0)?,
+                None => reader.tail(query.lines)?,
+            }
+        }
+        other => other?,
     };
     if query.follow {
         offset = reader.follow(offset)?;
     }
     if query.cursor.is_some() || reader.console.json {
-        writeln!(reader.console.err, "\nNext cursor: {run_id}:{offset}")?;
+        writeln!(
+            reader.console.err,
+            "\nNext cursor: {}:{offset}",
+            reader.run_id
+        )?;
     }
     Ok(0)
+}
+
+/// `gone`: the run is no longer the service's last run.
+fn is_gone(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<Refusal>()
+        .is_some_and(|refusal| refusal.code == "gone")
 }
 
 /// Where a read goes on from: `<runId>:<offset>`.
@@ -122,8 +146,10 @@ fn readable_run(item: &Item, machine: &str) -> Result<String> {
 struct Reader<'a, O, E> {
     client: &'a MgmtSocketClient,
     peer: &'a Peer,
-    run_id: &'a str,
-    service: &'a str,
+    query: &'a ServiceQuery<'a>,
+    /// The run being read; it moves to the next run when the service restarts.
+    run_id: String,
+    service: String,
     console: &'a mut Console<O, E>,
 }
 
@@ -136,7 +162,7 @@ impl<O: Write, E: Write> Reader<'_, O, E> {
     fn read(&self, offset: u64) -> Result<OutputData> {
         let value = self
             .client
-            .remote_output_read(&self.peer.id, self.run_id, offset, MAX_READ_BYTES)
+            .remote_output_read(&self.peer.id, &self.run_id, offset, MAX_READ_BYTES)
             .map_err(|error| self.restarted(remote_error(error, self.peer)))?;
         data(value)
     }
@@ -147,12 +173,36 @@ impl<O: Write, E: Write> Reader<'_, O, E> {
             Some(refusal) if refusal.code == "gone" => anyhow!(Refusal::new(
                 "gone",
                 format!(
-                    "'{}' restarted on {}. Read its output again without --cursor.",
+                    "'{}' restarted on {} again. Read its output again.",
                     self.service, self.peer.name
                 ),
             )),
             _ => error,
         }
+    }
+
+    /// After `gone`: moves to the service's current run, as the target's
+    /// snapshot shows it, to read it from offset 0.
+    fn move_to_current_run(&mut self) -> Result<()> {
+        let (snapshot, _) = fetch(self.client, self.peer)?;
+        let items = snapshot.shared_items(self.peer)?;
+        let (item, _) = find(&items, self.query, &self.peer.name)?;
+        let run_id = readable_run(item, &self.peer.name)?;
+        if run_id == self.run_id {
+            return Err(anyhow!(Refusal::new(
+                "gone",
+                format!(
+                    "'{}' restarted on {}, and its new run isn't shown yet. Read its output again.",
+                    self.service, self.peer.name
+                ),
+            )));
+        }
+        self.note(&format!(
+            "'{}' restarted on {}: reading its new run from the start.",
+            self.service, self.peer.name
+        ))?;
+        self.run_id = run_id;
+        Ok(())
     }
 
     /// Prints from `offset` until caught up, the run ended, or
@@ -202,7 +252,8 @@ impl<O: Write, E: Write> Reader<'_, O, E> {
         Ok(chunk.next)
     }
 
-    /// Prints new lines as they come, until the run ends or restarts.
+    /// Prints new lines as they come, until the run ends. When the service
+    /// restarts, follows its new run from offset 0.
     fn follow(&mut self, mut offset: u64) -> Result<u64> {
         let mut follow = self.open_follow(json!({ "offset": offset }))?;
         loop {
@@ -216,11 +267,10 @@ impl<O: Write, E: Write> Reader<'_, O, E> {
                     }
                 }
                 Followed::Ended(refusal) if refusal.code == "gone" => {
-                    self.note(&format!(
-                        "'{}' restarted on {}.",
-                        self.service, self.peer.name
-                    ))?;
-                    return Ok(offset);
+                    drop(follow);
+                    self.move_to_current_run()?;
+                    offset = 0;
+                    follow = self.open_follow(json!({ "offset": offset }))?;
                 }
                 Followed::Ended(refusal) => return Err(anyhow!(refusal)),
                 Followed::Closed => return Ok(offset),

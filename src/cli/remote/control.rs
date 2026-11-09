@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::inventory::{Item, ServiceQuery, Snapshot, fetch, find, write_item};
-use super::{Console, LOST, Peer, Refusal, remote_error, viewer_message};
+use super::{Console, LOST, Peer, REFUSED, Refusal, remote_error, viewer_message};
 use crate::application::ports::DaemonConnectionError;
 use crate::infrastructure::mgmt_client::{MgmtSocketClient, MgmtStream};
 use crate::infrastructure::remote::wire::{
@@ -120,10 +120,11 @@ fn timed_out(error: &anyhow::Error) -> bool {
 /// checks the target makes, with the code it would give.
 fn allowed(item: &Item, action: ControlAction, machine: &str) -> Result<()> {
     let service = &item.service.name;
-    let legacy = item.run.as_ref().is_some_and(|run| run.legacy);
+    // A live legacy run is relaunched from the app, after a confirmation. One
+    // that ended is only a record: the target's `controls` say what it allows.
+    let live_legacy = item.process == "running" && item.run.as_ref().is_some_and(|run| run.legacy);
     let code = match item.controls.get(action.as_str()) {
-        // A legacy run is relaunched from the app, after a confirmation.
-        Some(state) if state.allowed && legacy => "legacy_run",
+        Some(state) if state.allowed && live_legacy => "legacy_run",
         Some(state) if !state.allowed => state.code.as_deref().unwrap_or("conflict"),
         _ => return Ok(()),
     };
@@ -277,7 +278,11 @@ fn report<O: Write, E: Write>(
             ..
         } => {
             let code = code.unwrap_or_else(|| outcome_name(outcome).to_string());
-            return Err(anyhow!(Refusal::from_target(&code, &message, machine)));
+            let refusal = Refusal::from_target(&code, &message, machine);
+            if code == "conflict" {
+                return conflict(refusal, machine, console, fresh);
+            }
+            return Err(anyhow!(refusal));
         }
         Ended::Result {
             outcome,
@@ -317,6 +322,36 @@ fn report<O: Write, E: Write>(
         writeln!(console.err, "{text}")?;
     }
     Ok(exit)
+}
+
+/// `conflict`: the target changed since the snapshot the control expected.
+/// Says so with the service as it is now, and exits with [`REFUSED`]. The
+/// control is never sent again.
+fn conflict<O: Write, E: Write>(
+    refusal: Refusal,
+    machine: &str,
+    console: &mut Console<O, E>,
+    fresh: impl FnOnce() -> Result<(Item, Value)>,
+) -> Result<i32> {
+    let now = fresh();
+    if console.json {
+        let mut document = serde_json::to_value(&refusal)?;
+        document["outcome"] = json!("refused");
+        if let Ok((_, raw)) = &now {
+            document["status"] = raw.clone();
+        }
+        console.json(&document)?;
+        return Ok(REFUSED);
+    }
+    refusal.print(console)?;
+    match now {
+        Ok((item, _)) => write_item(&mut console.out, &item, machine)?,
+        Err(error) => writeln!(
+            console.err,
+            "Its current state could not be read: {error:#}"
+        )?,
+    }
+    Ok(REFUSED)
 }
 
 /// An outcome the target could not tell: says so, then shows the service
@@ -387,7 +422,6 @@ fn fresh(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::remote::REFUSED;
     use crate::cli::remote::inventory::tests::item;
 
     fn peer() -> Peer {
@@ -552,6 +586,46 @@ mod tests {
     }
 
     #[test]
+    fn a_conflict_prints_the_fresh_state_and_exits_2() {
+        let events = || {
+            vec![
+                json!({ "event": "sent", "requestId": "q" }),
+                json!({
+                    "event": "result", "outcome": "conflict", "code": "conflict",
+                    "message": "The run changed.", "runId": null,
+                }),
+            ]
+        };
+
+        let mut human = console(false);
+        assert_eq!(
+            run(events(), ControlAction::Restart, &mut human).unwrap(),
+            REFUSED
+        );
+        assert!(
+            text(&human.err).starts_with("teo-mini changed in the meantime.\n"),
+            "{}",
+            text(&human.err)
+        );
+        assert!(
+            text(&human.out).contains("APP / web\n  Running, in the app"),
+            "{}",
+            text(&human.out)
+        );
+
+        let mut json = console(true);
+        assert_eq!(
+            run(events(), ControlAction::Restart, &mut json).unwrap(),
+            REFUSED
+        );
+        let printed: Value = serde_json::from_slice(&json.out).unwrap();
+        assert_eq!(printed["outcome"], "refused");
+        assert_eq!(printed["code"], "conflict");
+        assert_eq!(printed["message"], "teo-mini changed in the meantime.");
+        assert_eq!(printed["status"]["process"], "running");
+    }
+
+    #[test]
     fn a_failed_start_exits_1_with_the_targets_last_lines() {
         let mut console = console(false);
         let events = vec![json!({
@@ -603,5 +677,24 @@ mod tests {
 
         let legacy = web(json!({ "restart": { "allowed": true } }), true);
         assert_eq!(refused(&legacy, ControlAction::Restart).code, "legacy_run");
+    }
+
+    #[test]
+    fn a_legacy_run_that_ended_does_not_block_a_fresh_start() {
+        let mut value = item("app", None, "web");
+        value["process"] = json!("stopped");
+        value["owner"] = json!(null);
+        value["run"]["legacy"] = json!(true);
+        value["run"]["runId"] = json!(null);
+        value["controls"] = json!({
+            "start": { "allowed": true },
+            "stop": { "allowed": false, "code": "conflict" },
+            "restart": { "allowed": false, "code": "conflict" },
+        });
+        let stopped: Item = serde_json::from_value(value).unwrap();
+
+        assert!(allowed(&stopped, ControlAction::Start, "teo-mini").is_ok());
+        let error = allowed(&stopped, ControlAction::Stop, "teo-mini").unwrap_err();
+        assert_eq!(error.downcast_ref::<Refusal>().unwrap().code, "conflict");
     }
 }
