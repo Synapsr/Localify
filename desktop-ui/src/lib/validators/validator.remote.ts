@@ -42,4 +42,20 @@ export const remoteStreamRequestSchema = z.discriminatedUnion("kind", [
     machineId: machineIdSchema,
     wants: remoteAccessWantsSchema,
   }),
+  z.object({
+    kind: z.literal("control"),
+    machineId: machineIdSchema,
+    action: z.enum(["start", "stop", "restart"]),
+    service: z.object({
+      projectId: z.string().min(1),
+      environment: z.string().min(1).nullable(),
+      serviceId: z.string().min(1),
+    }),
+    profile: z.string().min(1).nullable(),
+    expect: z.object({
+      runId: z.string().min(1).nullable(),
+      configRev: z.string().min(1),
+      legacyId: z.string().min(1).optional(),
+    }),
+  }),
 ]);

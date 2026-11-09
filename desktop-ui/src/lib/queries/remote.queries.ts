@@ -1,6 +1,7 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 
 import type {
+  RemoteAccessSuppressedDto,
   RemoteMachineDto,
   RemoteMachineRequest,
   RemotePairAnswerRequest,
@@ -22,6 +23,7 @@ const remoteQueryKeys = {
   all: () => ["remote"] as const,
   status: () => [...remoteQueryKeys.all(), "status"] as const,
   machines: () => [...remoteQueryKeys.all(), "machines"] as const,
+  suppressed: () => [...remoteQueryKeys.all(), "suppressed"] as const,
 } as const;
 
 export const remoteQueries = {
@@ -41,6 +43,13 @@ export const remoteQueries = {
       refetchInterval: REMOTE_POLL_MS,
       retry: false,
     }),
+  /** Read from this machine's files; changes only from its own access dialog. */
+  suppressed: () =>
+    queryOptions<RemoteAccessSuppressedDto[], Error>({
+      queryKey: remoteQueryKeys.suppressed(),
+      queryFn: () => tauriClient.getRemoteAccessSuppressed(),
+      retry: false,
+    }),
 };
 
 export const remoteMutations = {
@@ -57,6 +66,11 @@ export const remoteMutations = {
     mutationOptions<boolean, Error, RemoteMachineRequest>({
       mutationFn: (request) => tauriClient.unpairRemoteMachine(request),
       onSettled: () => invalidateQueries(queryClient, [remoteQueryKeys.all()]),
+    }),
+  restoreAccess: (queryClient: QueryClient) =>
+    mutationOptions<boolean, Error, RemoteMachineRequest>({
+      mutationFn: (request) => tauriClient.restoreRemoteAccess(request),
+      onSettled: () => invalidateQueries(queryClient, [remoteQueryKeys.suppressed()]),
     }),
   remove: (queryClient: QueryClient) =>
     mutationOptions<void, Error, RemoteMachineRequest>({

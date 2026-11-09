@@ -13,6 +13,7 @@
     "dialog:allow-message",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
+    "notification:default",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "http://**" }, { "url": "https://**" }]

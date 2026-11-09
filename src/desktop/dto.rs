@@ -1759,8 +1759,7 @@ pub enum RemoteStreamRequest {
     },
     /// Starts, stops or restarts a service on another machine, as this
     /// machine last saw it, then its progress and result. Closing the
-    /// stream stops listening; the control goes on there. Unused by the
-    /// window until PR 4d adds the buttons.
+    /// stream stops listening; the control goes on there.
     Control {
         machine_id: String,
         action: RemoteControlAction,
