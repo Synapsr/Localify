@@ -4,7 +4,7 @@ When a control is unavailable, the viewer's button stays, and clicking it offers
 
 Two fixes are needed.
 
-**Asking for access.** A viewer may send `access.request` to ask a target to turn on `control`, or `control` and `backgroundStarts`. The switches still change only on the target, by a person there. The request never changes a setting by itself, and never turns on `share`, which the session already needs.
+**Asking for access.** A viewer may send `access.request` to ask a target to turn on `control`, or `control` and `backgroundStarts`. The switches still change only on the target, by a person there. The request never changes a setting by itself. It needs `share` on the target, and access never turns `share` on.
 
 - **Who decides.** The target's daemon owns the request, and the app shows it in a dialog. The switches change only if the person there clicks `Allow`, and only if nothing changed the settings since the request was recorded. A request that was cancelled, expired or overtaken by a local change is never applied late.
 - **What the dialog says.** The switches are machine-wide: turning on `control` lets every paired machine control this one. So the dialog says that, rather than "let A in". It names the asker from the local pin, with its fingerprint, and never from a name the peer chose.
