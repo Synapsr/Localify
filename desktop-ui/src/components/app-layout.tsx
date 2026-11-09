@@ -2,7 +2,7 @@ import { useAppNavigationHotkeys } from "@/hooks/use-app-navigation-hotkeys";
 import { useTerminalHotkeys } from "@/hooks/use-terminal-hotkeys";
 import { useThemeShortcut } from "@/hooks/use-theme-shortcut";
 import { ProjectOrderProvider } from "@/providers/project-order-provider";
-import { RemoteProvider } from "@/providers/remote-provider";
+import { RemoteProvider, useRemote } from "@/providers/remote-provider";
 import { TerminalProvider, useTerminal } from "@/providers/terminal-provider";
 
 import { HttpsTrustNotice } from "./app/https-trust-notice";
@@ -32,6 +32,7 @@ function AppLayoutContent() {
   useTerminalHotkeys();
   useThemeShortcut();
   const { isOpen } = useTerminal();
+  const { outputOpen } = useRemote();
 
   return (
     <div
@@ -40,7 +41,7 @@ function AppLayoutContent() {
     >
       <div className="flex h-full flex-col rounded-lg bg-background ">
         <DesktopAnalytics />
-        {!isOpen ? <SharedNavigation /> : null}
+        {!isOpen && !outputOpen ? <SharedNavigation /> : null}
         <HttpsTrustNotice />
         <main className="flex-1 overflow-hidden  rounded-lg">
           <PageTransition />
