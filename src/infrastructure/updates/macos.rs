@@ -2,14 +2,14 @@
 //! account may replace it, its signature, the processes running from it,
 //! and the atomic swap.
 
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
@@ -168,14 +168,41 @@ fn writable(path: &Path) -> bool {
     unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
+/// A tool the installer checks the bundle with could not give an answer:
+/// it couldn't start, or it was killed. That says nothing about the
+/// archive, so the release isn't remembered as failed.
+#[derive(Debug, thiserror::Error)]
+#[error("Could not run {tool}: {detail}")]
+pub struct ToolFailed {
+    pub tool: String,
+    pub detail: String,
+}
+
+/// Runs `command`, failing with [`ToolFailed`] when it doesn't start or
+/// exits on a signal. An exit code is the tool's answer, for the caller.
+fn run_tool(mut command: Command) -> Result<Output, ToolFailed> {
+    let tool = command.get_program().to_string_lossy().into_owned();
+    let output = command.output().map_err(|error| ToolFailed {
+        tool: tool.clone(),
+        detail: error.to_string(),
+    })?;
+    if output.status.code().is_none() {
+        return Err(ToolFailed {
+            tool,
+            detail: format!("it ended with {}", output.status),
+        });
+    }
+    Ok(output)
+}
+
 /// A string from the bundle's `Info.plist`, XML or binary.
 pub fn info_value(bundle: &Path, key: &str) -> Result<String> {
     let plist = bundle.join("Contents/Info.plist");
-    let output = Command::new("/usr/bin/plutil")
+    let mut command = Command::new("/usr/bin/plutil");
+    command
         .args(["-extract", key, "raw", "-o", "-"])
-        .arg(&plist)
-        .output()
-        .with_context(|| format!("Could not run plutil on {}", plist.display()))?;
+        .arg(&plist);
+    let output = run_tool(command)?;
     if !output.status.success() {
         bail!("{} has no {key}", plist.display());
     }
@@ -202,9 +229,14 @@ pub struct Codesign;
 
 impl SignatureCheck for Codesign {
     fn verify(&self, bundle: &Path) -> Result<()> {
-        codesign(bundle, &["--deep"], BUNDLE_ID)?;
-        codesign(&bundle.join(CLI_IN_BUNDLE), &[], CLI_ID)
+        verify_with(Path::new("/usr/bin/codesign"), bundle)
     }
+}
+
+/// [`Codesign`]'s check, with the `codesign` at `tool`.
+pub(crate) fn verify_with(tool: &Path, bundle: &Path) -> Result<()> {
+    codesign(tool, bundle, &["--deep"], BUNDLE_ID)?;
+    codesign(tool, &bundle.join(CLI_IN_BUNDLE), &[], CLI_ID)
 }
 
 /// A Developer ID requirement for `identifier` from Localify's team.
@@ -217,24 +249,32 @@ pub fn requirement(identifier: &str) -> String {
     )
 }
 
-fn codesign(path: &Path, extra: &[&str], identifier: &str) -> Result<()> {
-    let output = Command::new("/usr/bin/codesign")
+/// `codesign` exits 1 when the signature is invalid and 3 when it doesn't
+/// meet the requirement. Any other end is no verdict on the bundle.
+fn codesign(tool: &Path, path: &Path, extra: &[&str], identifier: &str) -> Result<()> {
+    let mut command = Command::new(tool);
+    command
         .arg("--verify")
         .args(extra)
         .arg("--strict")
         .arg("--test-requirement")
         .arg(format!("={}", requirement(identifier)))
-        .arg(path)
-        .output()
-        .context("Could not run codesign")?;
-    if output.status.success() {
-        return Ok(());
+        .arg(path);
+    let output = run_tool(command)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match output.status.code() {
+        Some(0) => Ok(()),
+        Some(1 | 3) => bail!(
+            "{} is not signed by Localify: {}",
+            path.display(),
+            stderr.trim()
+        ),
+        _ => Err(ToolFailed {
+            tool: tool.display().to_string(),
+            detail: format!("{}: {}", output.status, stderr.trim()),
+        }
+        .into()),
     }
-    bail!(
-        "{} is not signed by Localify: {}",
-        path.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )
 }
 
 /// Every process's executable path, as `proc_pidpath` reads it.
@@ -286,15 +326,42 @@ fn process_path(pid: i32) -> ProcessPath {
 
 /// `acl_t` in `<sys/acl.h>`: an ACL the library allocates.
 type Acl = *mut libc::c_void;
+/// `acl_entry_t`: an entry inside an `acl_t`, freed with it.
+type AclEntry = *mut libc::c_void;
+/// `acl_flagset_t`: an entry's flags, inside its `acl_t`.
+type AclFlagset = *mut libc::c_void;
 /// `ACL_TYPE_EXTENDED` in `<sys/acl.h>`, the only ACL type macOS uses.
 const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+/// `acl_entry_id_t` values.
+const ACL_FIRST_ENTRY: libc::c_int = 0;
+const ACL_NEXT_ENTRY: libc::c_int = -1;
+/// `ACL_EXTENDED_ALLOW` in `acl_tag_t`.
+const ACL_EXTENDED_ALLOW: libc::c_int = 1;
+/// `ACL_ENTRY_ONLY_INHERIT` in `acl_flag_t`: the entry is only passed on
+/// to new children, and doesn't apply to the directory itself.
+const ACL_ENTRY_ONLY_INHERIT: libc::c_int = 1 << 8;
+/// The `acl_perm_t` bits that let someone add, remove or rename entries in
+/// a directory, or take it over: `ACL_ADD_FILE`, `ACL_DELETE`,
+/// `ACL_ADD_SUBDIRECTORY`, `ACL_DELETE_CHILD`, `ACL_WRITE_SECURITY` and
+/// `ACL_CHANGE_OWNER`.
+const ACL_WRITE_PERMS: u64 = (1 << 2) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 12) | (1 << 13);
 
 // The ACL calls of libSystem, which the libc crate doesn't declare for
-// macOS. Signatures from `<sys/acl.h>`; `acl_type_t` is a C enum, an int.
+// macOS. Signatures from `<sys/acl.h>` and `<membership.h>`; `acl_type_t`,
+// `acl_tag_t` and `acl_flag_t` are C enums, ints; `acl_permset_mask_t` is a
+// `u_int64_t`; `uuid_t` is `unsigned char[16]`.
 unsafe extern "C" {
     fn acl_init(count: libc::c_int) -> Acl;
     fn acl_set_fd_np(fd: libc::c_int, acl: Acl, kind: libc::c_int) -> libc::c_int;
+    fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> Acl;
+    fn acl_get_entry(acl: Acl, entry_id: libc::c_int, entry: *mut AclEntry) -> libc::c_int;
+    fn acl_get_tag_type(entry: AclEntry, tag: *mut libc::c_int) -> libc::c_int;
+    fn acl_get_permset_mask_np(entry: AclEntry, mask: *mut u64) -> libc::c_int;
+    fn acl_get_flagset_np(object: *mut libc::c_void, flags: *mut AclFlagset) -> libc::c_int;
+    fn acl_get_flag_np(flags: AclFlagset, flag: libc::c_int) -> libc::c_int;
+    fn acl_get_qualifier(entry: AclEntry) -> *mut libc::c_void;
     fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+    fn mbr_uid_to_uuid(uid: libc::uid_t, uuid: *mut u8) -> libc::c_int;
 }
 
 /// Removes every ACL entry of an open file or directory, as `chmod -N`
@@ -322,15 +389,126 @@ pub fn clear_acl(file: &File) -> io::Result<()> {
     }
 }
 
-/// Exchanges `staged` and `installed` in one step with `renamex_np`, so
-/// `installed` is never missing. Fails, touching nothing, on a volume
-/// without `RENAME_SWAP`.
-pub fn swap(staged: &Path, installed: &Path) -> Result<()> {
-    let from = CString::new(staged.as_os_str().as_bytes())?;
-    let to = CString::new(installed.as_os_str().as_bytes())?;
-    // SAFETY: both are NUL-terminated strings that outlive the call, which
-    // only reads them.
-    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) };
+/// Whether an ACL entry of this open directory lets an account other than
+/// `uid` add, remove or rename what it holds, or change its ACL or owner.
+/// An entry only passed on to new children doesn't apply to it. A volume
+/// without ACLs has none.
+pub fn acl_lets_others_write(dir: &File, uid: u32) -> io::Result<bool> {
+    // SAFETY: the descriptor is open for the call; it returns a new ACL,
+    // or null.
+    let acl = unsafe { acl_get_fd_np(dir.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) | Some(libc::ENOTSUP) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    let acl = AclGuard(acl);
+    let me = user_uuid(uid)?;
+    let mut entry: AclEntry = std::ptr::null_mut();
+    let mut which = ACL_FIRST_ENTRY;
+    // SAFETY: `acl.0` is the valid ACL read above, and `entry` a place for
+    // the call to write an entry pointer into. Past the last entry it
+    // fails, which ends the loop.
+    while unsafe { acl_get_entry(acl.0, which, &mut entry) } == 0 {
+        which = ACL_NEXT_ENTRY;
+        if entry_lets_other_write(entry, &me)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Frees an ACL from `acl_get_fd_np` once, however the reading ends.
+struct AclGuard(Acl);
+
+impl Drop for AclGuard {
+    fn drop(&mut self) {
+        // SAFETY: the ACL came from `acl_get_fd_np`, is freed only here,
+        // and its entries are not used after.
+        unsafe { acl_free(self.0) };
+    }
+}
+
+/// The membership UUID of `uid`, which an ACL entry names its account by.
+fn user_uuid(uid: u32) -> io::Result<[u8; 16]> {
+    let mut uuid = [0u8; 16];
+    // SAFETY: `uuid` has the 16 bytes a `uuid_t` holds, which the call
+    // writes.
+    let result = unsafe { mbr_uid_to_uuid(uid, uuid.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::from_raw_os_error(result));
+    }
+    Ok(uuid)
+}
+
+/// One entry of [`acl_lets_others_write`]: an allow entry with a write
+/// permission, applying to the directory itself, for anyone but `me`.
+fn entry_lets_other_write(entry: AclEntry, me: &[u8; 16]) -> io::Result<bool> {
+    let failed = |code: libc::c_int| {
+        if code < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(code)
+        }
+    };
+    let mut tag: libc::c_int = 0;
+    // SAFETY: `entry` is a valid entry of an ACL still alive, and `tag` a
+    // place for the call to write into.
+    failed(unsafe { acl_get_tag_type(entry, &mut tag) })?;
+    let mut mask: u64 = 0;
+    // SAFETY: as above, with `mask`.
+    failed(unsafe { acl_get_permset_mask_np(entry, &mut mask) })?;
+    if tag != ACL_EXTENDED_ALLOW || mask & ACL_WRITE_PERMS == 0 {
+        return Ok(false);
+    }
+    let mut flags: AclFlagset = std::ptr::null_mut();
+    // SAFETY: as above; the flagset points into the entry.
+    failed(unsafe { acl_get_flagset_np(entry, &mut flags) })?;
+    // SAFETY: `flags` was just read from the live entry.
+    if failed(unsafe { acl_get_flag_np(flags, ACL_ENTRY_ONLY_INHERIT) })? == 1 {
+        return Ok(false);
+    }
+    // SAFETY: `entry` is valid; it returns a new `guid_t` (16 bytes), or
+    // null.
+    let qualifier = unsafe { acl_get_qualifier(entry) };
+    if qualifier.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a non-null qualifier of an extended ACL entry is a `guid_t`,
+    // 16 bytes with no alignment needs. It is read once, then freed once
+    // and not used after.
+    let named = unsafe { std::ptr::read_unaligned(qualifier.cast::<[u8; 16]>()) };
+    // SAFETY: see above.
+    unsafe { acl_free(qualifier) };
+    Ok(&named != me)
+}
+
+/// Exchanges the staged bundle `staged` in the directory held open as
+/// `staging` with the installed one, `installed` in `destination`, in one
+/// step with `renameatx_np`, so the installed bundle is never missing.
+/// Both sides are named from open directories, so nothing that moves a
+/// folder above them since they were opened changes what is swapped.
+/// Fails, touching nothing, on a volume without `RENAME_SWAP`.
+pub fn swap_at(
+    staging: BorrowedFd<'_>,
+    staged: &CStr,
+    destination: BorrowedFd<'_>,
+    installed: &CStr,
+    shown: &Path,
+) -> Result<()> {
+    // SAFETY: both descriptors are open and both names NUL-terminated, all
+    // alive for the call, which only reads the names.
+    let result = unsafe {
+        libc::renameatx_np(
+            staging.as_raw_fd(),
+            staged.as_ptr(),
+            destination.as_raw_fd(),
+            installed.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
     if result == 0 {
         return Ok(());
     }
@@ -338,11 +516,11 @@ pub fn swap(staged: &Path, installed: &Path) -> Result<()> {
     match error.raw_os_error() {
         Some(libc::ENOTSUP) | Some(libc::EINVAL) => bail!(
             "The volume of {} can't swap two folders in one step (RENAME_SWAP), so it was left as it is.",
-            installed.display()
+            shown.display()
         ),
         _ => Err(anyhow!(error).context(format!(
             "Could not swap the new bundle in at {}",
-            installed.display()
+            shown.display()
         ))),
     }
 }
@@ -350,6 +528,7 @@ pub fn swap(staged: &Path, installed: &Path) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::fs;
+    use std::os::fd::AsFd;
 
     use super::*;
 
@@ -446,6 +625,20 @@ pub(crate) mod tests {
         assert!(target.still_unchanged().is_err());
     }
 
+    const APP: &CStr = c"Localify.app";
+
+    /// Swaps `staging/Localify.app` with `destination/Localify.app`.
+    fn swap_in(staging: &File, destination: &Path) -> Result<()> {
+        let parent = File::open(destination).unwrap();
+        swap_at(
+            staging.as_fd(),
+            APP,
+            parent.as_fd(),
+            APP,
+            &destination.join("Localify.app"),
+        )
+    }
+
     #[test]
     fn swapping_exchanges_the_two_folders() {
         // Temp dirs are on the boot volume, APFS on every supported macOS.
@@ -454,9 +647,28 @@ pub(crate) mod tests {
         let staged = dir.path().join("staged/Localify.app");
         fake_bundle(&installed, "1.6.0");
         fake_bundle(&staged, "1.7.0");
-        swap(&staged, &installed).unwrap();
+        let staging = File::open(dir.path().join("staged")).unwrap();
+        swap_in(&staging, dir.path()).unwrap();
         assert_eq!(bundle_version(&installed).unwrap(), Version::new(1, 7, 0));
         assert_eq!(bundle_version(&staged).unwrap(), Version::new(1, 6, 0));
+    }
+
+    #[test]
+    fn swapping_uses_the_staging_folder_held_open_not_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("Localify.app");
+        fake_bundle(&installed, "1.6.0");
+        fake_bundle(&dir.path().join("staged/Localify.app"), "1.7.0");
+        let staging = File::open(dir.path().join("staged")).unwrap();
+        // Someone moves the verified folder away and puts another tree at
+        // its path.
+        fs::rename(dir.path().join("staged"), dir.path().join("moved")).unwrap();
+        fake_bundle(&dir.path().join("staged/Localify.app"), "6.6.6");
+
+        swap_in(&staging, dir.path()).unwrap();
+        assert_eq!(bundle_version(&installed).unwrap(), Version::new(1, 7, 0));
+        let decoy = dir.path().join("staged/Localify.app");
+        assert_eq!(bundle_version(&decoy).unwrap(), Version::new(6, 6, 6));
     }
 
     #[test]
@@ -464,7 +676,9 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("Localify.app");
         fake_bundle(&installed, "1.6.0");
-        assert!(swap(&dir.path().join("missing.app"), &installed).is_err());
+        fs::create_dir(dir.path().join("empty")).unwrap();
+        let staging = File::open(dir.path().join("empty")).unwrap();
+        assert!(swap_in(&staging, dir.path()).is_err());
         assert_eq!(bundle_version(&installed).unwrap(), Version::new(1, 6, 0));
     }
 
@@ -503,6 +717,57 @@ pub(crate) mod tests {
         assert!(!has_acl(dir.path()));
     }
 
+    /// Adds an ACL entry to `path` with `chmod +a`.
+    pub(crate) fn add_acl(path: &Path, entry: &str) {
+        let status = Command::new("/bin/chmod")
+            .args(["+a", entry])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "chmod +a {entry}");
+    }
+
+    /// This account's short name, as an ACL entry names it.
+    pub(crate) fn user_name() -> String {
+        let output = Command::new("/usr/bin/id").arg("-un").output().unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn acl_entries_that_let_others_write_are_found() {
+        let lets_others_write = |entry: Option<&str>| {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(entry) = entry {
+                add_acl(dir.path(), entry);
+            }
+            acl_lets_others_write(&File::open(dir.path()).unwrap(), uid()).unwrap()
+        };
+        assert!(!lets_others_write(None));
+        for perm in [
+            "add_file",
+            "add_subdirectory",
+            "delete_child",
+            "delete",
+            "writesecurity",
+            "chown",
+        ] {
+            let entry = format!("everyone allow {perm}");
+            assert!(lets_others_write(Some(&entry)), "{entry}");
+        }
+        assert!(lets_others_write(Some("staff allow delete_child")));
+        // Denials, reading, this account's own access, and what only new
+        // children inherit, change nothing here.
+        assert!(!lets_others_write(Some("everyone deny delete")));
+        assert!(!lets_others_write(Some(
+            "everyone allow list,search,readattr"
+        )));
+        let mine = format!("{} allow add_file,delete_child", user_name());
+        assert!(!lets_others_write(Some(&mine)));
+        assert!(!lets_others_write(Some(
+            "everyone allow add_file,delete_child,directory_inherit,only_inherit"
+        )));
+    }
+
     #[test]
     fn the_requirement_pins_the_team_and_identifier() {
         let text = requirement(BUNDLE_ID);
@@ -511,11 +776,28 @@ pub(crate) mod tests {
         assert!(text.contains(r#"leaf[subject.OU] = "P5G8WAJ2G2""#));
     }
 
+    fn is_tool_failure(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| cause.is::<ToolFailed>())
+    }
+
     #[test]
     fn an_unsigned_bundle_fails_codesign() {
         let dir = tempfile::tempdir().unwrap();
         let bundle = dir.path().join("Localify.app");
         fake_bundle(&bundle, "1.7.0");
-        assert!(Codesign.verify(&bundle).is_err());
+        let error = Codesign.verify(&bundle).unwrap_err();
+        assert!(!is_tool_failure(&error), "{error:#}");
+    }
+
+    #[test]
+    fn a_codesign_that_cant_run_is_no_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Localify.app");
+        fake_bundle(&bundle, "1.7.0");
+        let missing = verify_with(&dir.path().join("no-codesign"), &bundle).unwrap_err();
+        assert!(is_tool_failure(&missing), "{missing:#}");
+        // `false` exits 1, codesign's "invalid": a verdict.
+        let invalid = verify_with(Path::new("/usr/bin/false"), &bundle).unwrap_err();
+        assert!(!is_tool_failure(&invalid), "{invalid:#}");
     }
 }

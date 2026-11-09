@@ -4,11 +4,18 @@
 //! signature, extraction, version, code signature, then, under the update
 //! lock, the app checks, the destination check, the staged bundle checked
 //! again, and the swap.
+//!
+//! The staging directory is held open from its creation to the swap, which
+//! names both sides from open directories. Every folder above it must be
+//! one no other account can change.
 
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::ffi::{CStr, CString};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -74,6 +81,28 @@ enum Refusal {
     Here(anyhow::Error),
 }
 
+/// A failed check of the staged bundle: the archive's fault, unless the
+/// tool couldn't give an answer or the bundle's path no longer led to it.
+fn refusal(error: anyhow::Error) -> Refusal {
+    let here = error
+        .chain()
+        .any(|cause| cause.is::<macos::ToolFailed>() || cause.is::<StagingMoved>());
+    if here {
+        Refusal::Here(error)
+    } else {
+        Refusal::Archive(error)
+    }
+}
+
+/// The staged bundle's path led somewhere else than the directory held
+/// open, so what a tool checked through it isn't what would be swapped in.
+#[derive(Debug, thiserror::Error)]
+#[error("{0} no longer leads to the staged update, so nothing was replaced.")]
+struct StagingMoved(String);
+
+/// [`extract::BUNDLE_NAME`], for the calls that name it from a directory.
+const BUNDLE: &CStr = c"Localify.app";
+
 /// What a release that failed here before answers.
 pub fn failed_before(version: &str) -> anyhow::Error {
     anyhow!("Localify {version} failed to install here before. Waiting for the next release.")
@@ -132,7 +161,7 @@ impl Installer<'_> {
         release::verify_signature(archive, &manifest_archive.signature, self.public_key)
             .map_err(Refusal::Archive)?;
         let dir = StagingDir::create(self.paths, self.target.device()).map_err(Refusal::Here)?;
-        let bundle = match extract::extract_bundle(archive, dir.path(), LIMITS) {
+        let bundle = match extract::extract_bundle(archive, &dir.dir, dir.path(), LIMITS) {
             Ok(bundle) => bundle,
             Err(error @ ExtractError::Write(_)) => {
                 return Err(Refusal::Here(
@@ -145,14 +174,15 @@ impl Installer<'_> {
                 ));
             }
         };
-        let version = macos::bundle_version(&bundle).map_err(Refusal::Archive)?;
+        let version = dir.through_path(macos::bundle_version).map_err(refusal)?;
         if version.to_string() != release.version {
             return Err(Refusal::Archive(anyhow!(
                 "The update archive holds version {version}, not the {} the manifest names",
                 release.version
             )));
         }
-        self.signature.verify(&bundle).map_err(Refusal::Archive)?;
+        dir.through_path(|bundle| self.signature.verify(bundle))
+            .map_err(refusal)?;
         Ok(Staged {
             dir,
             bundle,
@@ -173,7 +203,7 @@ impl Installer<'_> {
         }
         self.target.still_unchanged()?;
         self.still_verified(&staged)?;
-        macos::swap(&staged.bundle, &self.target.bundle)?;
+        self.swap(&staged)?;
         let version = staged.version.clone();
         self.log(&format!(
             "installed version={version} previous={} at={}",
@@ -197,14 +227,40 @@ impl Installer<'_> {
     }
 
     /// The staged bundle as verified, checked again right before the swap:
-    /// the same version, and its code signature.
+    /// the same version, and its code signature, of the bundle in the
+    /// directory held open.
     fn still_verified(&self, staged: &Staged) -> Result<()> {
         let changed = "The staged update changed after it was verified, so nothing was replaced";
-        let version = macos::bundle_version(&staged.bundle).context(changed)?;
+        let version = staged
+            .dir
+            .through_path(macos::bundle_version)
+            .context(changed)?;
         if version != staged.version {
             bail!("{changed}: it is now version {version}.");
         }
-        self.signature.verify(&staged.bundle).context(changed)
+        staged
+            .dir
+            .through_path(|bundle| self.signature.verify(bundle))
+            .context(changed)
+    }
+
+    /// Swaps the bundle in the staging directory held open with the
+    /// installed one, named from its folder.
+    fn swap(&self, staged: &Staged) -> Result<()> {
+        let installed = &self.target.bundle;
+        let parent = installed.parent().unwrap_or(Path::new("/"));
+        let name = installed
+            .file_name()
+            .ok_or_else(|| anyhow!("{} has no name", installed.display()))?;
+        let name = CString::new(name.as_bytes())?;
+        let destination = open_dir(parent)?;
+        macos::swap_at(
+            staged.dir.dir.as_fd(),
+            BUNDLE,
+            destination.as_fd(),
+            &name,
+            installed,
+        )
     }
 
     /// The update lock, then `app.lock`. A person's install waits for the
@@ -341,47 +397,46 @@ fn remove_dir_contents_except(dir: &Path, keep: &Path) -> io::Result<()> {
 }
 
 /// A new private directory under the updates folder, on the destination's
-/// volume, removed with what it holds when dropped unless kept.
+/// volume, held open from its creation to the swap, and removed with what
+/// it holds when dropped unless kept.
 struct StagingDir {
     path: PathBuf,
+    dir: File,
     keep: bool,
 }
 
 impl StagingDir {
-    /// Only this account may write in it: the updates folder, `staging/`
-    /// and the new directory are owned by it, writable by nobody else by
-    /// their mode, and have no ACL, inherited or not. The new directory is
-    /// checked empty once that holds.
+    /// Only this account may change it, or any folder above it. Every
+    /// folder from `/` down to the updates folder must be one no other
+    /// account can change (see [`check_above_staging`]). The updates folder,
+    /// `staging/` and the new directory are owned by this account, writable
+    /// by nobody else by their mode, and have no ACL, inherited or not. Each
+    /// is opened from its parent, never through a symlink. The new
+    /// directory is checked empty once that holds.
     fn create(paths: &UpdatePaths, device: u64) -> Result<Self> {
         fs::create_dir_all(paths.dir())
             .with_context(|| format!("Could not create {}", paths.dir().display()))?;
-        make_private(paths.dir(), 0o755)?;
+        let updates = open_checked(paths.dir())?;
+        make_private(&updates, paths.dir(), 0o755)?;
         let root = paths.staging_root();
-        match DirBuilder::new().mode(0o700).create(&root) {
-            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
-                return Err(error).with_context(|| format!("Could not create {}", root.display()));
-            }
-            _ => {}
-        }
-        make_private(&root, 0o700)?;
+        let staging_root = subdir(&updates, c"staging", &root, true)?;
+        make_private(&staging_root, &root, 0o700)?;
         let name = format!("{}-{}", std::process::id(), super::random_u64());
-        let dir = root.join(name);
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .with_context(|| format!("Could not create {}", dir.display()))?;
+        let path = root.join(&name);
+        let dir = subdir(&staging_root, &CString::new(name)?, &path, false)?;
         let staging = Self {
-            path: dir,
+            path,
+            dir,
             keep: false,
         };
-        let opened = make_private(&staging.path, 0o700)?;
+        make_private(&staging.dir, &staging.path, 0o700)?;
         if fs::read_dir(&staging.path)?.next().is_some() {
             bail!(
                 "Something else wrote in {}, so the update wasn't staged there.",
                 staging.path.display()
             );
         }
-        if opened.metadata()?.dev() != device {
+        if staging.dir.metadata()?.dev() != device {
             bail!(
                 "{} is on another volume than the installed app, so the update can't be swapped in.",
                 staging.path.display()
@@ -392,6 +447,29 @@ impl StagingDir {
 
     fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Runs `check` on the staged bundle through its path, which `codesign`
+    /// and `plutil` need, and makes sure right before and right after that
+    /// the path leads to the bundle in the directory held open.
+    fn through_path<T>(&self, check: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        let bundle = self.path.join(extract::BUNDLE_NAME);
+        self.leads_to_held(&bundle)?;
+        let checked = check(&bundle);
+        self.leads_to_held(&bundle)?;
+        checked
+    }
+
+    fn leads_to_held(&self, bundle: &Path) -> Result<()> {
+        let moved = || StagingMoved(bundle.display().to_string());
+        let held = extract::open_dir_at(self.dir.as_fd(), BUNDLE)
+            .and_then(|fd| File::from(fd).metadata())
+            .map_err(|_| moved())?;
+        let seen = fs::symlink_metadata(bundle).map_err(|_| moved())?;
+        if (held.dev(), held.ino()) != (seen.dev(), seen.ino()) {
+            return Err(moved().into());
+        }
+        Ok(())
     }
 
     /// Leaves the directory and what it holds in place.
@@ -408,15 +486,84 @@ impl Drop for StagingDir {
     }
 }
 
-/// Opens the directory at `path`, never through a symlink, checks that this
-/// account owns it, then lets only the owner write in it: its mode keeps at
-/// most `keep` (and always the owner's access), and its ACL is cleared.
-fn make_private(path: &Path, keep: u32) -> Result<File> {
-    let dir = OpenOptions::new()
+/// Opens a directory, never through a symlink.
+fn open_dir(path: &Path) -> Result<File> {
+    OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(path)
-        .with_context(|| format!("Could not open {}", path.display()))?;
+        .with_context(|| format!("Could not open {}", path.display()))
+}
+
+/// Opens the folder at `path` from `/`, one component at a time and never
+/// through a symlink, once every folder above it passed
+/// [`check_above_staging`].
+fn open_checked(path: &Path) -> Result<File> {
+    let canonical =
+        fs::canonicalize(path).with_context(|| format!("Could not open {}", path.display()))?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let mut dir = open_dir(Path::new("/"))?;
+    let mut at = PathBuf::from("/");
+    for component in canonical.components().skip(1) {
+        let Component::Normal(name) = component else {
+            bail!("Could not open {}: not a plain path", canonical.display());
+        };
+        check_above_staging(&dir, &at, uid)?;
+        at.push(name);
+        let opened = extract::open_dir_at(dir.as_fd(), &CString::new(name.as_bytes())?);
+        dir = File::from(opened.with_context(|| format!("Could not open {}", at.display()))?);
+    }
+    Ok(dir)
+}
+
+/// Refuses a folder above staging that another account could change: it
+/// could rename what lies below and put its own tree at the staged
+/// bundle's path. It must be owned by this account or root, have no group
+/// or other write in its mode, and no ACL entry letting another account
+/// write in it.
+fn check_above_staging(dir: &File, path: &Path, uid: u32) -> Result<()> {
+    let meta = dir
+        .metadata()
+        .with_context(|| format!("Could not read {}", path.display()))?;
+    let acl = || {
+        macos::acl_lets_others_write(dir, uid)
+            .with_context(|| format!("Could not read the ACL of {}", path.display()))
+    };
+    let why = if meta.uid() != uid && meta.uid() != 0 {
+        "belongs to another account"
+    } else if meta.mode() & 0o022 != 0 {
+        "is writable by its group or by everyone"
+    } else if acl()? {
+        "has an ACL entry that lets another account write in it"
+    } else {
+        return Ok(());
+    };
+    bail!(
+        "{} {why}, so another account could swap the update for its own before it is installed. \
+         Updates install again once only you or the system can write in it.",
+        path.display()
+    )
+}
+
+/// Makes (when missing, if `existing` may be) and opens the directory
+/// `name` in `parent`, never through a symlink.
+fn subdir(parent: &File, name: &CStr, shown: &Path, existing: bool) -> Result<File> {
+    match extract::mkdir_at(parent.as_fd(), name) {
+        Err(error) if !(existing && error.raw_os_error() == Some(libc::EEXIST)) => {
+            return Err(error).with_context(|| format!("Could not create {}", shown.display()));
+        }
+        _ => {}
+    }
+    let opened = extract::open_dir_at(parent.as_fd(), name)
+        .with_context(|| format!("Could not open {}", shown.display()))?;
+    Ok(File::from(opened))
+}
+
+/// Checks that this account owns the open directory at `path`, then lets
+/// only the owner write in it: its mode keeps at most `keep` (and always
+/// the owner's access), and its ACL is cleared.
+fn make_private(dir: &File, path: &Path, keep: u32) -> Result<()> {
     let meta = dir.metadata()?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     if meta.uid() != unsafe { libc::geteuid() } {
@@ -428,10 +575,9 @@ fn make_private(path: &Path, keep: u32) -> Result<File> {
     let mode = (meta.mode() & keep) | 0o700;
     let private = || -> io::Result<()> {
         dir.set_permissions(Permissions::from_mode(mode))?;
-        macos::clear_acl(&dir)
+        macos::clear_acl(dir)
     };
-    private().with_context(|| format!("Could not make {} private", path.display()))?;
-    Ok(dir)
+    private().with_context(|| format!("Could not make {} private", path.display()))
 }
 
 #[cfg(test)]
@@ -439,8 +585,9 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use crate::infrastructure::updates::extract::tests::with_write_error;
     use crate::infrastructure::updates::extract::tests::{Item, archive};
-    use crate::infrastructure::updates::macos::tests::{fake_bundle, has_acl};
+    use crate::infrastructure::updates::macos::tests::{add_acl, fake_bundle, has_acl, user_name};
     use crate::infrastructure::updates::macos::{CLI_IN_BUNDLE, TargetError};
     use crate::infrastructure::updates::release::ReleaseArchive;
     use crate::infrastructure::updates::release::tests::TestKey;
@@ -814,16 +961,11 @@ mod tests {
     #[test]
     fn an_inherited_acl_never_reaches_the_staged_bundle() {
         let world = World::new();
-        // Anyone may add files below, and new folders inherit that.
-        let status = std::process::Command::new("/bin/chmod")
-            .args([
-                "+a",
-                "everyone allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit",
-            ])
-            .arg(&world.root)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        // New folders below let anyone add files.
+        add_acl(
+            &world.root,
+            "everyone allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit,only_inherit",
+        );
         let installer = world.installer(&Signed(true), &none, &|| true);
         let (release, bytes) = world.release("1.7.0", "1.7.0");
 
@@ -837,6 +979,124 @@ mod tests {
         ] {
             assert!(!has_acl(path), "{} has an ACL", path.display());
         }
+    }
+
+    /// Whether this release is remembered as failed, by either record.
+    fn remembered(
+        world: &World,
+        installer: &Installer<'_>,
+        release: &Release,
+        bytes: &[u8],
+    ) -> bool {
+        let state = StateStore::new(&world.paths).load().unwrap();
+        installer.rejected(release).unwrap() || state.has_failed(&release::sha256_hex(bytes))
+    }
+
+    #[test]
+    fn a_folder_above_staging_that_others_can_change_stops_the_install() {
+        let others_write = |world: &World| {
+            fs::set_permissions(&world.root, Permissions::from_mode(0o777)).unwrap();
+        };
+        let acl = |world: &World| add_acl(&world.root, "everyone allow delete_child");
+        for open_up in [&others_write as &dyn Fn(&World), &acl] {
+            let world = World::new();
+            open_up(&world);
+            let installer = world.installer(&Signed(true), &none, &|| true);
+            let (release, bytes) = world.release("1.7.0", "1.7.0");
+
+            let error = installer.stage(&release, &bytes).err().unwrap();
+            let shown = world.root.display().to_string();
+            assert!(error.to_string().starts_with(&shown), "{error:#}");
+            assert!(!world.paths.staging_root().exists());
+            // Not the archive's fault.
+            assert!(!remembered(&world, &installer, &release, &bytes));
+        }
+    }
+
+    #[test]
+    fn a_folder_above_staging_only_this_account_can_change_is_fine() {
+        let world = World::new();
+        add_acl(&world.root, &format!("{} allow delete_child", user_name()));
+        add_acl(&world.root, "everyone deny delete");
+        let installer = world.installer(&Signed(true), &none, &|| true);
+        let (release, bytes) = world.release("1.7.0", "1.7.0");
+        let staged = installer.stage(&release, &bytes).unwrap();
+        installer.replace(staged, Mode::Unattended).unwrap();
+    }
+
+    /// Passes, and meanwhile, on the check right before the swap, moves the
+    /// staging directory away and puts another tree at its path, as
+    /// another account renaming a folder above it would.
+    struct SubstitutedDuringLastCheck(Cell<u32>);
+
+    impl SignatureCheck for SubstitutedDuringLastCheck {
+        fn verify(&self, bundle: &Path) -> Result<()> {
+            self.0.set(self.0.get() + 1);
+            if self.0.get() == 2 {
+                let staging = bundle.parent().unwrap();
+                fs::rename(staging, staging.with_extension("moved")).unwrap();
+                fake_bundle(bundle, "6.6.6");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_tree_put_at_the_staging_path_is_never_swapped_in() {
+        let world = World::new();
+        let check = SubstitutedDuringLastCheck(Cell::new(0));
+        let installer = world.installer(&check, &none, &|| true);
+        let (release, bytes) = world.release("1.7.0", "1.7.0");
+        let staged = installer.stage(&release, &bytes).unwrap();
+
+        let error = installer.replace(staged, Mode::Unattended).unwrap_err();
+        assert!(
+            error.chain().any(|cause| cause.is::<StagingMoved>()),
+            "{error:#}"
+        );
+        assert_eq!(
+            macos::bundle_version(&world.bundle()).unwrap(),
+            Version::new(1, 6, 0)
+        );
+    }
+
+    #[test]
+    fn a_full_disk_while_staging_is_not_the_archives_fault() {
+        let world = World::new();
+        let installer = world.installer(&Signed(true), &none, &|| true);
+        let (release, bytes) = world.release("1.7.0", "1.7.0");
+
+        let error = with_write_error(libc::ENOSPC, || installer.stage(&release, &bytes))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("Could not stage"), "{error:#}");
+        assert!(!remembered(&world, &installer, &release, &bytes));
+        // Once there is room, the same release installs.
+        let staged = installer.stage(&release, &bytes).unwrap();
+        installer.replace(staged, Mode::Unattended).unwrap();
+    }
+
+    /// The real `codesign` check, with no `codesign` to run.
+    struct NoCodesign;
+
+    impl SignatureCheck for NoCodesign {
+        fn verify(&self, bundle: &Path) -> Result<()> {
+            macos::verify_with(Path::new("/nonexistent/codesign"), bundle)
+        }
+    }
+
+    #[test]
+    fn a_codesign_that_cant_run_is_not_the_archives_fault() {
+        let world = World::new();
+        let installer = world.installer(&NoCodesign, &none, &|| true);
+        let (release, bytes) = world.release("1.7.0", "1.7.0");
+        assert!(installer.stage(&release, &bytes).is_err());
+        assert!(!remembered(&world, &installer, &release, &bytes));
+    }
+
+    #[test]
+    fn the_bundle_name_is_the_archives() {
+        assert_eq!(BUNDLE.to_str(), Ok(extract::BUNDLE_NAME));
     }
 
     #[test]

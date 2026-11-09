@@ -15,11 +15,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{CStr, CString, OsStr};
-use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, Read};
+use std::fs::{self, File, Permissions};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 use flate2::read::GzDecoder;
@@ -85,18 +85,16 @@ pub enum ExtractError {
     Write(io::Error),
 }
 
-/// Expands `archive` (a `.tar.gz`) into `staging`, which must be a new empty
-/// directory only this process writes, and returns the bundle's path.
+/// Expands `archive` (a `.tar.gz`) into `staging`, a new empty directory
+/// only this process writes, held open, at `staging_path`. Returns the
+/// bundle's path.
 pub fn extract_bundle(
     archive: &[u8],
-    staging: &Path,
+    staging: &File,
+    staging_path: &Path,
     limits: Limits,
 ) -> Result<PathBuf, ExtractError> {
-    let root = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(staging)
-        .map_err(ExtractError::Write)?;
+    let root = staging.try_clone().map_err(ExtractError::Write)?;
     let stream = Capped::new(GzDecoder::new(archive), stream_cap(limits));
     let mut tar = tar::Archive::new(stream);
     let mut state = Extraction::new(OwnedFd::from(root), limits);
@@ -107,7 +105,7 @@ pub fn extract_bundle(
     }
     read?;
     state.make_symlinks()?;
-    state.finish(staging)
+    state.finish(staging_path)
 }
 
 /// The most the decompressed stream may hold: the contents, the metadata,
@@ -336,7 +334,7 @@ impl Extraction {
         let (parent, name) = self.parent_dir(relative, shown)?;
         let file = create_file_at(parent.as_fd(), &name).map_err(|e| placement_error(e, shown))?;
         let mut file = File::from(file);
-        let copied = io::copy(&mut entry.take(size), &mut file).map_err(ExtractError::Archive)?;
+        let copied = copy_entry(&mut entry.take(size), &mut file)?;
         if copied != size {
             return Err(ExtractError::Archive(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -399,6 +397,30 @@ impl Extraction {
         }
         Ok(bundle)
     }
+}
+
+/// Copies an entry's contents into its file. Failing to read is the
+/// archive's fault; failing to write, such as on a full disk, is this
+/// machine's.
+fn copy_entry(from: &mut impl Read, to: &mut File) -> Result<u64, ExtractError> {
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let read = match from.read(&mut buffer) {
+            Ok(0) => return Ok(copied),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(ExtractError::Archive(error)),
+        };
+        write_chunk(to, &buffer[..read]).map_err(ExtractError::Write)?;
+        copied += read as u64;
+    }
+}
+
+fn write_chunk(to: &mut File, chunk: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    tests::injected_write_error()?;
+    to.write_all(chunk)
 }
 
 /// Takes `path` and `linkpath` from PAX records, and refuses the records
@@ -509,7 +531,7 @@ fn owned(fd: libc::c_int) -> io::Result<OwnedFd> {
 
 /// Opens the directory `name` in `dir`, failing on a symlink (`ELOOP`) or
 /// anything but a directory (`ENOTDIR`).
-fn open_dir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+pub(super) fn open_dir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: `dir` is an open descriptor and `name` a NUL-terminated
     // string, both alive for the call, which only reads `name`.
@@ -526,7 +548,7 @@ fn create_file_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
     owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) })
 }
 
-fn mkdir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+pub(super) fn mkdir_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
     // SAFETY: `dir` is an open descriptor and `name` a NUL-terminated
     // string, both alive for the call, which only reads `name`.
     let result = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
@@ -617,8 +639,60 @@ pub(crate) mod tests {
         limits: Limits,
     ) -> (tempfile::TempDir, Result<PathBuf, ExtractError>) {
         let dir = tempfile::tempdir().unwrap();
-        let result = extract_bundle(bytes, dir.path(), limits);
+        let result = extract_into(bytes, dir.path(), limits);
         (dir, result)
+    }
+
+    fn extract_into(bytes: &[u8], staging: &Path, limits: Limits) -> Result<PathBuf, ExtractError> {
+        let held = File::open(staging).unwrap();
+        extract_bundle(bytes, &held, staging, limits)
+    }
+
+    thread_local! {
+        /// The error this thread's next writes fail with, as a full disk
+        /// would.
+        static WRITE_ERROR: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(crate) fn injected_write_error() -> io::Result<()> {
+        match WRITE_ERROR.get() {
+            Some(code) => Err(io::Error::from_raw_os_error(code)),
+            None => Ok(()),
+        }
+    }
+
+    /// Runs `body` with every staged file's write failing with `code`.
+    pub(crate) fn with_write_error<T>(code: i32, body: impl FnOnce() -> T) -> T {
+        WRITE_ERROR.set(Some(code));
+        let result = body();
+        WRITE_ERROR.set(None);
+        result
+    }
+
+    #[test]
+    fn a_full_disk_is_a_write_error_not_the_archives() {
+        let (_dir, result) = with_write_error(libc::ENOSPC, || extract(&good_bundle()));
+        match result {
+            Err(ExtractError::Write(error)) => {
+                assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entry_cut_short_is_the_archives_fault() {
+        let mut bytes = archive(&[Item::File("Localify.app/a", &[7u8; 4096], 0o644)]);
+        // Undo the gzip so the tar can be cut inside the entry's data.
+        let mut tar = Vec::new();
+        GzDecoder::new(bytes.as_slice())
+            .read_to_end(&mut tar)
+            .unwrap();
+        tar.truncate(512 + 1000);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        io::Write::write_all(&mut encoder, &tar).unwrap();
+        bytes = encoder.finish().unwrap();
+        assert!(matches!(extract(&bytes).1, Err(ExtractError::Archive(_))));
     }
 
     #[test]
@@ -839,7 +913,7 @@ pub(crate) mod tests {
                 let outer = tempfile::tempdir().unwrap();
                 let staging = outer.path().join("staging");
                 fs::create_dir(&staging).unwrap();
-                let result = extract_bundle(&archive(&items), &staging, LIMITS);
+                let result = extract_into(&archive(&items), &staging, LIMITS);
                 assert!(result.is_err(), "{payload} was accepted");
                 assert_eq!(
                     everything_in(outer.path(), &staging),
