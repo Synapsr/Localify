@@ -1589,11 +1589,18 @@ async fn reconnecting_does_not_reset_the_pairing_limit() {
     })
     .await;
     wait_until("A sees B again", || a.sees("mB")).await;
+    // B's own link must be back too, or the request can end for another
+    // reason than the limit (seen on a loaded CI runner).
+    wait_until("B's link is connected again", || {
+        b.link.status().relay == RelayState::Connected
+    })
+    .await;
     let mut events = a.link.pair(&b.id).await.unwrap();
-    let PairEvent::Cancelled { reason, .. } = next_pair_event(&mut events).await else {
-        panic!("not busy");
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Cancelled { reason, .. } = &event else {
+        panic!("not busy: {event:?}");
     };
-    assert_eq!(reason, "busy");
+    assert_eq!(reason, "busy", "{event:?}");
 }
 
 #[tokio::test]
