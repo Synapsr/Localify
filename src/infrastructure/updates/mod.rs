@@ -91,6 +91,7 @@ impl UpdatePaths {
         self.dir.join("previous")
     }
 
+    #[cfg(test)]
     pub fn staging_root(&self) -> PathBuf {
         self.dir.join("staging")
     }

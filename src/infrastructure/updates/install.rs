@@ -81,19 +81,6 @@ enum Refusal {
     Here(anyhow::Error),
 }
 
-/// A failed check of the staged bundle: the archive's fault, unless the
-/// tool couldn't give an answer or the bundle's path no longer led to it.
-fn refusal(error: anyhow::Error) -> Refusal {
-    let here = error
-        .chain()
-        .any(|cause| cause.is::<macos::ToolFailed>() || cause.is::<StagingMoved>());
-    if here {
-        Refusal::Here(error)
-    } else {
-        Refusal::Archive(error)
-    }
-}
-
 /// The staged bundle's path led somewhere else than the directory held
 /// open, so what a tool checked through it isn't what would be swapped in.
 #[derive(Debug, thiserror::Error)]
@@ -128,9 +115,11 @@ impl Installer<'_> {
 
     /// Checks the archive and expands it into a new private directory: the
     /// signature before anything is extracted, then the bundle's version
-    /// and its code signature. An archive that fails any of these is
-    /// recorded, by its SHA-256 and by the release's identity, and skipped
-    /// until another release.
+    /// and its code signature. An archive that fails its signature, the
+    /// extraction rules, or the version check is recorded, by its SHA-256 and
+    /// by the release's identity, and skipped until another release. A
+    /// `plutil` or `codesign` failure is only retried at the next check,
+    /// since those tools also fail for local reasons.
     pub fn stage(&self, release: &Release, archive: &[u8]) -> Result<Staged> {
         let digest = release::sha256_hex(archive);
         let identity = release.identity();
@@ -174,7 +163,13 @@ impl Installer<'_> {
                 ));
             }
         };
-        let version = dir.through_path(macos::bundle_version).map_err(refusal)?;
+        // The archive passed its minisign signature, so a tool's "no" here is
+        // retried at the next check rather than held against the release:
+        // `plutil` and `codesign` also fail for local reasons (too many open
+        // files, a damaged keychain) with the same exit codes.
+        let version = dir
+            .through_path(macos::bundle_version)
+            .map_err(Refusal::Here)?;
         if version.to_string() != release.version {
             return Err(Refusal::Archive(anyhow!(
                 "The update archive holds version {version}, not the {} the manifest names",
@@ -182,7 +177,7 @@ impl Installer<'_> {
             )));
         }
         dir.through_path(|bundle| self.signature.verify(bundle))
-            .map_err(refusal)?;
+            .map_err(Refusal::Here)?;
         Ok(Staged {
             dir,
             bundle,
@@ -416,9 +411,12 @@ impl StagingDir {
     fn create(paths: &UpdatePaths, device: u64) -> Result<Self> {
         fs::create_dir_all(paths.dir())
             .with_context(|| format!("Could not create {}", paths.dir().display()))?;
-        let updates = open_checked(paths.dir())?;
-        make_private(&updates, paths.dir(), 0o755)?;
-        let root = paths.staging_root();
+        // The path the tools are given is the one whose every folder was
+        // checked: a symlink in the configured spelling would let a folder
+        // above it that no one checked redirect the tools elsewhere.
+        let (updates, checked) = open_checked(paths.dir())?;
+        make_private(&updates, &checked, 0o755)?;
+        let root = checked.join("staging");
         let staging_root = subdir(&updates, c"staging", &root, true)?;
         make_private(&staging_root, &root, 0o700)?;
         let name = format!("{}-{}", std::process::id(), super::random_u64());
@@ -498,7 +496,7 @@ fn open_dir(path: &Path) -> Result<File> {
 /// Opens the folder at `path` from `/`, one component at a time and never
 /// through a symlink, once every folder above it passed
 /// [`check_above_staging`].
-fn open_checked(path: &Path) -> Result<File> {
+fn open_checked(path: &Path) -> Result<(File, PathBuf)> {
     let canonical =
         fs::canonicalize(path).with_context(|| format!("Could not open {}", path.display()))?;
     // SAFETY: geteuid has no preconditions and cannot fail.
@@ -514,7 +512,7 @@ fn open_checked(path: &Path) -> Result<File> {
         let opened = extract::open_dir_at(dir.as_fd(), &CString::new(name.as_bytes())?);
         dir = File::from(opened.with_context(|| format!("Could not open {}", at.display()))?);
     }
-    Ok(dir)
+    Ok((dir, canonical))
 }
 
 /// Refuses a folder above staging that another account could change: it
@@ -583,6 +581,27 @@ fn make_private(dir: &File, path: &Path, keep: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    #[test]
+    fn the_tools_are_given_the_checked_path_not_a_symlinked_spelling() {
+        // A symlink in the configured spelling would let a folder above it,
+        // which nothing checked, point the tools at another tree.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let (_, checked) = open_checked(&link).unwrap();
+
+        assert_eq!(checked, fs::canonicalize(&real).unwrap());
+        assert!(
+            !fs::symlink_metadata(&checked)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 
     use super::*;
     use crate::infrastructure::updates::extract::tests::with_write_error;
@@ -749,18 +768,22 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_not_signed_by_localify_is_refused_and_remembered() {
+    fn a_bundle_codesign_refuses_is_not_installed_but_retried_later() {
+        // codesign also exits 1 for local reasons (too many open files), so
+        // its "no" is never held against a release whose minisign signature
+        // passed.
         let world = World::new();
         let installer = world.installer(&Signed(false), &none, &|| true);
         let (release, bytes) = world.release("1.7.0", "1.7.0");
         assert!(installer.stage(&release, &bytes).is_err());
         let digest = release::sha256_hex(&bytes);
         assert!(
-            StateStore::new(&world.paths)
+            !StateStore::new(&world.paths)
                 .load()
                 .unwrap()
                 .has_failed(&digest)
         );
+        assert!(!installer.rejected(&release).unwrap());
         assert_eq!(
             macos::bundle_version(&world.bundle()).unwrap(),
             Version::new(1, 6, 0)
@@ -1155,8 +1178,9 @@ mod tests {
     #[test]
     fn a_rejected_release_is_not_downloaded_again() {
         let world = World::new();
-        let installer = world.installer(&Signed(false), &none, &|| true);
-        let (release, bytes) = world.release("1.7.0", "1.7.0");
+        let installer = world.installer(&Signed(true), &none, &|| true);
+        // The archive's fault: it holds another version than its manifest.
+        let (release, bytes) = world.release("1.7.0", "1.6.5");
         assert!(may_download_unattended(&installer, &release, 1_000).unwrap());
         assert!(installer.stage(&release, &bytes).is_err());
 
