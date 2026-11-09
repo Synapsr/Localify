@@ -30,6 +30,7 @@ do when something goes wrong. Each feature with its own page is linked from here
   - [Configuration](#configuration)
   - [Files and directories](#files-and-directories)
   - [The daemon](#the-daemon)
+  - [Updates](#updates)
   - [Logging and verbosity](#logging-and-verbosity)
   - [Reverse proxy headers](#reverse-proxy-headers)
   - [Shell completions](#shell-completions)
@@ -524,6 +525,23 @@ there, the card gives the one command to run on it instead, such as
 A service started from an app older than 1.5 shows "Relaunch to share". Relaunch it, after
 a confirmation, and its output and controls work from then on.
 
+**From a terminal or an agent.** Add `--machine <name or id>` to act on another machine's
+services. Without `--env`, it uses the primary checkout there, and a service name that
+exists in two projects needs `--project`.
+
+```bash
+localify services status --machine teo-desktop
+localify logs web --machine teo-desktop -f
+localify dev web --machine teo-desktop --profile staging
+localify restart web --machine teo-desktop
+```
+
+`dev --machine` takes only `--project`, `--env` and `--profile`: the other machine decides
+whether the service starts in its app or in the background. A refusal prints why and
+exits with code 2; a control whose outcome never came back prints the service's current
+state and exits with code 3. Agents get the same through the `machine` argument of the
+service tools, and `list_machines`.
+
 How it works, for contributors: [remote-machines.md](remote-machines.md).
 
 ## Access from other devices
@@ -609,6 +627,7 @@ for debug output. `localify <command> --help` lists the rest.
 | `localify billing` | Manage the subscription |
 | `localify public-url create\|list\|remove\|protect\|unprotect\|claim` | Manage public URLs |
 | `localify machines [pair\|unpair\|remove\|settings]` | Pair machines and choose what they may do here |
+| `localify services status\|logs\|dev\|stop\|restart ... --machine <m>` | The same on another machine |
 | **Other** | |
 | `localify completions <shell>` | Generate shell completions |
 
@@ -717,6 +736,29 @@ The manager holds the ports, so outside it a daemon can only use ports from 1024
 loopback. With no systemd, `localify start` forks to the background and writes a PID
 file; as root it logs to `/var/log/localify/localify.log`. `localify start --foreground`
 stays in the terminal and logs to stdout until Ctrl+C, which helps when debugging.
+
+### Updates
+
+From 1.7 on macOS, Localify installs new versions by itself while the app is closed,
+even on a machine nobody sits at, and checks at once when a paired machine is on a newer
+version. It only installs official releases signed by Localify. With the app open,
+Settings and a small banner offer `Restart to update`, which says which tabs it will
+close; the app never restarts by itself.
+
+New installs start with automatic updates on. An install from before 1.7 keeps updating
+by hand until you turn them on, in Settings or from a terminal, which also works over
+SSH:
+
+```bash
+localify update --auto on    # or off
+localify update --status     # what is installed and available, and why it can't install
+localify update install      # install now
+```
+
+The previous version is kept in `~/Library/Application Support/Localify/previous/` if
+you ever need to go back. On Linux, Localify tells you when an update is available, and
+you run the install command again. The details are in
+[Automatic updates](desktop.md#automatic-updates).
 
 ### Logging and verbosity
 

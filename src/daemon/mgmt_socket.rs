@@ -182,6 +182,11 @@ struct MgmtResponse {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// The contract's code of a remote failure, so the CLI and the MCP
+    /// server can say why another machine refused (docs/remote-machines.md,
+    /// "Errors").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
 }
@@ -191,6 +196,7 @@ impl MgmtResponse {
         Self {
             ok: true,
             error: None,
+            code: None,
             data: Some(data),
         }
     }
@@ -199,6 +205,17 @@ impl MgmtResponse {
         Self {
             ok: false,
             error: Some(msg.into()),
+            code: None,
+            data: None,
+        }
+    }
+
+    /// What another machine, or the way to it, refused, with its code.
+    fn failure(failure: Failure) -> Self {
+        Self {
+            ok: false,
+            error: Some(failure.message),
+            code: Some(failure.code),
             data: None,
         }
     }
@@ -543,21 +560,22 @@ async fn remote_answer(remote: &RemoteLink, command: MgmtCommand) -> MgmtRespons
         MgmtCommand::RemoteAccessRestore { machine_id } => remote
             .restore_access(&machine_id)
             .map(|removed| serde_json::json!({ "ok": true, "removed": removed })),
-        MgmtCommand::RemoteInventory { machine_id } => remote
-            .inventory(&machine_id)
-            .await
-            .map_err(failure_error)
-            .and_then(|inventory| Ok(serde_json::to_value(inventory)?)),
+        MgmtCommand::RemoteInventory { machine_id } => match remote.inventory(&machine_id).await {
+            Ok(inventory) => serde_json::to_value(inventory).map_err(anyhow::Error::from),
+            Err(failure) => return MgmtResponse::failure(failure),
+        },
         MgmtCommand::RemoteOutputRead {
             machine_id,
             run_id,
             offset,
             max_bytes,
-        } => remote
+        } => match remote
             .read_output(&machine_id, &run_id, offset, max_bytes)
             .await
-            .map_err(failure_error)
-            .and_then(|data| Ok(serde_json::to_value(data)?)),
+        {
+            Ok(data) => serde_json::to_value(data).map_err(anyhow::Error::from),
+            Err(failure) => return MgmtResponse::failure(failure),
+        },
         _ => return MgmtResponse::error("Not a remote command"),
     };
     match answer {
@@ -658,10 +676,6 @@ async fn stream_events(
             },
         }
     }
-}
-
-fn failure_error(failure: Failure) -> anyhow::Error {
-    anyhow::anyhow!("{}", failure.message)
 }
 
 /// `remote_access`: `waiting`, then the answer. Closing the connection

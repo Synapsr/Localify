@@ -20,6 +20,7 @@ use crate::config::LocalifyPaths;
 use crate::infrastructure::cloud::api::CloudClient;
 use crate::infrastructure::cloud::credentials::CredentialsStore;
 use crate::infrastructure::cloud::http::{CloudHttp, block_on};
+use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::remote::pairing::{Outcome, PinState};
 use crate::infrastructure::remote::ssh_pair;
 
@@ -38,13 +39,13 @@ impl Switch {
 /// One machine of `remote_machines`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Machine {
-    id: String,
-    name: String,
+pub(super) struct Machine {
+    pub(super) id: String,
+    pub(super) name: String,
     #[serde(rename = "self")]
-    is_self: bool,
+    pub(super) is_self: bool,
     paired: bool,
-    state: String,
+    pub(super) state: String,
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
@@ -58,16 +59,14 @@ pub(super) fn daemon_error(error: DaemonConnectionError) -> anyhow::Error {
             BRANDING.app_name,
             BRANDING.cli_command()
         ),
-        DaemonConnectionError::ProtocolError(message) => anyhow!(message),
+        DaemonConnectionError::ProtocolError(message)
+        | DaemonConnectionError::Remote { message, .. } => anyhow!(message),
         other => anyhow!("Could not reach the daemon: {other}"),
     }
 }
 
-fn machines(ctx: &AppContext, probe: bool) -> Result<Vec<Machine>> {
-    let list = ctx
-        .mgmt_client
-        .remote_machines(probe)
-        .map_err(daemon_error)?;
+pub(super) fn machines(client: &MgmtSocketClient, probe: bool) -> Result<Vec<Machine>> {
+    let list = client.remote_machines(probe).map_err(daemon_error)?;
     serde_json::from_value(list).context("The daemon sent a machine list this version cannot read")
 }
 
@@ -172,21 +171,21 @@ fn state_label(state: &str) -> &str {
 
 /// A machine the person named.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Candidate {
-    id: String,
-    name: String,
-    is_self: bool,
+pub(super) struct Candidate {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) is_self: bool,
 }
 
 /// An exact machine id, else an exact name ignoring case. A name that
 /// matches two machines lists both.
-fn resolve(candidates: &[Candidate], query: &str) -> Result<Candidate> {
+pub(super) fn resolve(candidates: &[Candidate], query: &str) -> Result<Candidate> {
     if let Some(found) = candidates.iter().find(|machine| machine.id == query) {
         return Ok(found.clone());
     }
     let named: Vec<&Candidate> = candidates
         .iter()
-        .filter(|machine| machine.name.eq_ignore_ascii_case(query))
+        .filter(|machine| machine.name.to_lowercase() == query.to_lowercase())
         .collect();
     match named.as_slice() {
         [one] => Ok((*one).clone()),
@@ -216,7 +215,7 @@ fn resolve(candidates: &[Candidate], query: &str) -> Result<Candidate> {
     }
 }
 
-fn candidates(machines: &[Machine]) -> Vec<Candidate> {
+pub(super) fn candidates(machines: &[Machine]) -> Vec<Candidate> {
     machines
         .iter()
         .map(|machine| Candidate {
@@ -250,7 +249,7 @@ fn typed_yes(prompt: &str) -> Result<bool> {
 /// `localify machines pair <machine>`, as the viewer.
 pub fn pair(query: &str, ctx: &AppContext) -> Result<()> {
     require_person("Pair")?;
-    let target = resolve(&candidates(&machines(ctx, false)?), query)?;
+    let target = resolve(&candidates(&machines(&ctx.mgmt_client, false)?), query)?;
     if target.is_self {
         bail!("{} is this machine: pair it from another one.", target.name);
     }
@@ -418,7 +417,7 @@ fn ssh_target(query: &str, ctx: &AppContext) -> Result<pair_ssh::Target> {
             BRANDING.cli_command()
         );
     };
-    let target = resolve(&candidates(&machines(ctx, false)?), query)?;
+    let target = resolve(&candidates(&machines(&ctx.mgmt_client, false)?), query)?;
     if target.is_self || target.id == self_id {
         bail!("{} is this machine: pair it from another one.", target.name);
     }
@@ -504,7 +503,7 @@ pub fn accept_for_ssh(from: &str, account: &str, ctx: &AppContext) -> Result<i32
 /// `localify machines unpair <machine>`: deletes the pin, and tells the
 /// machine when a session is open.
 pub fn unpair(query: &str, json_flag: bool, ctx: &AppContext) -> Result<()> {
-    let machines = machines(ctx, false)?;
+    let machines = machines(&ctx.mgmt_client, false)?;
     let paired: Vec<Machine> = machines
         .into_iter()
         .filter(|machine| machine.paired)

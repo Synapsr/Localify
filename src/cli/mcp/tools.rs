@@ -90,18 +90,65 @@ const CONFIRM_PROFILE: Param = param(
     "Repeats the profile name to start a danger = true profile. Pass it only when the user asked for that profile in this task.",
 );
 const LINES: Param = param("lines", Kind::Integer, "Number of lines to return.");
+const MACHINE: Param = param(
+    "machine",
+    Kind::String,
+    "Another machine of the account, by name or id as list_machines shows it: acts on its services instead of this machine's. cwd is ignored, and without env, the tool uses the primary checkout there.",
+);
 const PUBLIC_URL: Param = required(
     "url",
     Kind::String,
     "The public URL, its slug or its id, as public_url_list shows them.",
 );
 
-/// `stop` or `restart` of one service.
+/// `stop` or `restart` of one service, here or on another machine.
 fn service_command(verb: &str, args: &ToolArgs) -> Result<Vec<String>> {
     Args::new(&[verb])
         .positional(args.required("service")?)?
         .option("--project", args.string("project")?)
         .option("--env", args.string("env")?)
+        .option("--machine", args.string("machine")?)
+        .done()
+}
+
+/// `list_services` and `service_status` on another machine: its snapshot,
+/// every service with its states.
+fn machine_status(machine: String) -> Result<Vec<String>> {
+    Args::new(&["services", "status"])
+        .option("--machine", Some(machine))
+        .flag("--json", true)
+        .done()
+}
+
+/// `service_start` with `machine`: a start that the other machine runs as it
+/// decides, so only the service and its profile can be named.
+fn start_on_machine(machine: String, args: &ToolArgs) -> Result<Vec<String>> {
+    let refused: Vec<&str> = [
+        ("background", args.optional_flag("background")?.is_some()),
+        ("env_files", !args.list("env_files")?.is_empty()),
+        ("confirm_profile", args.string("confirm_profile")?.is_some()),
+        ("command", !args.list("command")?.is_empty()),
+        ("domain", args.string("domain")?.is_some()),
+        ("replace", args.optional_flag("replace")?.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, given)| given.then_some(name))
+    .collect();
+    if !refused.is_empty() {
+        bail!(
+            "With machine, service_start takes only service, project, env and profile: {machine} decides how its services start. Remove {}.",
+            refused.join(", ")
+        );
+    }
+    let Some(service) = args.string("service")? else {
+        bail!("With machine, service_start needs service: there is no folder to read it from.");
+    };
+    Args::new(&["dev"])
+        .positional(service)?
+        .option("--machine", Some(machine))
+        .option("--project", args.string("project")?)
+        .option("--env", args.string("env")?)
+        .option("--profile", args.string("profile")?)
         .done()
 }
 
@@ -134,22 +181,37 @@ pub const TOOLS: &[Tool] = &[
         build: |_| Ok(argv(&["list"])),
     },
     Tool {
-        name: "list_services",
-        description: "Lists the services of every project (JSON): ID, project, URL, domains, folder, dev command and local target.",
+        name: "list_machines",
+        description: "Lists the other machines of this Localify Cloud account (JSON): name, id, connection state, whether they are paired and share their services. Pass a name or id as machine to list_services, service_status, service_logs, service_start, service_stop or service_restart to act there.",
         params: &[],
         uses_cwd: false,
         read_only: true,
         destructive: false,
-        build: |_| Ok(argv(&["services", "list", "--json"])),
+        build: |_| Ok(argv(&["machines", "--json"])),
+    },
+    Tool {
+        name: "list_services",
+        description: "Lists the services of every project (JSON): ID, project, URL, domains, folder, dev command and local target. With machine, the services of that machine and their states.",
+        params: &[MACHINE],
+        uses_cwd: false,
+        read_only: true,
+        destructive: false,
+        build: |args| match args.string("machine")? {
+            Some(machine) => machine_status(machine),
+            None => Ok(argv(&["services", "list", "--json"])),
+        },
     },
     Tool {
         name: "service_status",
-        description: "Shows every service Localify started, in every environment (JSON): running or not, PID, URL, port, origin (app, background, terminal), start time, and exit code once it stopped.",
-        params: &[],
+        description: "Shows every service Localify started, in every environment (JSON): running or not, PID, URL, port, origin (app, background, terminal), start time, and exit code once it stopped. With machine, every service of that machine: process, port, output and public URL, and which controls it allows.",
+        params: &[MACHINE],
         uses_cwd: false,
         read_only: true,
         destructive: false,
-        build: |_| Ok(argv(&["services", "status", "--json"])),
+        build: |args| match args.string("machine")? {
+            Some(machine) => machine_status(machine),
+            None => Ok(argv(&["services", "status", "--json"])),
+        },
     },
     Tool {
         name: "get_service_url",
@@ -201,11 +263,19 @@ pub const TOOLS: &[Tool] = &[
                 Kind::Boolean,
                 "Stop the running instance first, then start it again. Without it, a service that already runs is left running and nothing starts.",
             ),
+            param(
+                "machine",
+                Kind::String,
+                "Start it on another machine of the account, by name or id as list_machines shows it. That machine decides where it runs, so only service, project, env and profile may be passed with it.",
+            ),
         ],
         uses_cwd: true,
         read_only: false,
         destructive: false,
         build: |args| {
+            if let Some(machine) = args.string("machine")? {
+                return start_on_machine(machine, args);
+            }
             let mut command = Args::new(&["dev"]);
             if let Some(service) = args.string("service")? {
                 command = command.positional(service)?;
@@ -227,8 +297,8 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "service_stop",
-        description: "Stops a service Localify started (in the app, the background or a terminal), with everything it launched.",
-        params: &[SERVICE, PROJECT, ENV],
+        description: "Stops a service Localify started (in the app, the background or a terminal), with everything it launched. With machine, on that machine, when it allows remote controls.",
+        params: &[SERVICE, PROJECT, ENV, MACHINE],
         uses_cwd: true,
         read_only: false,
         destructive: false,
@@ -236,8 +306,8 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "service_restart",
-        description: "Stops a service and starts it again where it ran, on the same launch profile, and returns once it listens.",
-        params: &[SERVICE, PROJECT, ENV],
+        description: "Stops a service and starts it again where it ran, on the same launch profile, and returns once it listens. With machine, on that machine, when it allows remote controls.",
+        params: &[SERVICE, PROJECT, ENV, MACHINE],
         uses_cwd: true,
         read_only: false,
         destructive: false,
@@ -256,6 +326,7 @@ pub const TOOLS: &[Tool] = &[
                 Kind::String,
                 "Cursor from the previous service_logs call, as it returned it, to read only newer lines.",
             ),
+            MACHINE,
         ],
         uses_cwd: true,
         read_only: true,
@@ -266,6 +337,7 @@ pub const TOOLS: &[Tool] = &[
                 .option("--project", args.string("project")?)
                 .option("--env", args.string("env")?)
                 .option("--lines", args.integer("lines")?)
+                .option("--machine", args.string("machine")?)
                 .option(
                     "--cursor",
                     args.string("cursor").or_else(|_| args.integer("cursor")).map_err(|_| {
@@ -1000,6 +1072,11 @@ impl ToolArgs {
         }
     }
 
+    /// Whether the call passed `name` with a value, of any type.
+    pub fn has(&self, name: &str) -> bool {
+        !matches!(self.values.get(name), None | Some(Value::Null))
+    }
+
     pub fn string(&self, name: &str) -> Result<Option<String>> {
         match self.values.get(name) {
             None | Some(Value::Null) => Ok(None),
@@ -1291,6 +1368,125 @@ mod tests {
             ]
         );
         assert!(build("public_url_claim", json!({ "url": "--all" })).is_err());
+    }
+
+    #[test]
+    fn only_the_service_tools_take_a_machine() {
+        let mut with_machine: Vec<&str> = TOOLS
+            .iter()
+            .filter(|tool| tool.params.iter().any(|param| param.name == "machine"))
+            .map(|tool| tool.name)
+            .collect();
+        with_machine.sort_unstable();
+
+        assert_eq!(
+            with_machine,
+            [
+                "list_services",
+                "service_logs",
+                "service_restart",
+                "service_start",
+                "service_status",
+                "service_stop",
+            ]
+        );
+        let machines = TOOLS
+            .iter()
+            .find(|tool| tool.name == "list_machines")
+            .unwrap();
+        assert!(machines.read_only && !machines.uses_cwd);
+        assert_eq!(
+            build("list_machines", json!({})).unwrap(),
+            ["machines", "--json"]
+        );
+    }
+
+    #[test]
+    fn each_service_tool_acts_on_another_machine_with_machine() {
+        let status = ["services", "status", "--machine=teo-mini", "--json"];
+        assert_eq!(
+            build("list_services", json!({ "machine": "teo-mini" })).unwrap(),
+            status
+        );
+        assert_eq!(
+            build("service_status", json!({ "machine": "teo-mini" })).unwrap(),
+            status
+        );
+        assert_eq!(
+            build(
+                "service_logs",
+                json!({ "service": "web", "machine": "teo-mini", "cursor": "R:4" })
+            )
+            .unwrap(),
+            ["logs", "web", "--machine=teo-mini", "--cursor=R:4"]
+        );
+        assert_eq!(
+            build(
+                "service_stop",
+                json!({ "service": "web", "machine": "m2", "env": "feat" })
+            )
+            .unwrap(),
+            ["stop", "web", "--env=feat", "--machine=m2"]
+        );
+        assert_eq!(
+            build(
+                "service_restart",
+                json!({ "service": "web", "project": "app", "machine": "m2" })
+            )
+            .unwrap(),
+            ["restart", "web", "--project=app", "--machine=m2"]
+        );
+        assert_eq!(
+            build(
+                "service_start",
+                json!({ "service": "web", "machine": "m2", "env": "feat", "profile": "staging" })
+            )
+            .unwrap(),
+            [
+                "dev",
+                "web",
+                "--machine=m2",
+                "--env=feat",
+                "--profile=staging"
+            ]
+        );
+        // A machine is a value, never a flag.
+        assert_eq!(
+            build(
+                "service_stop",
+                json!({ "service": "web", "machine": "--all" })
+            )
+            .unwrap(),
+            ["stop", "web", "--machine=--all"]
+        );
+    }
+
+    #[test]
+    fn service_start_on_another_machine_takes_only_service_project_env_and_profile() {
+        for (name, value) in [
+            ("background", json!(true)),
+            ("background", json!(false)),
+            ("env_files", json!([".env.local"])),
+            ("confirm_profile", json!("prod")),
+            ("command", json!(["pnpm", "dev"])),
+            ("domain", json!("web.localify")),
+            ("replace", json!(true)),
+        ] {
+            let mut arguments = json!({ "service": "web", "machine": "teo-mini" });
+            arguments[name] = value;
+
+            let error = build("service_start", arguments).unwrap_err().to_string();
+
+            assert!(
+                error.contains("teo-mini decides how its services start"),
+                "{error}"
+            );
+            assert!(error.ends_with(&format!("Remove {name}.")), "{error}");
+        }
+        let error = build("service_start", json!({ "machine": "teo-mini" }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("needs service"), "{error}");
     }
 
     #[test]
