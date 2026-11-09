@@ -10,6 +10,7 @@ use crate::domain::RegistrationSource;
 use crate::infrastructure::dns::{SystemResolutionCheck, check_system_resolution};
 use crate::infrastructure::macos_system::LegacyInstall;
 use crate::infrastructure::network::get_network_info;
+use crate::infrastructure::updates::{UpdatePhase, UpdateStatus};
 
 pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
     let network_info = get_network_info();
@@ -43,6 +44,9 @@ pub fn execute(ctx: &AppContext, daemon_config: &DaemonConfig) -> Result<()> {
             println!("  HTTP:  http://localhost:{}", daemon_config.http_port);
             println!("  HTTPS: https://localhost:{}", daemon_config.https_port);
             print_dns_resolution_status(check_system_resolution(Duration::from_millis(1500)));
+            if let Some(line) = ctx.mgmt_client.update_status().ok().and_then(update_line) {
+                println!("  {line}");
+            }
         }
         None => {
             println!("Localify daemon: stopped");
@@ -105,6 +109,20 @@ fn print_dns_resolution_status(check: SystemResolutionCheck) {
     println!(
         "       If a VPN is active, its DNS or leak-protection settings may be bypassing macOS /etc/resolver."
     );
+}
+
+/// A line only when an update is available. Linux never installs by
+/// itself, so its reason is the whole line.
+fn update_line(status: UpdateStatus) -> Option<String> {
+    if status.state != UpdatePhase::Available {
+        return None;
+    }
+    let available = status.available.unwrap_or_default();
+    Some(match status.reason {
+        Some(reason) if cfg!(target_os = "linux") => reason,
+        Some(reason) => format!("Update available: {available}. {reason}"),
+        None => format!("Update available: {available}. It installs once the app is closed."),
+    })
 }
 
 fn trust_command() -> String {

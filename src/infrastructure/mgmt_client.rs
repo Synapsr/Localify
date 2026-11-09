@@ -12,6 +12,7 @@ use crate::domain::{
 };
 use crate::infrastructure::cloud::types::{PublicStatus, PublicUrl};
 use crate::infrastructure::launch_sessions::{LaunchSessionDto, LaunchSessionUpdate};
+use crate::infrastructure::updates::UpdateStatus;
 
 /// What the daemon should do after it stops serving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +119,23 @@ impl MgmtSocketClient {
         command["cmd"] = serde_json::json!("remote_settings");
         let mut response = self.send_command(&command.to_string())?;
         Ok(response["data"].take())
+    }
+
+    /// What is installed, what is available and why it waits
+    /// (docs/desktop.md, "Automatic updates").
+    pub fn update_status(&self) -> Result<UpdateStatus, DaemonConnectionError> {
+        let mut response = self.send_command(r#"{"cmd":"update_status"}"#)?;
+        serde_json::from_value(response["data"].take())
+            .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
+    }
+
+    /// Turns automatic updates on or off, and returns the new status.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn update_settings(&self, automatic: bool) -> Result<UpdateStatus, DaemonConnectionError> {
+        let command = serde_json::json!({ "cmd": "update_settings", "automatic": automatic });
+        let mut response = self.send_command(&command.to_string())?;
+        serde_json::from_value(response["data"].take())
+            .map_err(|error| DaemonConnectionError::ProtocolError(error.to_string()))
     }
 
     /// Deletes a pin; `true` when there was one.

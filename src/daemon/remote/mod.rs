@@ -700,6 +700,20 @@ impl RemoteLink {
         Ok(views)
     }
 
+    /// The versions paired machines announce in the relay's presence. It is
+    /// not authenticated: the updater only takes it as a hint to check early.
+    pub fn paired_versions(&self) -> Vec<String> {
+        self.list()
+            .map(|views| {
+                views
+                    .into_iter()
+                    .filter(|view| view.paired && !view.is_self)
+                    .filter_map(|view| view.version)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn list(&self) -> Result<Vec<MachineView>> {
         let pins = self.shared.store.pins()?;
         let view = self.shared.view();

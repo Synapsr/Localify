@@ -23,6 +23,7 @@ use crate::infrastructure::inventory::LocalInventory;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 use crate::infrastructure::remote::store::SettingsChange;
 use crate::infrastructure::remote::wire::AccessWants;
+use crate::infrastructure::updates::Updater;
 
 /// Management commands sent over the Unix socket.
 #[derive(Debug, Deserialize)]
@@ -151,6 +152,13 @@ enum MgmtCommand {
         #[serde(default)]
         tail: Option<u64>,
     },
+    /// What is installed, what is available and why it waits
+    /// (docs/desktop.md, "Automatic updates").
+    #[serde(rename = "update_status")]
+    UpdateStatus,
+    /// Turns `[updates] automatic` on or off; answers the new status.
+    #[serde(rename = "update_settings")]
+    UpdateSettings { automatic: bool },
 }
 
 /// Without an offset, a follow starts this far before the end: a few
@@ -214,6 +222,7 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "remote_machines" => Some(MgmtCommand::RemoteMachines { probe: false }),
         "remote_events" => Some(MgmtCommand::RemoteEvents { access: false }),
         "remote_access_suppressed" => Some(MgmtCommand::RemoteAccessSuppressed),
+        "update_status" => Some(MgmtCommand::UpdateStatus),
         _ => None,
     }
 }
@@ -227,12 +236,14 @@ pub struct DaemonPorts {
     pub dns: u16,
 }
 
-/// What the machine-wide commands answer from: the tunnel, the inventory
-/// and the relay link.
+/// What the machine-wide commands answer from: the tunnel, the inventory,
+/// the relay link and the updater.
 pub struct MachineServices {
     pub tunnel: PublicTunnel,
     pub inventory: Arc<LocalInventory>,
     pub remote: RemoteLink,
+    /// `None` when the daemon has no home folder to keep its files in.
+    pub updates: Option<Arc<Updater>>,
 }
 
 /// Serve management commands on a Unix domain socket.
@@ -252,6 +263,7 @@ pub async fn serve(
         tunnel,
         inventory,
         remote,
+        updates,
     } = services;
     let cancel = shutdown.token();
 
@@ -281,6 +293,7 @@ pub async fn serve(
         let tunnel = tunnel.clone();
         let inventory = Arc::clone(&inventory);
         let remote = remote.clone();
+        let updates = updates.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -416,6 +429,10 @@ pub async fn serve(
                 Some(MgmtCommand::Inventory { have }) => {
                     inventory_answer(&inventory, &tunnel, remote.switches(), have).await
                 }
+                Some(MgmtCommand::UpdateStatus) => update_answer(updates, None).await,
+                Some(MgmtCommand::UpdateSettings { automatic }) => {
+                    update_answer(updates, Some(automatic)).await
+                }
                 Some(command) => remote_answer(&remote, command).await,
                 None => MgmtResponse::error(format!("Unknown command: {}", line.trim())),
             };
@@ -439,6 +456,27 @@ pub async fn serve(
     info!("Management socket closed");
 
     Ok(())
+}
+
+/// `update_status`, or `update_settings` with `automatic`. Reading the
+/// installed bundle runs `plutil`, so it runs on a blocking thread.
+async fn update_answer(updates: Option<Arc<Updater>>, automatic: Option<bool>) -> MgmtResponse {
+    let Some(updates) = updates else {
+        return MgmtResponse::error("Updates are unavailable: the daemon has no home folder.");
+    };
+    let answer = tokio::task::spawn_blocking(move || match automatic {
+        Some(on) => updates.set_automatic(on),
+        None => Ok(updates.status()),
+    })
+    .await;
+    match answer {
+        Ok(Ok(status)) => match serde_json::to_value(status) {
+            Ok(status) => MgmtResponse::success(status),
+            Err(error) => MgmtResponse::error(error.to_string()),
+        },
+        Ok(Err(error)) => MgmtResponse::error(format!("{error:#}")),
+        Err(error) => MgmtResponse::error(error.to_string()),
+    }
 }
 
 /// The one-shot remote commands.
@@ -775,6 +813,11 @@ mod tests {
         let sock_clone = sock.clone();
         let config = dir.path().join("config.toml");
         std::fs::write(&config, "").unwrap();
+        let updates = Arc::new(Updater::new(
+            crate::infrastructure::updates::UpdatePaths::new(dir.path().join("updates")),
+            config.clone(),
+            false,
+        ));
         let inventory = Arc::new(
             LocalInventory::new(config, dir.path().join("data"))
                 .unwrap()
@@ -803,6 +846,7 @@ mod tests {
                     tunnel,
                     inventory,
                     remote: RemoteLink::new(&data_dir, Arc::new(source)),
+                    updates: Some(updates),
                 },
             )
             .await;
@@ -951,6 +995,23 @@ mod tests {
     }
 
     // --- serve() integration tests ---
+
+    #[tokio::test]
+    async fn update_settings_turns_automatic_updates_on_and_status_reads_it() {
+        let (sock, _shutdown, _rx, _dir) = start_server(vec![]).await;
+
+        let before = send_command(&sock, r#"{"cmd":"update_status"}"#).await;
+        assert_eq!(before["ok"], true);
+        assert_eq!(before["data"]["automatic"], false);
+        assert_eq!(before["data"]["state"], "unknown");
+
+        let set = send_command(&sock, r#"{"cmd":"update_settings","automatic":true}"#).await;
+        assert_eq!(set["ok"], true);
+        assert_eq!(set["data"]["automatic"], true);
+        let after = send_command(&sock, "update_status").await;
+        assert_eq!(after["data"]["automatic"], true);
+        assert!(after["data"]["installed"].is_string());
+    }
 
     #[tokio::test]
     async fn serve_status_returns_pid_and_count() {

@@ -501,6 +501,7 @@ pub(super) async fn serve_management(daemon: &Daemon) -> PathBuf {
         tunnel: PublicTunnel::new(1),
         inventory: std::sync::Arc::new(inventory),
         remote: daemon.link.clone(),
+        updates: None,
     };
     let ports = DaemonPorts {
         http: 80,

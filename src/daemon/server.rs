@@ -35,6 +35,7 @@ use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::inventory::LocalInventory;
 use crate::infrastructure::network::get_lan_ip;
 use crate::infrastructure::paths::LocalifyPaths;
+use crate::infrastructure::updates::{UpdatePaths, Updater};
 use localify::desktop::ProjectRootStore;
 
 /// Middleware that copies the client IP from `ConnectInfo` into a `ClientAddr` extension.
@@ -124,7 +125,9 @@ impl Server {
         })
     }
 
-    pub async fn run(self, shutdown: ShutdownHandle) -> Result<()> {
+    /// `managed` says launchd or systemd runs this daemon: only then does
+    /// it install updates, since only then does it restart on the new build.
+    pub async fn run(self, shutdown: ShutdownHandle, managed: bool) -> Result<()> {
         let cancel = shutdown.token();
         info!(
             http = self.http_port,
@@ -142,6 +145,13 @@ impl Server {
             self.config_path.clone(),
             self.data_dir.clone(),
         )?);
+        let updates = UpdatePaths::for_user().map(|paths| {
+            Arc::new(Updater::new(
+                paths,
+                self.config_path.clone(),
+                managed && cfg!(target_os = "macos"),
+            ))
+        });
         spawn_reload_listener(
             self.state.clone(),
             self.reload_rx,
@@ -164,6 +174,9 @@ impl Server {
         let source = DaemonSource::new(Arc::clone(&inventory), tunnel.clone(), app);
         let remote = RemoteLink::new(&self.data_dir, Arc::new(source));
         remote::spawn(remote.clone(), cancel.clone());
+        if let Some(updater) = &updates {
+            super::updates::spawn(Arc::clone(updater), remote.clone(), cancel.clone());
+        }
         public_tunnel::spawn(
             tunnel.clone(),
             access,
@@ -188,6 +201,7 @@ impl Server {
                 tunnel,
                 inventory,
                 remote,
+                updates,
             },
         );
 
