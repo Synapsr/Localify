@@ -43,7 +43,9 @@ use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
 use self::local::LocalSource;
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
-pub use self::viewing::{AccessEvent, Asking, FollowEvent, Following, RemoteInventory};
+pub use self::viewing::{
+    AccessEvent, Asking, ControlAsk, ControlEvent, FollowEvent, Following, RemoteInventory,
+};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -53,7 +55,9 @@ use crate::infrastructure::cloud::http::{
 use crate::infrastructure::cloud::passwords::PasswordStore;
 use crate::infrastructure::cloud::types::RosterMachine;
 use crate::infrastructure::remote::noise::{StaticKeys, decode_key, fingerprint};
-use crate::infrastructure::remote::store::{DEFAULT_SETTINGS, RemoteStore, SettingsChange};
+use crate::infrastructure::remote::store::{
+    DEFAULT_SETTINGS, RemoteStore, SettingsChange, now_rfc3339,
+};
 use crate::infrastructure::remote::wire::{
     AccessOutcome, Hello, Presence, ProtoRange, TargetSettings,
 };
@@ -164,6 +168,9 @@ pub struct Timings {
     pub access_every: Duration,
     /// After a refusal, a peer asks again only after this.
     pub access_after_refusal: Duration,
+    /// How long a viewer asks `control.status` for a control whose outcome
+    /// it lost, all of it together.
+    pub status_wait: Duration,
 }
 
 impl Default for Timings {
@@ -201,6 +208,7 @@ impl Default for Timings {
             access_expiry: seconds(120),
             access_every: seconds(10 * 60),
             access_after_refusal: seconds(3600),
+            status_wait: seconds(120),
         }
     }
 }
@@ -222,6 +230,9 @@ pub struct RemoteStatus {
     pub retry_at: Option<String>,
     pub settings: TargetSettings,
     pub fingerprint: Option<String>,
+    /// Why background starts run with the daemon's own environment: the
+    /// user's shell environment could not be read.
+    pub shell_environment_error: Option<String>,
 }
 
 /// What the link knows, for the management socket.
@@ -314,6 +325,10 @@ struct Shared {
     /// The pairing attempts of the last hour on this machine as a target.
     /// The link keeps them, so a new connection does not reset the limit.
     pair_attempts: Mutex<VecDeque<Instant>>,
+    /// The controls and status queries going on this machine as a target.
+    /// The link keeps them, so neither a new session nor a new connection
+    /// resets the bounds while that work goes on.
+    control_slots: Arc<actor::ControlSlots>,
     refresh: Notify,
     #[cfg(test)]
     wake: std::sync::atomic::AtomicBool,
@@ -329,6 +344,12 @@ struct Shared {
     /// Holds the next access answer before it takes the settings lock.
     #[cfg(test)]
     answer_pause: Mutex<Option<AnswerPause>>,
+    /// While set, the relay writer sends nothing, as a stuck socket.
+    #[cfg(test)]
+    writer_hold: Arc<std::sync::atomic::AtomicBool>,
+    /// The time this link's `hello`s give, as a machine with that clock.
+    #[cfg(test)]
+    hello_now: Mutex<Option<String>>,
 }
 
 /// Where a test holds an access answer: `reached` fires there, and the
@@ -364,6 +385,21 @@ impl Shared {
             .proto
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The time a `hello` gives: this machine's clock.
+    #[cfg(not(test))]
+    fn hello_now(&self) -> String {
+        now_rfc3339()
+    }
+
+    #[cfg(test)]
+    fn hello_now(&self) -> String {
+        self.hello_now
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(now_rfc3339)
     }
 
     /// Blocks the actor where a test paused the next access answer, as a
@@ -500,6 +536,7 @@ impl RemoteLink {
                 access_history: Mutex::new(access::History::default()),
                 sent_revisions: Mutex::new(local::SentRevisions::default()),
                 pair_attempts: Mutex::new(VecDeque::new()),
+                control_slots: Arc::default(),
                 refresh: Notify::new(),
                 #[cfg(test)]
                 wake: std::sync::atomic::AtomicBool::new(false),
@@ -511,6 +548,10 @@ impl RemoteLink {
                 proto: Mutex::new(ProtoRange::OURS),
                 #[cfg(test)]
                 answer_pause: Mutex::new(None),
+                #[cfg(test)]
+                writer_hold: Arc::default(),
+                #[cfg(test)]
+                hello_now: Mutex::new(None),
             }),
         }
     }
@@ -536,6 +577,30 @@ impl RemoteLink {
             retry_at: view.retry_at.clone(),
             settings: self.shared.store.settings().unwrap_or(DEFAULT_SETTINGS),
             fingerprint,
+            shell_environment_error: self.shared.source.shell_environment_failure(),
+        }
+    }
+
+    /// Reads the shell environment of background starts again, and says
+    /// why it still could not be read.
+    pub async fn reload_shell_environment(&self) -> Option<String> {
+        let source = Arc::clone(&self.shared.source);
+        tokio::task::spawn_blocking(move || source.reload_shell_environment())
+            .await
+            .unwrap_or_else(|error| Some(format!("The shell could not be asked: {error}")))
+    }
+
+    /// The switches and the app, as this machine's own inventory decides its
+    /// controls with them.
+    pub fn switches(&self) -> crate::application::inventory::Switches {
+        crate::application::inventory::Switches {
+            settings: self
+                .shared
+                .store
+                .settings()
+                .unwrap_or(DEFAULT_SETTINGS)
+                .into(),
+            app: self.shared.source.app().into(),
         }
     }
 
@@ -564,6 +629,17 @@ impl RemoteLink {
             .proto
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = proto;
+    }
+
+    /// Gives `now` in every `hello` from the next session on, as a machine
+    /// whose clock says so.
+    #[cfg(test)]
+    pub fn set_hello_now(&self, now: &str) {
+        *self
+            .shared
+            .hello_now
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now.to_string());
     }
 
     /// Holds the next access answer before it takes the settings lock, as

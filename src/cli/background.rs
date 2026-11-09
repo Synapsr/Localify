@@ -203,7 +203,7 @@ fn stop_before_detaching(
     let approved = match replace {
         Replace::Approved(run_id) => Some(run_id.clone()),
         Replace::Yes => None,
-        Replace::Ask | Replace::No => return Ok(None),
+        Replace::Ask | Replace::Legacy(_) | Replace::No => return Ok(None),
     };
     let launch = resolve_launch_target(target, config_path, ctx)?;
     let running = store
@@ -236,7 +236,11 @@ fn foreground_args(
             in_service_command = true;
             push_dispatcher_args(&mut foreground, launch_id, dispatcher);
         }
-        let ours = arg == "--detach" || (named && is_replace_flag(&arg));
+        // The dispatcher passes on the run it decided to replace: a caller's
+        // own `--replace=<runId>` comes back as that, and a bare `--replace`
+        // stays only for a caller's launch, whose executor then decides.
+        let replace = is_replace_flag(&arg) && (named || arg != "--replace");
+        let ours = arg == "--detach" || replace;
         if in_service_command || !ours {
             foreground.push(arg);
         }
@@ -1237,6 +1241,59 @@ mod tests {
                 "--replace=-qAAAAAAAAAAAAAAAAAAAA"
             ])
         );
+    }
+
+    /// A caller's `--replace=<runId>`, for the run it stopped, reaches the
+    /// executor once: it used to come back a second time, from the
+    /// dispatcher.
+    #[test]
+    fn a_caller_s_run_to_replace_reaches_the_executor_once() {
+        let launch_id = RunId::parse(ID).unwrap();
+        let stopped = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
+        let result = foreground_args(
+            args(&[
+                "dev",
+                "web",
+                "--remote-launch=AAAAAAAAAAAAAAAAAAAAAA",
+                "--replace=-qAAAAAAAAAAAAAAAAAAAA",
+                "--detach",
+            ])
+            .into_iter(),
+            &launch_id,
+            &Dispatcher::Caller {
+                replace: Some(stopped),
+            },
+        );
+
+        let replaces = result
+            .iter()
+            .filter(|arg| is_replace_flag(arg))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replaces,
+            [&OsString::from("--replace=-qAAAAAAAAAAAAAAAAAAAA")]
+        );
+        assert_eq!(
+            result,
+            args(&[
+                "dev",
+                "web",
+                "--remote-launch=AAAAAAAAAAAAAAAAAAAAAA",
+                "--replace=-qAAAAAAAAAAAAAAAAAAAA"
+            ])
+        );
+    }
+
+    /// A relaunch's legacy run reaches the executor as given.
+    #[test]
+    fn a_relaunch_s_legacy_run_reaches_the_executor() {
+        let launch_id = RunId::parse(ID).unwrap();
+        let relaunch = foreground_args(
+            args(&["dev", "web", "--replace-legacy=boot.1.2", "--detach"]).into_iter(),
+            &launch_id,
+            &Dispatcher::Caller { replace: None },
+        );
+        assert_eq!(relaunch, args(&["dev", "web", "--replace-legacy=boot.1.2"]));
     }
 
     #[test]

@@ -19,9 +19,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::application::inventory::{
-    AppPresence, Context, EnvironmentRef, ProfileChecks, ProjectRef, PublicUrlFacts,
-    PublicUrlState as UrlState, Revisions, RunExit, RunFacts, RunOrigin, RunProcess, ServiceFacts,
-    ServiceRef, Snapshot, TargetSettings, inventory_item,
+    Context, EnvironmentRef, ProfileChecks, ProjectRef, PublicUrlFacts, PublicUrlState as UrlState,
+    Revisions, RunExit, RunFacts, RunOrigin, RunProcess, ServiceFacts, ServiceRef, Snapshot,
+    Switches, inventory_item,
 };
 use crate::domain::RouteTarget;
 use crate::infrastructure::cloud::types::{PublicUrl, PublicUrlState};
@@ -124,6 +124,20 @@ impl LocalInventory {
         &self.data_dir
     }
 
+    /// The config the daemon loads.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    /// Where the run records are: the user's own `services/` unless a test
+    /// gave another.
+    pub fn services_dir(&self) -> PathBuf {
+        self.services_dir
+            .clone()
+            .or_else(|| RunningServiceStore::default_dir().ok())
+            .unwrap_or_default()
+    }
+
     /// Reads run records from `dir` instead of the user's `services/`.
     #[cfg(test)]
     pub fn with_services_dir(mut self, dir: PathBuf) -> Self {
@@ -134,14 +148,13 @@ impl LocalInventory {
     /// A fresh snapshot, numbered: the revision only moves when its content
     /// changed. One build runs at a time: a request that arrives during one
     /// waits for it and shares its snapshot. `project_roots` are the local
-    /// checkouts the app knows, as `localify dev` reads them. The control
-    /// executor comes with PR 4c, so until then every control is off,
-    /// whatever the `control` switch says, and the app counts as absent for
-    /// the controls; `machine.app` on the pages comes from the app bridge.
+    /// checkouts the app knows, as `localify dev` reads them; `switches`, the
+    /// target settings and whether the app runs, decide the controls.
     pub fn snapshot(
         &self,
         public: &PublicFacts,
         project_roots: &HashMap<String, PathBuf>,
+        switches: Switches,
     ) -> Result<Snapshot> {
         let seen = self.built.load(Ordering::SeqCst);
         let _building = lock(&self.building);
@@ -150,7 +163,7 @@ impl LocalInventory {
         {
             return Ok(last);
         }
-        let snapshot = self.build(public, project_roots)?;
+        let snapshot = self.build(public, project_roots, switches)?;
         *lock(&self.last) = Some(snapshot.clone());
         self.built.fetch_add(1, Ordering::SeqCst);
         Ok(snapshot)
@@ -160,6 +173,7 @@ impl LocalInventory {
         &self,
         public: &PublicFacts,
         project_roots: &HashMap<String, PathBuf>,
+        switches: Switches,
     ) -> Result<Snapshot> {
         let config = ConfigStore::new(self.config_path.clone()).load()?;
         let store = match &self.services_dir {
@@ -168,8 +182,8 @@ impl LocalInventory {
         };
         let key = LaunchRevKey::load_or_create(&self.data_dir)?;
         let context = Context {
-            settings: TargetSettings::default(),
-            app: AppPresence::Absent,
+            settings: switches.settings,
+            app: switches.app,
             tunnel_connected: public.tunnel_connected,
         };
         let observed = Observed {
@@ -233,6 +247,73 @@ pub fn gather(observed: &Observed<'_>) -> Result<Vec<ServiceFacts>> {
             service_facts(placed, reachable, &launch, profiles, record, observed)
         })
         .collect()
+}
+
+/// One service as a control looks at it before it acts: its facts from the
+/// same sources as a snapshot's, its own port alone probed, with its run
+/// record and the launch profiles of its checkout.
+pub struct Looked {
+    pub facts: ServiceFacts,
+    pub key: ServiceKey,
+    pub record: Option<RunningService>,
+    pub profiles: Result<Option<LaunchProfiles>>,
+}
+
+/// The service a control names, by its ids, with `environment` `None` for
+/// the primary checkout; `None` when the config names no such service with
+/// a proxy target.
+pub fn look_up(
+    config: &Config,
+    store: &RunningServiceStore,
+    key: &LaunchRevKey,
+    project_roots: &HashMap<String, PathBuf>,
+    wanted: &ServiceKey,
+) -> Result<Option<Looked>> {
+    let Some(placed) = place_services(config, project_roots)
+        .into_iter()
+        .find(|placed| {
+            placed.service.project_id == wanted.project_id
+                && placed.service.id == wanted.service_id
+                && match &wanted.environment {
+                    None => placed.environment.primary,
+                    Some(slug) => placed.environment.slug == *slug,
+                }
+        })
+    else {
+        return Ok(None);
+    };
+    let probes = ProbeGauge::default();
+    let reachable = probe_ports(BTreeSet::from([placed.port]), PROBE_DEADLINE, &probes)
+        .get(&placed.port)
+        .copied();
+    let launch = DevLaunch::resolve(placed.service.clone(), placed.port);
+    let profiles =
+        load_profiles(profiles_root(&placed.service, launch.plan.as_ref().ok()).as_deref());
+    let service_key = key_of(&placed);
+    let record = store.get(&service_key)?;
+    let public = PublicFacts::default();
+    let observed = Observed {
+        config,
+        store,
+        key,
+        public: &public,
+        project_roots,
+        probes: &probes,
+    };
+    let facts = service_facts(
+        placed,
+        reachable,
+        &launch,
+        &profiles,
+        record.as_ref(),
+        &observed,
+    )?;
+    Ok(Some(Looked {
+        facts,
+        key: service_key,
+        record,
+        profiles,
+    }))
 }
 
 /// Every service of the primary checkout, as `localify dev` runs it without
@@ -369,6 +450,7 @@ fn run_facts(
             at: rfc3339(exit.at),
             code: exit.code,
         }),
+        legacy_id: record.legacy_id(),
     }
 }
 
@@ -556,7 +638,9 @@ mod tests {
     use std::net::TcpListener;
 
     use super::*;
-    use crate::application::inventory::{OutputReason, Owner, ProcessState, Refusal};
+    use crate::application::inventory::{
+        AppPresence, OutputReason, Owner, ProcessState, Refusal, TargetSettings,
+    };
     use crate::infrastructure::process;
     use crate::infrastructure::running_services::{RunIdentity, RunOutput};
     use crate::infrastructure::runs::RunId;
@@ -882,7 +966,11 @@ domain = "web.feature.localify"
             .with_services_dir(machine.path("services"));
 
         let snapshot = inventory
-            .snapshot(&PublicFacts::default(), &HashMap::new())
+            .snapshot(
+                &PublicFacts::default(),
+                &HashMap::new(),
+                Switches::default(),
+            )
             .unwrap();
 
         assert_eq!(snapshot.items.len(), 2);
@@ -891,9 +979,29 @@ domain = "web.feature.localify"
                 && item.controls.restart.code == Some(Refusal::ControlDisabled)
         }));
         let again = inventory
-            .snapshot(&PublicFacts::default(), &HashMap::new())
+            .snapshot(
+                &PublicFacts::default(),
+                &HashMap::new(),
+                Switches::default(),
+            )
             .unwrap();
         assert_eq!(again.rev, 1);
+
+        // Turned on, with the app running: a start is allowed, and the
+        // revision moves with the controls.
+        let on = Switches {
+            settings: TargetSettings {
+                share: true,
+                control: true,
+                background_starts: false,
+            },
+            app: AppPresence::Running,
+        };
+        let allowed = inventory
+            .snapshot(&PublicFacts::default(), &HashMap::new(), on)
+            .unwrap();
+        assert!(allowed.items.iter().all(|item| item.controls.start.allowed));
+        assert_eq!(allowed.rev, 2);
     }
 
     #[test]
@@ -1098,7 +1206,11 @@ target = "127.0.0.1:{port}"
                 .map(|_| {
                     scope.spawn(|| {
                         inventory
-                            .snapshot(&PublicFacts::default(), &HashMap::new())
+                            .snapshot(
+                                &PublicFacts::default(),
+                                &HashMap::new(),
+                                Switches::default(),
+                            )
                             .unwrap()
                     })
                 })

@@ -75,6 +75,9 @@ pub struct RunFacts {
     pub profile: Option<String>,
     pub profile_danger: bool,
     pub exit: Option<RunExit>,
+    /// A legacy run of the app or of `dev --detach` whose PID is proven:
+    /// `<boot id>.<pid>.<native start>`, what a relaunch names.
+    pub legacy_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,10 +137,18 @@ pub struct TargetSettings {
     pub background_starts: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AppPresence {
     Running,
+    #[default]
     Absent,
+}
+
+/// What decides the controls of every service of the machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Switches {
+    pub settings: TargetSettings,
+    pub app: AppPresence,
 }
 
 /// What holds for every service of the machine.
@@ -190,6 +201,9 @@ pub struct RunView {
     pub started_at: String,
     pub profile: Option<String>,
     pub profile_danger: bool,
+    /// A legacy run whose PID is proven: what a relaunch names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_id: Option<String>,
     pub exit: Option<RunExit>,
 }
 
@@ -289,7 +303,7 @@ pub struct Control {
 }
 
 impl Control {
-    const ALLOWED: Self = Self {
+    pub const ALLOWED: Self = Self {
         allowed: true,
         code: None,
     };
@@ -316,6 +330,21 @@ pub enum Refusal {
     Conflict,
 }
 
+impl Refusal {
+    /// The code a refusal carries on the wire.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ControlDisabled => "control_disabled",
+            Self::BackgroundDisabled => "background_disabled",
+            Self::NotOwned => "not_owned",
+            Self::LegacyRun => "legacy_run",
+            Self::OwnerGone => "owner_gone",
+            Self::RefusedProfile => "refused_profile",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
 /// One service's item. Each state is computed from its own source only.
 pub fn inventory_item(facts: ServiceFacts, context: &Context) -> InventoryItem {
     let process = process_state(facts.run.as_ref());
@@ -333,6 +362,7 @@ pub fn inventory_item(facts: ServiceFacts, context: &Context) -> InventoryItem {
             started_at: run.started_at,
             profile: run.profile,
             profile_danger: run.profile_danger,
+            legacy_id: run.legacy_id,
             exit: run.exit,
         }),
         project: facts.project,
@@ -421,9 +451,22 @@ fn controls(facts: &ServiceFacts, owner: Option<Owner>, context: &Context) -> Co
     let legacy_alive = facts
         .run
         .as_ref()
-        .is_some_and(|run| run.legacy && run.process != RunProcess::Stopped);
-    if legacy_alive {
-        return Controls::all(Control::refused(Refusal::LegacyRun));
+        .filter(|run| run.legacy && run.process != RunProcess::Stopped);
+    if let Some(run) = legacy_alive {
+        // A proven legacy run of the app or of `dev --detach` is relaunched
+        // by a restart, under the checks of any restart.
+        let legacy = Control::refused(Refusal::LegacyRun);
+        let restart = match (&run.legacy_id, owner) {
+            (Some(_), Some(owner @ (Owner::App | Owner::Background))) => {
+                restart_control(owner, facts.profiles, context)
+            }
+            _ => legacy,
+        };
+        return Controls {
+            start: legacy,
+            stop: legacy,
+            restart,
+        };
     }
     let conflict = Control::refused(Refusal::Conflict);
     match owner {
@@ -648,6 +691,7 @@ mod tests {
             profile: None,
             profile_danger: false,
             exit: None,
+            legacy_id: None,
         }
     }
 
@@ -826,6 +870,42 @@ mod tests {
         let unproven = item(with(Some(legacy(RunProcess::Unproven)), true));
         assert_eq!(unproven.process, ProcessState::Stopped);
         assert_eq!(unproven.owner, Some(Owner::Unknown));
+    }
+
+    #[test]
+    fn a_proven_legacy_run_of_the_app_or_the_background_is_relaunched_by_a_restart() {
+        for origin in [RunOrigin::App, RunOrigin::Background] {
+            let proven = RunFacts {
+                legacy_id: Some("boot.42.7".into()),
+                origin,
+                ..legacy(RunProcess::Running)
+            };
+            let item = item(with(Some(proven.clone()), true));
+            assert_eq!(item.controls.restart, Control::ALLOWED, "{origin:?}");
+            assert_eq!(item.controls.start, refused(Refusal::LegacyRun));
+            assert_eq!(item.controls.stop, refused(Refusal::LegacyRun));
+            assert_eq!(item.run.unwrap().legacy_id.as_deref(), Some("boot.42.7"));
+
+            // The checks of any restart: the owner, and background starts.
+            let mut closed = Context {
+                app: AppPresence::Absent,
+                ..open()
+            };
+            closed.settings.background_starts = false;
+            let expected = match origin {
+                RunOrigin::App => Refusal::OwnerGone,
+                _ => Refusal::BackgroundDisabled,
+            };
+            let item = inventory_item(with(Some(proven), true), &closed);
+            assert_eq!(item.controls.restart, refused(expected));
+        }
+        let in_a_terminal = RunFacts {
+            legacy_id: Some("boot.42.7".into()),
+            origin: RunOrigin::Terminal,
+            ..legacy(RunProcess::Running)
+        };
+        let item = item(with(Some(in_a_terminal), true));
+        assert_eq!(item.controls, Controls::all(refused(Refusal::LegacyRun)));
     }
 
     #[test]

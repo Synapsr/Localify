@@ -1,7 +1,8 @@
-//! What this machine shows its paired machines as a target
-//! (`docs/remote-machines.md`, "Inventory" and "Output"): its inventory
-//! snapshot, and the output folder of a service's last run. The link asks
-//! for them only while a viewer asks, and never sends a path or a record.
+//! What this machine shows its paired machines as a target, and does for
+//! them (`docs/remote-machines.md`, "Inventory", "Output" and "Controls"):
+//! its inventory snapshot, the output folder of a service's last run, and
+//! the control executor. The link asks for them only while a viewer asks,
+//! and never sends a path or a record.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -13,15 +14,21 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use crate::application::inventory::{Have, Snapshot};
+use crate::application::inventory::{Have, Snapshot, Switches};
 use crate::daemon::public_tunnel::PublicTunnel;
 use crate::infrastructure::app_bridge;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
-use crate::infrastructure::remote::wire::{AppPresence, MachineSummary};
+use crate::infrastructure::remote::control::{
+    ControlRunner, ControlTimings, Live, LocalHost, Order, Reader,
+};
+use crate::infrastructure::remote::requests::{Report, RequestEntries};
+use crate::infrastructure::remote::wire::{AppPresence, ControlPhase, MachineSummary};
 use crate::infrastructure::running_services::RunningServiceStore;
 use crate::infrastructure::runs::RunId;
+use crate::infrastructure::shell_env::user_shell;
 use localify::desktop::ProjectRootStore;
+use localify::desktop::shell_environment::{ShellEnvironment, ShellEnvironmentState};
 
 pub type SnapshotFuture = Pin<Box<dyn Future<Output = Result<Snapshot>> + Send>>;
 
@@ -34,16 +41,38 @@ pub enum RunLookup {
     Unavailable(&'static str),
 }
 
-/// The target's facts, as the link reads them.
+/// The target's facts, as the link reads them, and what it does for a
+/// viewer's control.
 pub trait LocalSource: Send + Sync {
-    /// A fresh snapshot of this machine's inventory.
-    fn snapshot(&self) -> SnapshotFuture;
+    /// A fresh snapshot of this machine's inventory, its controls decided by
+    /// `switches`.
+    fn snapshot(&self, switches: Switches) -> SnapshotFuture;
     /// The output folder of `run_id`, while it is its service's last run
     /// and has a stream. Reads the run records: quick, and blocking.
     fn run_output(&self, run_id: &RunId) -> Result<Result<PathBuf, RunLookup>>;
     /// Whether the desktop app runs, as its bridge's `hello` last said:
     /// never waits for the app.
     fn app(&self) -> AppPresence;
+    /// Runs a control from check 4 on (see `ControlRunner::run`). Blocks
+    /// for as long as the control takes.
+    fn control(
+        &self,
+        order: &Order,
+        live: &Live<'_>,
+        progress: &mut dyn FnMut(ControlPhase),
+    ) -> Report;
+    /// `control.status`: what became of a peer's request. Blocks.
+    fn control_status(&self, peer: &str, request_id: &str) -> Report;
+    /// Whether a control under `request_id` may go on to its lease: a new
+    /// request id past the peer's entry limit is refused `too_many` (see
+    /// `ControlRunner::admits`). Blocks, briefly.
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report>;
+    /// Why background starts run without the user's shell environment,
+    /// when it could not be read.
+    fn shell_environment_failure(&self) -> Option<String>;
+    /// Reads the shell environment again, for the app's `Reload shell
+    /// environment`, and says why it still could not be read. Blocks.
+    fn reload_shell_environment(&self) -> Option<String>;
 }
 
 /// How often [`AppSeen`] asks the app's bridge.
@@ -90,28 +119,69 @@ impl AppSeen {
     }
 }
 
-/// The daemon's own inventory, tunnel and run records.
+/// The daemon's own inventory, tunnel and run records, and its controls.
 pub struct DaemonSource {
     inventory: Arc<LocalInventory>,
     tunnel: PublicTunnel,
     app: AppSeen,
+    controls: ControlRunner,
+    shell: Arc<ShellEnvironment>,
 }
 
 impl DaemonSource {
+    /// Resolves this executable once, canonical: a detached start runs it,
+    /// never a `localify` found on `PATH`.
     pub fn new(inventory: Arc<LocalInventory>, tunnel: PublicTunnel, app: AppSeen) -> Self {
+        let executable = LocalHost::own_executable();
+        let shell = Arc::new(ShellEnvironment::new(
+            executable.clone().unwrap_or_default(),
+            user_shell(),
+        ));
+        let services_dir = inventory.services_dir();
+        let host = LocalHost {
+            config_path: inventory.config_path().to_path_buf(),
+            data_dir: inventory.data_dir().to_path_buf(),
+            services_dir: services_dir.clone(),
+            executable,
+            environment: {
+                let shell = Arc::clone(&shell);
+                Arc::new(move || shell.environment())
+            },
+            installation: LocalHost::own_installation(),
+            project_roots: project_roots(),
+        };
+        let controls = ControlRunner::new(
+            Arc::new(host),
+            RequestEntries::in_services_dir(&services_dir),
+            ControlTimings::default(),
+        );
         Self {
             inventory,
             tunnel,
             app,
+            controls,
+            shell,
         }
     }
 }
 
+/// The checkouts the app knows, as `localify dev` reads them.
+fn project_roots() -> Reader<std::collections::HashMap<String, PathBuf>> {
+    Arc::new(|| {
+        ProjectRootStore::new_default()
+            .and_then(|store| store.load())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(project_id, root)| (project_id, PathBuf::from(root)))
+            .collect()
+    })
+}
+
 impl LocalSource for DaemonSource {
-    fn snapshot(&self) -> SnapshotFuture {
+    fn snapshot(&self, switches: Switches) -> SnapshotFuture {
         let inventory = Arc::clone(&self.inventory);
         let tunnel = self.tunnel.clone();
-        Box::pin(async move { build_snapshot(&inventory, &tunnel).await })
+        Box::pin(async move { build_snapshot(&inventory, &tunnel, switches).await })
     }
 
     fn run_output(&self, run_id: &RunId) -> Result<Result<PathBuf, RunLookup>> {
@@ -122,6 +192,42 @@ impl LocalSource for DaemonSource {
     fn app(&self) -> AppPresence {
         self.app.get()
     }
+
+    fn control(
+        &self,
+        order: &Order,
+        live: &Live<'_>,
+        progress: &mut dyn FnMut(ControlPhase),
+    ) -> Report {
+        self.controls.run(order, live, progress)
+    }
+
+    fn control_status(&self, peer: &str, request_id: &str) -> Report {
+        self.controls.status(peer, request_id)
+    }
+
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        self.controls.admits(peer, request_id)
+    }
+
+    fn shell_environment_failure(&self) -> Option<String> {
+        shell_failure(&self.shell)
+    }
+
+    fn reload_shell_environment(&self) -> Option<String> {
+        self.shell.reload();
+        shell_failure(&self.shell)
+    }
+}
+
+/// Why `shell`'s environment could not be read, when it could not.
+pub fn shell_failure(shell: &ShellEnvironment) -> Option<String> {
+    let status = shell.status();
+    (status.state == ShellEnvironmentState::Failed).then(|| {
+        status
+            .reason
+            .unwrap_or_else(|| "Your shell's environment could not be read.".into())
+    })
 }
 
 /// Numbers what viewers are sent: a snapshot's items and the machine
@@ -173,6 +279,7 @@ pub fn lookup(store: &RunningServiceStore, run_id: &RunId) -> Result<Result<Path
 pub async fn build_snapshot(
     inventory: &Arc<LocalInventory>,
     tunnel: &PublicTunnel,
+    switches: Switches,
 ) -> Result<Snapshot> {
     let (urls, machine_id) = tunnel.known_urls();
     let public = PublicFacts {
@@ -181,17 +288,8 @@ pub async fn build_snapshot(
         tunnel_connected: tunnel.status().await.tunnel == TunnelState::Connected,
     };
     let inventory = Arc::clone(inventory);
-    tokio::task::spawn_blocking(move || {
-        // The checkouts the app knows, as `localify dev` reads them.
-        let project_roots = ProjectRootStore::new_default()
-            .and_then(|store| store.load())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(project_id, root)| (project_id, PathBuf::from(root)))
-            .collect();
-        inventory.snapshot(&public, &project_roots)
-    })
-    .await?
+    tokio::task::spawn_blocking(move || inventory.snapshot(&public, &project_roots()(), switches))
+        .await?
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const TAIL_WINDOW: u64 = 1024 * 1024;
 
 /// Which service in which project environment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceKey {
     pub project_id: String,
@@ -214,6 +214,56 @@ impl RunningService {
         })
     }
 
+    /// What names a legacy run of the app or of `dev --detach` across PID
+    /// reuse, while its PID is proven: `<boot id>.<pid>.<native start>`. A
+    /// relaunch names it, and is checked against it before anything is
+    /// signalled. A terminal's legacy run has none: it is never relaunched.
+    pub fn legacy_id(&self) -> Option<String> {
+        if !self.is_legacy() || self.origin == ServiceOrigin::Terminal {
+            return None;
+        }
+        match &self.run {
+            None => {
+                let identity = self.legacy_identity().ok()?;
+                let boot_id = process::boot_id()?;
+                Some(format!("{boot_id}.{}.{}", identity.pid, identity.start))
+            }
+            Some(run) => self
+                .executor_runs()
+                .then(|| format!("{}.{}.{}", run.boot_id, self.pid, run.start)),
+        }
+    }
+
+    /// Whether this record still names the legacy run `legacy_id` names,
+    /// even once that run stopped: a relaunch's executor checks it under the
+    /// run lock, so a local launch that took the service over in between
+    /// wins. A process that is gone cannot show its start any more, so a
+    /// record without a run id is matched on its boot and PID, and on its
+    /// start only while that process is still alive as the service.
+    pub fn names_legacy(&self, legacy_id: &str) -> bool {
+        let mut parts = legacy_id.rsplitn(3, '.');
+        let (Some(start), Some(pid), Some(boot_id)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let (Ok(start), Ok(pid)) = (start.parse::<u64>(), pid.parse::<u32>()) else {
+            return false;
+        };
+        if !self.is_legacy() || self.origin == ServiceOrigin::Terminal || pid != self.pid {
+            return false;
+        }
+        match &self.run {
+            Some(run) => run.boot_id == boot_id && run.start == start,
+            None => {
+                let alive_as = match self.legacy_identity() {
+                    Ok(identity) => identity.start == start,
+                    Err(_) => true,
+                };
+                process::boot_id().as_deref() == Some(boot_id) && alive_as
+            }
+        }
+    }
+
     /// A legacy run is its executor, known by the start time `ps` printed. Its
     /// PID is that process only when the native start reads the same, to the
     /// second, unambiguously, and this boot began before the record was
@@ -307,10 +357,15 @@ pub struct RunningServiceStore {
 
 impl RunningServiceStore {
     pub fn new_default() -> Result<Self> {
+        Ok(Self::new(Self::default_dir()?))
+    }
+
+    /// The user's own `services/`, in the state dir.
+    pub fn default_dir() -> Result<PathBuf> {
         let dir = BRANDING
             .user_state_dir()
             .context("HOME is not set, so Localify cannot track running services.")?;
-        Ok(Self::new(dir.join("services")))
+        Ok(dir.join("services"))
     }
 
     pub fn new(dir: PathBuf) -> Self {

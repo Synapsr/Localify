@@ -3,6 +3,8 @@
 //! Viewing, and the PR 3 gate, are in `viewing`.
 
 mod access;
+mod control;
+mod convergence;
 mod viewing;
 
 use std::sync::Arc;
@@ -59,6 +61,7 @@ fn fast() -> Timings {
         access_expiry: ms(1500),
         access_every: ms(60_000),
         access_after_refusal: ms(60_000),
+        status_wait: ms(120_000),
     }
 }
 
@@ -151,6 +154,23 @@ fn launch_with(
     dir: TempDir,
     timings: Timings,
 ) -> Daemon {
+    let source = Arc::new(FakeSource::default());
+    // Where a daemon keeps them: one started again on this folder finds them.
+    source.keep_requests_in(dir.path().join("services").join("requests"));
+    let shared: Arc<dyn LocalSource> = source.clone();
+    launch_serving(cloud, (id, name, token), dir, timings, shared, source)
+}
+
+/// A daemon whose link serves `serving`; `source` is what the test reads
+/// back through [`Daemon::source`].
+fn launch_serving(
+    cloud: &FakeCloud,
+    (id, name, token): (&str, &str, &str),
+    dir: TempDir,
+    timings: Timings,
+    serving: Arc<dyn LocalSource>,
+    source: Arc<FakeSource>,
+) -> Daemon {
     CredentialsStore::in_data_dir(dir.path())
         .save(&CloudCredentials {
             api_base: cloud.base.clone(),
@@ -160,9 +180,7 @@ fn launch_with(
             machine_name: name.into(),
         })
         .unwrap();
-    let source = Arc::new(FakeSource::default());
-    let shared: Arc<dyn LocalSource> = source.clone();
-    let link = RemoteLink::with_timings(dir.path(), shared, timings);
+    let link = RemoteLink::with_timings(dir.path(), serving, timings);
     // As `LOCALIFY_CLOUD_API` makes a `wrangler dev` trusted.
     link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
@@ -337,7 +355,7 @@ async fn paced_against_the_relay(frames: usize, size: usize, check_takes: Durati
     ));
     let mut sent = 0;
     while sent < frames {
-        if outbox.push("x".repeat(size)) {
+        if outbox.push_for(None, "x".repeat(size)) {
             sent += 1;
         } else {
             tokio::time::sleep(Duration::from_millis(5)).await;

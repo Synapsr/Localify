@@ -177,6 +177,7 @@ fn launch_in_tab(
         id: request.launch_id,
         expires_at: request.expires_at,
         replaces: request.replaces,
+        replaces_legacy: request.replaces_legacy,
         remote: match (&request.requested_by, request.expect_rev) {
             (Some(requester), Some(expect_rev)) => Some(RemoteLaunch {
                 expect_rev,
@@ -305,11 +306,18 @@ fn parse(line: &str) -> Result<Request, BridgeError> {
 
 /// Refuses what this app cannot run, before anything is spawned.
 fn validate(launch: &LaunchRequest, now: u64) -> Result<(), BridgeError> {
-    if launch.replaces_legacy.is_some() {
-        return Err(error(
-            "unsupported",
-            "This version of Localify cannot relaunch a run started before run PTYs. Update Localify.",
-        ));
+    if let Some(legacy_id) = &launch.replaces_legacy {
+        let shaped = (1..=128).contains(&legacy_id.len())
+            && legacy_id.split('.').count() >= 3
+            && legacy_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-.".contains(&byte));
+        if !shaped || launch.replaces.is_some() || launch.requested_by.is_none() {
+            return Err(error(
+                "bad_request",
+                "replacesLegacy names a legacy run (<boot id>.<pid>.<start>) for a remote relaunch, without replaces.",
+            ));
+        }
     }
     if launch.expires_at <= now {
         return Err(error(
@@ -801,10 +809,17 @@ mod tests {
         local.requested_by = None;
         local.expect_rev = None;
         assert!(validate(&local, now).is_ok());
-        assert_eq!(
-            refused(|request| request.replaces_legacy = Some("boot.1.2".into())),
-            "unsupported"
-        );
+        let mut relaunch = launch();
+        relaunch.replaces_legacy = Some("6E0C1F4A-0B6D-4C5E-9F3A-1D2B3C4D5E6F.42.7".into());
+        assert!(validate(&relaunch, now).is_ok());
+        for legacy_id in ["boot", "../x.1.2", ""] {
+            let mut request = launch();
+            request.replaces_legacy = Some(legacy_id.into());
+            assert_eq!(validate(&request, now).unwrap_err().code, "bad_request");
+        }
+        let mut both = relaunch.clone();
+        both.replaces = Some(RunId::generate().unwrap());
+        assert_eq!(validate(&both, now).unwrap_err().code, "bad_request");
         assert_eq!(refused(|request| request.expires_at = 1), "expired");
         assert_eq!(
             refused(|request| request.expires_at = u64::MAX),
@@ -842,16 +857,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_legacy_relaunch_reaches_the_client_as_unsupported() {
+    fn a_legacy_relaunch_reaches_the_launcher() {
         let (_dir, bridge, launched) = bridge();
         let mut request = launch();
         request.replaces_legacy = Some("boot.1.2".into());
 
-        let Handoff::Refused(refusal) = client::launch(bridge.path(), &request) else {
-            panic!("a legacy relaunch was not refused");
-        };
-
-        assert_eq!(refusal.code, "unsupported");
-        assert!(launched.lock().unwrap().is_empty());
+        assert_eq!(client::launch(bridge.path(), &request), Handoff::Accepted);
+        assert_eq!(*launched.lock().unwrap(), vec![request]);
     }
 }

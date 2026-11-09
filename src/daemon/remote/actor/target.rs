@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::{Actor, Command, End, Failure, Key};
-use crate::application::inventory::{Snapshot, pages};
+use crate::application::inventory::{Snapshot, Switches, pages};
 use crate::daemon::remote::local::RunLookup;
 use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
 use crate::infrastructure::remote::wire::{
@@ -107,6 +107,11 @@ impl Follow {
 }
 
 impl Served {
+    /// Whether the viewer watches the inventory.
+    pub(super) fn watches(&self) -> bool {
+        self.watch.is_some()
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.watch.is_none()
             && self.follows.is_empty()
@@ -214,7 +219,7 @@ pub(super) struct Shelf {
     /// `share`, as this task last learned it: from a settings change, which
     /// waits for this task to act on it before it answers, and from the file
     /// each second, for a change made some other way.
-    sharing: bool,
+    pub(super) sharing: bool,
     /// A snapshot is being built: one at a time.
     building: bool,
     /// While watched, the next look for changes.
@@ -261,7 +266,9 @@ impl Actor {
     fn on_share(&mut self, share: bool) {
         self.shelf.sharing = share;
         if !share {
+            self.cut_queued(NOT_SHARED);
             self.end_served("not_shared", NOT_SHARED);
+            self.drop_control_answers(NOT_SHARED);
         }
     }
 
@@ -475,16 +482,25 @@ impl Actor {
     }
 
     /// Builds a snapshot off this task; one at a time.
-    fn build_snapshot(&mut self) {
+    pub(super) fn build_snapshot(&mut self) {
         if self.shelf.building {
             return;
         }
         self.shelf.building = true;
         let source = Arc::clone(&self.ctx.source);
         let commands = self.commands.clone();
+        let switches = Switches {
+            settings: self
+                .shared
+                .store
+                .settings()
+                .unwrap_or(DEFAULT_SETTINGS)
+                .into(),
+            app: source.app().into(),
+        };
         self.spawn(async move {
             let result = source
-                .snapshot()
+                .snapshot(switches)
                 .await
                 .map(Arc::new)
                 .map_err(|error| format!("{error:#}"));
@@ -805,7 +821,11 @@ impl Actor {
             return;
         };
         let follow = &mut served.follows[index];
-        let room = (follow.window - follow.unacked()).min(u64::from(MAX_READ_BYTES));
+        // The window is the viewer's: never trusted to cover what is unacked.
+        let room = follow
+            .window
+            .saturating_sub(follow.unacked())
+            .min(u64::from(MAX_READ_BYTES));
         let room = usize::try_from(room).unwrap_or(0);
         let data = match read_fitting(&follow.dir, id, &follow.run_id, follow.next, room) {
             Ok(data) => data,
@@ -863,6 +883,27 @@ impl Actor {
         let due = self.shelf.next_look.is_none_or(|at| now >= at);
         if watched && due {
             self.build_snapshot();
+        }
+    }
+
+    /// `share` was turned off: a viewer's session with messages still in
+    /// the send queue has them discarded, and ends with a relay `close`,
+    /// since its viewer could read nothing sealed after them. What was
+    /// already written is the viewer's; nothing queued before the change
+    /// leaves once it is confirmed.
+    fn cut_queued(&mut self, message: &str) {
+        let viewers: Vec<Key> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.role == Role::Target && session.purpose == Purpose::Session
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in viewers {
+            if self.out.discard(&key) {
+                self.end(&key, End::Close, &Failure::new("not_shared", message));
+            }
         }
     }
 

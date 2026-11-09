@@ -1205,6 +1205,10 @@ pub enum Replace {
     Yes,
     /// Stop that run only, which a person agreed to stop (`--replace=<runId>`).
     Approved(RunId),
+    /// Stop nothing, and start only while the record still names that legacy
+    /// run, which a remote relaunch's dispatcher stopped
+    /// (`--replace-legacy <legacyId>`).
+    Legacy(String),
     /// Leave it running, and start nothing.
     No,
 }
@@ -1227,7 +1231,7 @@ impl Replace {
         match self {
             Self::Yes => Ok(true),
             Self::Approved(run_id) => Ok(running.run_id() == Some(run_id)),
-            Self::No => Ok(false),
+            Self::Legacy(_) | Self::No => Ok(false),
             Self::Ask => confirm_replace(running, &mut io::stdin().lock(), &mut io::stderr()),
         }
     }
@@ -1271,6 +1275,16 @@ pub(crate) fn admit(
             Admission::Admitted(lock) => {
                 // The record only changes under this lock now.
                 let current = store.get(key)?;
+                if let Replace::Legacy(legacy_id) = &replace
+                    && !current
+                        .as_ref()
+                        .is_some_and(|current| current.names_legacy(legacy_id))
+                {
+                    bail!(
+                        "'{}' was started again by someone else since it was relaunched (legacy run {legacy_id}); nothing was started.",
+                        key.service_id
+                    );
+                }
                 let current = current.as_ref().and_then(RunningService::run_id);
                 if let Some(chosen) = &chosen {
                     match current {

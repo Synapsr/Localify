@@ -78,6 +78,10 @@ pub struct RunLaunch {
     /// replaced it, and starts nothing when someone else restarted the
     /// service meanwhile.
     pub replaces: Option<RunId>,
+    /// The legacy run a remote relaunch replaces, which its dispatcher
+    /// stopped: `--replace-legacy=<legacyId>`. The executor starts only
+    /// while the service's record still names it.
+    pub replaces_legacy: Option<String>,
     /// Set for a launch a paired machine asked for.
     pub remote: Option<RemoteLaunch>,
 }
@@ -98,6 +102,7 @@ impl RunLaunch {
             id: RunId::generate()?,
             expires_at: dispatch_expiry(),
             replaces,
+            replaces_legacy: None,
             remote: None,
         })
     }
@@ -120,6 +125,9 @@ impl RunLaunch {
         args.push(format!("--launch-expires={}", self.expires_at));
         if let Some(replaces) = &self.replaces {
             args.push(format!("--replace={replaces}"));
+        }
+        if let Some(legacy_id) = &self.replaces_legacy {
+            args.push(format!("--replace-legacy={legacy_id}"));
         }
         args.into_iter().map(OsString::from).collect()
     }
@@ -847,6 +855,7 @@ mod tests {
             id: id.clone(),
             expires_at: 42,
             replaces: Some(replaced.clone()),
+            replaces_legacy: None,
             remote: None,
         };
         assert_eq!(
@@ -863,6 +872,7 @@ mod tests {
             id,
             expires_at: 42,
             replaces: None,
+            replaces_legacy: Some("boot.42.7".into()),
             remote: Some(RemoteLaunch {
                 expect_rev: "0123456789abcdef".into(),
                 requested_by: RequestedBy::parse("machine-a:req-1").unwrap(),
@@ -875,6 +885,7 @@ mod tests {
                 "--expect-rev=0123456789abcdef",
                 "--request=machine-a:req-1",
                 "--launch-expires=42",
+                "--replace-legacy=boot.42.7",
             ]
             .map(OsString::from)
         );

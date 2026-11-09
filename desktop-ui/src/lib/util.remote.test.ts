@@ -30,6 +30,7 @@ function status(overrides: Partial<RemoteStatusDto> = {}): RemoteStatusDto {
     retryAt: null,
     settings: { share: false, control: false, backgroundStarts: false },
     fingerprint: "1a2b 3c4d 5e6f 7a8b",
+    shellEnvironmentError: null,
     ...overrides,
   };
 }

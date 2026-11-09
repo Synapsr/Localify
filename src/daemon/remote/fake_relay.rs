@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -24,11 +24,23 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use super::local::{LocalSource, RunLookup, SnapshotFuture};
-use crate::application::inventory::{InventoryItem, Revisions};
+use super::local::{LocalSource, RunLookup, SnapshotFuture, shell_failure};
+use crate::application::inventory::{
+    Context, InventoryItem, Revisions, RunFacts, RunOrigin, RunProcess, ServiceFacts, Switches,
+    inventory_item,
+};
+use crate::infrastructure::app_bridge::{BridgeError, Handoff, LaunchRequest};
+use crate::infrastructure::remote::control::{
+    ControlRunner, ControlTimings, DetachedLaunch, Expected, Host, Live, Look, Order, Spawned,
+};
 use crate::infrastructure::remote::noise::{Handshake, SessionContext, SessionId, StaticKeys};
+use crate::infrastructure::remote::requests::{Report, RequestEntries};
+use crate::infrastructure::remote::wire::ControlPhase;
 use crate::infrastructure::remote::wire::{AppPresence, FrameKind, Purpose, Send};
+use crate::infrastructure::running_services::ServiceKey;
 use crate::infrastructure::runs::RunId;
+use crate::infrastructure::runs::launches::{LaunchReport, RefusalCode, unix_ms_now};
+use localify::desktop::shell_environment::ShellEnvironment;
 
 /// What the relay does with one frame.
 pub enum Route {
@@ -78,6 +90,8 @@ struct State {
     claimed_proto: Option<Value>,
     lease_status: u16,
     lease_ttl: u64,
+    /// How long each lease takes to come.
+    lease_delay: std::time::Duration,
     connections: u32,
 }
 
@@ -139,6 +153,11 @@ impl FakeCloud {
         let mut state = self.state();
         state.lease_status = status;
         state.lease_ttl = ttl;
+    }
+
+    /// Each lease takes this long to come.
+    pub fn set_lease_delay(&self, delay: std::time::Duration) {
+        self.state().lease_delay = delay;
     }
 
     pub fn set_remote_access(&self, remote_access: bool) {
@@ -318,6 +337,10 @@ impl FakeCloud {
             }
             let key = header("sec-websocket-key").unwrap_or_default();
             return self.upgrade(stream, machine, &key).await;
+        }
+        if route == "lease" {
+            let delay = self.state().lease_delay;
+            tokio::time::sleep(delay).await;
         }
         let (status, answer) = self.answer(&request_line, machine.as_ref(), &body);
         let text = answer.map(|value| value.to_string()).unwrap_or_default();
@@ -738,10 +761,12 @@ pub fn opens(frame: &Send, purpose: Purpose) -> bool {
 }
 
 /// What a target shares in tests: the items its snapshots hold, numbered as
-/// the daemon numbers them, and the output folders of its runs.
+/// the daemon numbers them, or the services of its [`FakeHost`] projected
+/// with the switches; the output folders of its runs; and its controls, run
+/// by the real executor over the fake host, with request entries on disk.
 #[derive(Default)]
 pub struct FakeSource {
-    items: Mutex<Vec<InventoryItem>>,
+    items: Mutex<Option<Vec<InventoryItem>>>,
     revisions: Mutex<Option<Revisions>>,
     runs: Mutex<HashMap<String, Result<PathBuf, RunLookup>>>,
     builds: AtomicUsize,
@@ -749,16 +774,45 @@ pub struct FakeSource {
     build_ms: AtomicUsize,
     /// Whether the desktop app runs.
     app_running: AtomicBool,
+    host: OnceLock<Arc<FakeHost>>,
+    runner: OnceLock<ControlRunner>,
+    /// Where request entries are kept: the daemon's `services/requests`.
+    requests: Mutex<Option<PathBuf>>,
+    scratch: OnceLock<tempfile::TempDir>,
+    /// The shell environment background starts would get, once a test
+    /// gives one.
+    shell: OnceLock<Arc<ShellEnvironment>>,
+}
+
+/// The executor's delays, shortened.
+pub fn fast_controls() -> ControlTimings {
+    ControlTimings {
+        dispatch_budget: std::time::Duration::from_millis(1500),
+        settle: std::time::Duration::from_millis(1000),
+        poll: std::time::Duration::from_millis(20),
+        ahead: std::time::Duration::from_secs(60),
+    }
 }
 
 impl FakeSource {
+    /// Keeps request entries in `dir`, as a daemon keeps them in its state
+    /// folder: a daemon started again on it finds them.
+    pub fn keep_requests_in(&self, dir: PathBuf) {
+        *self.requests.lock().unwrap() = Some(dir);
+    }
+
+    /// The shell environment background starts read, as the daemon's.
+    pub fn set_shell(&self, shell: ShellEnvironment) -> Arc<ShellEnvironment> {
+        Arc::clone(self.shell.get_or_init(|| Arc::new(shell)))
+    }
+
     /// Each build takes this long, so requests pile up behind it.
     pub fn set_build_time(&self, ms: usize) {
         self.build_ms.store(ms, Ordering::SeqCst);
     }
 
     pub fn set_items(&self, items: Vec<InventoryItem>) {
-        *self.items.lock().unwrap() = items;
+        *self.items.lock().unwrap() = Some(items);
     }
 
     /// `run_id` is its service's last run, with its output in `dir`.
@@ -776,12 +830,45 @@ impl FakeSource {
     pub fn builds(&self) -> usize {
         self.builds.load(Ordering::SeqCst)
     }
+
+    /// The services the controls act on, and the snapshots show.
+    pub fn host(&self) -> Arc<FakeHost> {
+        Arc::clone(self.host.get_or_init(|| {
+            Arc::new(FakeHost {
+                state: Mutex::new(HostState::default()),
+            })
+        }))
+    }
+
+    fn runner(&self) -> &ControlRunner {
+        self.runner.get_or_init(|| {
+            let dir = self.requests.lock().unwrap().clone().unwrap_or_else(|| {
+                self.scratch
+                    .get_or_init(|| tempfile::tempdir().unwrap())
+                    .path()
+                    .to_path_buf()
+            });
+            let host: Arc<dyn Host> = self.host();
+            ControlRunner::new(host, RequestEntries::new(dir), fast_controls())
+        })
+    }
 }
 
 impl LocalSource for FakeSource {
-    fn snapshot(&self) -> SnapshotFuture {
+    fn snapshot(&self, switches: Switches) -> SnapshotFuture {
         self.builds.fetch_add(1, Ordering::SeqCst);
-        let items = self.items.lock().unwrap().clone();
+        let items = self.items.lock().unwrap().clone().unwrap_or_else(|| {
+            let context = Context {
+                settings: switches.settings,
+                app: switches.app,
+                tunnel_connected: false,
+            };
+            self.host()
+                .facts()
+                .into_iter()
+                .map(|facts| inventory_item(facts, &context))
+                .collect()
+        });
         let snapshot = self
             .revisions
             .lock()
@@ -811,5 +898,355 @@ impl LocalSource for FakeSource {
         } else {
             AppPresence::Absent
         }
+    }
+
+    fn control(
+        &self,
+        order: &Order,
+        live: &Live<'_>,
+        progress: &mut dyn FnMut(ControlPhase),
+    ) -> Report {
+        self.runner().run(order, live, progress)
+    }
+
+    fn control_status(&self, peer: &str, request_id: &str) -> Report {
+        let host = self.host();
+        let held = {
+            let mut state = host.state();
+            state.statuses += 1;
+            state.status_hold.take()
+        };
+        if let Some(held) = held {
+            let _ = held.recv();
+        }
+        self.runner().status(peer, request_id)
+    }
+
+    fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        let gate = {
+            let host = self.host();
+            let mut state = host.state();
+            state.admits += 1;
+            state.admits_gate.clone()
+        };
+        if let Some(gate) = gate {
+            let _ = gate.lock().unwrap().recv();
+        }
+        self.runner().admits(peer, request_id)
+    }
+
+    fn shell_environment_failure(&self) -> Option<String> {
+        self.shell.get().and_then(|shell| shell_failure(shell))
+    }
+
+    fn reload_shell_environment(&self) -> Option<String> {
+        let shell = self.shell.get()?;
+        shell.reload();
+        shell_failure(shell)
+    }
+}
+
+/// What the app bridge does with a launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Bridge {
+    #[default]
+    Accept,
+    /// Spawns the run, and the answer is lost.
+    Unanswered,
+    Absent,
+    Refuse(&'static str),
+}
+
+/// One service on the fake target.
+#[derive(Debug, Clone)]
+pub struct FakeService {
+    pub facts: ServiceFacts,
+    /// The legacy run the service's record still names, proven or not.
+    pub record_names: Option<String>,
+}
+
+#[derive(Default)]
+pub struct HostState {
+    pub services: Vec<FakeService>,
+    pub bridge: Bridge,
+    /// A started run exits at once with this code instead of listening.
+    pub exit_code: Option<i32>,
+    pub launches: HashMap<String, LaunchReport>,
+    /// What reached the app, and what was spawned detached.
+    pub handed: Vec<LaunchRequest>,
+    pub detached: Vec<DetachedLaunch>,
+    pub stops: Vec<Expected>,
+    /// Holds the next launch once it reached the host, until the test
+    /// sends or drops the other end.
+    pub hold: Option<std::sync::mpsc::Receiver<()>>,
+    /// Holds the next stop the same way, before it ends anything.
+    pub stop_hold: Option<std::sync::mpsc::Receiver<()>>,
+    /// Holds the next `control.status` the same way, before it reads.
+    pub status_hold: Option<std::sync::mpsc::Receiver<()>>,
+    /// How many `control.status` queries reached the executor.
+    pub statuses: usize,
+    /// While set, every entry-limit check before a lease waits on it, until
+    /// the test drops the other end.
+    pub admits_gate: Option<Arc<Mutex<std::sync::mpsc::Receiver<()>>>>,
+    /// How many entry-limit checks reached the executor.
+    pub admits: usize,
+}
+
+/// A target's services in memory: stops end their run, launches run
+/// `localify dev`'s own checks under the lock (a run still live, or a
+/// record that no longer names the legacy run relaunched, refuses), then
+/// start a run that listens.
+pub struct FakeHost {
+    state: Mutex<HostState>,
+}
+
+impl FakeHost {
+    pub fn state(&self) -> MutexGuard<'_, HostState> {
+        self.state.lock().unwrap()
+    }
+
+    pub fn facts(&self) -> Vec<ServiceFacts> {
+        self.state()
+            .services
+            .iter()
+            .map(|service| service.facts.clone())
+            .collect()
+    }
+
+    /// The facts of the service named `id`.
+    pub fn service(&self, id: &str) -> ServiceFacts {
+        self.state()
+            .services
+            .iter()
+            .find(|service| service.facts.service.id == id)
+            .map(|service| service.facts.clone())
+            .unwrap()
+    }
+
+    pub fn change(&self, id: &str, change: impl FnOnce(&mut FakeService)) {
+        let mut state = self.state();
+        let service = state
+            .services
+            .iter_mut()
+            .find(|service| service.facts.service.id == id)
+            .unwrap();
+        change(service);
+    }
+
+    /// What `localify dev` does with a launch, under the service's lock.
+    fn start(
+        &self,
+        id: &RunId,
+        key: &ServiceKey,
+        origin: RunOrigin,
+        replaces_legacy: Option<&str>,
+        profile: Option<String>,
+    ) {
+        let mut state = self.state();
+        let exit_code = state.exit_code;
+        let Some(service) = state
+            .services
+            .iter_mut()
+            .find(|service| matches(service, key))
+        else {
+            return;
+        };
+        let live = service
+            .facts
+            .run
+            .as_ref()
+            .is_some_and(|run| run.process != RunProcess::Stopped);
+        let renamed =
+            replaces_legacy.is_some_and(|legacy| service.record_names.as_deref() != Some(legacy));
+        let report = if live || renamed {
+            LaunchReport::Refused {
+                code: RefusalCode::Conflict,
+                message: "Someone else started it meanwhile.".into(),
+            }
+        } else {
+            service.record_names = None;
+            service.facts.run = Some(RunFacts {
+                run_id: Some(id.to_string()),
+                origin,
+                legacy: false,
+                has_stream: true,
+                process: if exit_code.is_some() {
+                    RunProcess::Stopped
+                } else {
+                    RunProcess::Running
+                },
+                started_at: "2026-11-09T10:00:00Z".into(),
+                profile,
+                profile_danger: false,
+                exit: None,
+                legacy_id: None,
+            });
+            service.facts.reachable = Some(exit_code.is_none());
+            match exit_code {
+                Some(code) => LaunchReport::Exited {
+                    code: Some(code),
+                    signal: None,
+                    reason: None,
+                },
+                None => LaunchReport::Running,
+            }
+        };
+        state.launches.insert(id.to_string(), report);
+    }
+}
+
+fn matches(service: &FakeService, key: &ServiceKey) -> bool {
+    service.facts.project.id == key.project_id
+        && service.facts.service.id == key.service_id
+        && service.facts.environment.slug == key.environment
+}
+
+/// Nothing to kill or reap.
+struct NoProcess;
+
+impl Spawned for NoProcess {
+    fn settle(self: Box<Self>, _: bool) {}
+}
+
+impl Host for FakeHost {
+    fn look(
+        &self,
+        wanted: &ServiceKey,
+        profile: Option<&str>,
+        legacy_id: Option<&str>,
+    ) -> anyhow::Result<Option<Look>> {
+        let state = self.state();
+        let Some(service) = state
+            .services
+            .iter()
+            .find(|service| matches(service, wanted))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Look {
+            facts: service.facts.clone(),
+            key: wanted.clone(),
+            profile_allowed: !matches!(profile, Some("prod" | "removed")),
+            names_legacy: legacy_id.is_some() && service.record_names.as_deref() == legacy_id,
+        }))
+    }
+
+    fn stop(&self, key: &ServiceKey, expected: &Expected) -> Result<(), Report> {
+        let hold = self.state().stop_hold.take();
+        if let Some(hold) = hold {
+            let _ = hold.recv();
+        }
+        let mut state = self.state();
+        state.stops.push(expected.clone());
+        let Some(service) = state
+            .services
+            .iter_mut()
+            .find(|service| matches(service, key))
+        else {
+            return Err(Report::refused("conflict", "Gone."));
+        };
+        let run = service
+            .facts
+            .run
+            .as_mut()
+            .filter(|run| run.process != RunProcess::Stopped);
+        let Some(run) = run else {
+            return Err(Report::refused("conflict", "Nothing runs."));
+        };
+        match expected {
+            Expected::Run(run_id) if run.run_id.as_deref() != Some(run_id.as_str()) => {
+                return Err(Report::refused("conflict", "Another run."));
+            }
+            Expected::Legacy(legacy_id) if service.record_names.as_deref() != Some(legacy_id) => {
+                return Err(Report::refused("conflict", "Another run."));
+            }
+            Expected::Legacy(legacy_id) if run.legacy_id.as_deref() != Some(legacy_id) => {
+                return Err(Report::refused("legacy_run", "Not proven."));
+            }
+            _ => {}
+        }
+        run.process = RunProcess::Stopped;
+        service.facts.reachable = Some(false);
+        Ok(())
+    }
+
+    fn launch_in_app(&self, request: &LaunchRequest) -> Handoff {
+        let (bridge, hold) = {
+            let mut state = self.state();
+            state.handed.push(request.clone());
+            (state.bridge, state.hold.take())
+        };
+        if let Some(hold) = hold {
+            let _ = hold.recv();
+        }
+        let key = ServiceKey {
+            project_id: request.service.project_id.clone(),
+            environment: request.service.environment.clone(),
+            service_id: request.service.service_id.clone(),
+        };
+        match bridge {
+            Bridge::Absent => return Handoff::Absent,
+            Bridge::Refuse(code) => {
+                return Handoff::Refused(BridgeError {
+                    code: code.into(),
+                    message: "Refused.".into(),
+                });
+            }
+            Bridge::Accept | Bridge::Unanswered => self.start(
+                &request.launch_id,
+                &key,
+                RunOrigin::App,
+                request.replaces_legacy.as_deref(),
+                request.profile.clone(),
+            ),
+        }
+        match bridge {
+            Bridge::Unanswered => Handoff::Unanswered("The answer was lost.".into()),
+            _ => Handoff::Accepted,
+        }
+    }
+
+    fn launch_detached(&self, launch: &DetachedLaunch) -> anyhow::Result<Box<dyn Spawned>> {
+        let hold = {
+            let mut state = self.state();
+            state.detached.push(launch.clone());
+            state.hold.take()
+        };
+        if let Some(hold) = hold {
+            let _ = hold.recv();
+        }
+        self.start(
+            &launch.launch_id,
+            &launch.key,
+            RunOrigin::Background,
+            launch.replaces_legacy.as_deref(),
+            launch.profile.clone(),
+        );
+        Ok(Box::new(NoProcess))
+    }
+
+    fn report(&self, launch_id: &RunId, expires_at: Option<u64>) -> anyhow::Result<LaunchReport> {
+        let mut state = self.state();
+        if let Some(report) = state.launches.get(launch_id.as_str()) {
+            return Ok(report.clone());
+        }
+        if expires_at.is_some_and(|expires| unix_ms_now() >= expires) {
+            state
+                .launches
+                .insert(launch_id.to_string(), LaunchReport::Expired);
+            return Ok(LaunchReport::Expired);
+        }
+        Ok(LaunchReport::Unknown)
+    }
+
+    fn listens(&self, port: u16) -> bool {
+        self.state()
+            .services
+            .iter()
+            .any(|service| service.facts.port == port && service.facts.reachable == Some(true))
+    }
+
+    fn last_lines(&self, _: &RunId, _: usize) -> String {
+        "the last line".into()
     }
 }

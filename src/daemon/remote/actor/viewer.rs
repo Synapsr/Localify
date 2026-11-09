@@ -4,16 +4,24 @@
 //! opens with the first request and closes with the last one.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
-use super::{Actor, End, Failure, Holder, Key};
+use super::{Actor, Command, End, Failure, Holder, Key};
 use crate::infrastructure::remote::wire::{
-    AccessWants, ByeReason, Have, PROTO_ACCESS, Purpose, Role, SessionMessage,
+    AccessWants, ByeReason, Control, ControlAction, ControlExpect, ControlService, Have,
+    PROTO_ACCESS, Purpose, Role, SessionMessage,
 };
 
 /// The window a viewer gives each follow.
 pub const WINDOW: u32 = 64 * 1024;
+/// A control expires this long after it is sent, in the target's clock.
+const CONTROL_EXPIRY: Duration = Duration::from_secs(30);
+
+/// The target's clock, as its `hello` gave it, and when it came.
+pub type PeerClock = (time::OffsetDateTime, Instant);
 
 /// What a management socket client asked a target for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +44,30 @@ pub enum TapRequest {
     Access {
         wants: AccessWants,
     },
+    /// Start, stop or restart one service. Its expiry is set when it is
+    /// sent, in the target's clock.
+    Control {
+        action: ControlAction,
+        service: ControlService,
+        profile: Option<String>,
+        request_id: String,
+        expect: ControlExpect,
+    },
+    /// What became of a control sent earlier, by its request id.
+    ControlStatus {
+        request_id: String,
+    },
+}
+
+impl TapRequest {
+    /// The first session version that carries this request.
+    fn proto(&self) -> u32 {
+        match self {
+            Self::Access { .. } => PROTO_ACCESS,
+            Self::Control { expect, .. } if expect.legacy_id.is_some() => PROTO_ACCESS,
+            _ => 1,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -44,6 +76,36 @@ pub enum TapEvent {
     Answer(SessionMessage),
     /// The session ended, and the request with it.
     Ended(Failure),
+}
+
+/// A request carried for a client, ended once this is dropped, wherever it
+/// is then: in the reply that hands it over included. A client that goes
+/// away at any point, before or after it took the id, leaves nothing
+/// behind on the session.
+#[derive(Debug)]
+pub struct Tapped {
+    commands: mpsc::UnboundedSender<Command>,
+    peer: String,
+    id: String,
+}
+
+impl Tapped {
+    pub(super) fn new(commands: mpsc::UnboundedSender<Command>, peer: String, id: String) -> Self {
+        Self { commands, peer, id }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Drop for Tapped {
+    fn drop(&mut self) {
+        let _ = self.commands.send(Command::Untap {
+            peer: std::mem::take(&mut self.peer),
+            id: std::mem::take(&mut self.id),
+        });
+    }
 }
 
 /// One request carried over a session, until it ends.
@@ -67,9 +129,29 @@ impl Tap {
             )
     }
 
-    fn message(&self, id: &str) -> SessionMessage {
+    /// The message that carries this request. `None` for a control whose
+    /// expiry the target's clock cannot represent: it is never sent.
+    fn message(&self, id: &str, clock: Option<&PeerClock>) -> Option<SessionMessage> {
         let id = id.to_string();
-        match self.request.clone() {
+        let message = match self.request.clone() {
+            TapRequest::Control {
+                action,
+                service,
+                profile,
+                request_id,
+                expect,
+            } => SessionMessage::Control(Box::new(Control {
+                id,
+                action,
+                service,
+                profile,
+                request_id,
+                expect,
+                expires_at: expiry(clock)?,
+            })),
+            TapRequest::ControlStatus { request_id } => {
+                SessionMessage::ControlStatus { id, request_id }
+            }
             TapRequest::Inventory { watch: true, have } => {
                 SessionMessage::InventoryWatch { id, have }
             }
@@ -98,15 +180,12 @@ impl Tap {
                 max_bytes,
             },
             TapRequest::Access { wants } => SessionMessage::AccessRequest { id, wants },
-        }
+        };
+        Some(message)
     }
 
-    /// The first session version that carries this request.
     fn proto(&self) -> u32 {
-        match self.request {
-            TapRequest::Access { .. } => PROTO_ACCESS,
-            _ => 1,
-        }
+        self.request.proto()
     }
 
     /// What tells the target this request is over, if anything.
@@ -137,6 +216,10 @@ impl Tap {
             (SessionMessage::OutputData(data), TapRequest::Follow { .. }) => data.ended,
             (SessionMessage::OutputData(_), TapRequest::Read { .. }) => true,
             (SessionMessage::AccessResult { .. }, TapRequest::Access { .. }) => true,
+            (
+                SessionMessage::ControlResult(_),
+                TapRequest::Control { .. } | TapRequest::ControlStatus { .. },
+            ) => true,
             _ => false,
         }
     }
@@ -160,11 +243,37 @@ fn answer_to(answer: &SessionMessage) -> Option<&str> {
         SessionMessage::InventoryPage { re, .. }
         | SessionMessage::InventoryUnchanged { re, .. } => Some(re),
         SessionMessage::OutputData(data) => Some(&data.re),
-        SessionMessage::Error { re: Some(re), .. } | SessionMessage::AccessResult { re, .. } => {
-            Some(re)
-        }
+        SessionMessage::Error { re: Some(re), .. }
+        | SessionMessage::AccessResult { re, .. }
+        | SessionMessage::ControlProgress { re, .. } => Some(re),
+        SessionMessage::ControlResult(result) => Some(&result.re),
         _ => None,
     }
+}
+
+/// `expiresAt` for a control sent now: the target's clock as its `hello`
+/// gave it, moved on by the time since, plus [`CONTROL_EXPIRY`]. `None`
+/// when that time cannot be represented: the peer chose its clock, so it
+/// is checked, never trusted to stay in range.
+fn expiry(clock: Option<&PeerClock>) -> Option<String> {
+    let now = match clock {
+        Some((then, received)) => {
+            then.checked_add(time::Duration::try_from(received.elapsed()).ok()?)?
+        }
+        None => time::OffsetDateTime::now_utc(),
+    };
+    let expires = now.checked_add(time::Duration::try_from(CONTROL_EXPIRY).ok()?)?;
+    expires
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+/// A control whose expiry the target's clock cannot represent.
+fn bad_clock() -> Failure {
+    Failure::new(
+        "bad_request",
+        "That machine's clock is out of range, so this control could not be given an expiry. Nothing was sent; check its date and time.",
+    )
 }
 
 impl Actor {
@@ -208,15 +317,19 @@ impl Actor {
     }
 
     /// Carries a request to `peer`, over its session or a new one. Returns
-    /// the request's id.
+    /// the request's id. A control goes only over a session already open,
+    /// and is in the send queue before this returns: it is never queued
+    /// here, so `Ok` means it was handed to the connection.
     pub(super) fn on_tap(
         &mut self,
         peer: &str,
         request: TapRequest,
         events: mpsc::Sender<TapEvent>,
     ) -> Result<String, Failure> {
+        let control = matches!(request, TapRequest::Control { .. });
         let key = match self.viewer_session(peer) {
             Some(key) => key,
+            None if control => return Err(self.no_session(peer)),
             None => {
                 if let Some(failure) = self.cannot_open(peer, Purpose::Session) {
                     return Err(failure);
@@ -225,20 +338,89 @@ impl Actor {
                     .ok_or_else(|| Failure::new("internal", "The session could not start."))?
             }
         };
+        if control {
+            self.can_send_now(&key, &request)?;
+        }
         self.taps_made += 1;
         let id = format!("r{}", self.taps_made);
-        let session = self
-            .sessions
-            .get_mut(&key)
-            .ok_or_else(|| Failure::new("closed", "The session ended."))?;
         let tap = Tap {
             request,
             events,
             sent: false,
         };
+        if control {
+            self.send_control(&key, &id, tap)?;
+            return Ok(id);
+        }
+        let session = self
+            .sessions
+            .get_mut(&key)
+            .ok_or_else(|| Failure::new("closed", "The session ended."))?;
         session.taps.insert(id.clone(), tap);
         self.send_taps(&key);
         Ok(id)
+    }
+
+    /// A control, sent now or not at all: ahead of any request still
+    /// waiting for room, and kept only once the send queue took it.
+    fn send_control(&mut self, key: &Key, id: &str, mut tap: Tap) -> Result<(), Failure> {
+        let clock = self.sessions.get(key).and_then(|session| session.clock);
+        let message = tap.message(id, clock.as_ref()).ok_or_else(bad_clock)?;
+        if !self.send_message(key, &message) {
+            return Err(self.unsent());
+        }
+        tap.sent = true;
+        let session = self
+            .sessions
+            .get_mut(key)
+            .ok_or_else(|| Failure::new("closed", "The session ended."))?;
+        session.taps.insert(id.to_string(), tap);
+        Ok(())
+    }
+
+    /// Why a control cannot go to `peer` now: there is no session to it.
+    fn no_session(&self, peer: &str) -> Failure {
+        self.cannot_open(peer, Purpose::Session).unwrap_or_else(|| {
+            Failure::new(
+                "not_connected",
+                "No session to it is open. A control goes only over a connected session; it is never queued.",
+            )
+        })
+    }
+
+    /// A control goes now or not at all: over a session whose `hello`
+    /// came, that answers, of a version that carries it, with room in the
+    /// send queue.
+    fn can_send_now(&self, key: &Key, request: &TapRequest) -> Result<(), Failure> {
+        let session = self
+            .sessions
+            .get(key)
+            .ok_or_else(|| Failure::new("not_connected", "The session ended."))?;
+        if session.hello.is_none() {
+            return Err(Failure::new(
+                "connecting",
+                "The session to it is still opening. Try again once it is connected.",
+            ));
+        }
+        if session.not_responding {
+            return Err(Failure::new(
+                "not_responding",
+                "It does not answer right now. Nothing was sent.",
+            ));
+        }
+        if request.proto() > session.proto.unwrap_or(1) {
+            return Err(Failure::new(
+                "unsupported",
+                "Update Localify on that machine to ask from here.",
+            ));
+        }
+        if !self.out.has_room_for_requests() {
+            return Err(Failure::new(
+                "busy",
+                "The connection to it is busy. Nothing was sent; try again shortly.",
+            ));
+        }
+        Ok(())
     }
 
     /// Once the target said hello: the requests that waited for it, in the
@@ -301,8 +483,42 @@ impl Actor {
             return self.close_if_unused(key);
         }
         tap.sent = true;
-        let message = tap.message(id);
-        self.send_message(key, &message);
+        let message = tap.message(id, session.clock.as_ref());
+        let sent = message
+            .as_ref()
+            .is_some_and(|message| self.send_message(key, message));
+        if !sent {
+            // Not sent: the request ends here rather than wait for nothing.
+            let tap = self
+                .sessions
+                .get_mut(key)
+                .and_then(|session| session.taps.remove(id));
+            let failure = if message.is_some() {
+                self.unsent()
+            } else {
+                bad_clock()
+            };
+            if let Some(tap) = tap {
+                tap.end(&failure);
+            }
+            self.close_if_unused(key);
+        }
+    }
+
+    /// Why a request the session took could not be sent: the connection
+    /// is ending, or the request is too large for a session message.
+    fn unsent(&self) -> Failure {
+        if self.failed.is_some() {
+            Failure::new(
+                "not_connected",
+                "The connection to it ended. Nothing was sent.",
+            )
+        } else {
+            Failure::new(
+                "bad_request",
+                "This request is too large to send. Nothing was sent.",
+            )
+        }
     }
 
     /// An answer from the target, to the request it names.

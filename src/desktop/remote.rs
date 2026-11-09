@@ -38,6 +38,15 @@ impl DesktopApi {
         self.daemon()?.remote_status().map_err(daemon_error)
     }
 
+    /// Has the daemon read the shell environment again, so its background
+    /// starts get what the app's own runs get after `Reload shell
+    /// environment`.
+    pub fn reload_remote_shell_environment(&self) -> Result<Value> {
+        self.daemon()?
+            .reload_remote_shell_environment()
+            .map_err(daemon_error)
+    }
+
     /// The roster merged with pins, presence and sessions, without probing.
     pub fn remote_machines(&self) -> Result<Value> {
         self.daemon()?.remote_machines(false).map_err(daemon_error)
@@ -127,6 +136,20 @@ impl DesktopApi {
                 "cmd": "remote_access",
                 "machineId": machine_id,
                 "wants": wants,
+            }),
+            RemoteStreamRequest::Control {
+                machine_id,
+                action,
+                service,
+                profile,
+                expect,
+            } => json!({
+                "cmd": "remote_control",
+                "machineId": machine_id,
+                "action": action,
+                "service": service,
+                "profile": profile,
+                "expect": expect,
             }),
         };
         self.daemon()?.remote_stream(&command).map_err(daemon_error)

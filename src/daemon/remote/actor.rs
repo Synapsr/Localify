@@ -11,10 +11,11 @@
 //! socket's requests (`viewer`).
 
 mod asking;
+mod control;
 mod target;
 mod viewer;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -30,8 +31,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use self::control::ControlEvent;
+pub use self::control::ControlSlots;
 use self::viewer::Tap;
-pub use self::viewer::{TapEvent, TapRequest, WINDOW};
+pub use self::viewer::{TapEvent, TapRequest, Tapped, WINDOW};
 use super::access::Waiting;
 use super::backoff::Ending;
 use super::lease::{LeaseError, LeaseKeeper};
@@ -50,7 +53,7 @@ use crate::infrastructure::remote::pairing::{Pairing, Step};
 use crate::infrastructure::remote::store::{Pin, now_rfc3339};
 use crate::infrastructure::remote::wire::{
     AccessOutcome, AccessWants, ByeReason, DeclineReason, FrameKind, Hello, PresenceState, Purpose,
-    RelayFrame, Role, Send, SessionMessage, is_later_message,
+    RelayFrame, Role, Send, SessionMessage, unknown_control_field,
 };
 
 /// A target handles at most this many handshakes at once.
@@ -194,7 +197,8 @@ pub enum Command {
         peer: String,
         request: TapRequest,
         events: mpsc::Sender<TapEvent>,
-        reply: oneshot::Sender<Result<String, Failure>>,
+        /// Dropping the [`Tapped`], heard or not, ends the request.
+        reply: oneshot::Sender<Result<Tapped, Failure>>,
     },
     /// The client of a request went away: unwatch or unfollow.
     Untap {
@@ -230,6 +234,13 @@ pub enum Command {
     /// A snapshot of this machine's inventory, built for a viewer.
     Snapshot {
         result: Result<Arc<crate::application::inventory::Snapshot>, String>,
+    },
+    /// The control executor's progress or result for a viewer's control or
+    /// `control.status`, `re` in the session `key`.
+    ControlDone {
+        key: Key,
+        re: String,
+        event: ControlEvent,
     },
 }
 
@@ -299,6 +310,12 @@ struct Session {
     taps: HashMap<String, Tap>,
     /// Target: the access request this viewer waits on.
     access: Option<Waiting>,
+    /// Target: the controls and `control.status`es of this viewer still
+    /// going, by id.
+    controls: HashSet<String>,
+    /// Viewer: the target's clock as its `hello` gave it, and when it came,
+    /// so a control expires in the target's clock.
+    clock: Option<viewer::PeerClock>,
 }
 
 impl Session {
@@ -329,6 +346,8 @@ impl Session {
             served: target::Served::default(),
             taps: HashMap::new(),
             access: None,
+            controls: HashSet::new(),
+            clock: None,
         }
     }
 
@@ -338,7 +357,11 @@ impl Session {
 
     /// Whether something still uses the session, so it is not idle.
     fn is_held(&self) -> bool {
-        if !self.taps.is_empty() || !self.served.is_empty() || self.access.is_some() {
+        if !self.taps.is_empty()
+            || !self.served.is_empty()
+            || self.access.is_some()
+            || !self.controls.is_empty()
+        {
             return true;
         }
         match &self.holder {
@@ -386,6 +409,9 @@ struct Actor {
     taps_made: u64,
     /// Target: how the last access requests ended, so a late answer says.
     access_ended: VecDeque<(String, AccessOutcome)>,
+    /// Target: cancels the controls of each peer not dispatched yet, once
+    /// it is unpaired or paired again.
+    control_cancels: HashMap<String, CancellationToken>,
 }
 
 pub async fn run(
@@ -398,7 +424,12 @@ pub async fn run(
 ) -> Ending {
     let timings = shared.timings;
     let (sink, mut stream) = socket.split();
-    let (out, queue) = pacer::queue();
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let (out, mut queue) = pacer::queue();
+    #[cfg(test)]
+    {
+        queue.hold = Some(Arc::clone(&shared.writer_hold));
+    }
     let drained = out.drained();
     let bucket = Bucket::paced(Instant::now());
     let mut writer = tokio::spawn(pacer::run(sink, queue, bucket));
@@ -421,6 +452,7 @@ pub async fn run(
         shelf: target::Shelf::new(sharing),
         taps_made: 0,
         access_ended: VecDeque::new(),
+        control_cancels: HashMap::new(),
     };
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -463,7 +495,9 @@ pub async fn run(
                 }
                 actor.on_tick();
             }
-            _ = ping.tick() => actor.send_text("ping".to_string()),
+            _ = ping.tick() => {
+                actor.send_text("ping".to_string());
+            }
             _ = poll.tick() => actor.on_poll(),
             // The writer took a frame: room for pages or output.
             _ = drained.notified() => {}
@@ -503,12 +537,21 @@ impl Actor {
     }
 
     /// Queues a frame. A full queue means the socket is stuck: the
-    /// connection ends, and the link connects again.
-    fn send_text(&mut self, text: String) {
-        if !self.out.push(text) && self.failed.is_none() {
+    /// connection ends, and the link connects again. Returns whether the
+    /// frame went in.
+    fn send_text(&mut self, text: String) -> bool {
+        self.send_tagged(None, text)
+    }
+
+    /// [`Actor::send_text`] for a frame that seals a message of session
+    /// `tag`, so it can be discarded while it waits.
+    fn send_tagged(&mut self, tag: Option<pacer::Tag>, text: String) -> bool {
+        let queued = self.out.push_for(tag, text);
+        if !queued && self.failed.is_none() {
             warn!("The relay socket stopped taking frames; reconnecting");
             self.failed = Some(Ending::Lost);
         }
+        queued
     }
 
     /// Whether `cloud.json` no longer holds this connection's sign-in.
@@ -533,7 +576,7 @@ impl Actor {
         kind: FrameKind,
         purpose: Option<Purpose>,
         data: Option<&[u8]>,
-    ) {
+    ) -> bool {
         let frame = Send {
             to: to.to_string(),
             sid: sid.encode(),
@@ -541,14 +584,21 @@ impl Actor {
             purpose,
             data: data.map(|data| URL_SAFE_NO_PAD.encode(data)),
         };
+        // A session message can be discarded while it waits; a handshake
+        // or a `close` never is.
+        let tag = (kind == FrameKind::Msg).then(|| (to.to_string(), sid));
         match serde_json::to_string(&frame) {
-            Ok(text) => self.send_text(text),
-            Err(error) => warn!(error = %error, "Could not encode a relay frame"),
+            Ok(text) => self.send_tagged(tag, text),
+            Err(error) => {
+                warn!(error = %error, "Could not encode a relay frame");
+                false
+            }
         }
     }
 
-    /// Encrypts and sends one session message. `false` when the session
-    /// cannot send: it is not open, or the message is out of bounds.
+    /// Encrypts and queues one session message. `false` when the session
+    /// cannot send: it is not open, the message is out of bounds, or the
+    /// send queue did not take it.
     fn send_message(&mut self, key: &Key, message: &SessionMessage) -> bool {
         let Ok(plaintext) = serde_json::to_vec(message) else {
             return false;
@@ -564,8 +614,7 @@ impl Actor {
         };
         session.messages += 1;
         let (peer, sid) = (session.peer.clone(), session.sid);
-        self.send_frame(&peer, sid, FrameKind::Msg, None, Some(&sealed));
-        true
+        self.send_frame(&peer, sid, FrameKind::Msg, None, Some(&sealed))
     }
 
     // --- Relay frames --------------------------------------------------------
@@ -668,6 +717,7 @@ impl Actor {
         }) {
             warn!(error = %format!("{error:#}"), "Could not delete a revoked machine's pin");
         }
+        self.cancel_controls(machine_id);
         self.end_peer(
             machine_id,
             End::Silent,
@@ -1060,7 +1110,7 @@ impl Actor {
         Hello {
             proto: self.shared.ours(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            now: now_rfc3339(),
+            now: self.shared.hello_now(),
             role,
             settings,
             app: settings.map(|_| self.ctx.source.app()),
@@ -1125,22 +1175,23 @@ impl Actor {
             .and_then(|t| t.as_str())
             .unwrap_or_default()
             .to_string();
+        // An argument a control never takes is refused, never dropped.
+        let unknown_field = (kind == "control")
+            .then(|| unknown_control_field(&value, agreed))
+            .flatten();
+        let greeted_target = self
+            .sessions
+            .get(key)
+            .is_some_and(|session| session.hello.is_some() && session.role == Role::Target);
         match serde_json::from_value::<SessionMessage>(value.clone()) {
+            Ok(SessionMessage::Control(control))
+                if greeted_target && control.within_bounds() && unknown_field.is_some() =>
+            {
+                let field = unknown_field.unwrap_or_default();
+                self.refuse_argument(key, &control.id, &field);
+            }
             // A type of a later version than the session's is unknown here.
             Ok(message) if message.proto() <= agreed => self.on_session_message(key, message),
-            Err(_) if is_later_message(&kind) => {
-                let re = value
-                    .get("id")
-                    .and_then(|id| id.as_str())
-                    .map(str::to_string);
-                let answer = SessionMessage::Error {
-                    re,
-                    code: "unsupported".into(),
-                    message: format!("This version of Localify does not handle {kind} yet."),
-                    retry_after: None,
-                };
-                self.send_message(key, &answer);
-            }
             Ok(_) | Err(_) => self.end(
                 key,
                 End::Error("bad_request", format!("Unknown message {kind}.")),
@@ -1197,6 +1248,22 @@ impl Actor {
                 if role == Role::Viewer && purpose == Purpose::Session =>
             {
                 self.deliver(key, message);
+            }
+            message @ (SessionMessage::ControlProgress { .. }
+            | SessionMessage::ControlResult(_))
+                if role == Role::Viewer && purpose == Purpose::Session =>
+            {
+                self.deliver(key, message);
+            }
+            SessionMessage::Control(control)
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_control(key, *control);
+            }
+            SessionMessage::ControlStatus { id, request_id }
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_control_status(key, id, request_id);
             }
             SessionMessage::AccessRequest { id, wants }
                 if role == Role::Target && purpose == Purpose::Session =>
@@ -1284,6 +1351,10 @@ impl Actor {
             );
         }
         let settings = hello.settings;
+        session.clock =
+            time::OffsetDateTime::parse(&hello.now, &time::format_description::well_known::Rfc3339)
+                .ok()
+                .map(|now| (now, Instant::now()));
         session.hello = Some(hello.clone());
         session.proto = Some(agreed);
         let (role, purpose) = (session.role, session.purpose);
@@ -1507,6 +1578,8 @@ impl Actor {
             );
         }
         info!(peer = %key.0, "Paired");
+        // A pin with a new key: nothing the old key asked for goes on.
+        self.cancel_controls(&key.0);
         self.view().failures.remove(&key.0);
         let Some(session) = self.sessions.get_mut(key) else {
             return;
@@ -1539,6 +1612,7 @@ impl Actor {
         }) {
             warn!(error = %format!("{error:#}"), "Could not delete an unpaired machine's pin");
         }
+        self.cancel_controls(peer);
         self.view().settings.remove(peer);
         self.view().inventories.remove(peer);
         if removed {
@@ -1573,14 +1647,27 @@ impl Actor {
                 events,
                 reply,
             } => {
-                let _ = reply.send(self.on_tap(&peer, request, events));
+                // A caller that left, before or after the reply came, drops
+                // the guard with it: the request ends either way.
+                let tapped = self
+                    .on_tap(&peer, request, events)
+                    .map(|id| Tapped::new(self.commands.clone(), peer, id));
+                let _ = reply.send(tapped);
             }
             Command::Untap { peer, id } => self.untap(&peer, &id),
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
             Command::Snapshot { result } => self.on_snapshot(result),
+            Command::ControlDone { key, re, event } => self.on_control_done(&key, &re, event),
             Command::SettingsChanged { reply } => {
                 self.reload_settings();
-                let _ = reply.send(());
+                // A writer barrier: confirmed once every frame queued before
+                // was written or discarded. Not one of `tasks`, so a
+                // reconnect cannot confirm it before the writer is done.
+                let flushed = self.out.flushed();
+                tokio::spawn(async move {
+                    flushed.await;
+                    let _ = reply.send(());
+                });
             }
             Command::AccessAnswer {
                 request_id,
@@ -1611,6 +1698,7 @@ impl Actor {
                 let _ = reply.send(self.on_answer(&pairing_id, accept));
             }
             Command::Unpair { peer } => {
+                self.cancel_controls(&peer);
                 let keys: Vec<Key> = self
                     .sessions
                     .keys()
@@ -1862,7 +1950,9 @@ impl Actor {
     fn end(&mut self, key: &Key, how: End, failure: &Failure) {
         match how {
             End::Silent => {}
-            End::Close => self.send_frame(&key.0, key.1, FrameKind::Close, None, None),
+            End::Close => {
+                self.send_frame(&key.0, key.1, FrameKind::Close, None, None);
+            }
             End::Bye(reason) => {
                 if !self.send_message(key, &SessionMessage::Bye { reason }) {
                     self.send_frame(&key.0, key.1, FrameKind::Close, None, None);
