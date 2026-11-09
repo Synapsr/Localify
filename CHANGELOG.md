@@ -3,6 +3,28 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.8.0 - 2026-11-10
+
+### New
+
+- **Check and control another machine's services from a terminal or an agent.** Add
+  `--machine <name>` to `services status`, `logs`, `dev`, `stop` and `restart` to act on
+  another of your machines, as the app's machine switcher does. Coding agents get the
+  same through `list_machines` and a `machine` argument on the service tools.
+  [Remote machines](https://github.com/Synapsr/Localify/blob/main/docs/README.md#remote-machines)
+- **Pair two machines over SSH, with nobody at either screen.** From a machine that
+  reaches the other over SSH, `localify machines pair <machine> --over-ssh <destination>`
+  starts the other side through `ssh`, compares both codes itself, and confirms both only
+  when they match. An agent you gave SSH access to both machines can now pair them. It
+  needs OpenSSH 8.7 or later on the machine you run it on.
+
+### Improved
+
+- **A pairing cut short says what each machine saved.** Instead of claiming nothing was
+  saved, it reports each side, and pairing again completes it. A machine on 1.7.0 or
+  earlier can't say whether it saved, so a pairing with it reports only this machine's
+  side.
+
 ## 1.7.0 - 2026-11-09
 
 ### New
