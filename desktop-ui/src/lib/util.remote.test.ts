@@ -172,8 +172,10 @@ test("a service's dot is green once it answers, red after a failed exit", () => 
   );
   assert.equal(
     serviceTone(item({ port: { number: 3000, reachable: null }, process: "running" })),
-    "ok",
+    "pending",
   );
+  // A port that answers is up, even when Localify has no run for it.
+  assert.equal(serviceTone(item({ port: { number: 3000, reachable: true } })), "ok");
   assert.equal(serviceTone(item({})), "off");
   assert.equal(
     serviceTone(

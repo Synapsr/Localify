@@ -86,6 +86,8 @@ export function RemoteServiceChip({ item, machineName, onOutput }: RemoteService
         <TooltipTrigger
           render={
             <span
+              tabIndex={0}
+              role="img"
               aria-label={`${item.service.name}: ${statusSummary(item)}`}
               className={cn("size-4 shrink-0 rounded-full", remoteToneDot[tone])}
             />
@@ -259,10 +261,11 @@ function ControlButton({
   );
 }
 
+/** The dot's tooltip in words, for the keyboard and screen readers. */
 function statusSummary(item: RemoteInventoryItemDto): string {
-  return serviceChips(item)
-    .map((chip) => `${chip.name} ${chip.value}`)
-    .join(", ");
+  const owner = ownerLabel(item.owner);
+  const states = serviceChips(item).map((chip) => `${chip.name} ${chip.value}`);
+  return (owner ? [owner, ...states] : states).join(", ");
 }
 
 function outputUnavailableMessage(

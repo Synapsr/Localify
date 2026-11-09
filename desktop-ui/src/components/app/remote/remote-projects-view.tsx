@@ -17,6 +17,7 @@ import {
   serviceTone,
 } from "@/lib/util.remote";
 import { cn } from "@/lib/utils";
+import { useRemote } from "@/providers/remote-provider";
 import { useTerminal } from "@/providers/terminal-provider";
 
 import { RemoteOutputPanel } from "./remote-output-panel";
@@ -35,6 +36,7 @@ interface RemoteProjectsViewProps {
 export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) {
   const state = useRemoteInventory(machine.id);
   const { closePanel, isOpen: terminalOpen, panelHeight } = useTerminal();
+  const { setOutputOpen } = useRemote();
   const [outputKey, setOutputKey] = useState<string | null>(null);
   // The terminal takes the bottom of the window back when it opens.
   useEffect(() => {
@@ -44,6 +46,11 @@ export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) 
   const name = inventory?.machine.name ?? machine.name;
   const groups = useMemo(() => groupInventory(inventory?.items ?? [], query), [inventory, query]);
   const outputItem = inventory?.items.find((item) => serviceKey(item) === outputKey) ?? null;
+  const outputShown = outputItem !== null;
+  useEffect(() => {
+    setOutputOpen(outputShown);
+    return () => setOutputOpen(false);
+  }, [outputShown, setOutputOpen]);
 
   const showOutput = (item: RemoteInventoryItemDto) => {
     // One panel at the bottom at a time, like the terminal.
@@ -225,15 +232,21 @@ function RemoteEnvironment({
           >
             <div className="ml-[7px] flex flex-col gap-2 border-l border-border/60 py-1.5">
               {environment.services.map((item) => (
-                <div key={serviceKey(item)} className="flex min-w-0 items-center gap-1.5 pl-3">
-                  {total > 1 ? (
-                    <span className="shrink-0 text-sm text-foreground">{item.service.name}</span>
-                  ) : null}
-                  <RemoteServiceChip
-                    item={item}
-                    machineName={machineName}
-                    onOutput={() => onOutput(item)}
+                <div key={serviceKey(item)} className="relative flex min-w-0 flex-col gap-1 pl-3">
+                  <span
+                    aria-hidden
+                    className="absolute top-4 left-0 h-px w-2.5 -translate-y-1/2 bg-border/60"
                   />
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    {total > 1 ? (
+                      <span className="shrink-0 text-sm text-foreground">{item.service.name}</span>
+                    ) : null}
+                    <RemoteServiceChip
+                      item={item}
+                      machineName={machineName}
+                      onOutput={() => onOutput(item)}
+                    />
+                  </div>
                 </div>
               ))}
             </div>

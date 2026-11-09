@@ -215,7 +215,7 @@ export function ownerLabel(owner: RemoteOwner | null): string | null {
   }
 }
 
-export interface ServiceChip {
+interface ServiceChip {
   name: "Process" | "Port" | "Output" | "Public URL";
   value: string;
   tone: RemoteTone;
@@ -287,9 +287,10 @@ export function remoteHost(localUrl: string): string {
   return localUrl.replace(/^[a-z]+:\/\//i, "").replace(/\/$/, "");
 }
 
-/** One dot for a service, like this Mac's chips: green once it answers. */
+/** One dot for a service, like this Mac's chips: green only once its port answers. */
 export function serviceTone(item: RemoteInventoryItemDto): RemoteTone {
-  if (item.process === "running") return item.port.reachable === false ? "pending" : "ok";
+  if (item.port.reachable === true) return "ok";
+  if (item.process === "running") return "pending";
   const exit = item.run?.exit;
   return exit && exit.code !== null && exit.code !== 0 ? "error" : "off";
 }
