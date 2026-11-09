@@ -12,8 +12,10 @@ use anyhow::Result;
 
 use crate::application::inventory::Snapshot;
 use crate::daemon::public_tunnel::PublicTunnel;
+use crate::infrastructure::app_bridge;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
+use crate::infrastructure::remote::wire::AppPresence;
 use crate::infrastructure::running_services::RunningServiceStore;
 use crate::infrastructure::runs::RunId;
 use localify::desktop::ProjectRootStore;
@@ -36,17 +38,26 @@ pub trait LocalSource: Send + Sync {
     /// The output folder of `run_id`, while it is its service's last run
     /// and has a stream. Reads the run records: quick, and blocking.
     fn run_output(&self, run_id: &RunId) -> Result<Result<PathBuf, RunLookup>>;
+    /// Whether the desktop app runs, as its bridge's `hello` says: quick,
+    /// and blocking for half a second at most.
+    fn app(&self) -> AppPresence;
 }
 
 /// The daemon's own inventory, tunnel and run records.
 pub struct DaemonSource {
     inventory: Arc<LocalInventory>,
     tunnel: PublicTunnel,
+    /// The app bridge's socket.
+    app_bridge: PathBuf,
 }
 
 impl DaemonSource {
-    pub fn new(inventory: Arc<LocalInventory>, tunnel: PublicTunnel) -> Self {
-        Self { inventory, tunnel }
+    pub fn new(inventory: Arc<LocalInventory>, tunnel: PublicTunnel, app_bridge: PathBuf) -> Self {
+        Self {
+            inventory,
+            tunnel,
+            app_bridge,
+        }
     }
 }
 
@@ -60,6 +71,10 @@ impl LocalSource for DaemonSource {
     fn run_output(&self, run_id: &RunId) -> Result<Result<PathBuf, RunLookup>> {
         let store = RunningServiceStore::new_default()?;
         lookup(&store, run_id)
+    }
+
+    fn app(&self) -> AppPresence {
+        app_bridge::probe(&self.app_bridge)
     }
 }
 

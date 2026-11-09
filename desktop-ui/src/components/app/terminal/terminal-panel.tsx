@@ -362,7 +362,8 @@ function TerminalTab({
   tab: TerminalTabItem;
 }) {
   const { session, title } = tab;
-  const { sessionStates } = useTerminal();
+  const { sessionStates, startedBy } = useTerminal();
+  const startedByName = startedBy[session.id];
   const buttonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
@@ -386,6 +387,11 @@ function TerminalTab({
     >
       <TerminalStateDot state={sessionStates.get(session.id) ?? "idle"} />
       <span className="min-w-0 truncate">{title}</span>
+      {startedByName ? (
+        <span className="shrink-0 truncate text-[10px] text-sky-300">
+          Started by {startedByName}
+        </span>
+      ) : null}
       <span
         role="button"
         tabIndex={-1}

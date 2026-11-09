@@ -134,9 +134,10 @@ impl LocalInventory {
     /// A fresh snapshot, numbered: the revision only moves when its content
     /// changed. One build runs at a time: a request that arrives during one
     /// waits for it and shares its snapshot. `project_roots` are the local
-    /// checkouts the app knows, as `localify dev` reads them. Remote controls
-    /// and the app bridge come with PR 4, so until then every control is off,
-    /// whatever the `control` switch says, and the app counts as absent.
+    /// checkouts the app knows, as `localify dev` reads them. The control
+    /// executor comes with PR 4c, so until then every control is off,
+    /// whatever the `control` switch says, and the app counts as absent for
+    /// the controls; `machine.app` on the pages comes from the app bridge.
     pub fn snapshot(
         &self,
         public: &PublicFacts,

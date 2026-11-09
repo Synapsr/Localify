@@ -38,7 +38,7 @@ use crate::infrastructure::running_services::{
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::finish::{Finish, KILL_WAIT, STOP_GRACE};
-use crate::infrastructure::runs::launches::{LaunchExit, dispatch_expiry};
+use crate::infrastructure::runs::launches::{LaunchExit, RequestedBy, dispatch_expiry};
 use crate::infrastructure::runs::output::{
     self, EndReason, FinalizeLock, ReaderLock, RunEnd, StreamSink, StreamWriter,
 };
@@ -55,12 +55,74 @@ const READ_POLL_MS: libc::c_int = 100;
 pub struct RunPtyLaunch {
     /// The pinned `localify` executable, never looked up on `PATH`.
     pub executable: PathBuf,
-    /// Its arguments, `--config <path> dev …`; the launch id is added here.
+    /// Its arguments, `--config <path> dev …`; the launch's flags are added
+    /// here.
     pub args: Vec<OsString>,
     pub working_directory: PathBuf,
     /// The whole environment `localify dev` gets.
     pub environment: Vec<(OsString, OsString)>,
     pub size: WindowSize,
+    pub launch: RunLaunch,
+}
+
+/// How `localify dev` in a run PTY is fenced (docs/remote-machines.md, "The
+/// run lock and launch fencing"): its launch id, which is its run's, and its
+/// expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLaunch {
+    pub id: RunId,
+    /// Unix milliseconds.
+    pub expires_at: u64,
+    /// The run this launch takes over, which its dispatcher stopped:
+    /// `--replace=<runId>`. The executor then records that this launch
+    /// replaced it, and starts nothing when someone else restarted the
+    /// service meanwhile.
+    pub replaces: Option<RunId>,
+    /// Set for a launch a paired machine asked for.
+    pub remote: Option<RemoteLaunch>,
+}
+
+/// What fences a remote launch further: `--expect-rev` and `--request`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLaunch {
+    pub expect_rev: String,
+    pub requested_by: RequestedBy,
+}
+
+impl RunLaunch {
+    /// The app's own launch, dispatched now: a new id, expiring in 15
+    /// seconds. A restart makes it only once the run it replaces has
+    /// stopped, so that stop never counts against the launch's expiry.
+    pub fn own(replaces: Option<RunId>) -> Result<Self> {
+        Ok(Self {
+            id: RunId::generate()?,
+            expires_at: dispatch_expiry(),
+            replaces,
+            remote: None,
+        })
+    }
+
+    /// Its flags for `localify dev`, each in one argument: a base64url id
+    /// may start with `-`.
+    fn args(&self) -> Vec<OsString> {
+        let mut args = Vec::new();
+        match &self.remote {
+            None => args.push(format!("--launch-id={}", self.id)),
+            Some(remote) => args.extend([
+                format!("--remote-launch={}", self.id),
+                format!("--expect-rev={}", remote.expect_rev),
+                format!(
+                    "--request={}:{}",
+                    remote.requested_by.machine_id, remote.requested_by.request_id
+                ),
+            ]),
+        }
+        args.push(format!("--launch-expires={}", self.expires_at));
+        if let Some(replaces) = &self.replaces {
+            args.push(format!("--replace={replaces}"));
+        }
+        args.into_iter().map(OsString::from).collect()
+    }
 }
 
 /// What selects the app's own installation: its home, its state dir on
@@ -155,20 +217,24 @@ pub struct RunPty {
 }
 
 impl RunPty {
-    /// Starts `localify dev` in a new run PTY with a new run id. `on_output`
-    /// gets every byte of the PTY, after it is in the run's stream; holding it
-    /// back holds back the reading. `on_end` is called once the run is
-    /// finalized, or `localify dev` ended without registering it.
+    /// Starts `localify dev` in a new run PTY, for the launch it names, whose
+    /// id is the run's. `on_output` gets every byte of the PTY, after it is
+    /// in the run's stream; holding it back holds back the reading. `on_end`
+    /// is called once the run is finalized, or `localify dev` ended without
+    /// registering it.
     pub fn spawn(
         store: Arc<RunningServiceStore>,
         launch: RunPtyLaunch,
         on_output: impl FnMut(&[u8]) + Send + 'static,
         on_end: impl FnOnce(RunPtyEnd) + Send + 'static,
     ) -> Result<Self> {
-        let run_id = RunId::generate()?;
+        let run_id = launch.launch.id.clone();
         let dir = store.run_dir(&run_id);
+        if dir.exists() || store.launches().read(&run_id)?.is_some() {
+            bail!("Launch {run_id} was already used; nothing was started.");
+        }
         output::create_run_dir(&dir)?;
-        let started = start(&dir, &run_id, launch);
+        let started = start(&dir, launch);
         let (reader_lock, sink, master, child, writer, reader) = match started {
             Ok(started) => started,
             Err(error) => {
@@ -351,17 +417,13 @@ fn signal_alive(known: &[Identity], signal: Signal) {
 type Started = (ReaderLock, StreamSink, PtyMaster, Child, File, File);
 
 /// The run's folder ready for its reader, then `localify dev` started in it.
-fn start(dir: &Path, run_id: &RunId, launch: RunPtyLaunch) -> Result<Started> {
+fn start(dir: &Path, launch: RunPtyLaunch) -> Result<Started> {
     let reader_lock = ReaderLock::acquire(dir)?;
     let sink = StreamSink::new(StreamWriter::create(dir)?);
     let mut command = Command::new(&launch.executable);
     command
         .args(&launch.args)
-        // In one argument: a base64url id may start with `-`. A restart
-        // stopped the run it replaces before this point, so that stop never
-        // counts against the launch's expiry.
-        .arg(format!("--launch-id={run_id}"))
-        .arg(format!("--launch-expires={}", dispatch_expiry()))
+        .args(launch.launch.args())
         .env_clear()
         .envs(launch.environment)
         .current_dir(&launch.working_directory);
@@ -775,6 +837,47 @@ mod tests {
             "no end within the wait is no end"
         );
         assert!(stream_end(Some(&ReadEnd::Eof), Some("disk full".into())).is_some());
+    }
+
+    #[test]
+    fn a_launch_passes_its_fence_to_localify_dev_in_single_arguments() {
+        let id = RunId::parse("-AAAAAAAAAAAAAAAAAAAAA").unwrap();
+        let replaced = RunId::parse("BBBBBBBBBBBBBBBBBBBBBB").unwrap();
+        let own = RunLaunch {
+            id: id.clone(),
+            expires_at: 42,
+            replaces: Some(replaced.clone()),
+            remote: None,
+        };
+        assert_eq!(
+            own.args(),
+            [
+                "--launch-id=-AAAAAAAAAAAAAAAAAAAAA",
+                "--launch-expires=42",
+                "--replace=BBBBBBBBBBBBBBBBBBBBBB",
+            ]
+            .map(OsString::from)
+        );
+
+        let remote = RunLaunch {
+            id,
+            expires_at: 42,
+            replaces: None,
+            remote: Some(RemoteLaunch {
+                expect_rev: "0123456789abcdef".into(),
+                requested_by: RequestedBy::parse("machine-a:req-1").unwrap(),
+            }),
+        };
+        assert_eq!(
+            remote.args(),
+            [
+                "--remote-launch=-AAAAAAAAAAAAAAAAAAAAA",
+                "--expect-rev=0123456789abcdef",
+                "--request=machine-a:req-1",
+                "--launch-expires=42",
+            ]
+            .map(OsString::from)
+        );
     }
 
     #[test]

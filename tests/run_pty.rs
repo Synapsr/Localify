@@ -24,7 +24,7 @@ use localify::branding::BRANDING;
 use localify::desktop::dto::ServiceRunDto;
 use localify::desktop::pty::{self, WindowSize, suspend_disabled};
 use localify::desktop::run_pty::{
-    AppInstallation, RunPty, RunPtyEnd, RunPtyLaunch, run_environment,
+    AppInstallation, RunLaunch, RunPty, RunPtyEnd, RunPtyLaunch, run_environment,
 };
 use localify::desktop::shell_environment::ShellEnvironment;
 use localify::infrastructure::process::{self, NativeProcesses, Signal};
@@ -120,6 +120,7 @@ impl Sandbox {
             working_directory: self.app.clone(),
             environment,
             size: WindowSize::new(100, 30).unwrap(),
+            launch: RunLaunch::own(None).unwrap(),
         }
     }
 
@@ -1224,6 +1225,7 @@ fn helper_run(
             working_directory: app.to_path_buf(),
             environment: run_environment(environment, app, &AppInstallation::of_this_process()),
             size: WindowSize::new(100, 30).unwrap(),
+            launch: RunLaunch::own(None).unwrap(),
         },
         move |bytes| output_shown.lock().unwrap().extend_from_slice(bytes),
         move |end| {

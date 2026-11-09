@@ -18,6 +18,7 @@ import type {
   ShellEnvironmentDto,
   TerminalExitPayload,
   TerminalLaunchServiceResultDto,
+  TerminalOpenedPayload,
   TerminalOutputPayload,
   TerminalSessionDto,
   TerminalSessionTargetDto,
@@ -42,6 +43,7 @@ const MIN_PANEL_HEIGHT = 220;
 const MAX_PANEL_HEIGHT_RATIO = 0.82;
 const MAX_BUFFER_BYTES = 1_000_000;
 const TERMINAL_HEIGHT_STORAGE_KEY = "localify.terminal.height";
+const STARTED_BY_MS = 5_000;
 
 type OutputBySessionId = Record<string, Uint8Array[]>;
 
@@ -75,6 +77,8 @@ interface TerminalContextValue {
   selectPreviousEnvironment: () => void;
   selectPreviousSession: () => void;
   sessionStates: Map<string, TerminalSessionState>;
+  /** The paired machine that just started a tab, by session id, for a few seconds. */
+  startedBy: Record<string, string>;
   /** Whether the environment services start with was read from the user's shell. */
   shellEnvironment: ShellEnvironmentDto | null;
   /** Stops a service tab's run through its session, never with a Ctrl-C. */
@@ -103,6 +107,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   const [selectedTarget, setSelectedTargetState] = useState<TerminalTargetRequest | null>(null);
   const [focusRequestId, setFocusRequestId] = useState(0);
   const [shellEnvironment, setShellEnvironment] = useState<ShellEnvironmentDto | null>(null);
+  const [startedBy, setStartedBy] = useState<Record<string, string>>({});
   const projectEnvironments = bootstrap?.projectEnvironments;
   const sessions = useMemo(
     () => sortTerminalSessions(unsortedSessions, projectOrder, projectEnvironments ?? []),
@@ -156,10 +161,40 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     };
   }, [reconcile]);
 
+  // Puts a new run in its tab's place: the one it took over, or a new one.
+  const insertRun = useCallback(
+    (result: TerminalLaunchServiceResultDto) => {
+      const { replaced } = result;
+      const session = reconcile(result.session);
+      setSessions((current) => {
+        const index = replaced ? current.findIndex((candidate) => candidate.id === replaced) : -1;
+        const others = current.filter(
+          (candidate) => candidate.id !== session.id && candidate.id !== replaced,
+        );
+        if (index === -1) {
+          return current.some((candidate) => candidate.id === session.id)
+            ? current.map((candidate) => (candidate.id === session.id ? session : candidate))
+            : [...others, session];
+        }
+        return [...others.slice(0, index), session, ...others.slice(index)];
+      });
+      if (replaced) {
+        setOutputBySessionId((current) => {
+          const next = { ...current };
+          delete next[replaced];
+          return next;
+        });
+      }
+      return session;
+    },
+    [reconcile],
+  );
+
   useEffect(() => {
     let unlistenOutput: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
     let unlistenSession: (() => void) | null = null;
+    let unlistenOpened: (() => void) | null = null;
     let unlistenShellEnvironment: (() => void) | null = null;
     let cancelled = false;
 
@@ -181,6 +216,30 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
     }).then((unlisten) => {
       unlistenSession = unlisten;
+    });
+
+    // A launch handed to the app, by `localify dev --in-app` or a paired machine: its tab
+    // joins the others without taking focus, unless it took over the tab in view.
+    void listen<TerminalOpenedPayload>("terminal-session-opened", (event) => {
+      if (cancelled) return;
+      const { replaced, startedBy: name } = event.payload;
+      const session = insertRun(event.payload);
+      setActiveSessionIdState((current) =>
+        current === null || current === replaced ? session.id : current,
+      );
+      if (name) {
+        setStartedBy((current) => ({ ...current, [session.id]: name }));
+        window.setTimeout(() => {
+          setStartedBy((current) => {
+            const next = { ...current };
+            delete next[session.id];
+            return next;
+          });
+        }, STARTED_BY_MS);
+      }
+      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+    }).then((unlisten) => {
+      unlistenOpened = unlisten;
     });
 
     void listen<ShellEnvironmentDto>("shell-environment", (event) => {
@@ -216,9 +275,10 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       unlistenOutput?.();
       unlistenExit?.();
       unlistenSession?.();
+      unlistenOpened?.();
       unlistenShellEnvironment?.();
     };
-  }, [queryClient, reconcile]);
+  }, [insertRun, queryClient, reconcile]);
 
   // Bootstrap polling is what sees a service stop. A stop the user just asked for, or watches
   // in the active tab, needs no warning, and looking at the tab clears it.
@@ -322,32 +382,12 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
   // A new run that took over an ended tab, or a restart, keeps the tab's place.
   const placeRun = useCallback(
     (result: TerminalLaunchServiceResultDto) => {
-      const { replaced } = result;
-      const session = reconcile(result.session);
-      setSessions((current) => {
-        const index = replaced ? current.findIndex((candidate) => candidate.id === replaced) : -1;
-        const others = current.filter(
-          (candidate) => candidate.id !== session.id && candidate.id !== replaced,
-        );
-        if (index === -1) {
-          return current.some((candidate) => candidate.id === session.id)
-            ? current.map((candidate) => (candidate.id === session.id ? session : candidate))
-            : [...others, session];
-        }
-        return [...others.slice(0, index), session, ...others.slice(index)];
-      });
-      if (replaced) {
-        setOutputBySessionId((current) => {
-          const next = { ...current };
-          delete next[replaced];
-          return next;
-        });
-      }
+      const session = insertRun(result);
       setActiveSessionIdState(session.id);
       setSelectedTargetState(toTerminalTargetRequest(session.target));
       setIsOpen(true);
     },
-    [reconcile],
+    [insertRun],
   );
 
   const openTerminal = useCallback(
@@ -409,8 +449,8 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     setShellEnvironment(await tauriClient.reloadShellEnvironment());
   }, []);
 
-  // `localify dev --in-app` and agents start services through a deep link, which
-  // takes the same path as the launch button.
+  // The `localify://action/launch-service` link starts a service through the same path as
+  // the launch button. `localify dev --in-app` uses the app bridge instead.
   useEffect(() => {
     setDeepLinkLaunchHandler(async (launch) => {
       setIsOpen(true);
@@ -630,6 +670,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       selectedTarget,
       setSelectedTarget,
       shellEnvironment,
+      startedBy,
       stopSession,
       togglePanel: () => setIsOpen((current) => !current),
       writeToSession,
@@ -661,6 +702,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       setSelectedTarget,
       selectedTarget,
       shellEnvironment,
+      startedBy,
       stopSession,
       writeToSession,
     ],

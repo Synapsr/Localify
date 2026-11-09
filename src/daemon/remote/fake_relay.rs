@@ -27,7 +27,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use super::local::{LocalSource, RunLookup, SnapshotFuture};
 use crate::application::inventory::{InventoryItem, Revisions};
 use crate::infrastructure::remote::noise::{Handshake, SessionContext, SessionId, StaticKeys};
-use crate::infrastructure::remote::wire::{FrameKind, Purpose, Send};
+use crate::infrastructure::remote::wire::{AppPresence, FrameKind, Purpose, Send};
 use crate::infrastructure::runs::RunId;
 
 /// What the relay does with one frame.
@@ -795,5 +795,9 @@ impl LocalSource for FakeSource {
             .get(run_id.as_str())
             .cloned()
             .unwrap_or(Err(RunLookup::Gone)))
+    }
+
+    fn app(&self) -> AppPresence {
+        AppPresence::Absent
     }
 }

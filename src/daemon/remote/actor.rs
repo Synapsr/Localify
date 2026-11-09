@@ -49,8 +49,8 @@ use crate::infrastructure::remote::noise::{
 use crate::infrastructure::remote::pairing::{Pairing, Step};
 use crate::infrastructure::remote::store::{Pin, now_rfc3339};
 use crate::infrastructure::remote::wire::{
-    AccessOutcome, AccessWants, AppPresence, ByeReason, DeclineReason, FrameKind, Hello,
-    PresenceState, Purpose, RelayFrame, Role, Send, SessionMessage, is_later_message,
+    AccessOutcome, AccessWants, ByeReason, DeclineReason, FrameKind, Hello, PresenceState, Purpose,
+    RelayFrame, Role, Send, SessionMessage, is_later_message,
 };
 
 /// A target handles at most this many handshakes at once.
@@ -1063,8 +1063,7 @@ impl Actor {
             now: now_rfc3339(),
             role,
             settings,
-            // The app bridge comes with remote controls.
-            app: settings.map(|_| AppPresence::Absent),
+            app: settings.map(|_| self.ctx.source.app()),
         }
     }
 

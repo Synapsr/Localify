@@ -19,8 +19,8 @@ use crate::application::inventory::{Snapshot, pages};
 use crate::daemon::remote::local::RunLookup;
 use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
 use crate::infrastructure::remote::wire::{
-    AppPresence, Have, MAX_MESSAGE_BYTES, MAX_READ_BYTES, MachineSummary, OutputData, OutputLine,
-    Purpose, Role, Rotated, SessionMessage,
+    Have, MAX_MESSAGE_BYTES, MAX_READ_BYTES, MachineSummary, OutputData, OutputLine, Purpose, Role,
+    Rotated, SessionMessage,
 };
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::output;
@@ -616,8 +616,7 @@ impl Actor {
             }
             .to_string(),
             settings: self.shared.store.settings().unwrap_or(DEFAULT_SETTINGS),
-            // The app bridge comes with remote controls.
-            app: AppPresence::Absent,
+            app: self.ctx.source.app(),
         }
     }
 

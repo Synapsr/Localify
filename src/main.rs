@@ -1358,6 +1358,7 @@ fn main() -> Result<()> {
                 cli::services::Replace::for_launch(replace.as_ref().map(|id| id.as_deref()))?,
                 config_path,
                 &ctx,
+                &paths.data_dir,
             )
         }
         Commands::Dev {
@@ -1374,31 +1375,37 @@ fn main() -> Result<()> {
             request,
             replace,
             ..
-        } => exit_with(cli::services::run(
-            cli::services::RunArgs {
-                mode: cli::services::RunMode::Dev,
-                service_name: service,
-                project,
-                environment: env,
-                init_domain: domain,
-                override_command: command,
-                launch_profile: launch_profile.into_args(),
-                dispatch: cli::launch_fence::DispatchFlags {
-                    launch_id,
-                    remote_launch,
-                    launch_expires,
-                    expect_rev,
-                    request,
+        } => {
+            // A remote launch has nobody at its terminal to ask, even in a
+            // run PTY: it stops only the run its dispatcher named.
+            let replace = match (&remote_launch, &replace) {
+                (Some(_), None) => cli::services::Replace::No,
+                _ => cli::services::Replace::for_launch(replace.as_ref().map(|id| id.as_deref()))?,
+            };
+            exit_with(cli::services::run(
+                cli::services::RunArgs {
+                    mode: cli::services::RunMode::Dev,
+                    service_name: service,
+                    project,
+                    environment: env,
+                    init_domain: domain,
+                    override_command: command,
+                    launch_profile: launch_profile.into_args(),
+                    dispatch: cli::launch_fence::DispatchFlags {
+                        launch_id,
+                        remote_launch,
+                        launch_expires,
+                        expect_rev,
+                        request,
+                    },
+                    replace,
                 },
-                replace: cli::services::Replace::for_launch(
-                    replace.as_ref().map(|id| id.as_deref()),
-                )?,
-            },
-            config_path,
-            localify::project_init::LocalAppUpdatePolicy::runtime_only(),
-            &ctx,
-            &paths,
-        )?),
+                config_path,
+                localify::project_init::LocalAppUpdatePolicy::runtime_only(),
+                &ctx,
+                &paths,
+            )?)
+        }
         Commands::Exec {
             launch_profile,
             command,

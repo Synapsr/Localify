@@ -160,7 +160,11 @@ impl Server {
             cancel.clone(),
         )
         .await;
-        let source = DaemonSource::new(Arc::clone(&inventory), tunnel.clone());
+        let source = DaemonSource::new(
+            Arc::clone(&inventory),
+            tunnel.clone(),
+            crate::infrastructure::app_bridge::socket_path(&self.data_dir),
+        );
         let remote = RemoteLink::new(&self.data_dir, Arc::new(source));
         remote::spawn(remote.clone(), cancel.clone());
         public_tunnel::spawn(

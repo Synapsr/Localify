@@ -3,7 +3,8 @@
 
 use localify::desktop::shell_environment::ShellEnvironmentDto;
 use localify::desktop::terminal::{
-    TerminalEvents, TerminalExitPayload, TerminalOutputPayload, TerminalSessionDto,
+    TerminalEvents, TerminalExitPayload, TerminalOpenedPayload, TerminalOutputPayload,
+    TerminalSessionDto,
 };
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -11,6 +12,8 @@ pub const TERMINAL_OUTPUT_EVENT: &str = "terminal-output";
 pub const TERMINAL_EXIT_EVENT: &str = "terminal-exit";
 /// A session changed: a service tab's run ended and was finalized.
 pub const TERMINAL_SESSION_EVENT: &str = "terminal-session";
+/// A service tab opened for a launch handed to the app over its bridge.
+pub const TERMINAL_SESSION_OPENED_EVENT: &str = "terminal-session-opened";
 pub const SHELL_ENVIRONMENT_EVENT: &str = "shell-environment";
 
 /// The window's side of the terminal panel's events.
@@ -27,6 +30,10 @@ impl<R: Runtime> TerminalEvents for WindowEvents<R> {
 
     fn session(&self, session: TerminalSessionDto) {
         let _ = self.0.emit(TERMINAL_SESSION_EVENT, session);
+    }
+
+    fn opened(&self, opened: TerminalOpenedPayload) {
+        let _ = self.0.emit(TERMINAL_SESSION_OPENED_EVENT, opened);
     }
 
     fn shell_environment(&self, status: ShellEnvironmentDto) {

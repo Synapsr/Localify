@@ -8,12 +8,13 @@ use std::io::Write;
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use commands::{AppState, DeepLinkLaunchDto, DeepLinkPayloadDto, DeepLinkRouteDto};
 use localify::branding::BRANDING;
 use localify::desktop::DesktopApi;
+use localify::desktop::app_bridge::{AppBridge, terminal_launcher};
 use localify::desktop::dto::{
     DomainInfoDto, OpenInEditorRequest, ProjectInfoDto, StartDaemonRequest,
 };
@@ -24,7 +25,7 @@ use localify::infrastructure::shell_env;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::{async_runtime, menu::AboutMetadata};
 #[cfg(desktop)]
@@ -55,6 +56,28 @@ const LOCALIFY_SCHEME: &str = "localify";
 #[derive(Default)]
 struct TrayState {
     quitting: AtomicBool,
+}
+
+/// The app bridge's socket, listened on while the app runs and removed when
+/// it exits (docs/remote-machines.md, "The app bridge").
+#[derive(Default)]
+struct BridgeState(Mutex<Option<AppBridge>>);
+
+/// Listens on the app bridge, so the daemon and `localify dev --in-app` can
+/// hand this app launches. Without it the app still works; launches it is
+/// handed then start nothing here.
+fn start_app_bridge<R: Runtime>(app: &AppHandle<R>, api: DesktopApi, terminal: TerminalManager) {
+    let listening = api
+        .data_dir()
+        .and_then(|data_dir| AppBridge::listen(&data_dir, terminal_launcher(terminal, api)));
+    match listening {
+        Ok(bridge) => {
+            if let Ok(mut held) = app.state::<BridgeState>().0.lock() {
+                *held = Some(bridge);
+            }
+        }
+        Err(error) => eprintln!("the app bridge is off: {error:#}"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1091,6 +1114,7 @@ pub fn run() {
     }
 
     let executable = api.binary_path().to_path_buf();
+    let bridge_api = api.clone();
     let builder = builder
         .on_menu_event(|app, event| {
             #[cfg(target_os = "macos")]
@@ -1107,7 +1131,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::with_api(api))
         .manage(remote::RemoteStreams::default())
-        .manage(TrayState::default());
+        .manage(TrayState::default())
+        .manage(BridgeState::default());
 
     #[cfg(target_os = "macos")]
     let builder = builder.manage(UpdateMenuState::default());
@@ -1123,6 +1148,7 @@ pub fn run() {
                 Arc::new(terminal::WindowEvents(app.handle().clone())),
             );
             terminal.warm_shell_environment();
+            start_app_bridge(app.handle(), bridge_api.clone(), terminal.clone());
             app.manage(terminal);
             app.handle().plugin(
                 tauri_plugin_updater::Builder::new()
@@ -1265,8 +1291,16 @@ pub fn run() {
             commands::reload_shell_environment,
             commands::consume_pending_deep_link
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let RunEvent::Exit = event
+                && let Ok(mut held) = app.state::<BridgeState>().0.lock()
+            {
+                // Dropping it removes the socket.
+                held.take();
+            }
+        });
 }
 
 #[cfg(test)]
