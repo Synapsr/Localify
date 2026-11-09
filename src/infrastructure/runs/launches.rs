@@ -393,9 +393,14 @@ impl LaunchRecords {
             else {
                 continue;
             };
-            if !older_than(&entry, max_age) || !unheld(&path) {
+            if !older_than(&entry, max_age) {
                 continue;
             }
+            // Held until the file is gone: an executor that opened it meanwhile
+            // waits on it, then finds the decision under it and stops.
+            let Some(_held) = hold_if_free(&path) else {
+                continue;
+            };
             if self.read(&id)?.is_none() {
                 self.expire(&id)?;
             }
@@ -635,9 +640,11 @@ pub fn sweep_temporaries(dir: &Path, max_age: Duration) -> Result<usize> {
     Ok(removed)
 }
 
-/// Whether no process holds the lock at `path`.
-fn unheld(path: &Path) -> bool {
-    File::open(path).is_ok_and(|file| file.try_lock().is_ok())
+/// The lock on `path`, when nobody holds it.
+fn hold_if_free(path: &Path) -> Option<File> {
+    let file = File::open(path).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 /// Whether `entry` was last changed at least `max_age` ago.
