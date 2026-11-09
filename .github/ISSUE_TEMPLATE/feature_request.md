@@ -4,10 +4,10 @@ about: Suggest an improvement or a new capability
 labels: enhancement
 ---
 
-**Problem**
+**What you're trying to do**
 
-<!-- What are you trying to do, and what gets in the way today? -->
+<!-- The task, and what gets in the way today. -->
 
-**Proposed solution**
+**What you'd like Localify to do**
 
-**Alternatives considered**
+**What you do today instead**
