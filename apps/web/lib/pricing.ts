@@ -1,5 +1,7 @@
 import { headers } from "next/headers";
 
+import { parsePricing } from "./pricing-response";
+
 // Localify Cloud prices, as Polar sells them. The cloud serves them from Polar at
 // GET /v1/pricing (docs/public-urls.md, "Plans"); the site falls back to the values
 // below whenever that endpoint fails, so a page never breaks over a price.
@@ -43,6 +45,10 @@ const fallback = (currency: Currency): Pricing => ({
   },
 });
 
+// Team isn't sold through Polar yet, so the endpoint doesn't price it: the site quotes
+// it, with the same number in both currencies, and the Team button opens a contact form.
+export const TEAM_PLAN = { monthly: 4900, seats: 3 } as const;
+
 // EU and EEA countries pay in euros, everyone else in US dollars, as the cloud decides.
 const EURO_COUNTRIES = new Set([
   "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR", "HR", "HU",
@@ -52,62 +58,6 @@ const EURO_COUNTRIES = new Set([
 
 const currencyForCountry = (country: string | null | undefined): Currency =>
   country && EURO_COUNTRIES.has(country.toUpperCase()) ? "eur" : "usd";
-
-// Sane bounds: anything outside them is a bad response, not a price to show.
-const MAX_AMOUNT = 100_000; // minor units, so 1,000.00
-const MAX_COUNT = 1_000;
-
-const isIntegerIn = (value: unknown, max: number): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
-
-const isMoney = (value: unknown, currency: Currency): value is Money => {
-  const money = value as Partial<Money> | null;
-  return (
-    typeof money === "object" &&
-    money !== null &&
-    isIntegerIn(money.amount, MAX_AMOUNT) &&
-    money.currency === currency
-  );
-};
-
-// The copy says "+1 serving machine" and "+10 public URLs", so the units must match it.
-const isAddon = (value: unknown, currency: Currency, unit: number): value is Money & { unit: number } =>
-  isMoney(value, currency) && (value as { unit?: unknown }).unit === unit;
-
-// Keeps only the fields the site shows, after checking each one.
-const parsePricing = (body: unknown, currency: Currency): Pricing | null => {
-  const data = body as {
-    currency?: unknown;
-    pro?: { monthly?: unknown; yearly?: unknown; includes?: { servingMachines?: unknown; publicUrls?: unknown } };
-    addons?: { machine?: unknown; urls?: unknown };
-  } | null;
-  if (typeof data !== "object" || data === null || data.currency !== currency) return null;
-
-  const { pro, addons } = data;
-  if (
-    !isMoney(pro?.monthly, currency) ||
-    !isMoney(pro?.yearly, currency) ||
-    !isIntegerIn(pro?.includes?.servingMachines, MAX_COUNT) ||
-    !isIntegerIn(pro?.includes?.publicUrls, MAX_COUNT) ||
-    !isAddon(addons?.machine, currency, 1) ||
-    !isAddon(addons?.urls, currency, 10)
-  ) {
-    return null;
-  }
-
-  return {
-    currency,
-    pro: {
-      monthly: { amount: pro.monthly.amount, currency },
-      yearly: { amount: pro.yearly.amount, currency },
-      includes: { servingMachines: pro.includes.servingMachines, publicUrls: pro.includes.publicUrls },
-    },
-    addons: {
-      machine: { amount: addons.machine.amount, currency, unit: addons.machine.unit },
-      urls: { amount: addons.urls.amount, currency, unit: addons.urls.unit },
-    },
-  };
-};
 
 // Per Worker isolate: OpenNext keeps no data cache by default, so this keeps the
 // endpoint from being asked on every page view. It holds plain, validated data

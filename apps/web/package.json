@@ -39,6 +39,7 @@
     "dev": "next dev",
     "preview": "node ../../scripts/web-cloudflare.mjs preview",
     "start": "next start",
+    "test": "node --test lib/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "upload": "node ../../scripts/web-cloudflare.mjs upload",
     "dev-localify": "next dev --hostname 127.0.0.1 --port 56431"

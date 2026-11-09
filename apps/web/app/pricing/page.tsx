@@ -4,7 +4,7 @@ import { getTranslations } from "next-intl/server";
 
 import { PageIntro } from "@/app/_components/page-intro";
 import { PageShell } from "@/app/_components/page-shell";
-import { Plans } from "@/app/_components/plans";
+import { PricingPlans } from "@/app/_components/pricing-plans";
 import { type FaqEntry, FaqItem } from "@/app/_sections/faq";
 import { buildPageMetadata } from "@/app/page-metadata";
 import { FadeIn, sectionClass } from "@/app/site-ui";
@@ -31,7 +31,11 @@ const PricingPage = async () => {
             </>
           }
         />
-        <Plans source="pricing" />
+        <PricingPlans source="pricing" />
+        <FadeIn className="mx-auto mt-10 max-w-3xl space-y-4 text-center">
+          <p className="text-[13.5px] leading-[1.6] text-pretty text-muted-foreground">{t("addons.how")}</p>
+          <p className="text-[13px] leading-[1.6] text-pretty text-muted-foreground">{t("billing")}</p>
+        </FadeIn>
       </section>
 
       <section className={sectionClass} id="pricing-faq">
