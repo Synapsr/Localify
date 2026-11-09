@@ -71,11 +71,10 @@ pub fn logs<O: Write, E: Write>(
     // is read as a cursor of another run would be.
     let mut offset = match first {
         Err(error) if is_gone(&error) => {
+            // Its new run started after the snapshot: everything it printed
+            // is new to this reader, so it is read from its first byte.
             reader.move_to_current_run()?;
-            match cursor {
-                Some(_) => reader.read_on(0)?,
-                None => reader.tail(query.lines)?,
-            }
+            reader.read_on(0)?
         }
         other => other?,
     };

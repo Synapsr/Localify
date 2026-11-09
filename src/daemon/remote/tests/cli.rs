@@ -400,23 +400,24 @@ async fn a_restart_between_the_snapshot_and_the_first_read_reads_the_new_run() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-        restart_on(&watcher, &dir, b"new\n");
+        restart_on(&watcher, &dir, b"new\nsecond\nthird\n");
     });
 
     let (code, out, err) = cli(&socket, true, |client, console| {
-        logs(client, &mini(), &follow_web(5), console)
+        // Fewer lines than the new run printed: it is still read from its start.
+        logs(client, &mini(), &follow_web(1), console)
     })
     .await;
     restarting.await.unwrap();
 
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "new\n");
+    assert_eq!(out, "new\nsecond\nthird\n");
     assert!(
         err.contains("'web' restarted on teo-mini: reading its new run from the start."),
         "{err}"
     );
     assert!(
-        err.ends_with(&format!("Next cursor: {NEXT_RUN}:4\n")),
+        err.ends_with(&format!("Next cursor: {NEXT_RUN}:17\n")),
         "{err}"
     );
 }

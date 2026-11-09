@@ -70,8 +70,11 @@ pub fn control<O: Write, E: Write>(
         .map_err(|error| remote_error(error, peer))?;
     let events = std::iter::from_fn(|| stream.next_answer().transpose());
     let ended = follow(events, &asked, console)?;
+    // The watch keeps the session open until the report has fetched the fresh
+    // state a conflict or a lost outcome prints, so that needs no new handshake.
+    let reported = report(ended, &asked, console, || fresh(client, peer, query));
     drop(watch);
-    report(ended, &asked, console, || fresh(client, peer, query))
+    reported
 }
 
 /// What a control was asked for, to say what happens to it.
