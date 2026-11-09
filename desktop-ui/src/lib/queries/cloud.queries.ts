@@ -36,8 +36,8 @@ function isWatchingCheckout(): boolean {
 }
 
 /**
- * Whether the plan's entitlement changed since the last answer any screen saw, however it
- * changed. The checkout watch only makes the app ask more often.
+ * Whether the plan's entitlement or limits changed since the last answer any screen saw,
+ * however they changed. The checkout watch only makes the app ask more often.
  */
 export const entitlementChange = createEntitlementTracker();
 
@@ -137,7 +137,7 @@ export const cloudMutations = {
       onSuccess: async () => watchCheckout(queryClient),
     }),
   /**
-   * After the plan's entitlement changed: the daemon fetches what this Mac serves, and the
+   * After the plan's entitlement or limits changed: the daemon fetches what this Mac serves, and the
    * account, the plan and the URLs, whose state follows the plan, are read again.
    */
   refreshTunnel: (queryClient: QueryClient) =>

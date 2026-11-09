@@ -285,21 +285,35 @@ fn wait_for_plan(
     done: impl Fn(&Plan) -> bool,
     not_yet: &str,
 ) -> Result<Plan> {
-    let deadline = Instant::now() + PLAN_WAIT;
     let billing = cloud.billing();
+    match poll_plan(|| billing.plan(), done, PLAN_POLL, PLAN_WAIT) {
+        Some(plan) => Ok(plan),
+        None => bail!(
+            "{not_yet}. Once the checkout is done, check with: {} whoami",
+            BRANDING.cli_command()
+        ),
+    }
+}
+
+/// Reads the plan every `poll` until it is `done`, for `wait` at most;
+/// `None` once `wait` is over. A failed read is retried: the checkout is
+/// still open in the browser.
+fn poll_plan(
+    mut read: impl FnMut() -> Result<Option<Plan>>,
+    done: impl Fn(&Plan) -> bool,
+    poll: Duration,
+    wait: Duration,
+) -> Option<Plan> {
+    let deadline = Instant::now() + wait;
     loop {
-        thread::sleep(PLAN_POLL);
-        // A failed poll is retried: the checkout is still open in the browser.
-        if let Ok(Some(plan)) = billing.plan()
+        thread::sleep(poll);
+        if let Ok(Some(plan)) = read()
             && done(&plan)
         {
-            return Ok(plan);
+            return Some(plan);
         }
         if Instant::now() >= deadline {
-            bail!(
-                "{not_yet}. Once the checkout is done, check with: {} whoami",
-                BRANDING.cli_command()
-            );
+            return None;
         }
     }
 }
@@ -557,6 +571,56 @@ mod tests {
         assert_eq!(addon_limit(&plan, Addon::Machine), 2);
         plan.limits.public_urls = 30;
         assert_eq!(addon_limit(&plan, Addon::Urls), 30);
+    }
+
+    #[test]
+    fn polling_stops_once_the_new_limit_shows() {
+        let raised = {
+            let mut plan = plan(PlanStatus::Active);
+            plan.limits.serving_machines = 4;
+            plan
+        };
+        let mut answers = vec![
+            Ok(Some(raised)),
+            Ok(Some(plan(PlanStatus::Active))),
+            Ok(None),
+            Err(anyhow::anyhow!("offline")),
+        ];
+        let mut reads = 0;
+
+        let plan = poll_plan(
+            || {
+                reads += 1;
+                answers.pop().unwrap()
+            },
+            |plan| addon_limit(plan, Addon::Machine) != 2,
+            Duration::ZERO,
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(plan.map(|plan| plan.limits.serving_machines), Some(4));
+        assert_eq!(
+            reads, 4,
+            "failed and unchanged reads are retried, then it stops"
+        );
+    }
+
+    #[test]
+    fn polling_gives_up_when_the_wait_is_over() {
+        let mut reads = 0;
+
+        let plan = poll_plan(
+            || {
+                reads += 1;
+                Ok(Some(plan(PlanStatus::Active)))
+            },
+            |plan| addon_limit(plan, Addon::Machine) != 2,
+            Duration::from_millis(1),
+            Duration::from_millis(20),
+        );
+
+        assert_eq!(plan, None);
+        assert!(reads >= 1);
     }
 
     #[test]
