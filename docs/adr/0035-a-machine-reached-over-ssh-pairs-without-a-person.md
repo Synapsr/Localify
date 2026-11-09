@@ -9,8 +9,10 @@ So `localify machines pair B --over-ssh <destination>` runs the whole pairing fr
 - It reads both codes and compares them in Localify's own code.
 - It confirms both sides only when they match, and cancels both otherwise.
 
-The trust comes from the SSH access the caller already has, which is exactly the access a person would use. Without `--over-ssh`, a person still confirms at a terminal or in the app, as before.
+The trust comes from the SSH access the caller already has, which is exactly the access a person would use, so that access must itself be authenticated. The SSH host key must already be trusted: an unknown or changed key fails, since an attacker who could answer for B over SSH and sit in the relay would otherwise pass the comparison. B's daemon must also report the machine id and the account A expects. Without `--over-ssh`, a person still confirms at a terminal or in the app, as before.
 
-`--for-ssh` answers only to the process that started it. It prints its code on stdout and accepts one line on stdin, the code A showed. It confirms only when that line equals its own code. It refuses when stdin is a terminal, so a person cannot use it by mistake.
+`--for-ssh` is a machine-readable interface for whoever runs it as a user that can reach B's daemon. It is not a check of its own: someone with access to B alone could feed it back its own code, which authorizes B's side only, never A's. The comparison that protects the pairing is A's. It refuses a terminal, which only keeps a person from using it by mistake.
 
 The MCP server still has no pairing tool. An agent pairs through the CLI and its own SSH access, which a person granted. Removing a machine from the account stays a person's decision.
+
+A lost connection after the confirmations started can leave one side pinned. That was already true of every pairing. The contract now says so: the CLI reports what each side did, and pairing the same machines again completes it.
