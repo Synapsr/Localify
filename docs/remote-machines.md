@@ -61,6 +61,17 @@ Three switches on each machine, set only on that machine, in the app's Settings 
 
 Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already dispatched finish, but no new one starts. The daemon confirms the change only once it has done so, with every waiting answer dropped, so nothing a service prints afterwards reaches a paired machine.
 
+### Asking for access
+
+A viewer can ask a target to turn on `control`, or `control` and `backgroundStarts`, with `access.request` (session protocol 2). The request changes nothing by itself: a person on the target decides (ADR 0033).
+
+1. The target answers at once `granted` when the switches asked for are already on, `busy` when another request is waiting on this target, and `too_many` with `retryAfter` when this viewer asked less than 60 seconds ago, counted on the target's monotonic clock from its previous request, whatever came of it.
+2. When the desktop app answers on its bridge, the target sends it `access` (see "The app bridge"). The app shows a dialog, without taking focus but with the app's notification: "A asks to start, stop and restart services on this Mac." For `backgroundStarts`, it adds "…even when Localify is closed." The buttons are `Allow` and `Don't allow`. `Allow` turns the switches on as Settings → Remote access does, then the target answers `granted`. `Don't allow`, closing the dialog, or 2 minutes without an answer, answers `declined`.
+3. When the app is absent, the target answers `nobody` at once. The viewer then shows the command to run on the target.
+4. A session that ends, or a switch turned off while the request waits, closes the dialog and answers nothing; the viewer reads the outcome from its next snapshot. Nothing is queued.
+
+Granting changes the settings, so the inventory's revision moves and the viewer's next snapshot carries controls that are allowed. The settings change only through the management socket's `remote_settings`, the same as Settings → Remote access and `localify machines settings`. A person who lets an agent run commands on the target, for example over SSH, lets it run `localify machines settings --control on` too.
+
 ## Trust
 
 ### Keys
@@ -287,7 +298,7 @@ JSON objects inside Noise transport messages, at most 32 KiB before encryption. 
 ```ts
 // Both ways, first.
 type Hello = {
-  t: "hello"; proto: { min: 1; max: 1 }; version: string;
+  t: "hello"; proto: { min: 1; max: 2 }; version: string;
   now: string;                         // RFC 3339, the sender's clock
   role: "viewer" | "target";
   // Target only.
@@ -308,13 +319,17 @@ type OutputAck    = { t: "output.ack"; re: string; offset: number };
 type OutputUnfollow = { t: "output.unfollow"; re: string };
 type Keep = { t: "keep"; ids: string[] };   // heartbeat; also renews these watches and follows
 type ControlStatus = { t: "control.status"; id: string; requestId: string };  // answered with a control.result
+// Session protocol 2.
+type AccessRequest = { t: "access.request"; id: string; wants: "control" | "backgroundStarts" };  // backgroundStarts asks for control too
 type Control = {
   t: "control"; id: string;
   action: "start" | "stop" | "restart";
   service: { projectId: string; environment: string | null; serviceId: string };
   profile: string | null;              // start only: a name LaunchProfiles::load resolves; null is the effective default
   requestId: string;                   // 16 random bytes, base64url: names this control across sessions
-  expect: { runId: string | null; configRev: string };
+  expect: { runId: string | null; configRev: string;
+    legacyPid?: number;                // protocol 2, restart only: the legacy run to relaunch (see "Relaunching a legacy run")
+  };
   expiresAt: string;                   // RFC 3339, in the target's clock
 };
 
@@ -338,6 +353,8 @@ type OutputData = {
   interrupted?: true;                  // with ended: capture stopped early (see "The end of a run")
 };
 type ControlProgress = { t: "control.progress"; re: string; phase: "dispatched" | "started" };
+// Session protocol 2. Answers an access.request; busy and too_many come as an error with re.
+type AccessResult = { t: "access.result"; re: string; outcome: "granted" | "declined" | "nobody" };
 type ControlResult = {
   t: "control.result"; re: string;
   // starting: admitted and running, not listening yet. unknown: only while the
@@ -373,7 +390,7 @@ The `code` of a `SessionError`, or of a `ControlResult` that is not `done`:
 | `control_disabled` | `control` is off | "B doesn't allow remote controls." |
 | `background_disabled` | the start or the restart would run in the background, and `backgroundStarts` is off | "Localify isn't open on B, and B doesn't allow background starts." |
 | `not_owned` | the run is in a terminal Localify does not own, or an unknown process holds the port | "This runs in a terminal on B. Stop it there." |
-| `legacy_run` | the service runs from a shell tab of an app from before run PTYs | "Relaunch it on that machine to enable remote control." |
+| `legacy_run` | the service runs from a shell tab of an app from before run PTYs, and its PID is not proven, or the control is not a relaunch | "Relaunch it on that machine to enable remote control." |
 | `owner_gone` | an app run outlived its app: stop is allowed, restart is not | "Stop it, then start it again." |
 | `refused_profile` | a dangerous, unknown or removed profile | "Start it on B to use this profile." |
 | `refused_argument` | a command, path, env value or option a remote control never takes | — (the CLI and the MCP server refuse these before sending; only a modified client gets here) |
@@ -392,7 +409,7 @@ The `code` of a `SessionError`, or of a `ControlResult` that is not `done`:
 
 ### Versioning
 
-Two versions move separately. The relay protocol is the WebSocket subprotocol, `localify-remote.1`; a Worker that drops one closes its sockets with `4002`. The session protocol is `proto` in `hello` and in `presence`, and its version is also in the prologue. Peers use the highest version both support; when their ranges do not overlap, the viewer shows "Update needed" before opening a session. A new optional field is added without a new version, and a receiver ignores fields it does not know, except in `control`, where an unknown field is refused so that no argument is ever silently dropped. A new message type, or a change in meaning, takes a new version, and a sender never sends a type the peer's version lacks.
+Two versions move separately. The relay protocol is the WebSocket subprotocol, `localify-remote.1`; a Worker that drops one closes its sockets with `4002`. The session protocol is `proto` in `hello` and in `presence`, and its version is also in the prologue. Peers use the highest version both support, which the viewer learns from the target's `presence` before it opens a session; that version is the digit of the prologue's label (`localify-remote/2`), so a relay cannot downgrade a session. When their ranges do not overlap, the viewer shows "Update needed" before opening a session. Version 2 adds `access.request`, `access.result` and `expect.legacyPid`; a viewer never sends them to a target that agreed on version 1. A new optional field is added without a new version, and a receiver ignores fields it does not know, except in `control`, where an unknown field is refused so that no argument is ever silently dropped. A new message type, or a change in meaning, takes a new version, and a sender never sends a type the peer's version lacks.
 
 ## Inventory
 
@@ -413,6 +430,7 @@ type InventoryItem = {
   run: {
     runId: string | null;           // null for a legacy run
     legacy: boolean; startedAt: string; profile: string | null; profileDanger: boolean;
+    legacyPid?: number;             // a legacy run whose PID is proven: what a relaunch names
     exit: { at: string; code: number | null } | null;
   } | null;                         // the service's last recorded run
   process: "running" | "stopped";   // whether any process of the run's session is alive
@@ -428,7 +446,7 @@ type InventoryItem = {
 - **Sources:** the configured projects, environments and services (the config the daemon loads, polled every 2 seconds); the checkouts' `localify.toml`; the running-service records in `services/`; a TCP connect to each service's port on `127.0.0.1`, 200 ms timeout, from at most 16 threads and within 1 second for all of them, a port not probed by then being `reachable: null`; the daemon's own runtime for public URLs and the tunnel (public-urls.md, "Tunnel").
 - **Four states:** `process` comes from the run's session, running while any process proven to belong to the run is alive (see "The end of a run"); `port.reachable` from the connect; `output.available` from the recorded run's stream, whoever holds the port now (`unknown_owner` only for a listener with no stream to attribute); `publicUrl.serving` from the URL's state, the machine that serves it, and this machine's tunnel being connected. They disagree often, and the UI shows each one: a process running with its port not reachable yet is "Starting"; a reachable port with no running record is `owner: "unknown"`.
 - **`configRev`:** the first 16 hex digits of HMAC-SHA-256, under a per-machine secret, over the canonical JSON of what a launch of this service would use: the service's entry as the daemon loaded it (command, folder, port, domains, environment); the effective launch plan `localify dev` resolves from it, through the one resolver both share (the argv after package-manager and script detection, the working folder, the framework arguments Localify adds) and the profile it would choose; the `package.json` of the service folder and of the checkout root that plan was read from; and the full effective profile definitions of its checkout as `LaunchProfiles::load` gives them (each profile's name, sources, `danger`, `max_duration`, `browser_indicator`, and its inline `[profiles.<name>.env]` values). It changes whenever any of them does. The HMAC keeps a low-entropy inline value from being guessed from a revision. The secret is 32 random bytes in `<data dir>/launch-rev.key` (0600), made on first need: written to a temporary file, then linked to its name, so two first uses at once agree on one key and a key is never replaced. The executor computes the revision from the definition it loaded and runs from that same definition (see "Controls"): in PR 4, a remote launch executes the plan it checked against `--expect-rev`, and never resolves it again.
-- **Legacy, in the inventory:** a record with no run id, and an app record with a run id but no stream (a shell tab of an app from before run PTYs), show `legacy: true`, `runId: null` and `output.reason: "legacy_run"`. While such a run is alive or unproven, every control is refused with `legacy_run`; once it is over, a start is allowed.
+- **Legacy, in the inventory:** a record with no run id, and an app record with a run id but no stream (a shell tab of an app from before run PTYs), show `legacy: true`, `runId: null` and `output.reason: "legacy_run"`. While such a run is alive or unproven, every control is refused with `legacy_run`; once it is over, a start is allowed. A legacy run whose PID is proven carries `legacyPid`, and for a viewer on session protocol 2, its `restart` follows the usual checks (`control`, the owner, `backgroundStarts`) instead of `legacy_run`, since a restart of it is a relaunch (see "Relaunching a legacy run"). The inventory is built per session, so a viewer on protocol 1 still sees `legacy_run`.
 - **`controls`:** what this viewer may do right now, with the code a refusal would carry, so the UI disables a button and says why before anyone clicks.
 - **`share` off:** the target sends `machine` and no items.
 - **Epoch and revision:** `epoch` is random, chosen at daemon start; `rev` starts at 1 and goes up whenever the snapshot's content changes. A request whose `have` matches gets `inventory.unchanged`.
@@ -574,10 +592,13 @@ The executor checks the expiry, the revision and the profile again when the laun
 | restart | `app` | absent | refuses `owner_gone` |
 | restart | `background` | — | refuses `background_disabled` unless `backgroundStarts` is on; otherwise stops it, then starts it detached |
 | restart | any | — | refuses `refused_profile` when the run's profile is now dangerous, unknown or removed |
-| any | a legacy run | — | refuses `legacy_run`; it keeps running |
+| restart, with `expect.legacyPid` | a legacy run, its PID proven | — | relaunches it (below) |
+| any other | a legacy run | — | refuses `legacy_run`; it keeps running |
 | any | `terminal`, `unknown` | — | refuses `not_owned`; the status stays visible |
 
 A restart keeps the run's profile. Its stop waits until the old run has ended, every process gone and its lock released, before the new launch is dispatched.
+
+**Relaunching a legacy run.** A restart whose `expect.runId` is `null` and whose `expect.legacyPid` is the PID the inventory showed names a legacy run. The target refuses `conflict` when the service's record no longer names that PID, and `legacy_run` when the PID is not proven by the rule of "Legacy runs" (it is then never signalled). The replacement start must be allowed first, as for any restart: when the app runs, it starts in a new service tab; otherwise it needs `backgroundStarts`, or the target refuses `background_disabled` and the run keeps running. The profile is the one the record names, and it must still be allowed. The target then stops the run as `localify stop` stops a legacy run, waits until the PID is gone and the lock is free, and dispatches the start. The command is the service's configured one. A command typed after `--` when it was first started is not kept, and the viewer's confirmation says so. The request entry, the launch and its record work as for any restart, with `stopped: {legacyPid, at}`.
 
 **Detached starts.** The daemon resolves its own executable once at start, canonicalized, and never looks `localify` up on `PATH`. It resolves the shell environment with the app's resolver (see "Output"), cached until the daemon restarts or the app's `Reload shell environment` asks it to resolve again; on failure it uses its own environment and says so in `remote_status`. It then spawns `<that path> --config <path> dev <service> --project <id> [--env <slug>] [--profile <name>] --remote-launch <id> --launch-expires <t> --expect-rev <rev> --request <machineId>:<requestId> --detach` directly with that environment, so no argument passes through a shell. Stdin is `/dev/null` and the process gets its own session. Startup is bounded: once the launch has expired, the daemon creates the `expired` record if none exists, and kills the process's session unless the launch was admitted. A run that started then has 90 seconds to listen.
 
@@ -590,7 +611,9 @@ The desktop app listens on `<data dir>/app-bridge.sock`, a Unix socket only its 
 | `{"cmd": "hello"}` | `{"ok": true, "data": {"version": "…", "bridge": 1}}` |
 | `{"cmd": "launch", "launchId", "expiresAt", "service": {projectId, environment, serviceId}, "profile", "expectRev", "replaces", "requestedBy": {machineId, name, requestId}}` | `{"ok": true, "data": {"accepted": true}}` once the run PTY is spawned, within 5 s |
 
-`replaces` is the run id whose tab the new run takes, or `null` for a new tab. The app spawns `localify dev` with `--remote-launch`, `--launch-expires`, `--expect-rev` and `--request` from the request, with the resolved shell environment, so the executor fences it and records who asked. Errors are `{"ok": false, "error": {"code", "message"}}`, with the codes of "Errors". The app opens the tab without taking focus and shows "Started by A" for 5 seconds. Stops need no bridge: the target signals the run itself, and the tab shows the exit. The app's own launch button and `dev --detach` pass launch ids the same way, and `localify dev --in-app` uses the bridge when the app answers, keeping the deep link only to open an app that is not running.
+| `{"cmd": "access", "requestId", "machine": {id, name}, "wants": "control" \| "backgroundStarts", "expiresAt"}` | `{"ok": true, "data": {"answer": "granted" \| "declined"}}` once a person answered, or at `expiresAt`, 2 minutes after it was asked |
+
+`replaces` is the run id whose tab the new run takes, or `null` for a new tab. For `access`, the app shows the dialog of "Asking for access", turns the switches on through `remote_settings` when the person allows it, and answers only then. A second `access` while one waits is refused `busy`. The target closes the connection to withdraw a request, and the app then closes its dialog. The app spawns `localify dev` with `--remote-launch`, `--launch-expires`, `--expect-rev` and `--request` from the request, with the resolved shell environment, so the executor fences it and records who asked. Errors are `{"ok": false, "error": {"code", "message"}}`, with the codes of "Errors". The app opens the tab without taking focus and shows "Started by A" for 5 seconds. Stops need no bridge: the target signals the run itself, and the tab shows the exit. The app's own launch button and `dev --detach` pass launch ids the same way, and `localify dev --in-app` uses the bridge when the app answers, keeping the deep link only to open an app that is not running.
 
 ### State machine
 
@@ -744,9 +767,14 @@ The daemon opens a session only when one of these asks for it, carries every req
   | `signed_out` | "Signed out" with `Unpair` |
   | `unavailable` | "Remote access needs Localify Cloud Pro", with the plan card's action |
 
-- **A remote machine's view** is the Projects screen of that machine, drawn like this Mac's and read-only: no editor, no domain or profile editing, no terminal. A banner says "You're viewing B. Its .localify URLs open only on B." Each project is a card like this Mac's: the primary checkout's services as domain chips, and each worktree folded under one line with its count of services that answer. A chip holds a dot (green once the service answers, amber while it starts, red after a failed exit, grey when stopped), the domain, the port, the public URL's globe, the launch profile, Start or Stop, and a menu with `Show output`, `Open public URL`, `Copy URL` and `Restart`. The dot's tooltip gives the owner ("In the app", "In the background", "In a terminal", "Unknown process") and the four states: Process, Port, Output, Public URL. The Start, Stop and Restart buttons follow `controls`; a disabled one says why. A control in flight shows its progress, and `unknown` shows "Outcome unknown. Checking B…".
+- **A remote machine's view** is the Projects screen of that machine, drawn like this Mac's and read-only: no editor, no domain or profile editing, no terminal. A banner says "You're viewing B. Its .localify URLs open only on B." Each project is a card like this Mac's: the primary checkout's services as domain chips, and each worktree folded under one line with its count of services that answer. A chip holds a dot (green once the service answers, amber while it starts, red after a failed exit, grey when stopped), the domain, the port, the public URL's globe, the launch profile, Start or Stop, and a menu with `Show output`, `Open public URL`, `Copy URL` and `Restart`. The dot's tooltip gives the owner ("In the app", "In the background", "In a terminal", "Unknown process") and the four states: Process, Port, Output, Public URL. The Start, Stop and Restart buttons follow `controls`. A control in flight shows its progress, and `unknown` shows "Outcome unknown. Checking B…".
+- **Quick actions:** a control that is not allowed stays clickable and opens a small card that says why and what fixes it, instead of a disabled button:
+  - `control_disabled` or `background_disabled`: `Ask B`, which sends `access.request` and shows "Waiting for an answer on B…", then "B allowed remote controls." or "B didn't allow it.", and for `nobody` "Nobody can answer on B." Below it, always, "Or run this on B:" with `localify machines settings --control on` (with `--background-starts on` for the second) and a copy button. Against a target on protocol 1, only the command shows.
+  - `legacy_run` on a running service, and Output's "Relaunch to share": `Relaunch on B`, after a confirmation, "web started before this version of Localify on B. Relaunch it so its output and controls work here? It restarts with its configured command." When controls are off, the card asks for access first, then relaunches.
+  - `not_owned`, `owner_gone`, `refused_profile` and the others: the message, with no action.
 - **URLs:** a remote `.localify` URL is copied, never opened. Clicking the domain opens the output when it is shared, and copies the URL otherwise. When the service has a public URL that serves, its globe and `Open public URL` open it.
 - **Output** opens in a panel docked at the bottom, sized, coloured and resized like the terminal panel, titled with the project and service, "on B", with search, Follow / Pause and selectable text (see "Output"). The terminal panel holds this Mac's PTYs only, so remote output stays out of it; opening one closes the other.
+- **Access dialog,** on a target whose app runs: the dialog of "Asking for access".
 - **Settings → Remote access,** on every machine: the three switches with one line each ("Share projects and output with paired machines", "Allow paired machines to start, stop and restart services", "Allow background starts when the app is closed"), a note that output can contain secrets the services print and what is typed into service tabs, this machine's fingerprint, and the paired machines with `Unpair` and `Remove from account`.
 - **Pairing dialogs,** with the wording of "Pairing".
 
@@ -854,7 +882,13 @@ Each PR ships only once its gate passes in CI, on top of its own unit tests.
 1. **Local foundations.** Run identity (run ids, `--launch-id`); the run PTY in the app, with the shell-environment resolver and `Reload shell environment`, the exit view with `Restart` and `Open a terminal here`, Ctrl-Z disabled, and stop and restart by session and process group; one supervisor for every launch; the run lock in the executor and fatal atomic registration; native process identity, `lastAliveAt` and the end of a run (proven membership, interrupted capture, finalization locks); legacy runs; the per-run stream from run PTYs and background pipes, with bounded reads by `{runId, offset}`; `localify logs` and `service_logs` on it; removing the whole-shell copy and `LOCALIFY_SERVICE_OUTPUT`; the inventory projection with its four states and HMAC revisions. Gate: capture isolation, shell environment, concurrent launches, end of a run, migration.
 2. **Trust and relay.** Keys, pins and settings files; Noise sessions, heartbeats and pairing with `snow`; the `RemoteRelay` object and routes, with the pre-auth guard and lazy checks; send pacing; migration 0006; `remoteAccess` in the entitlement, `/v1/me` and `cloud:admin`; leases and revocation pushes; reconnects; the management socket commands for status, roster and pairing; `localify machines`, `pair`, `unpair`, `remove` and `settings`; the cost measurement. Gate: pairing, replay, identity, leases, hibernation, reconnect storm.
 3. **Desktop viewing,** the first useful release: the switcher, the pairing dialogs, Settings → Remote access, the remote Projects view, Output. Gate: revocation end to end.
-4. **Remote controls.** Launch fencing (`--launch-expires`, `--expect-rev`, `--remote-launch`) and launch records published with `link`; request entries and `control.status`; the app bridge, with `dev --in-app` on it; ownership-aware start, stop and restart; the control executor on the target, its state machine and reconcile; detached starts; the buttons and their states in the app. Gate: control races and launch outcomes.
+4. **Remote controls,** for 1.6, in four PRs:
+   - **4a, launch fencing:** `--launch-expires`, `--expect-rev`, `--remote-launch` and `--request` in the executor; launch records published with `link`, the reconciler, retention and sweeps.
+   - **4b, the app bridge:** `app-bridge.sock` with `hello`, `launch` and `access`; `dev --in-app` on it; the app's own launches with launch ids.
+   - **4c, the control executor:** session protocol 2; request entries and `control.status`; the target checks, ownership-aware start, stop and restart, the legacy relaunch, detached starts, the state machine and reconcile; `access.request` on the target; the viewer's commands in `DesktopApi`.
+   - **4d, the app:** the buttons and their states, the quick actions and the access dialog.
+
+   Gate: control races and launch outcomes, and access requests.
 5. **CLI and MCP:** `--machine` on status, logs, dev, stop and restart; `list_machines` and the `machine` argument.
 
 ### Gates
@@ -904,6 +938,8 @@ Against a real daemon, a real app process where it says so, and the relay in `wr
 - A lost acknowledgement is reported exactly: launch A starts and exits, a local launch B then replaces the service's record, and the bridge's acknowledgement of A was lost. The target still reports A as admitted and exited, with its code.
 - A profile changed between the target's check and execution, to dangerous or to other sources, is refused by the executor.
 - A restart of a background run with `backgroundStarts` off is refused, and the run keeps running.
+- Access requests: with the app running on the target, `Allow` turns `control` on and the viewer's next snapshot allows controls; `Don't allow` and 2 minutes without an answer change nothing. With the app absent, the answer is `nobody` and nothing changes. A second request within a minute gets `too_many`, a second viewer's while one waits gets `busy`, and a session that ends closes the dialog. A target on protocol 1 is never sent `access.request`.
+- A legacy relaunch: a proven legacy run restarted with `expect.legacyPid` ends and is replaced by a run with a run id and a stream; an unproven one, or one whose record names another PID, is never signalled; with the app absent and `backgroundStarts` off, it is refused before anything stops.
 - External starts and config changes converge: while a viewer watches, the service is started from a terminal, stopped with `localify stop`, and its config edited. Within 12 seconds, the viewer's snapshot shows each state, and a control built on the old one gets `conflict`.
 
 ## Open questions
