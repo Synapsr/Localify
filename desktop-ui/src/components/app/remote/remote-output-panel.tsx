@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 
 import type { RemoteInventoryItemDto } from "@/types/localify";
 
@@ -10,6 +17,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { formatClock, remoteErrorMessage } from "@/lib/util.remote";
 import { filterOutput } from "@/lib/util.remote-output";
 import { cn } from "@/lib/utils";
+import { useTerminal } from "@/providers/terminal-provider";
 
 import { type OutputStatus, useRemoteOutput } from "./use-remote-output";
 
@@ -22,7 +30,8 @@ interface RemoteOutputPanelProps {
 
 /**
  * A service's output on another machine: read-only plain lines, selectable, with search and
- * Follow / Pause (docs/remote-machines.md, "Showing it"). Never a terminal.
+ * Follow / Pause (docs/remote-machines.md, "Showing it"). Never a terminal, but docked, sized
+ * and coloured like the terminal panel.
  */
 export function RemoteOutputPanel({
   machineId,
@@ -37,6 +46,7 @@ export function RemoteOutputPanel({
   const scroller = useRef<HTMLDivElement>(null);
   const shown = useMemo(() => filterOutput(buffer.entries, query), [buffer.entries, query]);
   const partial = query ? null : buffer.partial;
+  const { panelHeight, setPanelHeight } = useTerminal();
 
   // Following keeps the newest line in view; paused, lines arrive without scrolling.
   useEffect(() => {
@@ -44,16 +54,52 @@ export function RemoteOutputPanel({
     scroller.current.scrollTop = scroller.current.scrollHeight;
   }, [shown, partial, paused]);
 
-  return (
+  // Same handle and height as the terminal panel.
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = panelHeight;
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      setPanelHeight(startHeight + (startY - moveEvent.clientY));
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  };
+
+  // On the body: the page slides between screens, and a transformed parent would carry it.
+  return createPortal(
     <section
       aria-label={`Output · ${item.service.name} · ${machineName}`}
-      className="flex h-80 shrink-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-neutral-950 text-neutral-200 shadow-lg"
+      className="fixed inset-x-1.5 bottom-1.5 z-50 flex flex-col overflow-hidden rounded-lg border border-neutral-800 bg-[#111111] text-neutral-100 shadow-2xl"
+      style={{ height: panelHeight }}
     >
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-white/10 bg-neutral-900 pr-2 pl-3">
-        <h2 className="min-w-0 flex-1 truncate text-xs font-medium text-neutral-300">
-          Output · {item.service.name} · {machineName}
-        </h2>
-        <InputGroup className="h-7 w-48 border-white/10 bg-white/5 text-neutral-200">
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        onPointerDown={startResize}
+        className="absolute inset-x-0 top-0 z-20 h-1 cursor-ns-resize bg-transparent hover:bg-neutral-600/50"
+      />
+      <header className="flex h-10 shrink-0 items-center gap-1 border-b border-white/10 bg-[#171717] px-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          <span className="flex h-7 min-w-0 items-center gap-1.5 rounded-md bg-white/10 px-2 text-xs text-white">
+            <span
+              aria-hidden
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                item.process === "running" ? "bg-emerald-400" : "bg-neutral-600",
+              )}
+            />
+            <span className="min-w-0 truncate">
+              {item.project.name} / {item.service.name}
+            </span>
+          </span>
+          <span className="min-w-0 truncate px-1 text-xs text-neutral-500">on {machineName}</span>
+        </div>
+        <InputGroup className="h-7 w-44 border-white/10 bg-white/5 text-neutral-200">
           <InputGroupInput
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -83,7 +129,7 @@ export function RemoteOutputPanel({
           size="icon-xs"
           variant="ghost"
           className="text-neutral-300 hover:bg-white/10 hover:text-white"
-          aria-label="Close output"
+          aria-label="Hide output"
           onClick={onClose}
         >
           <XIcon className="size-4" />
@@ -92,7 +138,7 @@ export function RemoteOutputPanel({
       <StatusBar status={status} item={item} machineName={machineName} />
       <div
         ref={scroller}
-        className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-xs leading-5 select-text"
+        className="min-h-0 flex-1 overflow-y-auto bg-[#101010] px-3 py-2 font-mono text-xs leading-5 text-neutral-100 select-text"
       >
         {shown.map((entry) =>
           entry.kind === "notice" ? (
@@ -112,7 +158,8 @@ export function RemoteOutputPanel({
           </div>
         ) : null}
       </div>
-    </section>
+    </section>,
+    document.body,
   );
 }
 

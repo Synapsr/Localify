@@ -55,6 +55,9 @@ interface RemoteContextValue {
   incoming: IncomingPairing | null;
   answerIncoming: (accept: boolean) => Promise<void>;
   dismissIncoming: () => void;
+  /** A remote service's output covers the bottom of the window, as the terminal does. */
+  outputOpen: boolean;
+  setOutputOpen: (open: boolean) => void;
 }
 
 const RemoteContext = createContext<RemoteContextValue | null>(null);
@@ -65,6 +68,7 @@ export function RemoteProvider({ children }: PropsWithChildren) {
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
   const [outgoing, setOutgoing] = useState<OutgoingPairing | null>(null);
   const [incoming, setIncoming] = useState<IncomingPairing | null>(null);
+  const [outputOpen, setOutputOpen] = useState(false);
   const closeOutgoing = useRef<(() => void) | null>(null);
   const incomingRef = useRef(incoming);
   incomingRef.current = incoming;
@@ -238,6 +242,8 @@ export function RemoteProvider({ children }: PropsWithChildren) {
       incoming,
       answerIncoming,
       dismissIncoming,
+      outputOpen,
+      setOutputOpen,
     }),
     [
       selectedMachineId,
@@ -249,6 +255,7 @@ export function RemoteProvider({ children }: PropsWithChildren) {
       incoming,
       answerIncoming,
       dismissIncoming,
+      outputOpen,
     ],
   );
 

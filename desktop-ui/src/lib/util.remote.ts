@@ -215,7 +215,7 @@ export function ownerLabel(owner: RemoteOwner | null): string | null {
   }
 }
 
-export interface ServiceChip {
+interface ServiceChip {
   name: "Process" | "Port" | "Output" | "Public URL";
   value: string;
   tone: RemoteTone;
@@ -282,10 +282,17 @@ function publicUrlChip(item: RemoteInventoryItemDto): ServiceChip {
   };
 }
 
-/** A target's `.localify` URL, which resolves on that machine only: `web.louez.localify · on B`. */
-export function remoteUrlLabel(localUrl: string, machine: string): string {
-  const host = localUrl.replace(/^[a-z]+:\/\//i, "").replace(/\/$/, "");
-  return `${host} · on ${machine}`;
+/** A target's `.localify` URL without its scheme: `web.louez.localify`. */
+export function remoteHost(localUrl: string): string {
+  return localUrl.replace(/^[a-z]+:\/\//i, "").replace(/\/$/, "");
+}
+
+/** One dot for a service, like this Mac's chips: green only once its port answers. */
+export function serviceTone(item: RemoteInventoryItemDto): RemoteTone {
+  if (item.port.reachable === true) return "ok";
+  if (item.process === "running") return "pending";
+  const exit = item.run?.exit;
+  return exit && exit.code !== null && exit.code !== 0 ? "error" : "off";
 }
 
 export interface RemoteEnvironmentGroup {
