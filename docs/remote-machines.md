@@ -59,7 +59,7 @@ Three switches on each machine, set only on that machine, in the app's Settings 
 | `control` | No start, stop or restart from another machine. | Paired machines may start, stop and restart services this machine owns (see "Controls"). Needs `share`. |
 | `backgroundStarts` | A remote start needs the desktop app running here, and a background run cannot be restarted remotely. | A remote start runs detached in the background when the app is closed, and a background run can be restarted in the background. Needs `control`. |
 
-Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already dispatched finish, but no new one starts. The daemon confirms the change only once it has done so, with every waiting answer dropped, so nothing a service prints afterwards reaches a paired machine.
+Turning `share` off also turns the others off. Turning a switch off ends what depends on it at once: watches and follows end with `not_shared`, and controls already dispatched finish, but no new one starts. A control or a `control.status` still going is answered `error` `not_shared` at once, and whatever it comes to is never sent; while `share` is off, `control.status` answers `not_shared` without reading anything. The daemon confirms the change only once it has done so, with every waiting answer dropped, so nothing a service prints afterwards reaches a paired machine.
 
 ### Asking for access
 
@@ -361,8 +361,9 @@ type AccessResult = { t: "access.result"; re: string;
   outcome: "granted" | "declined" | "nobody" | "expired" | "cancelled" };
 type ControlResult = {
   t: "control.result"; re: string;
-  // starting: admitted and running, not listening yet. unknown: only while the
-  // launch has no record and its expiry has not passed.
+  // starting: admitted and running, not listening yet. unknown: transient,
+  // while nothing is decided yet: the launch has no record and its expiry has
+  // not passed, or the target still works on the request. The viewer asks again.
   outcome: "done" | "starting" | "refused" | "conflict" | "failed" | "unknown";
   code: string | null;                 // see "Errors" when not done
   message: string;
@@ -401,13 +402,13 @@ The `code` of a `SessionError`, or of a `ControlResult` that is not `done`:
 | `unknown_service` | the ids name nothing in the target's config | "This service no longer exists on B." |
 | `conflict` | the run, the config or the profile changed since the viewer looked, another launch won, or a previous run still has live processes | "B changed in the meantime." with the fresh state |
 | `expired` | the control arrived after `expiresAt` or with `expiresAt` more than 60 s ahead, or the launch reached `localify dev` after its own expiry | "The request took too long to reach B. Nothing was started." |
-| `busy` | another control of this service is in flight on the target, too many handshakes or pairings, or another access request is waiting on B | "Something else is starting or stopping it on B."; for access: "B is answering another request." |
+| `busy` | another control of this service is in flight on the target, too many controls and `control.status`es of this viewer or of all viewers already going on B (with `retryAfter`), too many handshakes or pairings, or another access request is waiting on B | "Something else is starting or stopping it on B."; for access: "B is answering another request." |
 | `unauthorized` | the target could not get a fresh lease, or the viewer is not in it | "Remote access is not available right now." |
 | `output_unavailable` | no output stream for that run, with the reason | see "Output" |
 | `gone` | the run id is not the service's last run | the viewer moves to the current run |
 | `request_mismatch` | a `requestId` the target already has, sent with another action, service or expected revision | "This request doesn't match the one B recorded." |
 | `unknown_request` | `control.status` names a request id the target does not have, or no longer has after 24 hours | "B has no record of that request." |
-| `too_many` | over a watch, follow or session bound, or an access request too soon (with `retryAfter`) | for access: "You asked B recently. Try again in 9 min." |
+| `too_many` | over a watch, follow or session bound, an access request too soon (with `retryAfter`), or more new controls from this viewer than request entries allow (see "Request entries") | for access: "You asked B recently. Try again in 9 min." |
 | `unsupported` | a message the peer's version does not know | "Update Localify on B." |
 | `bad_request` | malformed, or out of bounds | — |
 
@@ -475,7 +476,7 @@ Output shown remotely is everything one run's own channel carried, and nothing e
 - **Typed input is part of the output.** Keystrokes a person types into a running service tab are echoed by the terminal into the stream, so `localify logs` and paired machines see them. That is accepted. The tab says it in its footer while `share` is on: "What you type here appears in this service's output." Input with echo turned off, such as a password prompt, is not echoed.
 - **Run id:** the launch id the dispatcher chose: the app for a run PTY, `dev --detach` for a background run, the daemon for a remote launch. A person's own `localify dev` picks one itself. It is 16 random bytes, base64url, recorded as `runId` in the run's record.
 - **Location:** `<state dir>/services/output/<runId>/`, made of 4 MiB segments named by their index (`0.log`, `1.log`, …), segment `k` holding logical bytes `[k × 4 MiB, (k + 1) × 4 MiB)`. The writer keeps the two newest, so between 4 and 8 MiB of the end of a run stay readable. Writers derive the path from the run id they chose; nothing ever reads a path from the output.
-- **Background runs:** the detached executor gives the service pipes for stdout and stderr, stdin closed, and copies them into the stream itself. The executor's own messages (a refusal, the launch summary) are not the service's output: `dev --detach` sends them to `services/launches/<launchId>.log`, which it shows when the launch fails, and which goes with the run's stream.
+- **Background runs:** the detached executor gives the service pipes for stdout and stderr, stdin closed, and copies them into the stream itself. The executor's own messages (a refusal, the launch summary) are not the service's output: `dev --detach` sends them to `services/launches/<launchId>.log`, which it shows when the launch fails, and which goes with the run's stream; so does the daemon for the executors it spawns (see "Detached starts").
 - **Terminal runs** have no stream: `output.reason` is `terminal`.
 - **Records** say where their output is: `output: "pty"` for a run PTY, `"pipe"` for a background run, `null` otherwise.
 - **Legacy runs.** A service already running from a shell tab when the app updates (origin `app`, no run id) is left as it is. It is shown with a legacy identity, its PID and start time. Its PID is trusted, and signalled, only when the process's native start reads as the start time `ps` recorded, to the second and unambiguously, and this boot began before the record was written. Otherwise the run is `unknown`: never signalled, and to be stopped by hand; its output is unavailable remotely (`legacy_run`); and its remote controls are disabled with "Relaunch it on that machine to enable remote control." The old whole-shell file is never a fallback.
@@ -559,7 +560,7 @@ From a record, a reconciler reports exactly one of: admitted and starting; admit
 
 ### Request entries
 
-Every control from a peer leaves a request entry, `services/requests/<peer machine id>/<requestId>.json`, published like a launch record before the target takes any step that changes something: before a dispatch, a plain stop, or the stop phase of a restart. It holds an immutable fingerprint of the control (its action, project, environment, service, profile and expected run and revision), and then links every outcome as it happens: the launch it dispatched (admitted, refused, expired, exited), and `stopped: {runId, at}` for a stop. Updates go through a temporary file renamed over the entry and never change the fingerprint. Entries are kept for 24 hours, so a stop's correlation survives a daemon restart as a start's does. Before it links a launch, the entry of a control the target still works on (a stop, or a restart's stop) reports `unknown`; one a daemon restart left with no outcome and no launch reports `failed`, and the viewer looks at the fresh snapshot.
+Every control from a peer leaves a request entry, `services/requests/<peer machine id>/<requestId>.json`, published like a launch record before the target takes any step that changes something: before a dispatch, a plain stop, or the stop phase of a restart. It holds an immutable fingerprint of the control (its action, project, environment, service, profile and expected run and revision), and then links every outcome as it happens: the launch it dispatched (admitted, refused, expired, exited), and `stopped: {runId, at}` for a stop. Updates go through a temporary file renamed over the entry and never change the fingerprint. Entries are kept for 24 hours, so a stop's correlation survives a daemon restart as a start's does. A peer creates at most 20 entries in 10 minutes: past that, a control with a new `requestId` is refused `too_many`, with how long to wait, and leaves no entry. A publication looks at its own name only; entries past their 24 hours are swept by a pass at most every 10 minutes. Before it links a launch, the entry of a control the target still works on (a stop, or a restart's stop) reports `unknown`, and the viewer asks again. One a daemon restart left without an outcome and without a launch reports `failed`, and the viewer looks at the fresh snapshot: a restart whose stop was recorded says what it stopped, and only a stop is `done` once stopped.
 
 ### Target checks
 
@@ -570,6 +571,8 @@ Current authorization comes first:
 1. The session's peer is pinned, and `hello` has been exchanged.
 2. `share` and `control` are on.
 3. A fresh lease: the target calls `GET /v1/remote/lease` now, and the viewer's machine id is among its active machines (see "Entitlement"). A failure refuses with `unauthorized`: the target fails closed.
+
+Before it asks for that lease or reads anything, the target admits the control: a viewer has at most 4 controls and `control.status`es going on it, and all viewers together 16, past which it answers `busy` with `retryAfter` at once. Unpairing the viewer here, or pairing it again with another key, cancels what it asked that is not dispatched yet, a lease still to come included; right before it dispatches, the target checks again that the viewer is pinned with the key its session authenticated, and its switches. Only a control already dispatched finishes after an unpairing.
 
 Then an existing request:
 
@@ -606,7 +609,7 @@ A restart keeps the run's profile. Its stop waits until the old run has ended, e
 
 **Relaunching a legacy run.** A restart whose `expect.runId` is `null` and whose `expect.legacyId` is the one the inventory showed names a legacy run. It follows the restart rows of its owner exactly: a legacy run of the app needs the app running, which opens a new service tab (there is no run PTY to take over), or the target refuses `owner_gone`; a background one needs `backgroundStarts`. A legacy run in a terminal or of an unknown owner has no `legacyId` and is never relaunched. The target refuses `conflict` when the service's record no longer names that `legacyId`, and `legacy_run` when its PID is no longer proven. Every check, the replacement's included, passes before anything stops. The profile is the one the record names, and it must still be allowed. The target checks the identity again right before it signals, stops the run as `localify stop` stops a legacy run, and waits until the process is gone. It then dispatches the start with `--replace-legacy <legacyId>`, through the bridge's `replacesLegacy` or the detached command line. Under the lock, the executor refuses `conflict` unless the record still names that legacy run, so a local launch that replaced it in between wins. The command is the service's configured one. A command typed after `--` when it was first started is not kept, and the viewer's confirmation says so. `legacyId` is part of the request's fingerprint, and the entry records `stopped: {legacyId, at}`.
 
-**Detached starts.** The daemon resolves its own executable once at start, canonicalized, and never looks `localify` up on `PATH`. It resolves the shell environment with the app's resolver (see "Output"), cached until the daemon restarts or the app's `Reload shell environment` asks it to resolve again; on failure it uses its own environment and says so in `remote_status`. It then spawns `<that path> --config <path> dev <service> --project <id> [--env <slug>] [--profile <name>] --remote-launch <id> --launch-expires <t> --expect-rev <rev> --request <machineId>:<requestId> --detach` directly with that environment, so no argument passes through a shell. Stdin is `/dev/null` and the process gets its own session. Startup is bounded: once the launch has expired, the daemon creates the `expired` record if none exists, and kills the process's session unless the launch was admitted. A run that started then has 90 seconds to listen.
+**Detached starts.** The daemon resolves its own executable once at start, canonicalized, and never looks `localify` up on `PATH`. It resolves the shell environment with the app's resolver (see "Output"), cached until the daemon restarts or the app's `Reload shell environment` asks it to resolve again; on failure it uses its own environment and says so in `remote_status`. It then spawns the executor itself, `<that path> --config <path> dev <service> --project <id> [--env <slug>] [--profile <name>] --remote-launch <id> --launch-expires <t> --expect-rev <rev> --request <machineId>:<requestId> [--replace=<runId> | --replace-legacy=<legacyId>]`, directly with that environment and `LOCALIFY_SERVICE_ORIGIN=background`, so no argument passes through a shell. There is no `dev --detach` in between: the process the daemon spawns is the one that takes the service's lock, and the daemon knows its PID and session. Stdin is `/dev/null`, stdout and stderr go to the launch's log, `<launchId>.log`, the service's output to the run's stream, and the process gets its own session. Startup is bounded: once the launch has expired, the daemon creates the `expired` record if none exists and, unless the launch was admitted, kills every process of that session and reaps the executor, so nothing of it, its lock included, is left. A run that started then has 90 seconds to listen.
 
 ### The app bridge
 
@@ -637,7 +640,7 @@ received ──▶ checked ──▶ matched ──▶ dispatched ──▶ star
 
 - **Dispatched:** for a start or the second half of a restart, the launch is handed to the bridge or spawned detached, with its id and expiry. For a stop, the signal is sent; a stop is `done` once the run has ended (see "The end of a run").
 - **Started:** the launch record says `admitted`. `refused` there ends the control with its code (`conflict` for a revision that changed, a run still alive, or anything else that stopped the launch before its admission, with its message; `expired`, `refused_profile`).
-- **Settling:** the run is `done` when it listens on its port within 90 seconds, counted on the target's monotonic clock from the launch's admission. That timer is separate from the cleanup after an executor dies. It is `failed` when it exits first, with its last 40 lines in the message. After 90 seconds without either, it is `starting` with "Started on B, not listening yet". The target answers `unknown` only while a launch has no record and its expiry has not passed.
+- **Settling:** the run is `done` when it listens on its port within 90 seconds, counted on the target's monotonic clock from the launch's admission. That timer is separate from the cleanup after an executor dies. The launch's record comes first: once it says the launch ended, another process listening on the port does not make it `done`. It is `failed` when it exits first, with its last 40 lines in the message, as many of the newest as fit in 16 KiB once JSON-escaped, and "[earlier output cut]" when some did not, so the result always fits in a session message. While `share` is off, the result carries no line. After 90 seconds without either, it is `starting` with "Started on B, not listening yet". The target answers `unknown` only while nothing is decided: a launch has no record and its expiry has not passed, or it still works on the request. A daemon restart in the middle of a request leaves `failed`, never `unknown` (see "Request entries").
 - **Reconciling:** when the bridge drops, does not acknowledge within 5 seconds, or the app quits, the target does not know whether the app spawned the run. It never falls back to a background start for a launch it handed to the app. It waits until the launch's expiry has passed, creates the `expired` record if none exists, and answers from the record, after which no run with that id can start: admitted and starting or running (go on settling), admitted and exited (`failed`, with its code or reason), admitted and replaced (`conflict`: another launch replaced it), refused (`refused`, with its code), or expired (`failed`: "The Localify app on B closed before starting web. Nothing was started.").
 - **Progress:** `control.progress` is sent at `dispatched` and `started`, so the viewer can say "Starting in the app on B…".
 
@@ -646,11 +649,11 @@ On the viewer:
 ```text
 idle ─▶ sent ─▶ (progress) ─▶ result: done | starting | refused | conflict | failed
           │
-          └─ session lost, or no result in 120 s ─▶ unknown ─▶ control.status, snapshot ─▶ idle
+          └─ session lost, or no result in 120 s ─▶ unknown ─▶ control.status, every 2 s ─▶ result | lost ─▶ snapshot ─▶ idle
 ```
 
-- **Lost acknowledgement:** the viewer shows "Outcome unknown. Checking B…", opens a new session when it can, and asks `control.status` with the control's `requestId`, which reports exactly what happened to it; then it shows the fresh snapshot. It never sends the control again by itself.
-- **Queued controls:** the viewer sends a control only on an open session. A control the person asked for while the session was down is not queued; the button is disabled with the connection state.
+- **Lost acknowledgement:** the viewer shows "Outcome unknown. Checking B…", opens a new session when it can, and asks `control.status` with the control's `requestId`, which reports exactly what happened to it. While B cannot be reached or answers `unknown`, it asks again every 2 seconds, for 2 minutes at most; `unknown` is never where it stops: past 2 minutes it is `lost`. Then it fetches the fresh snapshot. It never sends the control again by itself.
+- **Queued controls:** the viewer sends a control only on a session already open, whose `hello` came, and sets its `expiresAt` as it sends it. A control the person asked for while the session was down is not queued: the daemon refuses it at once with the connection state, and the button is disabled with it. `control.status` may open a session.
 - **One at a time:** the viewer allows one control per service at a time; the target's per-service queue and the run lock enforce it across viewers and local launches.
 
 ## Cloud
@@ -738,6 +741,7 @@ New management socket commands. The streaming ones keep the connection open and 
 | Command | Answer |
 |---|---|
 | `remote_status` | `{relay: "off" \| "connecting" \| "connected" \| "reconnecting" \| "blocked", blocked: {code, message} \| null, retryAt, settings, fingerprint, shellEnvironmentError}`; `shellEnvironmentError` says why background starts run with the daemon's own environment, `null` otherwise |
+| `remote_reload_shell_environment` | `{shellEnvironmentError}`, once the daemon read the user's shell environment again for background starts; the app sends it on `Reload shell environment` |
 | `remote_machines` | the roster merged with pins, presence and sessions: `[{id, name, self, paired, state, version, fingerprint, proto}]`, `state` as in "Desktop app"; `proto` is the session version agreed from the authenticated `hello`s of the open session, `null` with no session |
 | `remote_settings {share?, control?, backgroundStarts?}` | the settings after the change |
 | `remote_pair {machineId}` | streaming: `code`, then `paired` or `cancelled` |
@@ -747,7 +751,7 @@ New management socket commands. The streaming ones keep the connection open and 
 | `remote_watch {machineId}` | streaming: `{event: "connecting"}`, `{event: "snapshot", machine, epoch, rev, truncated, items}` with every page of a revision, and `{event: "lost", code, message, retryIn}`, after which the daemon asks again by itself |
 | `remote_output_read {machineId, runId, offset, maxBytes}` | one `output.data` |
 | `remote_output_follow {machineId, runId, offset?, tail?}` | streaming `{event: "data", …output.data}`; the daemon acknowledges as the client reads. Without `offset`, from the last `tail` bytes (256 KiB by default). `{event: "ended", code, message}` when the follow stops before its run did: `gone` for a restart, a refusal, or a lost session |
-| `remote_control {machineId, action, service, profile, expect}` | streaming: `{event: "sent", requestId}`, `{event: "progress", phase}`, then `{event: "result", outcome, code, message, runId}`; the client waits up to 120 s, not the usual 2. A session lost first, or no result in 120 s, gives `{event: "unknown", code, message}`, then the result `control.status` gives on a new session, or `{event: "lost", code, message}` when it cannot be had; the control is never sent again |
+| `remote_control {machineId, action, service, profile, expect}` | streaming: `{event: "sent", requestId}` once it is sent, `{event: "progress", phase}`, then `{event: "result", outcome, code, message, runId}`; the client waits up to 120 s, not the usual 2. Without a session to that machine already open, it is refused at once, `{event: "result", outcome: "refused", code}` with the connection state (`not_connected`, `connecting`, `not_responding`, `peer_offline`, `not_paired`…) and no `sent`. A session lost first, or no result in 120 s, gives `{event: "unknown", code, message}`, then the result `control.status` gives on a new session, asked every 2 s for up to 2 minutes while it is `unknown` or cannot be had, or `{event: "lost", code, message}` past that, or when the target stopped sharing (`not_shared`); the control is never sent again |
 | `remote_access {machineId, wants}` | viewer side, streaming: `{event: "waiting"}`, then `{event: "result", outcome}` with the outcomes of `access.result`, `{event: "error", code, message, retryAfter?}` for `not_shared`, `busy`, `too_many` or `unsupported`, or `{event: "lost"}` when the session ended first; closing the stream sends `access.cancel` |
 | `remote_access_suppressed` | target side: `[{machineId, name, since}]`, the peers whose requests are suppressed |
 | `remote_access_restore {machineId}` | target side: lets that peer ask again; `{ok}` |
@@ -809,7 +813,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - **Resolving a service:** there is no folder to read on another machine, so a service name must be unique on the target, or come with `--project`, and `--env` names a non-primary checkout. An ambiguous name lists the matches.
 - **What `--machine` refuses:** with `dev`, every option but `--project`, `--env` and `--profile`: no command after `--`, no `--detach`, `--in-app`, `--env-file`, `--confirm-profile` or `--domain`. The target decides where the service runs.
 - **Launch flags:** `--launch-id`, `--launch-expires`, `--remote-launch`, `--expect-rev`, `--request` and `--replace-legacy` are hidden flags for dispatchers, documented here and not in `--help`.
-- **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; `unknown` prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2.
+- **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; an outcome it could not learn (`lost`) prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2.
 - `pair` and `remove` need a terminal: an agent cannot pair or remove machines.
 
 ## MCP
@@ -819,7 +823,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - With `machine`, `service_start` takes only `service`, `project`, `env` and `profile`. `background`, `env_files`, `confirm_profile`, `command` and `domain` make it fail with an error that says the target decides how its services start. It never creates a project.
 - `service_logs` with `machine` returns a cursor `<runId>:<offset>`.
 - Pairing, unpairing, settings and removal have no tool. Like signing in (ADR 0018), they stay a person's decision.
-- An error from a target reaches the agent with its code and message, so `control_disabled` tells it to ask the user to allow controls on that machine, and `unknown` tells it to check `service_status` before trying again.
+- An error from a target reaches the agent with its code and message, so `control_disabled` tells it to ask the user to allow controls on that machine, and an outcome it could not learn (`lost`) tells it to check `service_status` before trying again.
 
 ## Failure modes
 

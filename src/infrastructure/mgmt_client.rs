@@ -87,6 +87,18 @@ impl MgmtSocketClient {
         Ok(response["data"].take())
     }
 
+    /// Asks the daemon to read the user's shell environment again, for
+    /// background starts, as the app's `Reload shell environment` does for
+    /// its own runs. The shell may take up to 10 s.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn reload_remote_shell_environment(
+        &self,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let command = r#"{"cmd":"remote_reload_shell_environment"}"#;
+        let mut response = self.send_command_within(command, Duration::from_secs(20))?;
+        Ok(response["data"].take())
+    }
+
     /// The roster with each machine's state. A probe opens a session to
     /// each paired machine online, which takes a few seconds.
     pub fn remote_machines(&self, probe: bool) -> Result<serde_json::Value, DaemonConnectionError> {

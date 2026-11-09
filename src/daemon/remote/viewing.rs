@@ -29,8 +29,10 @@ const ANSWER_WAIT: Duration = Duration::from_secs(30);
 const ACK_EVERY: u64 = WINDOW as u64 / 4;
 /// How long a control waits for its result before it is `unknown`.
 pub const CONTROL_WAIT: Duration = Duration::from_secs(120);
-/// How long an `unknown` control keeps asking `control.status`.
-const STATUS_WAIT: Duration = Duration::from_secs(60);
+/// How long an `unknown` control keeps asking `control.status`, and how
+/// often.
+const STATUS_WAIT: Duration = Duration::from_secs(120);
+const STATUS_EVERY: Duration = Duration::from_secs(2);
 
 /// A target's whole inventory: every page of one revision.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -124,8 +126,9 @@ pub struct ControlAsk {
     pub expect: ControlExpect,
 }
 
-/// What `remote_control` streams: `sent`, its progress, then its result.
-/// A session lost before the result is `unknown`, and the result comes from
+/// What `remote_control` streams: `sent`, its progress, then its result. A
+/// control that could not be sent at once is refused, and never queued. A
+/// session lost before the result is `unknown`, and the result comes from
 /// `control.status` on a new session when it can be had, or `lost` says it
 /// could not. A control is never sent again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -233,7 +236,13 @@ fn control_answer(answer: SessionMessage) -> ControlEvent {
             message: plain_line(&result.message),
             run_id: result.run_id.map(|run_id| plain_line(&run_id)),
         },
-        // A refusal before the executor, `unsupported` among them.
+        // `share` turned off on the target while it worked on the control:
+        // whatever it came to there, its answer is never sent.
+        SessionMessage::Error { code, message, .. } if code == "not_shared" => ControlEvent::Lost {
+            code,
+            message: plain_line(&message),
+        },
+        // A refusal before the executor, `busy` among them.
         other => {
             let failure = answered_with(other);
             let outcome = if failure.code == "conflict" {
@@ -248,6 +257,16 @@ fn control_answer(answer: SessionMessage) -> ControlEvent {
                 run_id: None,
             }
         }
+    }
+}
+
+/// A control that was never sent.
+fn not_sent(failure: Failure) -> ControlEvent {
+    ControlEvent::Result {
+        outcome: ControlOutcome::Refused,
+        code: Some(failure.code),
+        message: plain_line(&failure.message),
+        run_id: None,
     }
 }
 
@@ -651,7 +670,7 @@ impl RemoteLink {
             Ok(request_id) => self.control_as(peer, ask, request_id),
             Err(failure) => {
                 let (sender, receiver) = mpsc::channel(1);
-                let _ = sender.try_send(lost_control(failure));
+                let _ = sender.try_send(not_sent(failure));
                 receiver
             }
         }
@@ -680,6 +699,8 @@ impl RemoteLink {
             }
             let ended = link.control_status(&peer, &request_id).await;
             let _ = sender.send(ended).await;
+            // Then the fresh state, whatever the outcome said.
+            let _ = link.inventory(&peer).await;
         });
         receiver
     }
@@ -702,9 +723,9 @@ impl RemoteLink {
         };
         let (id, mut events) = match self.tap(peer, request).await {
             Ok(tap) => tap,
-            // Never sent: nothing to reconcile.
+            // Never sent: refused, with nothing to reconcile.
             Err(failure) => {
-                let _ = sender.send(lost_control(failure)).await;
+                let _ = sender.send(not_sent(failure)).await;
                 return None;
             }
         };
@@ -736,21 +757,35 @@ impl RemoteLink {
         failure
     }
 
-    /// `control.status` for `request_id`, on a session of its own, tried
-    /// again while the target cannot be reached, for [`STATUS_WAIT`] at most.
+    /// `control.status` for `request_id`, on a session of its own, asked
+    /// every [`STATUS_EVERY`] while the target cannot be reached or has no
+    /// outcome yet, for [`STATUS_WAIT`] at most. `unknown` is never the end:
+    /// past the wait, `lost` is.
     pub(super) async fn control_status(&self, peer: &str, request_id: &str) -> ControlEvent {
         let deadline = tokio::time::Instant::now() + STATUS_WAIT;
-        let mut wait = Duration::from_millis(500);
         loop {
-            let failure = match self.status_once(peer, request_id).await {
+            let pending = match self.status_once(peer, request_id).await {
+                Ok(ControlEvent::Result {
+                    outcome: ControlOutcome::Unknown,
+                    message,
+                    ..
+                }) => Failure::new(
+                    "timeout",
+                    format!(
+                        "{message} It still had no outcome after 2 minutes; its state shows what happened."
+                    ),
+                ),
                 Ok(event) => return event,
+                // Asking again changes nothing.
+                Err(failure) if matches!(failure.code.as_str(), "not_paired" | "key_mismatch") => {
+                    return lost_control(failure);
+                }
                 Err(failure) => failure,
             };
-            if tokio::time::Instant::now() + wait >= deadline {
-                return lost_control(failure);
+            if tokio::time::Instant::now() + STATUS_EVERY >= deadline {
+                return lost_control(pending);
             }
-            tokio::time::sleep(wait).await;
-            wait = (wait * 2).min(Duration::from_secs(8));
+            tokio::time::sleep(STATUS_EVERY).await;
         }
     }
 

@@ -267,6 +267,7 @@ impl Actor {
         self.shelf.sharing = share;
         if !share {
             self.end_served("not_shared", NOT_SHARED);
+            self.drop_control_answers(NOT_SHARED);
         }
     }
 

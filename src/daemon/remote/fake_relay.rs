@@ -24,14 +24,14 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use super::local::{LocalSource, RunLookup, SnapshotFuture};
+use super::local::{LocalSource, RunLookup, SnapshotFuture, shell_failure};
 use crate::application::inventory::{
     Context, InventoryItem, Revisions, RunFacts, RunOrigin, RunProcess, ServiceFacts, Switches,
     inventory_item,
 };
 use crate::infrastructure::app_bridge::{BridgeError, Handoff, LaunchRequest};
 use crate::infrastructure::remote::control::{
-    ControlRunner, ControlTimings, DetachedLaunch, Expected, Host, Look, Order, Spawned,
+    ControlRunner, ControlTimings, DetachedLaunch, Expected, Host, Live, Look, Order, Spawned,
 };
 use crate::infrastructure::remote::noise::{Handshake, SessionContext, SessionId, StaticKeys};
 use crate::infrastructure::remote::requests::{Report, RequestEntries};
@@ -40,6 +40,7 @@ use crate::infrastructure::remote::wire::{AppPresence, FrameKind, Purpose, Send}
 use crate::infrastructure::running_services::ServiceKey;
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::launches::{LaunchReport, RefusalCode, unix_ms_now};
+use localify::desktop::shell_environment::ShellEnvironment;
 
 /// What the relay does with one frame.
 pub enum Route {
@@ -89,6 +90,8 @@ struct State {
     claimed_proto: Option<Value>,
     lease_status: u16,
     lease_ttl: u64,
+    /// How long each lease takes to come.
+    lease_delay: std::time::Duration,
     connections: u32,
 }
 
@@ -150,6 +153,11 @@ impl FakeCloud {
         let mut state = self.state();
         state.lease_status = status;
         state.lease_ttl = ttl;
+    }
+
+    /// Each lease takes this long to come.
+    pub fn set_lease_delay(&self, delay: std::time::Duration) {
+        self.state().lease_delay = delay;
     }
 
     pub fn set_remote_access(&self, remote_access: bool) {
@@ -329,6 +337,10 @@ impl FakeCloud {
             }
             let key = header("sec-websocket-key").unwrap_or_default();
             return self.upgrade(stream, machine, &key).await;
+        }
+        if route == "lease" {
+            let delay = self.state().lease_delay;
+            tokio::time::sleep(delay).await;
         }
         let (status, answer) = self.answer(&request_line, machine.as_ref(), &body);
         let text = answer.map(|value| value.to_string()).unwrap_or_default();
@@ -767,6 +779,9 @@ pub struct FakeSource {
     /// Where request entries are kept: the daemon's `services/requests`.
     requests: Mutex<Option<PathBuf>>,
     scratch: OnceLock<tempfile::TempDir>,
+    /// The shell environment background starts would get, once a test
+    /// gives one.
+    shell: OnceLock<Arc<ShellEnvironment>>,
 }
 
 /// The executor's delays, shortened.
@@ -784,6 +799,11 @@ impl FakeSource {
     /// folder: a daemon started again on it finds them.
     pub fn keep_requests_in(&self, dir: PathBuf) {
         *self.requests.lock().unwrap() = Some(dir);
+    }
+
+    /// The shell environment background starts read, as the daemon's.
+    pub fn set_shell(&self, shell: ShellEnvironment) -> Arc<ShellEnvironment> {
+        Arc::clone(self.shell.get_or_init(|| Arc::new(shell)))
     }
 
     /// Each build takes this long, so requests pile up behind it.
@@ -883,10 +903,10 @@ impl LocalSource for FakeSource {
     fn control(
         &self,
         order: &Order,
-        switches: &dyn Fn() -> Switches,
+        live: &Live<'_>,
         progress: &mut dyn FnMut(ControlPhase),
     ) -> Report {
-        self.runner().run(order, switches, progress)
+        self.runner().run(order, live, progress)
     }
 
     fn control_status(&self, peer: &str, request_id: &str) -> Report {
@@ -894,7 +914,13 @@ impl LocalSource for FakeSource {
     }
 
     fn shell_environment_failure(&self) -> Option<String> {
-        None
+        self.shell.get().and_then(|shell| shell_failure(shell))
+    }
+
+    fn reload_shell_environment(&self) -> Option<String> {
+        let shell = self.shell.get()?;
+        shell.reload();
+        shell_failure(shell)
     }
 }
 
@@ -931,6 +957,8 @@ pub struct HostState {
     /// Holds the next launch once it reached the host, until the test
     /// sends or drops the other end.
     pub hold: Option<std::sync::mpsc::Receiver<()>>,
+    /// Holds the next stop the same way, before it ends anything.
+    pub stop_hold: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 /// A target's services in memory: stops end their run, launches run
@@ -1073,6 +1101,10 @@ impl Host for FakeHost {
     }
 
     fn stop(&self, key: &ServiceKey, expected: &Expected) -> Result<(), Report> {
+        let hold = self.state().stop_hold.take();
+        if let Some(hold) = hold {
+            let _ = hold.recv();
+        }
         let mut state = self.state();
         state.stops.push(expected.clone());
         let Some(service) = state
