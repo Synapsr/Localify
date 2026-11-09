@@ -1,5 +1,9 @@
 # AGENTS.md
 
+Instructions for coding agents working in this repository. `CLAUDE.md` is a symlink to
+this file, so every agent reads the same rules: edit `AGENTS.md` only. Humans start with
+[CONTRIBUTING.md](CONTRIBUTING.md), which has the build, run and test commands.
+
 ## Task Completion Requirements
 
 - **Rust**: `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` must pass.
@@ -9,7 +13,7 @@
 
 ## Project Snapshot
 
-Localify is a local development proxy written in Rust. It routes custom `.localify` domains to local services with automatic HTTPS. Ships as a CLI plus a Tauri desktop app (`desktop-ui/`, React + Vite + TanStack). The website is a separate Next.js app in `apps/web/`.
+Localify is a local development proxy written in Rust. It routes custom `.localify` domains to local services with automatic HTTPS, and starts and supervises those services (`localify dev`). It ships as a CLI and daemon (`src/`), a Tauri desktop app for macOS (`src-tauri/` and `desktop-ui/`, React + Vite + TanStack), and an MCP server for coding agents (`localify mcp`, in `src/cli/mcp/`). Localify Cloud, the paid part (public URLs, billing, the relay between remote machines), is a Cloudflare Worker in `apps/cloud/`. The website is a separate Next.js app in `apps/web/`.
 
 **Philosophy**: Pragmatic, idiomatic Rust. Build the simplest thing that works. YAGNI throughout.
 
@@ -31,10 +35,16 @@ If a tradeoff is required, choose correctness and simplicity over short-term con
 
 ## Documentation map
 
+- **Build, run, test, repository layout** — [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Domain language** — [CONTEXT.md](CONTEXT.md)
+- **How the pieces fit together** — [docs/localify-technical-overview.md](docs/localify-technical-overview.md)
 - **Desktop UI architecture** — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Rust conventions** — [docs/rust/conventions.md](docs/rust/conventions.md)
 - **Rust architecture / DDD layers** — [docs/rust/architecture.md](docs/rust/architecture.md)
-- **Operational guides** — [docs/desktop.md](docs/desktop.md), [docs/docker.md](docs/docker.md), [docs/linux.md](docs/linux.md)
+- **Contracts** — [docs/public-urls.md](docs/public-urls.md), [docs/remote-machines.md](docs/remote-machines.md), [docs/launch-profiles.md](docs/launch-profiles.md)
+- **Decisions** — [docs/adr/](docs/adr/)
+- **User guide** — [docs/README.md](docs/README.md)
+- **Operational guides** — [docs/desktop.md](docs/desktop.md), [docs/docker.md](docs/docker.md), [docs/linux.md](docs/linux.md), [apps/cloud/README.md](apps/cloud/README.md)
 
 ## Load docs by context
 
@@ -44,6 +54,9 @@ If a tradeoff is required, choose correctness and simplicity over short-term con
 | Module structure, new layer, DDD boundary | [docs/rust/architecture.md](docs/rust/architecture.md) |
 | Any `desktop-ui/` change | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Any `apps/web/` change, or a claim about what Localify does | [apps/web/README.md](apps/web/README.md) |
+| Any `apps/cloud/` change, public URLs, accounts or billing | [apps/cloud/README.md](apps/cloud/README.md) and [docs/public-urls.md](docs/public-urls.md) |
+| Remote machines, runs, service tabs, the app bridge | [docs/remote-machines.md](docs/remote-machines.md) |
+| Launch profiles | [docs/launch-profiles.md](docs/launch-profiles.md) |
 
 ## Pre-commit
 

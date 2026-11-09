@@ -1,6 +1,6 @@
 # Localify
 
-Localify gives local development projects stable local domains, and exposes chosen ones on public URLs through Localify Cloud.
+Localify gives local development projects stable local domains and starts their services. Through Localify Cloud, it exposes chosen domains on public URLs and lets a person's machines see and control each other's services.
 
 ## Language
 
@@ -53,8 +53,16 @@ The canonical project environment that owns the project's existing local domains
 _Avoid_: Main branch, default branch
 
 **Terminal Session**:
-An interactive shell opened from Localify for a project environment or one service inside a project environment.
+An interactive shell opened from Localify for a project environment or one service inside a project environment. In the app, a shell tab.
 _Avoid_: Terminal tab, dev server, launcher
+
+**Run**:
+One execution of a service by `localify dev`, known by its run id, with its own output. The desktop app (a service tab), the background (`--detach`) or a terminal Localify does not own holds it. A run started before run ids existed is a legacy run.
+_Avoid_: Process, instance, session
+
+**Service Tab**:
+The desktop app's tab for one run, in a pseudo-terminal the app owns. It is the run, not a shell: when the run ends, it shows the exit code.
+_Avoid_: Terminal session, shell tab
 
 **Local Domain**:
 A stable `.localify` hostname for one local entrypoint in a project.
@@ -81,7 +89,7 @@ The shared password a public URL asks for before any traffic reaches the machine
 _Avoid_: User login, account access
 
 **Localify Cloud**:
-The paid hosted service behind public URLs: accounts, plans, URL reservations, access protection and the public entry point.
+The paid hosted service behind public URLs and remote machines: accounts, plans, URL reservations, access protection, the public entry point and the relay between machines.
 _Avoid_: Backend, server, relay
 
 **Cloud Account**:
@@ -111,3 +119,15 @@ _Avoid_: Seat, machine limit, connection
 **Suspended**:
 A public URL that exists, keeps its slug and password, but does not serve, because its account's entitlement does not cover it. Paying again or removing other URLs brings it back. Not the same as taken down, which is a removal for abuse.
 _Avoid_: Disabled, offline, deleted
+
+**Machine**:
+One signed-in installation of Localify, known by its machine id. Its name is only a label.
+_Avoid_: Device, host
+
+**Pairing**:
+Two machines of one cloud account pinning each other's key, after a person confirms the same 6-digit code on both. Only paired machines see each other's projects.
+_Avoid_: Linking, trusting
+
+**Viewer** and **Target**:
+The machine a person looks from, and the machine looked at. Any paired machine can be either. A target decides on its own what viewers may see and do there: share, control, background starts.
+_Avoid_: Client, server
