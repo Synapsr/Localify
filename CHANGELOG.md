@@ -3,6 +3,20 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.7.0 - 2026-11-09
+
+### New
+
+- **Your Macs install new Localify versions by themselves.** While the app is closed, a
+  Mac installs a new version on its own, even a runner nobody sits at, and checks at
+  once when a paired machine is on a newer version. Only official releases, signed by
+  Localify, are installed. With the app open, Settings and a small banner offer
+  `Restart to update`, which says which tabs it will close first; the app never
+  restarts by itself. New installs start with automatic updates on. An existing install
+  turns them on in Settings or with `localify update --auto on`, which works over SSH.
+  `localify update` shows what is installed and available, and `localify update install`
+  installs now. [Updates](https://github.com/Synapsr/Localify/blob/main/docs/desktop.md#automatic-updates)
+
 ## 1.6.0 - 2026-11-09
 
 ### New
