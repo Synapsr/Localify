@@ -525,7 +525,7 @@ enum UpdateCommands {
 
 #[derive(Subcommand)]
 enum MachinesCommands {
-    /// Pair with another machine: both show a code, and a person confirms it on each
+    /// Pair with another machine: both show a code, and a person confirms it on each, or --over-ssh compares them itself
     Pair {
         /// The machine's name or id
         #[arg(required_unless_present = "accept")]
@@ -534,6 +534,26 @@ enum MachinesCommands {
         /// Wait on this machine for another one's pairing request
         #[arg(long, conflicts_with = "machine")]
         accept: bool,
+
+        /// Pair with no person at either screen: start the accepting side on the machine through `ssh <DESTINATION>`, whose host key must already be trusted, and compare both codes here. Exits 0 paired, 2 nothing saved, 4 partial
+        #[arg(long = "over-ssh", value_name = "DESTINATION", requires = "machine")]
+        over_ssh: Option<String>,
+
+        /// With --over-ssh: the absolute path of localify on the other machine, when ssh's non-interactive shell does not find it
+        #[arg(long = "remote-localify", value_name = "PATH", requires = "over_ssh")]
+        remote_localify: Option<String>,
+
+        /// The accepting side --over-ssh starts: JSON lines on stdin and stdout, never a terminal
+        #[arg(long = "for-ssh", requires_all = ["accept", "from", "account"], hide = true)]
+        for_ssh: bool,
+
+        /// With --for-ssh: the only machine id whose request this acceptor takes
+        #[arg(long, requires = "for_ssh", hide = true)]
+        from: Option<String>,
+
+        /// With --for-ssh: the account this machine must be signed in to
+        #[arg(long, requires = "for_ssh", hide = true)]
+        account: Option<String>,
     },
 
     /// Forget a paired machine here, and on it when a session is open
@@ -1744,10 +1764,31 @@ fn main() -> Result<()> {
         },
         Commands::Machines { json, command } => match command {
             None => cli::machines::list(json, &ctx),
-            Some(MachinesCommands::Pair { accept: true, .. }) => cli::machines::accept(&ctx),
-            Some(MachinesCommands::Pair { machine, .. }) => {
-                cli::machines::pair(machine.as_deref().unwrap_or_default(), &ctx)
+            Some(MachinesCommands::Pair {
+                for_ssh: true,
+                from: Some(from),
+                account: Some(account),
+                ..
+            }) => exit_with(cli::machines::accept_for_ssh(&from, &account, &ctx)?),
+            Some(MachinesCommands::Pair { accept: true, .. }) => {
+                exit_with(cli::machines::accept(&ctx)?)
             }
+            Some(MachinesCommands::Pair {
+                machine,
+                over_ssh: Some(destination),
+                remote_localify,
+                ..
+            }) => exit_with(cli::machines::pair_over_ssh(
+                machine.as_deref().unwrap_or_default(),
+                &destination,
+                remote_localify.as_deref(),
+                json,
+                &ctx,
+            )),
+            Some(MachinesCommands::Pair { machine, .. }) => exit_with(cli::machines::pair(
+                machine.as_deref().unwrap_or_default(),
+                &ctx,
+            )?),
             Some(MachinesCommands::Unpair { machine }) => {
                 cli::machines::unpair(&machine, json, &ctx)
             }

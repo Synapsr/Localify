@@ -195,7 +195,7 @@ impl Drop for Sandbox {
 }
 
 /// `localify` as `cargo test` builds it, next to this test binary's folder.
-fn localify_binary() -> PathBuf {
+pub(super) fn localify_binary() -> PathBuf {
     let binary = std::env::current_exe()
         .ok()
         .and_then(|test| Some(test.parent()?.parent()?.join("localify")))

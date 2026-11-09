@@ -136,6 +136,20 @@ function OutgoingPairingDialog() {
             </DialogFooter>
           </>
         ) : null}
+
+        {outgoing.step === "partial" ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>Pairing with {name} did not finish</DialogTitle>
+              <DialogDescription>{outgoing.message}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={dismissOutgoing}>
+                Close
+              </Button>
+            </DialogFooter>
+          </>
+        ) : null}
       </DialogContent>
     </Dialog>
   );
@@ -210,6 +224,20 @@ function IncomingPairingDialog() {
             <DialogHeader>
               <DialogTitle>Pairing with {incoming.name}</DialogTitle>
               <DialogDescription>{PAIRING_CANCELLED}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={dismissIncoming}>
+                Close
+              </Button>
+            </DialogFooter>
+          </>
+        ) : null}
+
+        {incoming.step === "partial" ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>Pairing with {incoming.name} did not finish</DialogTitle>
+              <DialogDescription>{incoming.message}</DialogDescription>
             </DialogHeader>
             <DialogFooter>
               <Button variant="outline" onClick={dismissIncoming}>

@@ -497,6 +497,13 @@ impl RemoteStore {
             .and_then(|()| {
                 fs::rename(&temporary, &path)
                     .with_context(|| format!("Could not write {}", path.display()))
+            })
+            // The rename itself is durable only once the folder is synced: a
+            // pin `pair.saved` reported must survive a crash.
+            .and_then(|()| {
+                fs::File::open(&self.dir)
+                    .and_then(|dir| dir.sync_all())
+                    .with_context(|| format!("Could not sync {}", self.dir.display()))
             });
         if written.is_err() {
             let _ = fs::remove_file(&temporary);

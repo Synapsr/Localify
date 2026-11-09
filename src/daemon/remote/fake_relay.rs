@@ -33,10 +33,17 @@ use crate::infrastructure::app_bridge::{BridgeError, Handoff, LaunchRequest};
 use crate::infrastructure::remote::control::{
     ControlRunner, ControlTimings, DetachedLaunch, Expected, Host, Live, Look, Order, Spawned,
 };
-use crate::infrastructure::remote::noise::{Handshake, SessionContext, SessionId, StaticKeys};
+use crate::infrastructure::remote::noise::{
+    HASH_LEN, Handshake, SessionContext, SessionId, StaticKeys, Transport,
+};
+use crate::infrastructure::remote::pairing::{Pairing, Step};
 use crate::infrastructure::remote::requests::{Report, RequestEntries};
+use crate::infrastructure::remote::store::now_rfc3339;
 use crate::infrastructure::remote::wire::ControlPhase;
-use crate::infrastructure::remote::wire::{AppPresence, FrameKind, Purpose, Send};
+use crate::infrastructure::remote::wire::{
+    AppPresence, ByeReason, FrameKind, Hello, ProtoRange, Purpose, Role as WireRole, Send,
+    SessionMessage,
+};
 use crate::infrastructure::running_services::ServiceKey;
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::launches::{LaunchReport, RefusalCode, unix_ms_now};
@@ -75,6 +82,7 @@ struct State {
     sockets: HashMap<String, mpsc::UnboundedSender<Message>>,
     hook: Option<Hook>,
     mitm: Option<Mitm>,
+    legacy: Option<Legacy>,
     budgets: HashMap<String, RelayBudget>,
     refusals: u32,
     lease_requests: u32,
@@ -214,6 +222,27 @@ impl FakeCloud {
             sessions: HashMap::new(),
             completed_with_b: 0,
         });
+    }
+
+    /// Plays `b` towards `a` in every pairing session as Localify 1.7.0
+    /// does on the wire, and ends it as `ends` says.
+    pub fn play_legacy(&self, a: &str, b: &str, ends: LegacyEnd) {
+        self.state().legacy = Some(Legacy {
+            a: a.into(),
+            b: b.into(),
+            keys: StaticKeys::generate().unwrap(),
+            ends,
+            sessions: HashMap::new(),
+            heard: Vec::new(),
+        });
+    }
+
+    /// The messages `a` sent the legacy `b`, decrypted.
+    pub fn legacy_heard(&self) -> Vec<Value> {
+        self.state()
+            .legacy
+            .as_ref()
+            .map_or_else(Vec::new, |legacy| legacy.heard.clone())
     }
 
     /// How many handshakes the relay completed with `b` as `a`.
@@ -542,6 +571,14 @@ impl FakeCloud {
                 return;
             }
         }
+        if let Some(replies) = self.as_legacy(&mut state, from, &frame) {
+            if let Some(socket) = state.sockets.get(from) {
+                for reply in replies {
+                    let _ = socket.send(Message::text(reply.to_string()));
+                }
+            }
+            return;
+        }
         if let Some(handled) = self.in_the_middle(&mut state, from, &frame) {
             if let Some((to, value)) = handled
                 && let Some(socket) = state.sockets.get(&to)
@@ -668,6 +705,224 @@ impl FakeCloud {
             _ => Some(None),
         }
     }
+}
+
+/// How the 1.7.0 target the relay plays ends a pairing both sides accepted.
+/// Either way, it says `bye` `done` and never `pair.saved`, which 1.7.0
+/// does not have, whether or not it saved its pin.
+#[derive(Debug, Clone, Copy)]
+pub enum LegacyEnd {
+    /// It took A's confirm, could not save its pin, and ended.
+    PinFailed,
+    /// Its 2 minutes ran out this long after its own confirm, before A's
+    /// confirm reached it.
+    Timeout(std::time::Duration),
+}
+
+/// Localify 1.7.0 as a pairing target, on the wire: `hello` with versions
+/// 1 to 2, the commitment and the reveal, its own `pair.confirm` with
+/// `accept: true` once the code is out, then `bye` `done`.
+struct Legacy {
+    a: String,
+    b: String,
+    keys: StaticKeys,
+    ends: LegacyEnd,
+    sessions: HashMap<String, LegacySession>,
+    heard: Vec<Value>,
+}
+
+enum LegacySession {
+    Handshake(Handshake),
+    Open {
+        transport: Transport,
+        hash: [u8; HASH_LEN],
+        pairing: Option<Pairing>,
+    },
+}
+
+impl FakeCloud {
+    /// A frame from `a` to the legacy `b`: what `b` answers, encrypted.
+    fn as_legacy(&self, state: &mut State, from: &str, frame: &Send) -> Option<Vec<Value>> {
+        let user = state.user_id.clone();
+        let legacy = state.legacy.as_mut()?;
+        if from != legacy.a || frame.to != legacy.b {
+            return None;
+        }
+        let data = frame
+            .data
+            .as_deref()
+            .and_then(|data| URL_SAFE_NO_PAD.decode(data).ok());
+        let (Some(data), Some(sid)) = (data, SessionId::parse(&frame.sid)) else {
+            return Some(Vec::new());
+        };
+        let b = legacy.b.clone();
+        let reply = |data: &[u8], kind: &str| {
+            json!({"t": "recv", "from": b, "sid": frame.sid, "kind": kind,
+                   "data": URL_SAFE_NO_PAD.encode(data)})
+        };
+        // Anything it cannot take, it drops, as the session would end.
+        Some(
+            self.legacy_reply(legacy, user, frame, sid, &data, reply)
+                .unwrap_or_default(),
+        )
+    }
+
+    fn legacy_reply(
+        &self,
+        legacy: &mut Legacy,
+        user: String,
+        frame: &Send,
+        sid: SessionId,
+        data: &[u8],
+        reply: impl Fn(&[u8], &str) -> Value,
+    ) -> Option<Vec<Value>> {
+        match (frame.kind, legacy.sessions.remove(&frame.sid)) {
+            (FrameKind::Hs, None) => {
+                let context = SessionContext {
+                    purpose: frame.purpose?,
+                    account: user,
+                    initiator: legacy.a.clone(),
+                    responder: legacy.b.clone(),
+                    sid,
+                };
+                let mut handshake = Handshake::responder(&legacy.keys, &context).ok()?;
+                handshake.read(data).ok()?;
+                let second = handshake.write().ok()?;
+                legacy
+                    .sessions
+                    .insert(frame.sid.clone(), LegacySession::Handshake(handshake));
+                Some(vec![reply(&second, "hs")])
+            }
+            (FrameKind::Hs, Some(LegacySession::Handshake(mut handshake))) => {
+                handshake.read(data).ok()?;
+                let (mut transport, hash) = handshake.finish().ok()?;
+                let hello = SessionMessage::Hello(Hello {
+                    proto: ProtoRange { min: 1, max: 2 },
+                    version: "1.7.0".into(),
+                    now: now_rfc3339(),
+                    role: WireRole::Target,
+                    settings: None,
+                    app: None,
+                });
+                let sealed = seal(&mut transport, &hello);
+                legacy.sessions.insert(
+                    frame.sid.clone(),
+                    LegacySession::Open {
+                        transport,
+                        hash,
+                        pairing: None,
+                    },
+                );
+                Some(vec![reply(&sealed, "msg")])
+            }
+            (
+                FrameKind::Msg,
+                Some(LegacySession::Open {
+                    mut transport,
+                    hash,
+                    mut pairing,
+                }),
+            ) => {
+                let plaintext = transport.decrypt(data).ok()?;
+                let value: Value = serde_json::from_slice(&plaintext).ok()?;
+                legacy.heard.push(value.clone());
+                let message: SessionMessage = serde_json::from_value(value).ok()?;
+                let (out, timer) = legacy_answer(legacy.ends, hash, &mut pairing, &message);
+                let sealed: Vec<Value> = out
+                    .iter()
+                    .map(|message| reply(&seal(&mut transport, message), "msg"))
+                    .collect();
+                legacy.sessions.insert(
+                    frame.sid.clone(),
+                    LegacySession::Open {
+                        transport,
+                        hash,
+                        pairing,
+                    },
+                );
+                if let Some(after) = timer {
+                    self.legacy_timeout(frame.sid.clone(), after);
+                }
+                Some(sealed)
+            }
+            _ => None,
+        }
+    }
+
+    /// The legacy `b`'s 2 minutes run out: `bye` `done`, nothing saved.
+    fn legacy_timeout(&self, sid: String, after: std::time::Duration) {
+        let cloud = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let mut state = cloud.state();
+            let Some(legacy) = state.legacy.as_mut() else {
+                return;
+            };
+            let (a, b) = (legacy.a.clone(), legacy.b.clone());
+            let Some(LegacySession::Open { transport, .. }) = legacy.sessions.get_mut(&sid) else {
+                return;
+            };
+            let bye = seal(transport, &bye_done());
+            let frame = json!({"t": "recv", "from": b, "sid": sid, "kind": "msg",
+                               "data": URL_SAFE_NO_PAD.encode(bye)});
+            if let Some(socket) = state.sockets.get(&a) {
+                let _ = socket.send(Message::text(frame.to_string()));
+            }
+        });
+    }
+}
+
+/// What the legacy `b` sends for `message`, and when its own timeout
+/// fires, if it starts one.
+fn legacy_answer(
+    ends: LegacyEnd,
+    hash: [u8; HASH_LEN],
+    pairing: &mut Option<Pairing>,
+    message: &SessionMessage,
+) -> (Vec<SessionMessage>, Option<std::time::Duration>) {
+    let sends = |steps: Vec<Step>| -> Vec<SessionMessage> {
+        steps
+            .into_iter()
+            .filter_map(|step| match step {
+                Step::Send(message) => Some(message),
+                _ => None,
+            })
+            .collect()
+    };
+    match (message, pairing.as_mut()) {
+        (SessionMessage::Hello(_), None) => {
+            let (started, commit) = Pairing::responder(hash).unwrap();
+            *pairing = Some(started);
+            (vec![commit], None)
+        }
+        (SessionMessage::PairNonce { .. }, Some(pairing)) => {
+            // The code is out; its person accepts at once.
+            let mut out = sends(pairing.receive(message).unwrap());
+            out.extend(sends(pairing.answer(true).unwrap()));
+            let timer = match ends {
+                LegacyEnd::Timeout(after) => Some(after),
+                LegacyEnd::PinFailed => None,
+            };
+            (out, timer)
+        }
+        // Its pin could not be saved: 1.7.0 still ends with `bye` `done`.
+        (SessionMessage::PairConfirm { .. }, Some(_)) if matches!(ends, LegacyEnd::PinFailed) => {
+            (vec![bye_done()], None)
+        }
+        _ => (Vec::new(), None),
+    }
+}
+
+fn bye_done() -> SessionMessage {
+    SessionMessage::Bye {
+        reason: ByeReason::Done,
+    }
+}
+
+fn seal(transport: &mut Transport, message: &SessionMessage) -> Vec<u8> {
+    transport
+        .encrypt(&serde_json::to_vec(message).unwrap())
+        .unwrap()
 }
 
 /// relay.ts's two budgets: 200 frames refilled at 50 a second, 5 MiB

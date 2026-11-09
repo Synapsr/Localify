@@ -13,8 +13,8 @@ use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
 use super::remote::local::build_snapshot;
 use super::remote::{
-    AccessEvent, Asking, ControlAsk, ControlEvent, Failure, FollowEvent, Following, PairEvent,
-    RemoteLink,
+    Accepted, AccessEvent, Asking, ControlAsk, ControlEvent, Failure, FollowEvent, Following,
+    PairEvent, RemoteLink,
 };
 use super::router::SharedState;
 use crate::application::inventory::Have;
@@ -82,9 +82,20 @@ enum MgmtCommand {
         #[serde(flatten)]
         change: SettingsChange,
     },
-    /// Streaming: the code, then `paired` or `cancelled`.
+    /// Streaming: the code, then `paired`, `cancelled` or `partial`.
+    /// `attempt` only tags the events, for the SSH helper's lines.
     #[serde(rename = "remote_pair", rename_all = "camelCase")]
-    RemotePair { machine_id: String },
+    RemotePair {
+        machine_id: String,
+        #[serde(default)]
+        attempt: Option<String>,
+    },
+    /// Streaming, for `localify machines pair --accept --for-ssh`: `ready`
+    /// once a one-shot acceptor for that account and that initiating
+    /// machine is registered, then the code and how the pairing ended.
+    /// Closing the connection cancels it.
+    #[serde(rename = "remote_pair_accept", rename_all = "camelCase")]
+    RemotePairAccept { machine_id: String, account: String },
     #[serde(rename = "remote_pair_answer", rename_all = "camelCase")]
     RemotePairAnswer { pairing_id: String, accept: bool },
     #[serde(rename = "remote_unpair", rename_all = "camelCase")]
@@ -324,8 +335,22 @@ pub async fn serve(
 
             let command = parse_command(&line);
             match command {
-                Some(MgmtCommand::RemotePair { machine_id }) => {
-                    return stream_pairing(&remote, &machine_id, reader, writer).await;
+                Some(MgmtCommand::RemotePair {
+                    machine_id,
+                    attempt,
+                }) => {
+                    let events = remote.pair(&machine_id).await;
+                    return stream_pairing(events, attempt, None, reader, writer).await;
+                }
+                Some(MgmtCommand::RemotePairAccept {
+                    machine_id,
+                    account,
+                }) => {
+                    let (ready, events) = match remote.accept(&machine_id, &account).await {
+                        Ok((accepted, events)) => (Some(accepted), Ok(events)),
+                        Err(error) => (None, Err(error)),
+                    };
+                    return stream_pairing(events, None, ready, reader, writer).await;
                 }
                 Some(MgmtCommand::RemoteEvents { access }) => {
                     return stream_events(&remote, access, reader, writer).await;
@@ -578,28 +603,42 @@ async fn client_gone(reader: &mut BufReader<OwnedReadHalf>) {
     }
 }
 
-/// `remote_pair`: one line per event until the pairing ends. Closing the
-/// connection cancels the pairing.
+/// `remote_pair` and `remote_pair_accept`: `ready` first for an acceptor,
+/// then one line per event until the pairing ends. Closing the connection
+/// cancels the pairing.
 async fn stream_pairing(
-    remote: &RemoteLink,
-    machine_id: &str,
+    events: anyhow::Result<mpsc::Receiver<PairEvent>>,
+    attempt: Option<String>,
+    ready: Option<Accepted>,
     mut reader: BufReader<OwnedReadHalf>,
     mut writer: OwnedWriteHalf,
 ) {
-    let mut events = match remote.pair(machine_id).await {
+    let mut events = match events {
         Ok(events) => events,
         Err(error) => {
             write_line(&mut writer, &MgmtResponse::error(format!("{error:#}"))).await;
             return;
         }
     };
+    if let Some(ready) = ready {
+        let Ok(mut data) = serde_json::to_value(&ready) else {
+            return;
+        };
+        data["event"] = "ready".into();
+        if !write_line(&mut writer, &MgmtResponse::success(data)).await {
+            return;
+        }
+    }
     loop {
         tokio::select! {
             _ = client_gone(&mut reader) => return,
             event = events.recv() => {
                 let Some(event) = event else { return };
                 let last = !matches!(event, PairEvent::Code { .. });
-                let Ok(data) = serde_json::to_value(&event) else { return };
+                let Ok(mut data) = serde_json::to_value(&event) else { return };
+                if let Some(attempt) = &attempt {
+                    data["attempt"] = attempt.clone().into();
+                }
                 if !write_line(&mut writer, &MgmtResponse::success(data)).await || last {
                     return;
                 }

@@ -28,7 +28,7 @@ use crate::daemon::router::RuntimeState;
 use crate::infrastructure::inventory::LocalInventory;
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::remote::store::SettingsChange;
-use crate::infrastructure::remote::wire::AppPresence;
+use crate::infrastructure::remote::wire::{AppPresence, PROTO_MAX, PROTO_PAIR_SAVED};
 use crate::infrastructure::runs::output::{
     EndReason, RunEnd, StreamWriter, create_run_dir, publish_end,
 };
@@ -184,6 +184,12 @@ async fn the_cli_reads_and_controls_another_machine_through_the_daemon() {
     writer.append(b"one\ntwo\nthree\n").unwrap();
     b.source.set_run(RUN, Ok(run_dir.clone()));
     let (socket, _shutdown, _dir) = socket(&a).await;
+    // A and B agree on the latest protocol, 3 (`pair.saved`) or later, in
+    // the session every command below goes through.
+    let agreed = |daemon: &Daemon| daemon.link.shared.view().protos.get("mB").copied();
+    a.link.open("mB", true).await.unwrap();
+    assert_eq!(agreed(&a), Some(PROTO_MAX));
+    const { assert!(PROTO_MAX >= PROTO_PAIR_SAVED) };
 
     // `--machine` names B by its name in any case, and A itself locally.
     let resolving = socket.clone();
@@ -280,6 +286,7 @@ async fn the_cli_reads_and_controls_another_machine_through_the_daemon() {
         "Stopping 'web' on teo-mini…\n'web' stopped on teo-mini.\n"
     );
     assert_eq!(b.source.host().state().stops.len(), 1);
+    assert_eq!(agreed(&a), Some(PROTO_MAX));
 
     // With controls off on B, nothing is sent and the refusal says why.
     controls(&b, false).await;

@@ -6,6 +6,7 @@ mod access;
 mod cli;
 mod control;
 mod convergence;
+mod ssh_pairing;
 mod viewing;
 
 use std::sync::Arc;
@@ -17,13 +18,15 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::fake_relay::{FakeCloud, FakeSource, Route, is_message, opens};
+use super::fake_relay::{FakeCloud, FakeSource, LegacyEnd, Route, is_message, opens};
 use super::local::LocalSource;
 use super::machines::{MachineState, RelayState, SessionState};
 use super::{Event, PairEvent, RemoteLink, Timings, spawn};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
 use crate::infrastructure::remote::noise::{SessionId, StaticKeys, encode_key};
+use crate::infrastructure::remote::pairing::PinState;
 use crate::infrastructure::remote::store::RemoteStore;
+use crate::infrastructure::remote::store::{Pin, now_rfc3339};
 use crate::infrastructure::remote::wire::{FrameKind, Purpose};
 
 fn fast() -> Timings {
@@ -35,6 +38,7 @@ fn fast() -> Timings {
         viewer_gives_up_after: ms(2500),
         target_gives_up_after: ms(4000),
         pairing_timeout: ms(2500),
+        pair_settle: ms(1500),
         idle_after: ms(30_000),
         lifetime: ms(3_600_000),
         tick: ms(40),
@@ -560,13 +564,25 @@ async fn a_pairing_nobody_answers_times_out_and_pins_nothing() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
     let mut subscription = b.link.subscribe(false);
-    let (mut events, id_a, _, _, _) = to_codes(&a, &b, &mut subscription.events).await;
-    // A accepts; B's person never answers.
-    a.link.answer(&id_a, true).await.unwrap();
+    // Nobody answers on either side: nothing was saved.
+    let (mut events, _, _, _, _) = to_codes(&a, &b, &mut subscription.events).await;
     let PairEvent::Cancelled { reason, .. } = next_pair_event(&mut events).await else {
         panic!("not cancelled");
     };
+    // Whichever side's 2 minutes end first.
     assert!(reason == "timeout" || reason == "done", "{reason}");
+    assert!(!a.pinned("mB") && !b.pinned("mA"));
+
+    // A accepts; B's person never answers. A cannot know B did not, so it
+    // reports a partial result, with its own state verified.
+    let (mut events, id_a, _, _, _) = to_codes(&a, &b, &mut subscription.events).await;
+    a.link.answer(&id_a, true).await.unwrap();
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial { local, peer, .. } = &event else {
+        panic!("not partial: {event:?}");
+    };
+    assert_eq!((*local, *peer), (PinState::NotPinned, PinState::Unknown));
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!a.pinned("mB") && !b.pinned("mA"));
 }
 
@@ -662,6 +678,220 @@ async fn a_target_takes_one_pairing_at_a_time_and_five_an_hour() {
         panic!("not busy");
     };
     assert_eq!(reason, "busy");
+}
+
+/// From B's `pair.confirm` with `accept: true` on, the relay swallows every
+/// message B sends: the session is cut after the first confirm. The
+/// confirm is the only message of its size, `{"t":"pair.confirm",
+/// "accept":true}` and its 16-byte tag.
+pub(super) fn cut_after_bs_confirm(cloud: &FakeCloud) {
+    let mut cut = false;
+    cloud.set_hook(Some(Box::new(move |from, frame| {
+        if from == "mB" && is_message(frame) {
+            let size = frame
+                .data
+                .as_deref()
+                .and_then(|data| {
+                    base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, data)
+                        .ok()
+                })
+                .map_or(0, |bytes| bytes.len());
+            cut |= size == 34 + 16;
+            if cut {
+                return Route::Swallow;
+            }
+        }
+        Route::Forward
+    })));
+}
+
+#[tokio::test]
+async fn a_session_cut_after_a_confirm_is_partial_and_pairing_again_completes_it() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let mut subscription = b.link.subscribe(false);
+    cut_after_bs_confirm(&cloud);
+    let (mut events, id_a, code_a, id_b, code_b) = to_codes(&a, &b, &mut subscription.events).await;
+    assert_eq!(code_a, code_b);
+    a.link.answer(&id_a, true).await.unwrap();
+    b.link.answer(&id_b, true).await.unwrap();
+
+    // B had A's accept and saved; its confirm never reached A.
+    wait_until("B pins A", || b.pinned("mA")).await;
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial { local, peer, .. } = &event else {
+        panic!("not partial: {event:?}");
+    };
+    assert_eq!((*local, *peer), (PinState::NotPinned, PinState::Unknown));
+    let Event::PairPartial { local, peer, .. } = next_event(&mut subscription.events, |event| {
+        matches!(event, Event::PairPartial { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert_eq!((local, peer), (PinState::Pinned, PinState::Unknown));
+    assert!(!a.pinned("mB"));
+
+    // The same machines and keys: pairing again completes it.
+    cloud.set_hook(None);
+    pair(&a, &b).await;
+}
+
+#[tokio::test]
+async fn pairing_never_replaces_a_pin_of_another_key() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let other = pin_other_key(&a);
+    let _subscription = b.link.subscribe(false);
+    let mut events = a.link.pair("mB").await.unwrap();
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Cancelled { reason, .. } = &event else {
+        panic!("not cancelled: {event:?}");
+    };
+    assert_eq!(reason, "key_mismatch");
+    assert_eq!(a.store().pins().unwrap()["mB"].public_key, other);
+    assert!(!b.pinned("mA"));
+}
+
+/// A pin for B with another key, written on A as another pairing would.
+fn pin_other_key(a: &Daemon) -> String {
+    let other = encode_key(&StaticKeys::generate().unwrap().public);
+    a.store()
+        .update_pins("mA", |pins| {
+            pins.insert(
+                "mB".into(),
+                Pin {
+                    public_key: other.clone(),
+                    name: "teo-mini".into(),
+                    paired_at: now_rfc3339(),
+                },
+            );
+        })
+        .unwrap();
+    other
+}
+
+#[tokio::test]
+async fn a_pin_of_another_key_written_during_a_pairing_is_never_replaced() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let mut subscription = b.link.subscribe(false);
+    let (mut events, id_a, _, id_b, _) = to_codes(&a, &b, &mut subscription.events).await;
+    // Past the handshake's check: another pairing pins another key for B.
+    let other = pin_other_key(&a);
+    a.link.answer(&id_a, true).await.unwrap();
+    b.link.answer(&id_b, true).await.unwrap();
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial {
+        local,
+        reason,
+        message,
+        ..
+    } = &event
+    else {
+        panic!("not partial: {event:?}");
+    };
+    assert_eq!(reason, "key_mismatch");
+    assert_eq!(*local, PinState::NotPinned);
+    assert!(message.contains("another key"), "{message}");
+    assert_eq!(a.store().pins().unwrap()["mB"].public_key, other);
+    assert_eq!(
+        a.link.shared.view().failures.get("mB").map(String::as_str),
+        Some("key_mismatch")
+    );
+}
+
+#[tokio::test]
+async fn the_peer_is_pinned_only_once_its_pair_saved_arrives() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let mut subscription = b.link.subscribe(false);
+    // The relay swallows B's `pair.saved`, `{"t":"pair.saved"}` and its
+    // 16-byte tag; B's `bye` `done` still comes.
+    cloud.set_hook(Some(Box::new(|from, frame| {
+        let size = frame
+            .data
+            .as_deref()
+            .and_then(|data| {
+                base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, data).ok()
+            })
+            .map_or(0, |bytes| bytes.len());
+        if from == "mB" && is_message(frame) && size == 18 + 16 {
+            Route::Swallow
+        } else {
+            Route::Forward
+        }
+    })));
+    let (mut events, id_a, _, id_b, _) = to_codes(&a, &b, &mut subscription.events).await;
+    a.link.answer(&id_a, true).await.unwrap();
+    b.link.answer(&id_b, true).await.unwrap();
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial { local, peer, .. } = &event else {
+        panic!("not partial: {event:?}");
+    };
+    assert_eq!((*local, *peer), (PinState::Pinned, PinState::Unknown));
+    // B heard A's `pair.saved`.
+    next_event(&mut subscription.events, |event| {
+        matches!(event, Event::Paired { .. })
+    })
+    .await;
+    assert!(a.pinned("mB") && b.pinned("mA"));
+
+    // Both acknowledgements through: paired on both sides.
+    cloud.set_hook(None);
+    pair(&a, &b).await;
+}
+
+/// A pairing with a target that runs 1.7.0, which ends with `bye` `done`
+/// as `ends` says. Both people accept; A saves its pin and cannot know
+/// whether the target did.
+async fn pair_with_legacy(ends: LegacyEnd) {
+    let cloud = FakeCloud::start().await;
+    let (a, _b) = two(&cloud).await;
+    cloud.play_legacy("mA", "mB", ends);
+    let mut events = a.link.pair("mB").await.unwrap();
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Code { pairing_id, .. } = event else {
+        panic!("no code: {event:?}");
+    };
+    a.link.answer(&pairing_id, true).await.unwrap();
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial {
+        local,
+        peer,
+        reason,
+        message,
+        ..
+    } = &event
+    else {
+        panic!("not partial: {event:?}");
+    };
+    assert_eq!((*local, *peer), (PinState::Pinned, PinState::Unknown));
+    assert_eq!(reason, "unconfirmed");
+    assert!(message.contains("older version"), "{message}");
+    assert!(a.pinned("mB"));
+    // Nothing A sent is new to 1.7.0: no `pair.saved`, and a `hello` whose
+    // range holds version 2.
+    wait_until("the target hears A's bye", || {
+        cloud.legacy_heard().len() == 4
+    })
+    .await;
+    let heard = cloud.legacy_heard();
+    let kinds: Vec<&str> = heard.iter().filter_map(|m| m["t"].as_str()).collect();
+    assert_eq!(kinds, ["hello", "pair.nonce", "pair.confirm", "bye"]);
+    let proto = &heard[0]["proto"];
+    assert!(proto["min"].as_u64() <= Some(2) && proto["max"].as_u64() >= Some(2));
+}
+
+#[tokio::test]
+async fn a_bye_from_1_7_0_after_its_timeout_is_not_a_saved_pin() {
+    pair_with_legacy(LegacyEnd::Timeout(Duration::from_millis(400))).await;
+}
+
+#[tokio::test]
+async fn a_bye_from_1_7_0_after_its_pin_failed_is_not_a_saved_pin() {
+    pair_with_legacy(LegacyEnd::PinFailed).await;
 }
 
 // --- Identity ----------------------------------------------------------------
@@ -1216,10 +1446,12 @@ async fn signing_out_while_connected_closes_the_link_and_pins_nothing() {
         .unwrap();
     a.link.refresh();
     wait_until("A's socket closes", || !cloud.connected("mA")).await;
-    assert!(matches!(
-        next_pair_event(&mut events).await,
-        PairEvent::Cancelled { .. }
-    ));
+    // A accepted: B could have saved, as far as A knows.
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial { local, peer, .. } = &event else {
+        panic!("not partial: {event:?}");
+    };
+    assert_eq!((*local, *peer), (PinState::NotPinned, PinState::Unknown));
     let _ = b.link.answer(&id_b, true).await;
 
     wait_until("A is off", || a.link.status().relay == RelayState::Off).await;
@@ -1255,10 +1487,19 @@ async fn a_stale_pairing_writes_nothing_into_a_newer_sign_in() {
         .unwrap();
     // B confirms: A's old actor gets the confirmation and tries to pin.
     b.link.answer(&id_b, true).await.unwrap();
-    let PairEvent::Cancelled { message, .. } = next_pair_event(&mut events).await else {
-        panic!("A's pairing should not complete");
+    // B saved; A could not, and says so.
+    let event = next_pair_event(&mut events).await;
+    let PairEvent::Partial {
+        local,
+        reason,
+        message,
+        ..
+    } = &event
+    else {
+        panic!("A's pairing should not complete: {event:?}");
     };
-    assert!(message.contains("pin could not be saved"), "{message}");
+    assert_eq!(*local, PinState::NotPinned);
+    assert_eq!(reason, "pin_failed", "{message}");
     let store = a.store();
     assert!(store.pins().unwrap().is_empty());
     assert!(!a.dir.path().join("remote/peers.json").exists());

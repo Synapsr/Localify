@@ -37,8 +37,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub use self::actor::Failure;
+pub use self::actor::{Accepted, Event, PairEvent};
 use self::actor::{Command, TapEvent, TapRequest};
-pub use self::actor::{Event, PairEvent};
 use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
 use self::local::LocalSource;
@@ -130,6 +130,9 @@ pub struct Timings {
     pub viewer_gives_up_after: Duration,
     pub target_gives_up_after: Duration,
     pub pairing_timeout: Duration,
+    /// After writing its pin, a side waits this long for the peer's `bye`,
+    /// which says the peer wrote its own.
+    pub pair_settle: Duration,
     pub idle_after: Duration,
     pub lifetime: Duration,
     pub tick: Duration,
@@ -183,6 +186,7 @@ impl Default for Timings {
             viewer_gives_up_after: seconds(60),
             target_gives_up_after: seconds(90),
             pairing_timeout: seconds(120),
+            pair_settle: seconds(30),
             idle_after: seconds(120),
             lifetime: seconds(3600),
             tick: seconds(1),
@@ -233,6 +237,10 @@ pub struct RemoteStatus {
     /// Why background starts run with the daemon's own environment: the
     /// user's shell environment could not be read.
     pub shell_environment_error: Option<String>,
+    /// This machine's id and the account's user id, while connected: what
+    /// a pairing over SSH checks on both sides.
+    pub machine_id: Option<String>,
+    pub account: Option<String>,
 }
 
 /// What the link knows, for the management socket.
@@ -301,6 +309,8 @@ struct Conn {
     lease: Arc<LeaseKeeper>,
     cloud: Arc<CloudClient>,
     self_id: String,
+    /// The account's user id.
+    account: String,
 }
 
 struct Shared {
@@ -562,6 +572,10 @@ impl RemoteLink {
     }
 
     pub fn status(&self) -> RemoteStatus {
+        let conn = self
+            .shared
+            .conn()
+            .filter(|_| self.shared.view().relay == RelayState::Connected);
         let view = self.shared.view();
         let fingerprint = self
             .shared
@@ -578,6 +592,8 @@ impl RemoteLink {
             settings: self.shared.store.settings().unwrap_or(DEFAULT_SETTINGS),
             fingerprint,
             shell_environment_error: self.shared.source.shell_environment_failure(),
+            machine_id: conn.as_ref().map(|conn| conn.self_id.clone()),
+            account: conn.map(|conn| conn.account),
         }
     }
 
@@ -800,6 +816,32 @@ impl RemoteLink {
             })
             .map_err(|_| anyhow!("The relay connection closed. Try again."))?;
         Ok(receiver)
+    }
+
+    /// Registers the one-shot acceptor of `localify machines pair --accept
+    /// --for-ssh`: only a pairing request from `from` consumes it, for the
+    /// account `account`. The events say the code, then how it ended.
+    pub async fn accept(
+        &self,
+        from: &str,
+        account: &str,
+    ) -> Result<(Accepted, mpsc::Receiver<PairEvent>)> {
+        let conn = self.connected()?;
+        let (events, receiver) = mpsc::channel(16);
+        let (reply, accepted) = oneshot::channel();
+        conn.commands
+            .send(Command::Accept {
+                from: from.to_string(),
+                account: account.to_string(),
+                events,
+                reply,
+            })
+            .map_err(|_| anyhow!("The relay connection closed. Try again."))?;
+        match accepted.await {
+            Ok(Ok(accepted)) => Ok((accepted, receiver)),
+            Ok(Err(failure)) => bail!("{}", failure.message),
+            Err(_) => bail!("The relay connection closed. Try again."),
+        }
     }
 
     /// A person's answer to the code of a pairing, on either side.
@@ -1183,6 +1225,7 @@ async fn connect_and_serve(
         lease: Arc::clone(&lease),
         cloud: Arc::clone(&ready.cloud),
         self_id: ready.credentials.machine_id.clone(),
+        account: ready.account.user_id.clone(),
     };
     shared.set_conn(Some(conn.clone()));
     // The names pins are saved with.

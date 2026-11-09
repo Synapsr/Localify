@@ -2,6 +2,7 @@ import type {
   RemoteInventoryItemDto,
   RemoteMachineDto,
   RemoteOwner,
+  RemotePinState,
   RemoteStatusDto,
 } from "@/types/localify";
 
@@ -176,6 +177,30 @@ export function remoteErrorMessage(code: string, machine: string, fallback: stri
 }
 
 export const PAIRING_CANCELLED = "Pairing cancelled. Nothing was saved.";
+
+/** What each side saved when a pairing stopped after a confirm (docs/remote-machines.md, "Partial results"). */
+export function pairingPartialMessage(
+  machine: string,
+  local: RemotePinState,
+  peer: RemotePinState,
+  reason: string,
+): string {
+  const here =
+    local === "pinned"
+      ? `This Mac saved ${machine}'s key`
+      : `This Mac did not save ${machine}'s key`;
+  // Pairing again would end the same way.
+  if (reason === "unconfirmed") {
+    return `${here}. ${machine} runs an older version of Localify, which doesn't say whether it saved this Mac's key: check on ${machine}, or update Localify there and pair again.`;
+  }
+  const there =
+    peer === "pinned"
+      ? `${machine} saved this Mac's key`
+      : peer === "not_pinned"
+        ? `${machine} did not save this Mac's key`
+        : `${machine} may or may not have saved this Mac's key`;
+  return `Pairing did not finish on both machines. ${here}; ${there}. Pair them again to complete it.`;
+}
 
 /** Why a pairing this Mac asked for did not happen (docs/remote-machines.md, "Pairing"). */
 export function pairingCancelledMessage(reason: string, message: string, machine: string): string {

@@ -89,7 +89,7 @@ export function quickAction(
   const control = item.controls[action];
   const legacyId = item.run?.legacyId;
   if (legacyId && (action === "restart" || control.code === "legacy_run")) {
-    if (proto !== 2) return { kind: "message", text: `Update Localify on ${machine}.` };
+    if (!asksAccess(proto)) return { kind: "message", text: `Update Localify on ${machine}.` };
     // A relaunch is a restart: the restart's checks decide.
     const restart = item.controls.restart;
     if (restart.allowed) return { kind: "relaunch", access: null };
@@ -100,8 +100,13 @@ export function quickAction(
   if (control.allowed) return { kind: "run" };
   if (control.code === "legacy_run") return { kind: "message", text: `Relaunch it on ${machine}.` };
   const wants = accessWants(control.code, runsInBackground(item, action, appRunning));
-  if (wants) return proto === 2 ? { kind: "ask", wants } : { kind: "command", wants };
+  if (wants) return asksAccess(proto) ? { kind: "ask", wants } : { kind: "command", wants };
   return { kind: "message", text: refusalText(control.code, machine) };
+}
+
+/** Protocol 2 and later carry access requests and relaunches. */
+function asksAccess(proto: number | null): boolean {
+  return proto !== null && proto >= 2;
 }
 
 function refusalText(code: string | undefined, machine: string): string {

@@ -17,6 +17,7 @@ import {
   ownerLabel,
   PAIRING_CANCELLED,
   pairingCancelledMessage,
+  pairingPartialMessage,
   remoteErrorMessage,
   remoteHost,
   serviceChips,
@@ -133,6 +134,22 @@ test("a pairing nobody can confirm says how to fix it", () => {
   assert.equal(
     pairingCancelledMessage("timeout", "It took too long.", "B"),
     "Pairing cancelled. Nothing was saved. It took too long.",
+  );
+});
+
+test("a pairing that stopped after a confirm says what each side saved", () => {
+  assert.equal(
+    pairingPartialMessage("B", "pinned", "unknown", "timeout"),
+    "Pairing did not finish on both machines. This Mac saved B's key; B may or may not have saved this Mac's key. Pair them again to complete it.",
+  );
+  assert.equal(
+    pairingPartialMessage("B", "not_pinned", "pinned", "done"),
+    "Pairing did not finish on both machines. This Mac did not save B's key; B saved this Mac's key. Pair them again to complete it.",
+  );
+  // A peer on 1.7.0 or earlier never says it saved: pairing again ends the same way.
+  assert.equal(
+    pairingPartialMessage("B", "pinned", "unknown", "unconfirmed"),
+    "This Mac saved B's key. B runs an older version of Localify, which doesn't say whether it saved this Mac's key: check on B, or update Localify there and pair again.",
   );
 });
 
