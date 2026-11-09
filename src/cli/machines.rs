@@ -1,7 +1,8 @@
 //! `localify machines`: the other machines of this Localify Cloud account,
 //! pairing with them, and what they may see and do here
 //! (`docs/remote-machines.md`, "CLI"). Pairing and removal need a person at
-//! a terminal: an agent cannot pair or remove machines.
+//! a terminal, except that someone who can run commands on both machines
+//! may pair them over SSH (ADR 0035, `pair_ssh`).
 
 use std::io::{self, BufRead, Write};
 
@@ -11,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::output::{can_prompt, print_json, wants_json};
+use super::pair_ssh;
 use crate::application::ports::DaemonConnectionError;
 use crate::branding::BRANDING;
 use crate::cli::context::AppContext;
@@ -18,6 +20,8 @@ use crate::config::LocalifyPaths;
 use crate::infrastructure::cloud::api::CloudClient;
 use crate::infrastructure::cloud::credentials::CredentialsStore;
 use crate::infrastructure::cloud::http::{CloudHttp, block_on};
+use crate::infrastructure::remote::pairing::{Outcome, PinState};
+use crate::infrastructure::remote::ssh_pair;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Switch {
@@ -47,7 +51,7 @@ struct Machine {
     sharing: Option<bool>,
 }
 
-fn daemon_error(error: DaemonConnectionError) -> anyhow::Error {
+pub(super) fn daemon_error(error: DaemonConnectionError) -> anyhow::Error {
     match error {
         DaemonConnectionError::NotRunning => anyhow!(
             "Remote machines go through the {} daemon, which is not running. Start it with: {} start",
@@ -277,10 +281,14 @@ pub fn pair(query: &str, ctx: &AppContext) -> Result<()> {
             Some("cancelled") => {
                 bail!("{}", cancelled_message(&event));
             }
+            Some("partial") => bail!("{}", event["message"].as_str().unwrap_or_default()),
             _ => {}
         }
     }
-    bail!("Pairing cancelled. Nothing was saved.")
+    bail!(
+        "The daemon stopped answering about the pairing; run `{} machines` to see where it stands.",
+        BRANDING.cli_command()
+    )
 }
 
 fn answer(ctx: &AppContext, pairing_id: &str, accept: bool) -> Result<()> {
@@ -337,10 +345,136 @@ pub fn accept(ctx: &AppContext) -> Result<()> {
             Some("pair_cancelled") if waiting_for.as_deref() == Some(pairing_id.as_str()) => {
                 bail!("Pairing cancelled. Nothing was saved.")
             }
+            Some("pair_partial") if waiting_for.as_deref() == Some(pairing_id.as_str()) => {
+                let here = if event["local"] == "pinned" {
+                    "saved"
+                } else {
+                    "did not save"
+                };
+                bail!(
+                    "Pairing did not finish on both machines: this machine {here} {name}'s key, and {name}'s side is {}. Pair them again to complete it.",
+                    event["peer"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .replace('_', " ")
+                )
+            }
             _ => {}
         }
     }
     bail!("The daemon stopped waiting for a pairing request.")
+}
+
+/// `localify machines pair <machine> --over-ssh <destination>`: pairs
+/// with no person at either screen, comparing both codes here. Prints how
+/// it ended, and returns the exit code: 0 paired, 2 nothing saved, 4
+/// partial.
+pub fn pair_over_ssh(
+    query: &str,
+    destination: &str,
+    remote_localify: Option<&str>,
+    json_flag: bool,
+    ctx: &AppContext,
+) -> i32 {
+    let report = match ssh_target(query, ctx) {
+        Ok(target) => match ssh_command(destination, remote_localify, &target) {
+            Ok(args) => {
+                let started = std::time::Instant::now();
+                let mut ssh = std::process::Command::new("ssh");
+                ssh.args(&args);
+                match pair_ssh::Peer::spawn(ssh, &target.name) {
+                    Ok(peer) => pair_ssh::drive(&ctx.mgmt_client, &target, peer, started),
+                    Err(error) => pair_ssh::Report::refused(
+                        Some(&target),
+                        format!("Could not run ssh: {error}"),
+                    ),
+                }
+            }
+            Err(error) => pair_ssh::Report::refused(Some(&target), format!("{error:#}")),
+        },
+        Err(error) => pair_ssh::Report::refused(None, format!("{error:#}")),
+    };
+    print_report(&report, wants_json(json_flag));
+    report.exit_code()
+}
+
+/// The machine to pair with, and this machine's account, from its daemon.
+fn ssh_target(query: &str, ctx: &AppContext) -> Result<pair_ssh::Target> {
+    let status = ctx.mgmt_client.remote_status().map_err(daemon_error)?;
+    let (Some(self_id), Some(account)) = (status["machineId"].as_str(), status["account"].as_str())
+    else {
+        bail!(
+            "Remote access is not available on this machine: it is not connected to Localify Cloud right now. Check `{} machines`.",
+            BRANDING.cli_command()
+        );
+    };
+    let target = resolve(&candidates(&machines(ctx, false)?), query)?;
+    if target.is_self || target.id == self_id {
+        bail!("{} is this machine: pair it from another one.", target.name);
+    }
+    Ok(pair_ssh::Target {
+        machine_id: target.id,
+        name: target.name,
+        own_id: self_id.to_string(),
+        account: account.to_string(),
+    })
+}
+
+/// `ssh`'s arguments, with the helper's command for the remote shell.
+fn ssh_command(
+    destination: &str,
+    remote_localify: Option<&str>,
+    target: &pair_ssh::Target,
+) -> Result<Vec<String>> {
+    let executable = match remote_localify {
+        Some(path) => ssh_pair::remote_executable(path)?,
+        None => BRANDING.cli_command(),
+    };
+    let command = ssh_pair::remote_command(executable, &target.own_id, &target.account)?;
+    Ok(ssh_pair::ssh_args(destination, &command)?)
+}
+
+fn print_report(report: &pair_ssh::Report, json: bool) {
+    if json {
+        let _ = print_json(report);
+        return;
+    }
+    let name = report.name.as_deref().unwrap_or("the other machine");
+    match report.outcome {
+        Outcome::Paired => println!(
+            "Paired with {name} over SSH: both machines saved each other's key. {name} sees this machine's name; it shares projects and output, or allows controls, only once that is turned on there."
+        ),
+        Outcome::Cancelled if report.detail.is_empty() => {
+            eprintln!("Pairing cancelled. Nothing was saved.");
+        }
+        Outcome::Cancelled => eprintln!("Pairing cancelled. Nothing was saved. {}", report.detail),
+        Outcome::Partial => {
+            let here = match report.local {
+                PinState::Pinned => "saved",
+                PinState::NotPinned => "did not save",
+                PinState::Unknown => "may or may not have saved",
+            };
+            let there = match report.peer {
+                PinState::Pinned => "saved this machine's key",
+                PinState::NotPinned => "did not save this machine's key",
+                PinState::Unknown => "may or may not have saved this machine's key",
+            };
+            eprintln!(
+                "Pairing did not finish on both machines: this machine {here} {name}'s key, and {name} {there}. Pair them again to complete it. {}",
+                report.detail
+            );
+        }
+    }
+}
+
+/// `localify machines pair --accept --for-ssh`, on the machine
+/// `--over-ssh` reaches. Returns the exit code.
+pub fn accept_for_ssh(from: &str, account: &str, ctx: &AppContext) -> Result<i32> {
+    let args = pair_ssh::HelperArgs {
+        from: from.to_string(),
+        account: account.to_string(),
+    };
+    pair_ssh::accept_for_ssh(&ctx.mgmt_client, &args)
 }
 
 /// `localify machines unpair <machine>`: deletes the pin, and tells the

@@ -30,7 +30,7 @@ import { RemotePairingDialogs } from "@/components/app/remote/remote-pairing-dia
 import { remoteQueries } from "@/lib/queries";
 import { openRemoteStream } from "@/lib/remote-stream";
 import { tauriClient } from "@/lib/tauri-client";
-import { pairingCancelledMessage } from "@/lib/util.remote";
+import { pairingCancelledMessage, pairingPartialMessage } from "@/lib/util.remote";
 import {
   type AccessPrompt,
   accessPromptAdded,
@@ -48,7 +48,9 @@ export type OutgoingPairing =
   | { step: "asking"; machine: RemoteMachineDto }
   | { step: "code"; machine: RemoteMachineDto; pairingId: string; code: string; answered: boolean }
   | { step: "paired"; machine: RemoteMachineDto }
-  | { step: "cancelled"; machine: RemoteMachineDto; message: string };
+  | { step: "cancelled"; machine: RemoteMachineDto; message: string }
+  /** It stopped after a confirm: one side may hold a pin the other lacks. */
+  | { step: "partial"; machine: RemoteMachineDto; message: string };
 
 /** A pairing another machine asked for, with this Mac as the target. */
 export type IncomingPairing =
@@ -61,7 +63,8 @@ export type IncomingPairing =
       answered: boolean;
     }
   | { step: "paired"; pairingId: string; name: string }
-  | { step: "cancelled"; pairingId: string; name: string };
+  | { step: "cancelled"; pairingId: string; name: string }
+  | { step: "partial"; pairingId: string; name: string; message: string };
 
 /** Another machine asks this Mac to turn on remote controls (docs/remote-machines.md). */
 export interface IncomingAccess {
@@ -139,6 +142,19 @@ export function RemoteProvider({ children }: PropsWithChildren) {
               ? { step: "cancelled", pairingId: event.pairingId, name: current.name }
               : current,
           );
+          return;
+        case "pair_partial":
+          setIncoming((current) =>
+            current && current.pairingId === event.pairingId
+              ? {
+                  step: "partial",
+                  pairingId: event.pairingId,
+                  name: event.name,
+                  message: pairingPartialMessage(event.name, event.local, event.peer),
+                }
+              : current,
+          );
+          refreshMachines();
           return;
         case "access_request": {
           const { event: _, expiresAt: __, ...request } = event;
@@ -218,6 +234,14 @@ export function RemoteProvider({ children }: PropsWithChildren) {
               machine,
               message: pairingCancelledMessage(event.reason, event.message, machine.name),
             });
+            return;
+          case "partial":
+            setOutgoing({
+              step: "partial",
+              machine,
+              message: pairingPartialMessage(machine.name, event.local, event.peer),
+            });
+            refreshMachines();
             return;
         }
       };

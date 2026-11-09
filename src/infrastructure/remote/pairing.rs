@@ -112,10 +112,7 @@ enum State {
         nonce: Nonce,
     },
     /// Both: the code is shown, waiting for both answers.
-    Confirming {
-        mine: Option<bool>,
-        theirs: Option<bool>,
-    },
+    Confirming,
     Finished,
 }
 
@@ -125,6 +122,11 @@ pub struct Pairing {
     side: Side,
     h: [u8; HASH_LEN],
     state: State,
+    /// This side's answer, once its person gave it. Kept after the end, so
+    /// a cut session can still tell what may have been written.
+    mine: Option<bool>,
+    /// The peer's `pair.confirm`, once it arrived.
+    theirs: Option<bool>,
 }
 
 impl Pairing {
@@ -134,6 +136,8 @@ impl Pairing {
             side: Side::Initiator,
             h,
             state: State::AwaitCommit,
+            mine: None,
+            theirs: None,
         }
     }
 
@@ -146,6 +150,8 @@ impl Pairing {
             side: Side::Responder,
             h,
             state: State::Committed { nonce },
+            mine: None,
+            theirs: None,
         };
         Ok((pairing, SessionMessage::PairCommit { c: encode(&c) }))
     }
@@ -154,9 +160,26 @@ impl Pairing {
         self.state == State::Finished
     }
 
+    /// This side's answer: `Some(true)` once it sent `pair.confirm` with
+    /// `accept: true`. Until then the peer cannot have written a pin.
+    pub fn mine(&self) -> Option<bool> {
+        self.mine
+    }
+
+    /// The peer's `pair.confirm`, once it arrived.
+    pub fn theirs(&self) -> Option<bool> {
+        self.theirs
+    }
+
     /// Takes the peer's next pairing message.
     pub fn receive(&mut self, message: &SessionMessage) -> Result<Vec<Step>, PairingError> {
         let state = std::mem::replace(&mut self.state, State::Finished);
+        if let (State::Confirming, None, SessionMessage::PairConfirm { accept }) =
+            (&state, self.theirs, message)
+        {
+            self.theirs = Some(*accept);
+            return Ok(self.settle(Vec::new()));
+        }
         let (state, steps) = self.next(state, message)?;
         self.state = state;
         Ok(steps)
@@ -185,7 +208,7 @@ impl Pairing {
                 let shown = format_code(code(&self.h, &theirs, &nonce));
                 let reveal = SessionMessage::PairReveal { n: encode(&nonce) };
                 Ok((
-                    confirming(),
+                    State::Confirming,
                     vec![Step::Send(reveal), Step::ShowCode(shown)],
                 ))
             }
@@ -205,47 +228,69 @@ impl Pairing {
                     return Err(PairingError::NonceReuse);
                 }
                 let shown = format_code(code(&self.h, &nonce, &theirs));
-                Ok((confirming(), vec![Step::ShowCode(shown)]))
+                Ok((State::Confirming, vec![Step::ShowCode(shown)]))
             }
-            (
-                _,
-                State::Confirming { mine, theirs: None },
-                SessionMessage::PairConfirm { accept },
-            ) => Ok(settle(mine, Some(*accept), vec![])),
             (_, _, message) => Err(PairingError::OutOfOrder(name(message))),
         }
     }
 
     /// The person's answer, once the code is shown.
     pub fn answer(&mut self, accept: bool) -> Result<Vec<Step>, PairingError> {
-        let State::Confirming { mine: None, theirs } = self.state else {
+        if self.state != State::Confirming || self.mine.is_some() {
             return Err(PairingError::AlreadyAnswered);
-        };
-        let send = vec![Step::Send(SessionMessage::PairConfirm { accept })];
-        let (state, steps) = settle(Some(accept), theirs, send);
-        self.state = state;
-        Ok(steps)
+        }
+        self.mine = Some(accept);
+        Ok(self.settle(vec![Step::Send(SessionMessage::PairConfirm { accept })]))
+    }
+
+    /// Ends the pairing once either answer is no, or both are yes.
+    fn settle(&mut self, mut steps: Vec<Step>) -> Vec<Step> {
+        match (self.mine, self.theirs) {
+            (Some(false), _) | (_, Some(false)) => {
+                steps.push(Step::Cancelled);
+                self.state = State::Finished;
+            }
+            (Some(true), Some(true)) => {
+                steps.push(Step::Paired);
+                self.state = State::Finished;
+            }
+            _ => self.state = State::Confirming,
+        }
+        steps
     }
 }
 
-fn confirming() -> State {
-    State::Confirming {
-        mine: None,
-        theirs: None,
-    }
+/// What one side of a pairing holds: its own state as it verified it on
+/// disk, or the peer's as this side learned it (`docs/remote-machines.md`,
+/// "Partial results").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinState {
+    Pinned,
+    NotPinned,
+    Unknown,
 }
 
-fn settle(mine: Option<bool>, theirs: Option<bool>, mut steps: Vec<Step>) -> (State, Vec<Step>) {
-    match (mine, theirs) {
-        (Some(false), _) | (_, Some(false)) => {
-            steps.push(Step::Cancelled);
-            (State::Finished, steps)
+/// How a pairing ended, from both sides' states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Both sides are known to hold the other's pin.
+    Paired,
+    /// Nothing was written on either side.
+    Cancelled,
+    /// Anything else: one side may hold a pin the other lacks. Pairing
+    /// again with the same machines completes it.
+    Partial,
+}
+
+impl Outcome {
+    pub fn of(local: PinState, peer: PinState) -> Self {
+        match (local, peer) {
+            (PinState::Pinned, PinState::Pinned) => Self::Paired,
+            (PinState::NotPinned, PinState::NotPinned) => Self::Cancelled,
+            _ => Self::Partial,
         }
-        (Some(true), Some(true)) => {
-            steps.push(Step::Paired);
-            (State::Finished, steps)
-        }
-        _ => (State::Confirming { mine, theirs }, steps),
     }
 }
 
@@ -457,6 +502,44 @@ mod tests {
         }
         // Each attempt matches with probability 10⁻⁶.
         assert!(matches <= 1, "{matches} of 200 attempts matched");
+    }
+
+    #[test]
+    fn each_side_keeps_both_answers_after_the_end() {
+        let (mut a, mut b, _, _) = to_codes([12; 32], [12; 32]);
+        assert_eq!((a.mine(), a.theirs()), (None, None));
+        a.answer(true).unwrap();
+        b.receive(&confirm(true)).unwrap();
+        b.answer(true).unwrap();
+        a.receive(&confirm(true)).unwrap();
+        assert!(a.is_finished() && b.is_finished());
+        assert_eq!((a.mine(), a.theirs()), (Some(true), Some(true)));
+        assert_eq!((b.mine(), b.theirs()), (Some(true), Some(true)));
+
+        let (mut a, _, _, _) = to_codes([13; 32], [13; 32]);
+        a.answer(true).unwrap();
+        a.receive(&confirm(false)).unwrap();
+        assert_eq!((a.mine(), a.theirs()), (Some(true), Some(false)));
+    }
+
+    #[test]
+    fn the_outcome_is_paired_only_when_both_are_known_pinned() {
+        use PinState::{NotPinned, Pinned, Unknown};
+        assert_eq!(Outcome::of(Pinned, Pinned), Outcome::Paired);
+        assert_eq!(Outcome::of(NotPinned, NotPinned), Outcome::Cancelled);
+        for (local, peer) in [
+            (Pinned, Unknown),
+            (Pinned, NotPinned),
+            (NotPinned, Pinned),
+            (NotPinned, Unknown),
+            (Unknown, Unknown),
+        ] {
+            assert_eq!(
+                Outcome::of(local, peer),
+                Outcome::Partial,
+                "{local:?} {peer:?}"
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ import {
   ownerLabel,
   PAIRING_CANCELLED,
   pairingCancelledMessage,
+  pairingPartialMessage,
   remoteErrorMessage,
   remoteHost,
   serviceChips,
@@ -133,6 +134,17 @@ test("a pairing nobody can confirm says how to fix it", () => {
   assert.equal(
     pairingCancelledMessage("timeout", "It took too long.", "B"),
     "Pairing cancelled. Nothing was saved. It took too long.",
+  );
+});
+
+test("a pairing that stopped after a confirm says what each side saved", () => {
+  assert.equal(
+    pairingPartialMessage("B", "pinned", "unknown"),
+    "Pairing did not finish on both machines. This Mac saved B's key; B may or may not have saved this Mac's key. Pair them again to complete it.",
+  );
+  assert.equal(
+    pairingPartialMessage("B", "not_pinned", "pinned"),
+    "Pairing did not finish on both machines. This Mac did not save B's key; B saved this Mac's key. Pair them again to complete it.",
   );
 });
 

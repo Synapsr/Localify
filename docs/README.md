@@ -480,8 +480,15 @@ localify machines pair --accept    # or wait for a request on the other one
 
 Both machines show the same 6-digit code, and you confirm it on each. What the machines
 say to each other is end-to-end encrypted, so Localify Cloud relays it without reading
-it. Pairing and removing a machine need a person at a terminal or in the app; agents
-can't do it. `localify machines unpair <machine>` forgets a paired machine, and
+it. Pairing needs a person at a terminal or in the app, with one exception: from a
+machine that can reach the other over SSH, `localify machines pair teo-desktop
+--over-ssh teo@teo-desktop.local` starts the other side through `ssh`, compares both
+codes itself, and confirms both only when they match. So an agent you gave SSH access to
+both machines can pair them. The host key must already be trusted, and when ssh's shell
+doesn't find `localify` there, pass its path with `--remote-localify`. It exits 0 once
+both machines saved each other, 2 when nothing was saved, and 4 when only one may have:
+pairing again completes it. Removing a machine always needs a person.
+`localify machines unpair <machine>` forgets a paired machine, and
 `localify machines remove <machine>` signs it out of the account.
 
 **Choose what others may see and do here.** Each machine decides for itself, in Settings

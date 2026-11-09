@@ -45,11 +45,12 @@ use super::socket::RelaySocket;
 use super::{Shared, View};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::CloudClient;
+use crate::infrastructure::launch_rev::random_bytes;
 use crate::infrastructure::remote::noise::{
     HASH_LEN, Handshake, KEY_LEN, SessionContext, SessionId, StaticKeys, Transport, decode_key,
     encode_key,
 };
-use crate::infrastructure::remote::pairing::{Pairing, Step};
+use crate::infrastructure::remote::pairing::{Outcome, Pairing, PinState, Step};
 use crate::infrastructure::remote::store::{Pin, now_rfc3339};
 use crate::infrastructure::remote::wire::{
     AccessOutcome, AccessWants, ByeReason, DeclineReason, FrameKind, Hello, PresenceState, Purpose,
@@ -102,6 +103,30 @@ pub enum PairEvent {
         reason: String,
         message: String,
     },
+    /// The session ended after a `pair.confirm`, and the two sides are not
+    /// both known to hold the other's pin (`docs/remote-machines.md`,
+    /// "Partial results").
+    Partial {
+        machine_id: String,
+        name: String,
+        local: PinState,
+        peer: PinState,
+        reason: String,
+        message: String,
+    },
+}
+
+/// What the `--for-ssh` helper's acceptor answers once it is registered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Accepted {
+    /// This machine's id, which the initiator checks against the one it
+    /// resolved.
+    pub machine_id: String,
+    pub account: String,
+    /// A fresh id that tags the helper's lines; a correlation id, not a
+    /// check.
+    pub attempt: String,
 }
 
 /// What `remote_events` clients hear.
@@ -129,6 +154,14 @@ pub enum Event {
         pairing_id: String,
         machine_id: String,
         reason: String,
+    },
+    /// The pairing ended with only one side known to hold a pin.
+    PairPartial {
+        pairing_id: String,
+        machine_id: String,
+        name: String,
+        local: PinState,
+        peer: PinState,
     },
     Presence {
         machine_id: String,
@@ -180,6 +213,14 @@ pub enum Command {
         pairing_id: String,
         accept: bool,
         reply: oneshot::Sender<bool>,
+    },
+    /// Registers the one-shot acceptor of `localify machines pair --accept
+    /// --for-ssh`: only a pairing request from `from` consumes it.
+    Accept {
+        from: String,
+        account: String,
+        events: mpsc::Sender<PairEvent>,
+        reply: oneshot::Sender<Result<Accepted, Failure>>,
     },
     Unpair {
         peer: String,
@@ -302,7 +343,17 @@ struct Session {
     not_responding: bool,
     pairing: Option<Pairing>,
     code_shown: bool,
+    /// This side wrote its pin in this pairing.
     paired: bool,
+    /// The pairing ends at this time; by default its 2 minutes from the
+    /// first handshake message, or the acceptor's own deadline.
+    pair_deadline: Option<Instant>,
+    /// After writing its pin, the side waits until then for the peer's
+    /// `bye`.
+    settle_until: Option<Instant>,
+    /// The peer ended with `bye` `done` once both had accepted: it says it
+    /// wrote its pin.
+    peer_saved: bool,
     holder: Holder,
     /// Target: what the viewer asked for.
     served: target::Served,
@@ -342,6 +393,9 @@ impl Session {
             pairing: None,
             code_shown: false,
             paired: false,
+            pair_deadline: None,
+            settle_until: None,
+            peer_saved: false,
             holder: Holder::None,
             served: target::Served::default(),
             taps: HashMap::new(),
@@ -412,6 +466,17 @@ struct Actor {
     /// Target: cancels the controls of each peer not dispatched yet, once
     /// it is unpaired or paired again.
     control_cancels: HashMap<String, CancellationToken>,
+    /// Target: the `--for-ssh` helper's acceptor, until a pairing request
+    /// from its machine consumes it or it expires.
+    acceptor: Option<Acceptor>,
+}
+
+/// A one-shot acceptor, bound to the account and one initiating machine.
+struct Acceptor {
+    from: String,
+    /// The pairing's 2 minutes, from registration.
+    deadline: Instant,
+    events: mpsc::Sender<PairEvent>,
 }
 
 pub async fn run(
@@ -453,6 +518,7 @@ pub async fn run(
         taps_made: 0,
         access_ended: VecDeque::new(),
         control_cancels: HashMap::new(),
+        acceptor: None,
     };
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1034,6 +1100,16 @@ impl Actor {
         if role == Role::Viewer && purpose == Purpose::Pair {
             session.pairing = Some(Pairing::initiator(hash));
         }
+        // A different key for an existing pin never replaces it silently.
+        if purpose == Purpose::Pair
+            && let Some(failure) = self.pin_conflict(&key.0, remote)
+        {
+            self.send_message(
+                key,
+                &SessionMessage::error("key_mismatch", failure.message.clone()),
+            );
+            return self.end(key, End::Close, &failure);
+        }
         if role == Role::Target && purpose == Purpose::Session {
             if let Err(failure) = self.peer_check(&key.0, remote) {
                 let code = if failure.code == "key_mismatch" {
@@ -1097,6 +1173,30 @@ impl Actor {
                 .insert(peer.to_string(), failure.code.clone());
         }
         result
+    }
+
+    /// A pin for `peer` with another key than the one the pairing
+    /// handshake gave.
+    fn pin_conflict(&self, peer: &str, remote: Option<[u8; KEY_LEN]>) -> Option<Failure> {
+        let pins = self.shared.store.pins().unwrap_or_default();
+        let pin = pins.get(peer)?;
+        if remote.is_some() && decode_key(&pin.public_key).ok() == remote {
+            return None;
+        }
+        self.view()
+            .failures
+            .insert(peer.to_string(), "key_mismatch".into());
+        Some(Failure::new(
+            "key_mismatch",
+            "This machine already holds another key for it. Don't trust it until you know why: unpair it, then pair again.",
+        ))
+    }
+
+    /// Whether the pins on disk hold `peer` with the key the handshake gave.
+    fn holds_pin(&self, peer: &str, remote: Option<[u8; KEY_LEN]>) -> bool {
+        let pins = self.shared.store.pins().unwrap_or_default();
+        pins.get(peer)
+            .is_some_and(|pin| remote.is_some() && decode_key(&pin.public_key).ok() == remote)
     }
 
     fn hello(&self, role: Role, purpose: Purpose) -> Hello {
@@ -1287,6 +1387,14 @@ impl Actor {
                 self.on_request(key, message);
             }
             SessionMessage::Bye { reason } => {
+                // Only a side that wrote its pin ends a pairing with `bye`
+                // `done` once both accepted.
+                let both_accepted = session.pairing.as_ref().is_some_and(|pairing| {
+                    pairing.mine() == Some(true) && pairing.theirs() == Some(true)
+                });
+                if reason == ByeReason::Done && both_accepted {
+                    session.peer_saved = true;
+                }
                 if reason == ByeReason::Unpaired {
                     self.forget_pin(&key.0);
                 }
@@ -1397,21 +1505,28 @@ impl Actor {
     /// On the target, once both hellos are in: decline, or commit.
     fn start_pairing(&mut self, key: &Key) {
         let now = Instant::now();
-        // Kept by the link, so a new connection does not reset the count.
-        let mut attempts = self.shared.pair_attempts();
-        while attempts
-            .front()
-            .is_some_and(|at| now.duration_since(*at) >= HOUR)
-        {
-            attempts.pop_front();
-        }
-        let oldest = attempts.front().copied();
-        let full = attempts.len() >= PAIRINGS_PER_HOUR;
-        drop(attempts);
         let decline = |reason, retry_after| SessionMessage::PairDeclined {
             reason,
             retry_after,
         };
+        // The `--for-ssh` helper's acceptor: only its machine consumes it,
+        // and its attempt was counted when it was registered.
+        let mine = |acceptor: &mut Acceptor| acceptor.from == key.0 && now < acceptor.deadline;
+        if let Some(acceptor) = self.acceptor.take_if(mine) {
+            if let Some(session) = self.sessions.get_mut(key) {
+                session.holder = Holder::Pair(acceptor.events);
+                session.pair_deadline = Some(acceptor.deadline);
+            }
+            return self.commit(key);
+        }
+        if self.acceptor.is_some() {
+            self.send_message(key, &decline(DeclineReason::Busy, Some(60)));
+            return self.end(
+                key,
+                End::Bye(ByeReason::Done),
+                &Failure::new("busy", "Busy."),
+            );
+        }
         if self.shared.subscribers.load(Ordering::SeqCst) == 0 {
             self.send_message(key, &decline(DeclineReason::NobodyToConfirm, None));
             return self.end(
@@ -1420,22 +1535,12 @@ impl Actor {
                 &Failure::new("nobody_to_confirm", "Nobody could confirm."),
             );
         }
-        let another = self.sessions.iter().any(|(other, session)| {
-            other != key
-                && session.role == Role::Target
-                && session
-                    .pairing
-                    .as_ref()
-                    .is_some_and(|pairing| !pairing.is_finished())
-        });
-        if another || full {
-            let retry_after = match oldest {
-                Some(oldest) if !another => HOUR
-                    .saturating_sub(now.duration_since(oldest))
-                    .as_secs()
-                    .max(1),
-                _ => 60,
-            };
+        let busy = if self.pairing_active(Some(key)) {
+            Some(60)
+        } else {
+            self.pairing_room(now).err()
+        };
+        if let Some(retry_after) = busy {
             self.send_message(key, &decline(DeclineReason::Busy, Some(retry_after)));
             return self.end(
                 key,
@@ -1444,6 +1549,43 @@ impl Actor {
             );
         }
         self.shared.pair_attempts().push_back(now);
+        self.commit(key);
+    }
+
+    /// Whether a pairing other than `except` is going on as the target.
+    fn pairing_active(&self, except: Option<&Key>) -> bool {
+        self.sessions.iter().any(|(other, session)| {
+            Some(other) != except
+                && session.role == Role::Target
+                && session
+                    .pairing
+                    .as_ref()
+                    .is_some_and(|pairing| !pairing.is_finished())
+        })
+    }
+
+    /// Whether the last hour leaves room for one more pairing attempt, or
+    /// how many seconds until it does. The link keeps the attempts, so a
+    /// new connection does not reset the count.
+    fn pairing_room(&self, now: Instant) -> Result<(), u64> {
+        let mut attempts = self.shared.pair_attempts();
+        while attempts
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= HOUR)
+        {
+            attempts.pop_front();
+        }
+        match attempts.front() {
+            Some(oldest) if attempts.len() >= PAIRINGS_PER_HOUR => Err(HOUR
+                .saturating_sub(now.duration_since(*oldest))
+                .as_secs()
+                .max(1)),
+            _ => Ok(()),
+        }
+    }
+
+    /// The responder's commitment, which starts the pairing.
+    fn commit(&mut self, key: &Key) {
         let Some(hash) = self.sessions.get(key).and_then(|session| session.hash) else {
             return;
         };
@@ -1459,6 +1601,79 @@ impl Actor {
                 End::Bye(ByeReason::Done),
                 &Failure::new("internal", format!("{error:#}")),
             ),
+        }
+    }
+
+    /// `remote_pair_accept`: registers the helper's acceptor. Counted
+    /// against the hour's attempts now, as it is about to write `ready`,
+    /// and its 2 minutes start now.
+    fn register_acceptor(
+        &mut self,
+        from: String,
+        account: &str,
+        events: mpsc::Sender<PairEvent>,
+    ) -> Result<Accepted, Failure> {
+        if account != self.ctx.account {
+            return Err(Failure::new(
+                "wrong_account",
+                "This machine is signed in to another Localify Cloud account than the one asked for.",
+            ));
+        }
+        if from == self.ctx.self_id {
+            return Err(Failure::new(
+                "bad_request",
+                "A machine cannot pair with itself.",
+            ));
+        }
+        if self
+            .acceptor
+            .as_ref()
+            .is_some_and(|acceptor| acceptor.events.is_closed())
+        {
+            self.acceptor = None;
+        }
+        let now = Instant::now();
+        if self.acceptor.is_some() || self.pairing_active(None) {
+            return Err(Failure::new(
+                "busy",
+                "Another pairing is going on on this machine. Try again in a minute.",
+            ));
+        }
+        if let Err(seconds) = self.pairing_room(now) {
+            return Err(Failure::new(
+                "busy",
+                format!(
+                    "This machine took 5 pairing attempts in the last hour. Try again in {} min.",
+                    seconds.div_ceil(60)
+                ),
+            ));
+        }
+        let mut bytes = [0_u8; 16];
+        random_bytes(&mut bytes).map_err(|error| Failure::new("internal", format!("{error:#}")))?;
+        self.shared.pair_attempts().push_back(now);
+        self.acceptor = Some(Acceptor {
+            from,
+            deadline: now + self.shared.timings.pairing_timeout,
+            events,
+        });
+        Ok(Accepted {
+            machine_id: self.ctx.self_id.clone(),
+            account: self.ctx.account.clone(),
+            attempt: URL_SAFE_NO_PAD.encode(bytes),
+        })
+    }
+
+    /// An acceptor whose 2 minutes ran out, or whose helper left, before a
+    /// request consumed it. Nothing was saved.
+    fn expire_acceptor(&mut self, now: Instant) {
+        let gone =
+            |acceptor: &mut Acceptor| now >= acceptor.deadline || acceptor.events.is_closed();
+        if let Some(acceptor) = self.acceptor.take_if(gone) {
+            let failure = Failure::new(
+                "timeout",
+                "No pairing request came from that machine in time.",
+            );
+            notify_failure(Holder::Pair(acceptor.events), &failure);
         }
     }
 
@@ -1556,7 +1771,8 @@ impl Actor {
         }
     }
 
-    /// Both people accepted: pin the key the handshake gave.
+    /// Both people accepted: pin the key the handshake gave, say so with
+    /// `bye` `done`, and wait for the peer's to learn it wrote its own.
     fn paired(&mut self, key: &Key) {
         let name = self.view().name_of(&key.0);
         let Some(peer_key) = self.sessions.get(key).and_then(|session| session.peer_key) else {
@@ -1564,7 +1780,7 @@ impl Actor {
         };
         let pin = Pin {
             public_key: encode_key(&peer_key),
-            name: name.clone(),
+            name,
             paired_at: now_rfc3339(),
         };
         if let Err(error) = self.shared.store.update_pins(&self.ctx.self_id, |pins| {
@@ -1574,35 +1790,100 @@ impl Actor {
             return self.end(
                 key,
                 End::Bye(ByeReason::Done),
-                &Failure::new("cancelled", message),
+                &Failure::new("pin_failed", message),
             );
         }
         info!(peer = %key.0, "Paired");
         // A pin with a new key: nothing the old key asked for goes on.
         self.cancel_controls(&key.0);
         self.view().failures.remove(&key.0);
+        let settle = Instant::now() + self.shared.timings.pair_settle;
         let Some(session) = self.sessions.get_mut(key) else {
             return;
         };
         session.paired = true;
-        match &session.holder {
-            Holder::Pair(events) => {
-                let _ = events.try_send(PairEvent::Paired {
-                    machine_id: key.0.clone(),
+        session.settle_until = Some(settle);
+        self.send_message(
+            key,
+            &SessionMessage::Bye {
+                reason: ByeReason::Done,
+            },
+        );
+    }
+
+    /// What each side holds once a pairing session ended: nothing when
+    /// neither could have written a pin, otherwise this side's pin as the
+    /// disk has it and the peer's as it said.
+    fn pin_states(&self, key: &Key, session: &Session, pairing: &Pairing) -> (PinState, PinState) {
+        // The peer writes its pin only once this side's `accept: true`
+        // arrived.
+        let peer_may_have_pinned = pairing.mine() == Some(true) && pairing.theirs() != Some(false);
+        if !session.paired && !peer_may_have_pinned {
+            return (PinState::NotPinned, PinState::NotPinned);
+        }
+        let local = if self.holds_pin(&key.0, session.peer_key) {
+            PinState::Pinned
+        } else {
+            PinState::NotPinned
+        };
+        let peer = if session.peer_saved {
+            PinState::Pinned
+        } else {
+            PinState::Unknown
+        };
+        (local, peer)
+    }
+
+    /// Tells whoever waits on a pairing session how it ended.
+    fn report_pairing(&mut self, key: &Key, session: Session, failure: &Failure) {
+        let name = self.view().name_of(&key.0);
+        let states = session
+            .pairing
+            .as_ref()
+            .map(|pairing| self.pin_states(key, &session, pairing));
+        let outcome = states.map_or(Outcome::Cancelled, |(local, peer)| Outcome::of(local, peer));
+        let machine_id = key.0.clone();
+        match (session.holder, outcome, states) {
+            (Holder::Pair(events), Outcome::Paired, _) => {
+                let _ = events.try_send(PairEvent::Paired { machine_id, name });
+            }
+            (Holder::Pair(events), Outcome::Partial, Some((local, peer))) => {
+                let _ = events.try_send(PairEvent::Partial {
+                    message: partial_message(&name, local, peer),
+                    machine_id,
                     name,
+                    local,
+                    peer,
+                    reason: failure.code.clone(),
                 });
             }
-            _ => self.shared.emit(Event::Paired {
-                pairing_id: key.1.encode(),
-                machine_id: key.0.clone(),
-                name,
-            }),
+            (Holder::None, outcome, states)
+                if session.role == Role::Target && session.code_shown =>
+            {
+                let pairing_id = key.1.encode();
+                let event = match (outcome, states) {
+                    (Outcome::Paired, _) => Event::Paired {
+                        pairing_id,
+                        machine_id,
+                        name,
+                    },
+                    (Outcome::Partial, Some((local, peer))) => Event::PairPartial {
+                        pairing_id,
+                        machine_id,
+                        name,
+                        local,
+                        peer,
+                    },
+                    _ => Event::PairCancelled {
+                        pairing_id,
+                        machine_id,
+                        reason: failure.code.clone(),
+                    },
+                };
+                self.shared.emit(event);
+            }
+            (holder, _, _) => notify_failure(holder, failure),
         }
-        self.end(
-            key,
-            End::Bye(ByeReason::Done),
-            &Failure::new("done", "Paired."),
-        );
     }
 
     fn forget_pin(&mut self, peer: &str) {
@@ -1696,6 +1977,14 @@ impl Actor {
                 reply,
             } => {
                 let _ = reply.send(self.on_answer(&pairing_id, accept));
+            }
+            Command::Accept {
+                from,
+                account,
+                events,
+                reply,
+            } => {
+                let _ = reply.send(self.register_acceptor(from, &account, events));
             }
             Command::Unpair { peer } => {
                 self.cancel_controls(&peer);
@@ -1810,6 +2099,7 @@ impl Actor {
             self.check(&key, now);
         }
         self.expire_access(now);
+        self.expire_acceptor(now);
         self.serve_tick(now);
     }
 
@@ -1846,11 +2136,21 @@ impl Actor {
             .pairing
             .as_ref()
             .is_some_and(|pairing| !pairing.is_finished());
-        if pairing_open && now.duration_since(session.started) >= timings.pairing_timeout {
+        let deadline = session
+            .pair_deadline
+            .unwrap_or(session.started + timings.pairing_timeout);
+        if pairing_open && now >= deadline {
             return self.end(
                 key,
                 End::Bye(ByeReason::Done),
-                &Failure::new("timeout", "Pairing cancelled. Nothing was saved."),
+                &Failure::new("timeout", "The pairing timed out."),
+            );
+        }
+        if session.settle_until.is_some_and(|until| now >= until) {
+            return self.end(
+                key,
+                End::Silent,
+                &Failure::new("timeout", "The other machine did not say it saved its pin."),
             );
         }
         let left = match &session.holder {
@@ -1865,7 +2165,7 @@ impl Actor {
                 self.end(
                     key,
                     End::Bye(ByeReason::Done),
-                    &Failure::new("cancelled", "Pairing cancelled. Nothing was saved."),
+                    &Failure::new("cancelled", "Nobody waits for this pairing any more."),
                 );
             }
             return;
@@ -1948,6 +2248,22 @@ impl Actor {
     // --- Ending --------------------------------------------------------------
 
     fn end(&mut self, key: &Key, how: End, failure: &Failure) {
+        // The peer reads `bye` `done` after both accepted as "saved": a side
+        // that accepted and did not write its pin ends with `error`.
+        let accepted_unsaved = self.sessions.get(key).is_some_and(|session| {
+            !session.paired
+                && session
+                    .pairing
+                    .as_ref()
+                    .is_some_and(|pairing| pairing.mine() == Some(true))
+        });
+        let how = match how {
+            End::Bye(ByeReason::Done) if accepted_unsaved => End::Error(
+                "cancelled",
+                "The other machine stopped the pairing without saving its pin.".into(),
+            ),
+            how => how,
+        };
         match how {
             End::Silent => {}
             End::Close => {
@@ -1989,15 +2305,8 @@ impl Actor {
             // The session is gone: the viewer hears nothing more.
             self.access_closed(&waiting.request_id, AccessOutcome::Cancelled);
         }
-        if session.paired {
-            return;
-        }
-        if session.role == Role::Target && session.code_shown {
-            self.shared.emit(Event::PairCancelled {
-                pairing_id: key.1.encode(),
-                machine_id: key.0.clone(),
-                reason: failure.code.clone(),
-            });
+        if session.purpose == Purpose::Pair {
+            return self.report_pairing(key, session, failure);
         }
         notify_failure(session.holder, failure);
     }
@@ -2038,6 +2347,9 @@ impl Actor {
         for key in keys {
             self.end(&key, End::Silent, failure);
         }
+        if let Some(acceptor) = self.acceptor.take() {
+            notify_failure(Holder::Pair(acceptor.events), failure);
+        }
     }
 }
 
@@ -2061,6 +2373,22 @@ fn notify_failure(holder: Holder, failure: &Failure) {
             });
         }
     }
+}
+
+/// What a person reads when only one side may hold a pin.
+fn partial_message(name: &str, local: PinState, peer: PinState) -> String {
+    let here = match local {
+        PinState::Pinned => format!("This machine saved {name}'s key"),
+        _ => format!("This machine did not save {name}'s key"),
+    };
+    let there = match peer {
+        PinState::Pinned => format!("{name} saved this machine's key"),
+        PinState::NotPinned => format!("{name} did not save this machine's key"),
+        PinState::Unknown => format!("{name} may or may not have saved this machine's key"),
+    };
+    format!(
+        "Pairing did not finish on both machines. {here}; {there}. Pair them again to complete it."
+    )
 }
 
 fn bad_request() -> Failure {

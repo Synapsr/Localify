@@ -1275,6 +1275,15 @@ export type RemoteEventDto =
   | { event: "pair_request"; pairingId: string; machineId: string; name: string; code: string }
   | { event: "paired"; pairingId: string; machineId: string; name: string }
   | { event: "pair_cancelled"; pairingId: string; machineId: string; reason: string }
+  /** The pairing ended after a confirm with only one side known to hold a pin. */
+  | {
+      event: "pair_partial";
+      pairingId: string;
+      machineId: string;
+      name: string;
+      local: RemotePinState;
+      peer: RemotePinState;
+    }
   | { event: "presence"; machineId: string; state: "online" | "offline" }
   | { event: "revoked"; machineId: string }
   | { event: "unpaired"; machineId: string }
@@ -1318,11 +1327,24 @@ export interface RemoteAccessSuppressedDto {
   since: string;
 }
 
+/** A side's pin after a pairing: its own as it verified it, the other's as it said. */
+export type RemotePinState = "pinned" | "not_pinned" | "unknown";
+
 /** What `remote_pair` says to the machine that asked. */
 export type RemotePairEventDto =
   | { event: "code"; pairingId: string; machineId: string; name: string; code: string }
   | { event: "paired"; machineId: string; name: string }
-  | { event: "cancelled"; reason: string; message: string };
+  | { event: "cancelled"; reason: string; message: string }
+  /** After a confirm, only one side may hold a pin (docs/remote-machines.md, "Partial results"). */
+  | {
+      event: "partial";
+      machineId: string;
+      name: string;
+      local: RemotePinState;
+      peer: RemotePinState;
+      reason: string;
+      message: string;
+    };
 
 export interface RemoteMachineSummaryDto {
   machineId: string;

@@ -15,6 +15,7 @@ pub mod logs;
 pub mod machines;
 pub mod mcp;
 pub mod output;
+pub mod pair_ssh;
 pub mod profile_init;
 pub mod project;
 pub mod project_env;
