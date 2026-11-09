@@ -109,7 +109,7 @@ Pairing runs over the relay as a Noise session with purpose `pair` (see "Session
 9. Each side sends `pair.confirm` with `accept` once its person answers. A side writes its pin only when its own person accepted and the peer's `accept: true` arrived. Before either side has sent `pair.confirm`, a cancel, a mismatch, a message out of order or repeated, a closed session or 2 minutes without both answers pins nothing, and both show "Pairing cancelled. Nothing was saved." After that, see "Partial results" below.
 10. After pairing, B shows "Paired with A" and a link to Settings → Remote access, with the three switches still off. A shows B as "Paired · not sharing" until B turns `share` on.
 
-**Partial results.** Before either side sends `pair.confirm`, a cancel or a lost session pins nothing. After the first `pair.confirm`, a lost session can leave one side pinned and not the other. Each side then reports what it knows of the other ("B confirmed; its answer did not arrive"), never "Nothing was saved". The CLI exits 4 with both sides' known states. Pairing again with the same machine ids and keys completes it. A different key for an existing pin never replaces it silently: that is a key mismatch.
+**Partial results.** Before either side sends `pair.confirm`, nothing writes a new pin. After the first `pair.confirm`, a lost session can leave one side pinned and not the other. Each side then reports its own state as it verified it on disk, `pinned` or `not_pinned`, and the peer's as `pinned` (its `accept: true` arrived and it says it saved), `not_pinned` (it cancelled before confirming), or `unknown`. The CLI exits 4 unless both sides are known to be pinned (0) or nothing was written (2). Pairing again with the same machine ids and keys completes it. A different key for an existing pin never replaces it silently: that is a key mismatch.
 
 ### Pairing over SSH
 
@@ -118,12 +118,14 @@ Pairing runs over the relay as a Noise session with purpose `pair` (see "Session
 - **SSH:** A runs `ssh` directly, with no local shell, as `ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o StdinNull=no -o ForkAfterAuthentication=no -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o ControlMaster=no -o ControlPath=none -o ConnectTimeout=15 -- <destination> <command>`. The host key must already be trusted (`known_hosts` or a host CA); an unknown or changed key fails before anything else. `<destination>` must be one operand that does not start with `-`. The remote command is the executable path and fixed arguments, each quoted for a POSIX shell. `--remote-localify` is one absolute path, refused if it holds a newline or NUL. Without it, the command is `localify` as the remote non-interactive environment finds it, and a missing one fails with a message that names `--remote-localify`. Nothing is installed or updated on B, and nothing switches users or uses `sudo`.
 - **The accepting side:** `localify machines pair --accept --for-ssh --from <A's machine id> --account <user id>` is a machine-readable interface for an authorized local caller. Refusing a terminal on stdin or stdout only prevents accidental interactive use. It is not authentication and it proves nothing about SSH. The comparison is A's, and processes of the daemon's own user are inside the trust boundary, as everywhere in this contract. It opens no listener. It talks to its own daemon over the management socket as the user SSH logged in as; when that user cannot reach the daemon, or the daemon's account or machine id differ from what A expects, it fails before pairing.
 - **Protocol:** stdout carries JSON lines only, each under 4 KiB, with `"v": 1`. stderr is diagnostics, read and logged by A but never parsed. Both are drained at once. The lines, in order:
-  1. `{"v": 1, "event": "ready", "machineId", "account", "attempt"}`. It is sent only once B's daemon holds a one-shot acceptor for that account, that initiating machine and a fresh `attempt` id; no other request can consume it.
+  1. `{"v": 1, "event": "ready", "machineId", "account", "attempt"}`. It is sent only once B's daemon holds a one-shot acceptor for that account and that initiating machine id; a pairing request from another machine id cannot consume it. `attempt` is a fresh id B picks, which A passes to its daemon (`remote_pair {machineId, attempt}`) and which tags the `code` and `result` lines, so A never mixes two attempts. It is a correlation id, not a check: a relay that answers in A's name is caught by the code comparison, which is what protects the pairing.
   2. `{"v": 1, "event": "code", "attempt", "code"}`.
-  3. `{"v": 1, "event": "result", "attempt", "outcome": "paired" | "cancelled" | "partial", "detail"}`.
+  3. `{"v": 1, "event": "result", "attempt", "outcome": "paired" | "cancelled" | "partial", "local", "peer", "detail"}`, with the states of "Partial results".
+
+  A cancel or an expiry before any code ends with `ready` then `result`. A failure before `ready` (no daemon, wrong account, a pairing already active, over the limit) writes nothing to stdout, explains on stderr and exits non-zero.
 
   A starts its pairing request only after a `ready` whose `machineId` is the B it resolved and whose `account` is its own. A malformed, repeated, out-of-order or foreign line ends the attempt. After `code`, A compares it with its own code. On a match, it writes `{"v": 1, "confirm": "<code>"}` to B's stdin and confirms its own side, and keeps stdin open until B's `result`. On a mismatch, it writes `{"v": 1, "cancel": true}` and cancels its side. A closed stdin before a confirm cancels B. B confirms only when the line's code equals its own.
-- **Deadlines:** 15 s for SSH to connect, 15 s more for `ready`, then the pairing's 2 minutes, counted from B's `ready` on each daemon's monotonic clock, never extended by progress. On any failure, A cancels its side and closes B's stdin. A reaps the `ssh` child, and B's acceptor expires on its own deadline if cleanup can't reach it.
+- **Deadlines:** 15 s for SSH to connect and 15 s more for `ready`, on A. B starts the pairing's 2 minutes on its monotonic clock when it registers the acceptor, just before it writes `ready`; A starts its own 2 minutes when it receives a valid `ready`. Neither is extended by progress, and B's expiry decides. On any failure, A cancels its side and closes B's stdin. A reaps the `ssh` child, and B's acceptor expires on its own deadline if cleanup can't reach it.
 - **Limits:** the same as any pairing. One active pairing per target, and 5 attempts an hour per target, counted by B's daemon on `ready`, mismatches and cancels included; a new helper or a reconnect doesn't reset the count. There is no automatic retry after a mismatch.
 - **Exit codes:** 0 paired on both sides; 2 refused or cancelled with nothing saved; 4 partial, with both sides' states.
 
@@ -763,7 +765,7 @@ New management socket commands. The streaming ones keep the connection open and 
 | `remote_reload_shell_environment` | `{shellEnvironmentError}`, once the daemon read the user's shell environment again for background starts; the app sends it on `Reload shell environment` |
 | `remote_machines` | the roster merged with pins, presence and sessions: `[{id, name, self, paired, state, version, fingerprint, proto}]`, `state` as in "Desktop app"; `proto` is the session version agreed from the authenticated `hello`s of the open session, `null` with no session |
 | `remote_settings {share?, control?, backgroundStarts?}` | the settings after the change |
-| `remote_pair {machineId}` | streaming: `code`, then `paired` or `cancelled` |
+| `remote_pair {machineId, attempt?}` | streaming: `code`, then `paired`, `cancelled`, or `partial` with `{local: "pinned" \| "not_pinned", peer: "pinned" \| "not_pinned" \| "unknown"}` (see "Partial results"); `attempt` only correlates the SSH helper's lines |
 | `remote_pair_answer {pairingId, accept}` | `{ok}` |
 | `remote_unpair {machineId}` | `{ok}` |
 | `remote_inventory {machineId}` | one snapshot, all pages |
@@ -834,7 +836,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - **What `--machine` refuses:** with `dev`, every option but `--project`, `--env` and `--profile`: no command after `--`, no `--detach`, `--in-app`, `--env-file`, `--confirm-profile` or `--domain`. The target decides where the service runs.
 - **Launch flags:** `--launch-id`, `--launch-expires`, `--remote-launch`, `--expect-rev`, `--request` and `--replace-legacy` are hidden flags for dispatchers, documented here and not in `--help`.
 - **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; an outcome it could not learn (`lost`) prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2.
-- `pair` needs a terminal, or `--over-ssh` (see "Pairing" and ADR 0035), which lets an agent with SSH access to both machines pair them. `remove` needs a terminal: an agent cannot remove a machine.
+- `pair` needs a terminal, or `--over-ssh` on the initiator and `--accept --for-ssh` on the side it starts (see "Pairing over SSH" and ADR 0035), which lets an agent with SSH access to both machines pair them. `remove` needs a terminal: an agent cannot remove a machine.
 
 ## MCP
 
@@ -946,7 +948,7 @@ Against a real daemon, a real app process where it says so, and the relay in `wr
 
 **PR 2, trust and relay:**
 
-- Pairing: a nonce sent before the commit, a duplicated commit, a reveal that does not match the commit, a handshake hash altered by a test relay that substitutes a key, a cancel on either side, and a 2-minute timeout each pin nothing. A test relay running two handshakes cannot make both codes match except by chance.
+- Pairing: a nonce sent before the commit, a duplicated commit, a reveal that does not match the commit, a handshake hash altered by a test relay that substitutes a key, a cancel on either side, and a 2-minute timeout each pin nothing when they happen before either `pair.confirm`; a session cut after one is reported `partial` with each side's verified state. A test relay running two handshakes cannot make both codes match except by chance.
 - Replay: a recorded session's frames replayed into a new session fail; a duplicated or reordered transport message ends the session; a forced nonce reuse is rejected.
 - Identity substitution: a relay that rewrites `from`, a roster key that differs from the pin, a purpose rewritten in the envelope, and a same-name sign-in all fail to open a session.
 - Handshakes: an incomplete one is dropped after 30 s; more than 4 at once get `busy`.
