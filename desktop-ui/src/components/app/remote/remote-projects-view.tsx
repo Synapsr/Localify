@@ -1,46 +1,26 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useMemo, useState } from "react";
-import { toast } from "sonner";
+import { AnimatePresence, motion } from "motion/react";
+import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 
-import type {
-  RemoteControlAction,
-  RemoteInventoryItemDto,
-  RemoteMachineDto,
-} from "@/types/localify";
+import type { RemoteInventoryItemDto, RemoteMachineDto } from "@/types/localify";
 
-import {
-  CheckIcon,
-  CopyIcon,
-  ExternalLinkIcon,
-  FileTextIcon,
-  InfoCircleIcon,
-  PlayIcon,
-  PowerIcon,
-  RefreshIcon,
-  SpinnerIcon,
-} from "@/components/icons";
-import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { bootstrapQueries } from "@/lib/queries";
-import { tauriClient } from "@/lib/tauri-client";
+import { ChevronDownIcon, InfoCircleIcon, SpinnerIcon } from "@/components/icons";
 import {
   describeMachine,
   groupInventory,
   isFinalCode,
-  ownerLabel,
   remoteErrorMessage,
-  remoteUrlLabel,
-  serviceChips,
+  type RemoteEnvironmentGroup,
+  type RemoteProjectGroup,
   serviceKey,
-  type ServiceChip,
+  serviceTone,
 } from "@/lib/util.remote";
 import { cn } from "@/lib/utils";
+import { useTerminal } from "@/providers/terminal-provider";
 
-import { remoteToneDot } from "./machine-switcher";
 import { RemoteOutputPanel } from "./remote-output-panel";
+import { RemoteServiceChip } from "./remote-service-chip";
 import { useRemoteInventory } from "./use-remote-inventory";
 
 interface RemoteProjectsViewProps {
@@ -49,19 +29,30 @@ interface RemoteProjectsViewProps {
 }
 
 /**
- * Another machine's Projects screen, read-only (docs/remote-machines.md, "A remote machine's
- * view"): projects, environments and services with their four states, owners and public URLs.
+ * Another machine's Projects screen, drawn like this Mac's and read-only
+ * (docs/remote-machines.md, "A remote machine's view").
  */
 export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) {
   const state = useRemoteInventory(machine.id);
+  const { closePanel, isOpen: terminalOpen, panelHeight } = useTerminal();
   const [outputKey, setOutputKey] = useState<string | null>(null);
+  // The terminal takes the bottom of the window back when it opens.
+  useEffect(() => {
+    if (terminalOpen) setOutputKey(null);
+  }, [terminalOpen]);
   const inventory = state.inventory;
   const name = inventory?.machine.name ?? machine.name;
   const groups = useMemo(() => groupInventory(inventory?.items ?? [], query), [inventory, query]);
   const outputItem = inventory?.items.find((item) => serviceKey(item) === outputKey) ?? null;
 
+  const showOutput = (item: RemoteInventoryItemDto) => {
+    // One panel at the bottom at a time, like the terminal.
+    closePanel();
+    setOutputKey(serviceKey(item));
+  };
+
   return (
-    <div className="flex flex-col gap-3 pb-(--bottom-padding-navigation)">
+    <div className="flex flex-col gap-2 pb-(--bottom-padding-navigation)">
       <Banner>
         You're viewing {name}. Its .localify URLs open only on {name}.
       </Banner>
@@ -90,37 +81,18 @@ export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) 
       ) : null}
 
       {groups.map((project) => (
-        <section
+        <RemoteProjectCard
           key={project.id}
-          className="rounded-xl border border-border/30 bg-neutral-50/50 px-4 py-3 dark:bg-neutral-800/50"
-        >
-          <h2 className="truncate text-lg font-medium">{project.name}</h2>
-          {project.environments.map((environment) => (
-            <div key={environment.key} className="mt-3">
-              <div className="mb-1.5 flex items-center gap-2 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground/80">{environment.name}</span>
-                {environment.branch && environment.branch !== environment.name ? (
-                  <span className="font-mono">{environment.branch}</span>
-                ) : null}
-                {environment.primary ? <span>primary</span> : null}
-              </div>
-              <ul className="divide-y divide-border/40 rounded-lg border border-border/40 bg-background">
-                {environment.services.map((item) => (
-                  <ServiceRow
-                    key={serviceKey(item)}
-                    item={item}
-                    machineName={name}
-                    onOutput={() => setOutputKey(serviceKey(item))}
-                  />
-                ))}
-              </ul>
-            </div>
-          ))}
-        </section>
+          project={project}
+          machineName={name}
+          onOutput={showOutput}
+        />
       ))}
 
       {outputItem ? (
-        <div className="sticky bottom-(--bottom-padding-navigation) z-20">
+        <>
+          {/* Keeps the last cards scrollable above the panel. */}
+          <div aria-hidden style={{ height: panelHeight }} />
           <RemoteOutputPanel
             key={`${machine.id}/${outputKey}`}
             machineId={machine.id}
@@ -128,8 +100,146 @@ export function RemoteProjectsView({ machine, query }: RemoteProjectsViewProps) 
             item={outputItem}
             onClose={() => setOutputKey(null)}
           />
-        </div>
+        </>
       ) : null}
+    </div>
+  );
+}
+
+function RemoteProjectCard({
+  project,
+  machineName,
+  onOutput,
+}: {
+  project: RemoteProjectGroup;
+  machineName: string;
+  onOutput: (item: RemoteInventoryItemDto) => void;
+}) {
+  const primary = project.environments.filter((environment) => environment.primary);
+  const others = project.environments.filter((environment) => !environment.primary);
+
+  return (
+    <section className="flex gap-3 rounded-xl border border-border/30 bg-neutral-50/50 px-3 py-3 transition-colors hover:border-border dark:bg-neutral-800/50">
+      {/* Where this Mac's cards hold their drag handle, so both screens line up. */}
+      <div className="size-9 shrink-0" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <h2 className="truncate text-lg font-medium">{project.name}</h2>
+        {primary.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {primary.flatMap((environment) =>
+              environment.services.map((item) => (
+                <RemoteServiceChip
+                  key={serviceKey(item)}
+                  item={item}
+                  machineName={machineName}
+                  onOutput={() => onOutput(item)}
+                />
+              )),
+            )}
+          </div>
+        ) : null}
+        {others.length > 0 ? (
+          <div
+            className={cn(
+              "flex flex-col gap-0.5",
+              primary.length > 0 && "mt-1.5 border-t border-border/60 pt-1.5",
+            )}
+          >
+            {others.map((environment) => (
+              <RemoteEnvironment
+                key={environment.key}
+                environment={environment}
+                machineName={machineName}
+                onOutput={onOutput}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+/** A worktree's services, folded under one line like this Mac's environments. */
+function RemoteEnvironment({
+  environment,
+  machineName,
+  onOutput,
+}: {
+  environment: RemoteEnvironmentGroup;
+  machineName: string;
+  onOutput: (item: RemoteInventoryItemDto) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const total = environment.services.length;
+  const answering = environment.services.filter((item) => serviceTone(item) === "ok").length;
+  const branch =
+    environment.branch && environment.branch !== environment.name ? environment.branch : null;
+  const routesId = useId();
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="group/env flex w-full min-w-0 items-center gap-2 rounded-md py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        aria-expanded={open}
+        aria-controls={routesId}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <ChevronDownIcon
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground/60 transition-[transform,color] duration-200 ease-out group-hover/env:text-foreground",
+            !open && "-rotate-90",
+          )}
+        />
+        <span
+          aria-hidden
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            answering === total ? "bg-success" : answering > 0 ? "bg-amber-500" : "bg-neutral-400",
+          )}
+        />
+        <span className="shrink-0 rounded-full border border-border/60 bg-muted/60 px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+          worktree
+        </span>
+        <span className="min-w-0 truncate text-sm font-medium">{environment.name}</span>
+        {branch ? (
+          <span className="hidden min-w-0 truncate text-xs text-muted-foreground sm:inline">
+            {branch}
+          </span>
+        ) : null}
+        <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+          {answering}/{total}
+        </span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            key="services"
+            id={routesId}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.22, ease: [0.2, 0, 0, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="ml-[7px] flex flex-col gap-2 border-l border-border/60 py-1.5">
+              {environment.services.map((item) => (
+                <div key={serviceKey(item)} className="flex min-w-0 items-center gap-1.5 pl-3">
+                  {total > 1 ? (
+                    <span className="shrink-0 text-sm text-foreground">{item.service.name}</span>
+                  ) : null}
+                  <RemoteServiceChip
+                    item={item}
+                    machineName={machineName}
+                    onOutput={() => onOutput(item)}
+                  />
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }
@@ -160,143 +270,5 @@ function Banner({ children, tone = "info" }: { children: ReactNode; tone?: "info
       <InfoCircleIcon className="mt-0.5 size-3.5 shrink-0" />
       <span className="min-w-0 flex-1">{children}</span>
     </div>
-  );
-}
-
-function ServiceRow({
-  item,
-  machineName,
-  onOutput,
-}: {
-  item: RemoteInventoryItemDto;
-  machineName: string;
-  onOutput: () => void;
-}) {
-  const { data: bootstrap } = useQuery(bootstrapQueries.read());
-  const browser = bootstrap?.launcherPreferences.browser ?? "default";
-  const owner = ownerLabel(item.owner);
-  const publicUrl = item.publicUrl?.serving ? item.publicUrl.url : null;
-
-  const openPublicUrl = async (url: string) => {
-    try {
-      await tauriClient.openProjectUrl({ url, browser });
-    } catch (error) {
-      toast.error("Open in browser failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  return (
-    <li className="flex flex-col gap-2 px-3 py-2.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="truncate text-sm font-medium">{item.service.name}</span>
-        {owner ? <span className="text-xs text-muted-foreground">{owner}</span> : null}
-        {item.run?.profile ? (
-          <span className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-            {item.run.profile}
-          </span>
-        ) : null}
-        <div className="ml-auto flex flex-wrap items-center gap-1">
-          {item.output.available ? (
-            <Button size="xs" variant="outline" onClick={onOutput}>
-              <FileTextIcon />
-              Output
-            </Button>
-          ) : null}
-          {publicUrl ? (
-            <Button size="xs" variant="outline" onClick={() => void openPublicUrl(publicUrl)}>
-              <ExternalLinkIcon />
-              Open public URL
-            </Button>
-          ) : null}
-          <ControlButton item={item} action="start" machineName={machineName} />
-          <ControlButton item={item} action="stop" machineName={machineName} />
-          <ControlButton item={item} action="restart" machineName={machineName} />
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {serviceChips(item).map((chip) => (
-          <Chip key={chip.name} chip={chip} />
-        ))}
-      </div>
-      <LocalUrl url={item.localUrl} machineName={machineName} />
-    </li>
-  );
-}
-
-function Chip({ chip }: { chip: ServiceChip }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-border/50 px-2 py-0.5 text-[11px] text-muted-foreground">
-      <span aria-hidden className={cn("size-1.5 rounded-full", remoteToneDot[chip.tone])} />
-      <span>{chip.name}:</span>
-      <span className="text-foreground/80">{chip.value}</span>
-    </span>
-  );
-}
-
-/** A target's `.localify` URL: copied, never opened, since it resolves on that machine only. */
-function LocalUrl({ url, machineName }: { url: string; machineName: string }) {
-  const { copy, copied } = useCopyToClipboard();
-  return (
-    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-      <span className="truncate font-mono">{remoteUrlLabel(url, machineName)}</span>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        aria-label={copied ? "URL copied" : "Copy URL"}
-        onClick={() => void copy(url)}
-      >
-        {copied ? <CheckIcon className="text-emerald-500" /> : <CopyIcon />}
-      </Button>
-    </div>
-  );
-}
-
-const CONTROL_LABEL: Record<RemoteControlAction, string> = {
-  start: "Start",
-  stop: "Stop",
-  restart: "Restart",
-};
-
-const CONTROL_ICON = {
-  start: PlayIcon,
-  stop: PowerIcon,
-  restart: RefreshIcon,
-} as const;
-
-/**
- * Start, Stop and Restart follow the target's `controls`. Remote controls come in a later
- * version, so each one is disabled, and says why in its tooltip.
- */
-function ControlButton({
-  item,
-  action,
-  machineName,
-}: {
-  item: RemoteInventoryItemDto;
-  action: RemoteControlAction;
-  machineName: string;
-}) {
-  const control = item.controls[action];
-  const Icon = CONTROL_ICON[action];
-  const reason = control.code
-    ? remoteErrorMessage(control.code, machineName, "Not available.")
-    : `${CONTROL_LABEL[action]} from another machine comes in a later version.`;
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span tabIndex={0} className="inline-flex">
-            <Button size="icon-xs" variant="ghost" disabled aria-label={CONTROL_LABEL[action]}>
-              <Icon />
-            </Button>
-          </span>
-        }
-      />
-      <TooltipContent>
-        {CONTROL_LABEL[action]}: {reason}
-      </TooltipContent>
-    </Tooltip>
   );
 }

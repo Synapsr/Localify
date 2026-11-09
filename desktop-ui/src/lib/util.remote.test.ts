@@ -18,8 +18,9 @@ import {
   PAIRING_CANCELLED,
   pairingCancelledMessage,
   remoteErrorMessage,
-  remoteUrlLabel,
+  remoteHost,
   serviceChips,
+  serviceTone,
 } from "./util.remote.ts";
 
 function status(overrides: Partial<RemoteStatusDto> = {}): RemoteStatusDto {
@@ -159,10 +160,35 @@ test("a running service whose port does not answer yet is starting", () => {
   assert.equal(ownerLabel(null), null);
 });
 
-test("a target's local URL is labelled with its machine", () => {
+test("a target's local URL is shown without its scheme", () => {
+  assert.equal(remoteHost("https://web.louez.localify/"), "web.louez.localify");
+});
+
+test("a service's dot is green once it answers, red after a failed exit", () => {
+  assert.equal(serviceTone(item({ process: "running", owner: "background" })), "pending");
   assert.equal(
-    remoteUrlLabel("https://web.louez.localify/", "teo-mini"),
-    "web.louez.localify · on teo-mini",
+    serviceTone(item({ process: "running", port: { number: 3000, reachable: true } })),
+    "ok",
+  );
+  assert.equal(
+    serviceTone(item({ port: { number: 3000, reachable: null }, process: "running" })),
+    "ok",
+  );
+  assert.equal(serviceTone(item({})), "off");
+  assert.equal(
+    serviceTone(
+      item({
+        run: {
+          runId: null,
+          legacy: false,
+          startedAt: "2026-11-09T09:00:00Z",
+          profile: null,
+          profileDanger: false,
+          exit: { at: "2026-11-09T09:01:00Z", code: 1 },
+        },
+      }),
+    ),
+    "error",
   );
 });
 
