@@ -1288,6 +1288,7 @@ fn main() -> Result<()> {
         Commands::Dev {
             detach: true,
             service,
+            domain,
             project,
             env,
             launch_profile,
@@ -1304,7 +1305,7 @@ fn main() -> Result<()> {
                     service: service.as_deref(),
                     project: project.as_deref(),
                     environment: env.as_deref(),
-                    init_domain: None,
+                    init_domain: domain.as_deref(),
                 },
                 override_command: &command,
                 launch_profile: &launch_profile.into_args(),

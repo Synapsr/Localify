@@ -367,6 +367,12 @@ impl LaunchRecords {
 
     /// Removes the launch locks older than `max_age` that nobody holds,
     /// which a crash before its decision left. Returns how many went.
+    ///
+    /// A lock goes only once its launch is decided: an undecided one is
+    /// decided `expired` first, long past any launch's expiry. An executor
+    /// that opened the old file before it was unlinked, or creates a new
+    /// one after, then finds the decision under its lock and stops, so two
+    /// locks for one launch id never both lead to a stop.
     pub fn sweep_launch_locks(&self, max_age: Duration) -> Result<usize> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
@@ -379,16 +385,21 @@ impl LaunchRecords {
         let mut removed = 0;
         for entry in entries.flatten() {
             let path = entry.path();
-            let launch = path
+            let Some(id) = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .and_then(|name| name.strip_suffix(LAUNCH_LOCK_SUFFIX))
-                .is_some_and(|id| RunId::parse(id).is_ok());
-            if launch
-                && older_than(&entry, max_age)
-                && unheld(&path)
-                && fs::remove_file(&path).is_ok()
-            {
+                .and_then(|id| RunId::parse(id).ok())
+            else {
+                continue;
+            };
+            if !older_than(&entry, max_age) || !unheld(&path) {
+                continue;
+            }
+            if self.read(&id)?.is_none() {
+                self.expire(&id)?;
+            }
+            if fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
         }
@@ -1119,6 +1130,18 @@ mod tests {
         assert_eq!(records.sweep_launch_locks(Duration::ZERO).unwrap(), 1);
         assert!(!lock_file(&crashed).exists());
         assert!(records.dir().join(EXIT_LOCK).exists());
+        // Decided before it went, so an executor that still opens or
+        // recreates the lock finds the decision and stops.
+        assert!(matches!(
+            records.read(&crashed).unwrap(),
+            Some(LaunchRecord::Expired { .. })
+        ));
+        let late = records.lock_launch(&crashed).unwrap();
+        assert!(matches!(
+            records.read(&crashed).unwrap(),
+            Some(LaunchRecord::Expired { .. })
+        ));
+        drop(late);
     }
 
     #[test]

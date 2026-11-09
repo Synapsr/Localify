@@ -972,6 +972,12 @@ fn a_replacement_its_checks_refuse_never_stops_the_running_service() {
             "--confirm-profile prod",
         );
     }
+    // Detached: `--domain` with a named service, which only the executor
+    // used to refuse, after the dispatcher had stopped the run.
+    refused(
+        &["--detach", "--replace", "--domain", "other.localify"],
+        "--domain only applies",
+    );
     // Detached: a `localify.toml` that does not load.
     fs::write(sandbox.app.join("localify.toml"), "[profiles\n").unwrap();
     refused(&["--detach", "--replace"], "localify.toml");
