@@ -3,8 +3,8 @@
 //! compile every point away.
 
 /// The folder a test arms points in: `<folder>/<point>` holds a process at
-/// `point`, which writes `<folder>/<point>.reached` and waits until the test
-/// removes `<folder>/<point>`.
+/// `point`, which writes its PID to `<folder>/<point>.reached` and waits
+/// until the test removes `<folder>/<point>`.
 pub const PAUSE_DIR_ENV: &str = "LOCALIFY_TEST_PAUSE_DIR";
 
 /// Waits at `point` while a test holds it.
@@ -21,7 +21,10 @@ pub fn pause_at(point: &str) {
         if !armed.exists() {
             return;
         }
-        let _ = std::fs::write(Path::new(&dir).join(format!("{point}.reached")), "");
+        let _ = std::fs::write(
+            Path::new(&dir).join(format!("{point}.reached")),
+            std::process::id().to_string(),
+        );
         while armed.exists() {
             std::thread::sleep(Duration::from_millis(10));
         }

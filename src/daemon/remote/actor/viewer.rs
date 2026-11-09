@@ -59,6 +59,17 @@ pub enum TapRequest {
     },
 }
 
+impl TapRequest {
+    /// The first session version that carries this request.
+    fn proto(&self) -> u32 {
+        match self {
+            Self::Access { .. } => PROTO_ACCESS,
+            Self::Control { expect, .. } if expect.legacy_id.is_some() => PROTO_ACCESS,
+            _ => 1,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TapEvent {
     /// The target's answer: pages, `unchanged`, output, or an error.
@@ -140,13 +151,8 @@ impl Tap {
         }
     }
 
-    /// The first session version that carries this request.
     fn proto(&self) -> u32 {
-        match &self.request {
-            TapRequest::Access { .. } => PROTO_ACCESS,
-            TapRequest::Control { expect, .. } if expect.legacy_id.is_some() => PROTO_ACCESS,
-            _ => 1,
-        }
+        self.request.proto()
     }
 
     /// What tells the target this request is over, if anything.
@@ -265,15 +271,18 @@ impl Actor {
     }
 
     /// Carries a request to `peer`, over its session or a new one. Returns
-    /// the request's id.
+    /// the request's id. A control goes only over a session already open,
+    /// and is sent before this returns: it is never queued.
     pub(super) fn on_tap(
         &mut self,
         peer: &str,
         request: TapRequest,
         events: mpsc::Sender<TapEvent>,
     ) -> Result<String, Failure> {
+        let control = matches!(request, TapRequest::Control { .. });
         let key = match self.viewer_session(peer) {
             Some(key) => key,
+            None if control => return Err(self.no_session(peer)),
             None => {
                 if let Some(failure) = self.cannot_open(peer, Purpose::Session) {
                     return Err(failure);
@@ -282,6 +291,9 @@ impl Actor {
                     .ok_or_else(|| Failure::new("internal", "The session could not start."))?
             }
         };
+        if control {
+            self.can_send_now(&key, &request)?;
+        }
         self.taps_made += 1;
         let id = format!("r{}", self.taps_made);
         let session = self
@@ -296,6 +308,51 @@ impl Actor {
         session.taps.insert(id.clone(), tap);
         self.send_taps(&key);
         Ok(id)
+    }
+
+    /// Why a control cannot go to `peer` now: there is no session to it.
+    fn no_session(&self, peer: &str) -> Failure {
+        self.cannot_open(peer, Purpose::Session).unwrap_or_else(|| {
+            Failure::new(
+                "not_connected",
+                "No session to it is open. A control goes only over a connected session; it is never queued.",
+            )
+        })
+    }
+
+    /// A control goes now or not at all: over a session whose `hello`
+    /// came, that answers, of a version that carries it, with room in the
+    /// send queue.
+    fn can_send_now(&self, key: &Key, request: &TapRequest) -> Result<(), Failure> {
+        let session = self
+            .sessions
+            .get(key)
+            .ok_or_else(|| Failure::new("not_connected", "The session ended."))?;
+        if session.hello.is_none() {
+            return Err(Failure::new(
+                "connecting",
+                "The session to it is still opening. Try again once it is connected.",
+            ));
+        }
+        if session.not_responding {
+            return Err(Failure::new(
+                "not_responding",
+                "It does not answer right now. Nothing was sent.",
+            ));
+        }
+        if request.proto() > session.proto.unwrap_or(1) {
+            return Err(Failure::new(
+                "unsupported",
+                "Update Localify on that machine to ask from here.",
+            ));
+        }
+        if !self.out.has_room_for_requests() {
+            return Err(Failure::new(
+                "busy",
+                "The connection to it is busy. Nothing was sent; try again shortly.",
+            ));
+        }
+        Ok(())
     }
 
     /// Once the target said hello: the requests that waited for it, in the

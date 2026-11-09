@@ -1243,10 +1243,11 @@ mod tests {
         );
     }
 
-    /// The daemon's detached restart passes the run it stopped, and a
-    /// relaunch the legacy run: each reaches the executor once.
+    /// A caller's `--replace=<runId>`, for the run it stopped, reaches the
+    /// executor once: it used to come back a second time, from the
+    /// dispatcher.
     #[test]
-    fn a_caller_s_run_to_replace_and_legacy_run_reach_the_executor_once() {
+    fn a_caller_s_run_to_replace_reaches_the_executor_once() {
         let launch_id = RunId::parse(ID).unwrap();
         let stopped = RunId::parse("-qAAAAAAAAAAAAAAAAAAAA").unwrap();
         let result = foreground_args(
@@ -1263,6 +1264,15 @@ mod tests {
                 replace: Some(stopped),
             },
         );
+
+        let replaces = result
+            .iter()
+            .filter(|arg| is_replace_flag(arg))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replaces,
+            [&OsString::from("--replace=-qAAAAAAAAAAAAAAAAAAAA")]
+        );
         assert_eq!(
             result,
             args(&[
@@ -1272,7 +1282,12 @@ mod tests {
                 "--replace=-qAAAAAAAAAAAAAAAAAAAA"
             ])
         );
+    }
 
+    /// A relaunch's legacy run reaches the executor as given.
+    #[test]
+    fn a_relaunch_s_legacy_run_reaches_the_executor() {
+        let launch_id = RunId::parse(ID).unwrap();
         let relaunch = foreground_args(
             args(&["dev", "web", "--replace-legacy=boot.1.2", "--detach"]).into_iter(),
             &launch_id,

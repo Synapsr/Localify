@@ -1273,14 +1273,25 @@ pub fn shell_environment_status(
     Ok(terminal.shell_environment())
 }
 
+/// Reads the shell environment again for the app's runs, and for the
+/// daemon's background starts, which keep their own copy.
 #[tauri::command]
 pub async fn reload_shell_environment(
     terminal: tauri::State<'_, TerminalManager>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<ShellEnvironmentDto, String> {
     let terminal = terminal.inner().clone();
-    async_runtime::spawn_blocking(move || terminal.reload_shell_environment())
-        .await
-        .map_err(map_error)
+    let api = state.api.clone();
+    async_runtime::spawn_blocking(move || {
+        let status = terminal.reload_shell_environment();
+        // A daemon that is not running reads it when it starts.
+        if let Err(error) = api.reload_remote_shell_environment() {
+            eprintln!("The daemon could not read the shell environment again: {error:#}");
+        }
+        status
+    })
+    .await
+    .map_err(map_error)
 }
 
 #[tauri::command]

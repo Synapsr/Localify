@@ -26,6 +26,7 @@ use crate::infrastructure::remote::wire::{
     ProtoRange,
 };
 use crate::infrastructure::runs::RunId;
+use localify::desktop::shell_environment::ShellEnvironment;
 
 const REV: &str = "0123456789abcdef";
 const RUN: &str = "RRRRRRRRRRRRRRRRRRRRRR";
@@ -144,14 +145,22 @@ async fn switches(daemon: &Daemon, background_starts: bool) {
         .unwrap();
 }
 
-/// A views B, paired, with B sharing and allowing controls, its app
-/// running, and `web` in the state `run` says.
-async fn controlled(cloud: &FakeCloud, run: Option<RunFacts>) -> (Daemon, Daemon) {
+/// A and B paired, with B sharing and allowing controls, its app running,
+/// and `web` in the state `run` says; no session yet.
+async fn set_up(cloud: &FakeCloud, run: Option<RunFacts>) -> (Daemon, Daemon) {
     let (a, b) = two(cloud).await;
     pair(&a, &b).await;
     switches(&b, false).await;
     b.source.set_app(AppPresence::Running);
     b.source.host().state().services = vec![service(run)];
+    (a, b)
+}
+
+/// [`set_up`], with A's session to B open, as the app's view of B holds
+/// it: a control goes only over an open session.
+async fn controlled(cloud: &FakeCloud, run: Option<RunFacts>) -> (Daemon, Daemon) {
+    let (a, b) = set_up(cloud, run).await;
+    a.link.open("mB", true).await.unwrap();
     (a, b)
 }
 
@@ -390,6 +399,7 @@ async fn a_reconnect_cannot_repeat_a_restart() {
         unreachable!()
     };
 
+    a.link.open("mB", true).await.unwrap();
     let same = events(a.link.control_as(
         "mB",
         ask(ControlAction::Restart, Some(RUN)),
@@ -475,6 +485,7 @@ async fn request_entries_survive_a_daemon_restart_and_a_mismatch_runs_nothing() 
     switches(&b, false).await;
     b.source.set_app(AppPresence::Running);
     b.source.host().state().services = vec![service(Some(run(RunOrigin::App)))];
+    a.link.open("mB", true).await.unwrap();
 
     let stopped = events(a.link.control_as(
         "mB",
@@ -502,6 +513,7 @@ async fn request_entries_survive_a_daemon_restart_and_a_mismatch_runs_nothing() 
         ),
         "{status:?}"
     );
+    a.link.open("mB", true).await.unwrap();
     let mismatch = events(
         a.link
             .control_as("mB", ask(ControlAction::Start, None), request_id(7)),
@@ -703,13 +715,212 @@ async fn a_local_launch_between_the_stop_and_the_relaunch_wins() {
 #[tokio::test]
 async fn a_relaunch_is_never_sent_to_a_target_of_protocol_1() {
     let cloud = FakeCloud::start().await;
-    let (a, b) = controlled(&cloud, Some(legacy(RunOrigin::App, true))).await;
+    let (a, b) = set_up(&cloud, Some(legacy(RunOrigin::App, true))).await;
     b.link.speak(ProtoRange { min: 1, max: 1 });
+    a.link.open("mB", true).await.unwrap();
 
     let seen = control(&a, relaunch()).await;
 
     assert_eq!(ended(&seen).1.as_deref(), Some("unsupported"));
     assert!(stops(&b).is_empty() && handed(&b) == 0);
+}
+
+// --- Bounds: sessions, sharing, pairing, admission ---------------------------
+
+/// A control goes only over a session already open: without one it is
+/// refused at once, with the connection state, and never queued. A status
+/// query may still open one.
+#[tokio::test]
+async fn a_control_without_an_open_session_is_refused_and_never_queued() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = set_up(&cloud, None).await;
+
+    let seen = control(&a, ask(ControlAction::Start, None)).await;
+
+    assert_eq!(seen.len(), 1, "never announced as sent: {seen:?}");
+    assert_eq!(
+        ended(&seen),
+        (ControlOutcome::Refused, Some("not_connected".into()))
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(a.session("mB").is_none(), "no session was opened for it");
+    assert_eq!(handed(&b), 0);
+    let status = a.link.control_status("mB", &request_id(1)).await;
+    assert!(
+        matches!(&status, ControlEvent::Result { code: Some(code), .. } if code == "unknown_request"),
+        "{status:?}"
+    );
+}
+
+/// Turning `share` off drops every answer still to come: a launch that
+/// fails afterwards sends none of its output, and `control.status` reads
+/// nothing while B doesn't share.
+#[tokio::test]
+async fn turning_share_off_drops_a_control_s_answer_and_its_output() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, None).await;
+    b.source.host().state().exit_code = Some(3);
+    let release = hold(&b);
+    let pending = a.link.control("mB", ask(ControlAction::Start, None));
+    wait_until("the start reached the app", || handed(&b) == 1).await;
+
+    b.link
+        .change_settings(SettingsChange {
+            share: Some(false),
+            ..SettingsChange::default()
+        })
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let seen = events(pending).await;
+
+    assert!(
+        matches!(seen.last(), Some(ControlEvent::Lost { code, .. }) if code == "not_shared"),
+        "{seen:?}"
+    );
+    assert!(!format!("{seen:?}").contains("the last line"), "{seen:?}");
+    let Some(ControlEvent::Sent { request_id }) = seen.first() else {
+        panic!("{seen:?}")
+    };
+    let status = a.link.control_status("mB", request_id).await;
+    assert!(
+        matches!(&status, ControlEvent::Result { code: Some(code), .. } if code == "not_shared"),
+        "{status:?}"
+    );
+    assert!(!format!("{status:?}").contains("the last line"));
+}
+
+/// A control still waiting for its fresh lease when B unpairs A never
+/// runs, though the account still lists A.
+#[tokio::test]
+async fn a_control_not_dispatched_yet_never_runs_after_an_unpairing() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, None).await;
+    cloud.set_lease_delay(Duration::from_secs(2));
+    let mut pending = a.link.control("mB", ask(ControlAction::Start, None));
+    let sent = pending.recv().await;
+    assert!(matches!(sent, Some(ControlEvent::Sent { .. })), "{sent:?}");
+    // B has it, and waits for its lease.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert!(b.link.unpair("mA").unwrap());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert_eq!(handed(&b), 0, "nothing reached the app");
+    assert!(b.source.host().state().detached.is_empty());
+}
+
+/// A viewer's controls and status queries are bounded on the target before
+/// any work starts for them: past the bound, `busy` at once.
+#[tokio::test]
+async fn controls_past_the_bound_are_busy_before_any_work_starts() {
+    let cloud = FakeCloud::start().await;
+    let (a, _b) = controlled(&cloud, None).await;
+    cloud.set_lease_delay(Duration::from_secs(5));
+    let mut waiting = Vec::new();
+    for _ in 0..4 {
+        let mut pending = a.link.control("mB", ask(ControlAction::Start, None));
+        let sent = pending.recv().await;
+        assert!(matches!(sent, Some(ControlEvent::Sent { .. })), "{sent:?}");
+        waiting.push(pending);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let asked = Instant::now();
+    let fifth = control(&a, ask(ControlAction::Start, None)).await;
+    let status = a.link.control_status("mB", &request_id(9)).await;
+
+    assert_eq!(
+        ended(&fifth),
+        (ControlOutcome::Refused, Some("busy".into()))
+    );
+    assert!(
+        matches!(&status, ControlEvent::Result { code: Some(code), .. } if code == "busy"),
+        "{status:?}"
+    );
+    assert!(asked.elapsed() < Duration::from_secs(2), "refused at once");
+}
+
+/// `unknown` is never the end: while B still works on a stop whose answer
+/// was lost, A keeps asking `control.status`, never sending the control
+/// again, and then fetches B's fresh state.
+#[tokio::test]
+async fn an_unknown_outcome_is_asked_again_until_it_comes() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, Some(run(RunOrigin::App))).await;
+    let (release, held) = std::sync::mpsc::channel();
+    b.source.host().state().stop_hold = Some(held);
+    let pending = a.link.control("mB", ask(ControlAction::Stop, Some(RUN)));
+    wait_until("the stop is held", || {
+        b.source.host().state().stop_hold.is_none()
+    })
+    .await;
+
+    cloud.close("mA", 1012, "restart");
+    // B says it is still working on it, each time A asks meanwhile.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    release.send(()).unwrap();
+    let seen = events(pending).await;
+
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, ControlEvent::Unknown { .. })),
+        "{seen:?}"
+    );
+    assert_eq!(ended(&seen), (ControlOutcome::Done, None));
+    assert_eq!(stops(&b).len(), 1, "never sent again");
+    wait_until("A fetched B's fresh state", || {
+        a.link
+            .shared
+            .view()
+            .inventories
+            .get("mB")
+            .is_some_and(|inventory| inventory.items[0]["process"] == "stopped")
+    })
+    .await;
+}
+
+// --- The shell environment of background starts ------------------------------
+
+/// Background starts read the user's shell environment once. When that
+/// failed, the app's `Reload shell environment` has the daemon read it
+/// again, and `remote_status` no longer says it failed.
+#[tokio::test]
+async fn reloading_the_shell_environment_recovers_from_a_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cloud = FakeCloud::start().await;
+    let b = super::daemon(&cloud, "mB", "teo-mini").await;
+    let dir = tempfile::tempdir().unwrap();
+    let printer = dir.path().join("localify");
+    let shell = b
+        .source
+        .set_shell(ShellEnvironment::new(printer.clone(), "/bin/sh".into()));
+    // Nothing prints the environment yet: the first read fails.
+    let first = Arc::clone(&shell);
+    tokio::task::spawn_blocking(move || first.environment())
+        .await
+        .unwrap();
+    assert!(b.link.status().shell_environment_error.is_some());
+
+    std::fs::write(
+        &printer,
+        "#!/bin/sh\nprintf '%s\\0PATH=/usr/bin:/bin\\0LOCALIFY_TEST_MARK=read\\0%s' \"$2\" \"$2\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&printer, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(b.link.reload_shell_environment().await, None);
+    assert_eq!(b.link.status().shell_environment_error, None);
+    let environment = tokio::task::spawn_blocking(move || shell.environment())
+        .await
+        .unwrap();
+    assert!(
+        environment
+            .iter()
+            .any(|(key, value)| key == "LOCALIFY_TEST_MARK" && value == "read"),
+        "{environment:?}"
+    );
 }
 
 /// Copies a daemon's folder, as it is left on disk.

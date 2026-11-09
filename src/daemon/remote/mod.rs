@@ -545,6 +545,15 @@ impl RemoteLink {
         }
     }
 
+    /// Reads the shell environment of background starts again, and says
+    /// why it still could not be read.
+    pub async fn reload_shell_environment(&self) -> Option<String> {
+        let source = Arc::clone(&self.shared.source);
+        tokio::task::spawn_blocking(move || source.reload_shell_environment())
+            .await
+            .unwrap_or_else(|error| Some(format!("The shell could not be asked: {error}")))
+    }
+
     /// The switches and the app, as this machine's own inventory decides its
     /// controls with them.
     pub fn switches(&self) -> crate::application::inventory::Switches {

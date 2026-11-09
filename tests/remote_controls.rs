@@ -23,7 +23,7 @@ use localify::branding::BRANDING;
 use localify::infrastructure::app_bridge::{self, LaunchRequest};
 use localify::infrastructure::process::{self, NativeProcesses};
 use localify::infrastructure::remote::control::{
-    ControlRunner, ControlTimings, Host, LocalHost, Look, Order,
+    ControlRunner, ControlTimings, Host, Live, LocalHost, Look, Order,
 };
 use localify::infrastructure::remote::requests::{Report, RequestEntries};
 use localify::infrastructure::remote::wire::{
@@ -212,6 +212,16 @@ fn switches(background_starts: bool, app: AppPresence) -> impl Fn() -> Switches 
     }
 }
 
+/// Runs a control with these switches, from a peer still paired.
+fn run(runner: &ControlRunner, order: &Order, switches: impl Fn() -> Switches) -> Report {
+    let paired = || true;
+    let live = Live {
+        switches: &switches,
+        paired: &paired,
+    };
+    runner.run(order, &live, &mut |_| {})
+}
+
 fn fast(budget: Duration) -> ControlTimings {
     ControlTimings {
         dispatch_budget: budget,
@@ -243,10 +253,10 @@ fn a_background_restart_without_background_starts_is_refused_and_it_keeps_runnin
         Some(sandbox.look(&host, None)).filter(|look| look.facts.run.is_some())
     });
 
-    let report = runner.run(
+    let report = run(
+        &runner,
         &order(ControlAction::Restart, &look, "r1"),
-        &switches(false, AppPresence::Absent),
-        &mut |_| {},
+        switches(false, AppPresence::Absent),
     );
 
     assert_eq!(report.outcome, ControlOutcome::Refused, "{report:?}");
@@ -282,10 +292,10 @@ fn a_proven_legacy_run_is_relaunched_in_the_background() {
         look.facts.run
     );
 
-    let report = runner.run(
+    let report = run(
+        &runner,
         &order(ControlAction::Restart, &look, "r2"),
-        &switches(true, AppPresence::Absent),
-        &mut |_| {},
+        switches(true, AppPresence::Absent),
     );
 
     assert!(
@@ -303,6 +313,63 @@ fn a_proven_legacy_run_is_relaunched_in_the_background() {
         "replaced by the relaunch"
     );
     assert_eq!(record.run.as_ref().unwrap().output, Some(RunOutput::Pipe));
+}
+
+/// A detached start whose executor stalls before its admission, holding
+/// the service's lock, is killed once its launch expires: the daemon spawns
+/// the executor itself, so nothing of it is left, and the lock is free.
+#[test]
+fn a_detached_start_stalled_before_its_admission_is_killed_at_expiry() {
+    let sandbox = Sandbox::new("exec sleep 300");
+    let pause = sandbox.root.join("pause");
+    fs::create_dir_all(&pause).unwrap();
+    let armed = pause.join("launch-record-written");
+    fs::write(&armed, "").unwrap();
+    let mut environment = sandbox.environment();
+    environment.push(("LOCALIFY_TEST_PAUSE_DIR".into(), pause.clone().into()));
+    let host = Arc::new(LocalHost {
+        environment: Arc::new(move || environment.clone()),
+        ..sandbox.host()
+    });
+    let runner = ControlRunner::new(
+        host.clone(),
+        RequestEntries::in_services_dir(&sandbox.services_dir()),
+        fast(Duration::from_secs(3)),
+    );
+    let look = sandbox.look(&host, None);
+
+    let control = order(ControlAction::Start, &look, "r5");
+    let (executor, report) = thread::scope(|scope| {
+        let running = scope.spawn(|| run(&runner, &control, switches(true, AppPresence::Absent)));
+        let executor: u32 = wait_until("the executor paused before its admission", || {
+            fs::read_to_string(pause.join("launch-record-written.reached"))
+                .ok()?
+                .parse()
+                .ok()
+        });
+        (executor, running.join().unwrap())
+    });
+    // Whatever happened, nothing waits at the pause any more.
+    let _ = fs::remove_file(&armed);
+
+    assert_eq!(report.outcome, ControlOutcome::Failed, "{report:?}");
+    assert_eq!(report.code.as_deref(), Some("expired"));
+    assert!(
+        process::process_info(executor).is_none(),
+        "the executor {executor} is gone"
+    );
+    let lock = fs::read_dir(sandbox.services_dir())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.to_string_lossy().ends_with("--web.lock"))
+        .expect("the executor took the service's lock");
+    let lock = fs::File::open(lock).unwrap();
+    assert!(lock.try_lock().is_ok(), "its lock is free");
+    assert!(
+        sandbox.store().get(&look.key).unwrap().is_none(),
+        "nothing ran"
+    );
 }
 
 /// The executor refuses a relaunch once the record names another run: a
@@ -358,13 +425,7 @@ fn a_lost_acknowledgement_is_reported_exactly() {
 
     let control = order(ControlAction::Start, &look, "r3");
     let ran = thread::scope(|scope| {
-        let running = scope.spawn(|| {
-            runner.run(
-                &control,
-                &switches(false, AppPresence::Running),
-                &mut |_| {},
-            )
-        });
+        let running = scope.spawn(|| run(&runner, &control, switches(false, AppPresence::Running)));
         // The app spawned A, then closed the connection without a word.
         let launch_a = bridge.join().unwrap();
         wait_until("A exited", || {

@@ -65,6 +65,10 @@ enum MgmtCommand {
     /// The relay link (`docs/remote-machines.md`, "Daemon").
     #[serde(rename = "remote_status")]
     RemoteStatus,
+    /// Reads the user's shell environment again, for background starts:
+    /// the app's `Reload shell environment` asks it.
+    #[serde(rename = "remote_reload_shell_environment")]
+    RemoteReloadShellEnvironment,
     /// The roster with states. With `probe`, opens a short session to each
     /// paired machine online first, so the states are current.
     #[serde(rename = "remote_machines")]
@@ -206,6 +210,7 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "public_urls" => Some(MgmtCommand::PublicUrls),
         "inventory" => Some(MgmtCommand::Inventory { have: None }),
         "remote_status" => Some(MgmtCommand::RemoteStatus),
+        "remote_reload_shell_environment" => Some(MgmtCommand::RemoteReloadShellEnvironment),
         "remote_machines" => Some(MgmtCommand::RemoteMachines { probe: false }),
         "remote_events" => Some(MgmtCommand::RemoteEvents { access: false }),
         "remote_access_suppressed" => Some(MgmtCommand::RemoteAccessSuppressed),
@@ -441,6 +446,10 @@ async fn remote_answer(remote: &RemoteLink, command: MgmtCommand) -> MgmtRespons
     let answer = match command {
         MgmtCommand::RemoteStatus => {
             serde_json::to_value(remote.status()).map_err(anyhow::Error::from)
+        }
+        MgmtCommand::RemoteReloadShellEnvironment => {
+            let error = remote.reload_shell_environment().await;
+            Ok(serde_json::json!({ "shellEnvironmentError": error }))
         }
         MgmtCommand::RemoteMachines { probe } => remote
             .machines(probe)

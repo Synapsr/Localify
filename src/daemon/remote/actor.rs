@@ -407,6 +407,9 @@ struct Actor {
     taps_made: u64,
     /// Target: how the last access requests ended, so a late answer says.
     access_ended: VecDeque<(String, AccessOutcome)>,
+    /// Target: cancels the controls of each peer not dispatched yet, once
+    /// it is unpaired or paired again.
+    control_cancels: HashMap<String, CancellationToken>,
 }
 
 pub async fn run(
@@ -442,6 +445,7 @@ pub async fn run(
         shelf: target::Shelf::new(sharing),
         taps_made: 0,
         access_ended: VecDeque::new(),
+        control_cancels: HashMap::new(),
     };
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -689,6 +693,7 @@ impl Actor {
         }) {
             warn!(error = %format!("{error:#}"), "Could not delete a revoked machine's pin");
         }
+        self.cancel_controls(machine_id);
         self.end_peer(
             machine_id,
             End::Silent,
@@ -1549,6 +1554,8 @@ impl Actor {
             );
         }
         info!(peer = %key.0, "Paired");
+        // A pin with a new key: nothing the old key asked for goes on.
+        self.cancel_controls(&key.0);
         self.view().failures.remove(&key.0);
         let Some(session) = self.sessions.get_mut(key) else {
             return;
@@ -1581,6 +1588,7 @@ impl Actor {
         }) {
             warn!(error = %format!("{error:#}"), "Could not delete an unpaired machine's pin");
         }
+        self.cancel_controls(peer);
         self.view().settings.remove(peer);
         self.view().inventories.remove(peer);
         if removed {
@@ -1654,6 +1662,7 @@ impl Actor {
                 let _ = reply.send(self.on_answer(&pairing_id, accept));
             }
             Command::Unpair { peer } => {
+                self.cancel_controls(&peer);
                 let keys: Vec<Key> = self
                     .sessions
                     .keys()

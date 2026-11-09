@@ -20,7 +20,7 @@ use crate::infrastructure::app_bridge;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
 use crate::infrastructure::remote::control::{
-    ControlRunner, ControlTimings, LocalHost, Order, Reader,
+    ControlRunner, ControlTimings, Live, LocalHost, Order, Reader,
 };
 use crate::infrastructure::remote::requests::{Report, RequestEntries};
 use crate::infrastructure::remote::wire::{AppPresence, ControlPhase, MachineSummary};
@@ -58,7 +58,7 @@ pub trait LocalSource: Send + Sync {
     fn control(
         &self,
         order: &Order,
-        switches: &dyn Fn() -> Switches,
+        live: &Live<'_>,
         progress: &mut dyn FnMut(ControlPhase),
     ) -> Report;
     /// `control.status`: what became of a peer's request. Blocks.
@@ -66,6 +66,9 @@ pub trait LocalSource: Send + Sync {
     /// Why background starts run without the user's shell environment,
     /// when it could not be read.
     fn shell_environment_failure(&self) -> Option<String>;
+    /// Reads the shell environment again, for the app's `Reload shell
+    /// environment`, and says why it still could not be read. Blocks.
+    fn reload_shell_environment(&self) -> Option<String>;
 }
 
 /// How often [`AppSeen`] asks the app's bridge.
@@ -189,10 +192,10 @@ impl LocalSource for DaemonSource {
     fn control(
         &self,
         order: &Order,
-        switches: &dyn Fn() -> Switches,
+        live: &Live<'_>,
         progress: &mut dyn FnMut(ControlPhase),
     ) -> Report {
-        self.controls.run(order, switches, progress)
+        self.controls.run(order, live, progress)
     }
 
     fn control_status(&self, peer: &str, request_id: &str) -> Report {
@@ -200,13 +203,23 @@ impl LocalSource for DaemonSource {
     }
 
     fn shell_environment_failure(&self) -> Option<String> {
-        let status = self.shell.status();
-        (status.state == ShellEnvironmentState::Failed).then(|| {
-            status
-                .reason
-                .unwrap_or_else(|| "Your shell's environment could not be read.".into())
-        })
+        shell_failure(&self.shell)
     }
+
+    fn reload_shell_environment(&self) -> Option<String> {
+        self.shell.reload();
+        shell_failure(&self.shell)
+    }
+}
+
+/// Why `shell`'s environment could not be read, when it could not.
+pub fn shell_failure(shell: &ShellEnvironment) -> Option<String> {
+    let status = shell.status();
+    (status.state == ShellEnvironmentState::Failed).then(|| {
+        status
+            .reason
+            .unwrap_or_else(|| "Your shell's environment could not be read.".into())
+    })
 }
 
 /// Numbers what viewers are sent: a snapshot's items and the machine

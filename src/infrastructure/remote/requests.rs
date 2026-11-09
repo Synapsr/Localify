@@ -217,10 +217,10 @@ impl RequestEntries {
 
     /// Publishes the request's first entry, whole, or returns the one
     /// already there: written to a temporary file, synced, then linked to
-    /// its name, which fails when an entry exists. Entries past their
-    /// retention are swept first, so an old one never stands in the way.
+    /// its name, which fails when an entry exists. An entry past its
+    /// retention there is replaced. Nothing else is looked at: sweeping is
+    /// [`RequestEntries::sweep`]'s, now and then.
     pub fn publish(&self, peer: &str, request_id: &str, entry: &RequestEntry) -> Result<Published> {
-        let _ = self.sweep();
         let path = self.path(peer, request_id)?;
         let dir = path.parent().context("A request entry has a folder")?;
         fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
@@ -477,5 +477,39 @@ mod tests {
         assert!(entries.read("mA", REQUEST).unwrap().is_none());
         assert_eq!(entries.sweep().unwrap(), 1);
         assert!(!path.exists());
+    }
+
+    /// A publication looks at its own name only: entries past their
+    /// retention are the periodic sweep's, so a fresh request id never
+    /// makes the target scan every entry.
+    #[test]
+    fn a_publication_never_scans_the_other_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = RequestEntries::new(dir.path().to_path_buf());
+        let other = "BBBBBBBBBBBBBBBBBBBBBB";
+        for request in [REQUEST, other] {
+            entries
+                .publish("mA", request, &entry(ControlAction::Stop))
+                .unwrap();
+        }
+        let old = SystemTime::now() - RETENTION - Duration::from_secs(1);
+        for request in [REQUEST, other] {
+            File::options()
+                .write(true)
+                .open(dir.path().join("mA").join(format!("{request}.json")))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+
+        // Its own stale entry is replaced; the other one is left as it is.
+        assert!(matches!(
+            entries
+                .publish("mA", REQUEST, &entry(ControlAction::Restart))
+                .unwrap(),
+            Published::New
+        ));
+        assert!(dir.path().join("mA").join(format!("{other}.json")).exists());
+        assert_eq!(entries.sweep().unwrap(), 1);
     }
 }
