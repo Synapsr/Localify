@@ -2,7 +2,7 @@
 
 This guide covers Linux-specific setup details and
 troubleshooting. For general usage, see the
-[main documentation](README.md).
+[user guide](README.md).
 
 ## Install
 
