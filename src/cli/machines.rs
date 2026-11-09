@@ -247,7 +247,9 @@ fn typed_yes(prompt: &str) -> Result<bool> {
 }
 
 /// `localify machines pair <machine>`, as the viewer.
-pub fn pair(query: &str, ctx: &AppContext) -> Result<()> {
+/// Returns the exit code: 0 paired, 2 nothing saved, 4 partial (see
+/// docs/remote-machines.md, "Partial results").
+pub fn pair(query: &str, ctx: &AppContext) -> Result<i32> {
     require_person("Pair")?;
     let target = resolve(&candidates(&machines(&ctx.mgmt_client, false)?), query)?;
     if target.is_self {
@@ -275,12 +277,16 @@ pub fn pair(query: &str, ctx: &AppContext) -> Result<()> {
                     "Paired with {}. It shows this machine's name; it shares projects and output, or allows controls, only once its owner turns that on.",
                     target.name
                 );
-                return Ok(());
+                return Ok(0);
             }
             Some("cancelled") => {
-                bail!("{}", cancelled_message(&event));
+                eprintln!("{}", cancelled_message(&event));
+                return Ok(2);
             }
-            Some("partial") => bail!("{}", event["message"].as_str().unwrap_or_default()),
+            Some("partial") => {
+                eprintln!("{}", event["message"].as_str().unwrap_or_default());
+                return Ok(4);
+            }
             _ => {}
         }
     }
@@ -308,7 +314,8 @@ fn cancelled_message(event: &Value) -> String {
 
 /// `localify machines pair --accept`: waits here for another machine's
 /// request, and asks the person to confirm its code.
-pub fn accept(ctx: &AppContext) -> Result<()> {
+/// Returns the exit code, as [`pair`] does.
+pub fn accept(ctx: &AppContext) -> Result<i32> {
     require_person("Pair --accept")?;
     let mut stream = ctx
         .mgmt_client
@@ -339,10 +346,11 @@ pub fn accept(ctx: &AppContext) -> Result<()> {
                     "Paired with {name}. It sees this machine's name only, until you turn on sharing: {} machines settings --share on",
                     BRANDING.cli_command()
                 );
-                return Ok(());
+                return Ok(0);
             }
             Some("pair_cancelled") if waiting_for.as_deref() == Some(pairing_id.as_str()) => {
-                bail!("Pairing cancelled. Nothing was saved.")
+                eprintln!("Pairing cancelled. Nothing was saved.");
+                return Ok(2);
             }
             Some("pair_partial") if waiting_for.as_deref() == Some(pairing_id.as_str()) => {
                 let here = if event["local"] == "pinned" {
@@ -352,17 +360,19 @@ pub fn accept(ctx: &AppContext) -> Result<()> {
                 };
                 // Pairing again would end the same way.
                 if event["reason"] == "unconfirmed" {
-                    bail!(
+                    eprintln!(
                         "This machine {here} {name}'s key. {name} runs an older version of Localify, which does not say whether it saved this machine's key: check on {name}, or update Localify there and pair again."
                     );
+                    return Ok(4);
                 }
-                bail!(
+                eprintln!(
                     "Pairing did not finish on both machines: this machine {here} {name}'s key, and {name}'s side is {}. Pair them again to complete it.",
                     event["peer"]
                         .as_str()
                         .unwrap_or("unknown")
                         .replace('_', " ")
-                )
+                );
+                return Ok(4);
             }
             _ => {}
         }

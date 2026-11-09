@@ -643,6 +643,70 @@ async fn after_a_broken_line_nothing_from_b_is_trusted() {
 }
 
 #[tokio::test]
+async fn a_line_after_b_s_result_undoes_that_result() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let on_a = serve_management(&a).await;
+    let (ready, mut accepted) = b.link.accept("mA", &account(&b)).await.unwrap();
+    let (stdin, stdin_writer) = std::io::pipe().unwrap();
+    let (stdout, mut lines) = std::io::pipe().unwrap();
+    let (stderr, _stderr_writer) = std::io::pipe().unwrap();
+    let attempt = ready.attempt.clone();
+    let ready = HelperLine::Ready {
+        machine_id: ready.machine_id,
+        account: ready.account,
+        attempt: attempt.clone(),
+    };
+    lines.write_all(ready.to_line().as_bytes()).unwrap();
+    let peer = Peer::from_pipes(stdin_writer, stdout, stderr, "teo-mini");
+    let target = Target {
+        machine_id: "mB".into(),
+        name: "teo-mini".into(),
+        own_id: "mA".into(),
+        account: account(&a),
+    };
+    let driving = tokio::spawn(async move { drive_from(&on_a, target, peer).await });
+
+    let PairEvent::Code {
+        pairing_id: id_b,
+        code,
+        ..
+    } = next_pair_event(&mut accepted).await
+    else {
+        panic!("no code on B");
+    };
+    let line = HelperLine::Code {
+        attempt: attempt.clone(),
+        code: code.clone(),
+    };
+    lines.write_all(line.to_line().as_bytes()).unwrap();
+    let confirm = tokio::task::spawn_blocking(move || first_line(stdin))
+        .await
+        .unwrap();
+    assert_eq!(confirm, Ok(ControlLine::Confirm(code)));
+    // B's daemon confirms too, so A's side finishes before B's `result`.
+    b.link.answer(&id_b, true).await.unwrap();
+    wait_until("A pinned B", || a.pinned("mB")).await;
+
+    // B claims success, then breaks the protocol before its stdout closes.
+    let result = HelperLine::Result {
+        attempt,
+        outcome: Outcome::Paired,
+        local: PinState::Pinned,
+        peer: PinState::Pinned,
+        detail: String::new(),
+    };
+    lines.write_all(result.to_line().as_bytes()).unwrap();
+    lines.write_all(b"not json\n").unwrap();
+    drop(lines);
+
+    let report = driving.await.unwrap();
+    assert_ne!(report.outcome, Outcome::Paired, "{report:?}");
+    assert_ne!(report.exit_code(), 0);
+    assert!(report.detail.contains("cannot take"), "{}", report.detail);
+}
+
+#[tokio::test]
 async fn a_malformed_or_foreign_line_from_b_ends_the_attempt() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;

@@ -575,6 +575,7 @@ pub fn drive(own: &MgmtSocketClient, target: &Target, peer: Peer, started: Insta
         own_closed: false,
         peer_result: None,
         peer_done: false,
+        peer_eof: false,
         broke: None,
         failure: None,
     };
@@ -612,6 +613,9 @@ struct Run<'a> {
     peer_result: Option<(PinState, String)>,
     /// B said how it ended, closed its stdout, or broke the protocol.
     peer_done: bool,
+    /// B's stdout closed. Its lines are checked until then, so a line after
+    /// its `result` still breaks the protocol and undoes that result.
+    peer_eof: bool,
     /// How B's stdout broke the protocol. From then on, none of its lines
     /// is trusted, not even an earlier `result`.
     broke: Option<String>,
@@ -752,8 +756,9 @@ impl Run<'_> {
             }
             Input::Line(Ok(line)) => self.take_line(&line),
             Input::Line(Err(error)) => self.broken(&error),
-            Input::LineEnd if self.broke.is_some() => {}
+            Input::LineEnd if self.broke.is_some() => self.peer_eof = true,
             Input::LineEnd => {
+                self.peer_eof = true;
                 self.peer_done = true;
                 let name = &self.target.name;
                 self.abandon(format!(
@@ -859,19 +864,25 @@ impl Run<'_> {
     /// closes, and `ssh` is reaped.
     fn wind_down(&mut self) {
         let deadline = Instant::now() + WIND_DOWN;
-        while !(self.own_done() && self.peer_done) {
+        // B ends once its stdin closes. Everything it still writes is checked
+        // until its stdout closes: a line after its `result` breaks the
+        // protocol, and that result is no longer trusted.
+        self.peer.close_stdin();
+        while !(self.own_done() && self.peer_eof) {
             match self.peer.rx.recv_timeout(left(deadline)) {
                 Ok(Input::Daemon(event)) if ended(&event).is_some() => self.own_end = Some(event),
                 Ok(Input::DaemonEnd(_)) => self.own_closed = true,
-                Ok(Input::Line(Ok(line))) if !self.peer_done => self.take_line(&line),
-                Ok(Input::Line(Err(error))) if !self.peer_done => self.broken(&error),
-                Ok(Input::Line(Err(_)) | Input::LineEnd) => self.peer_done = true,
+                Ok(Input::Line(Ok(line))) => self.take_line(&line),
+                Ok(Input::Line(Err(error))) => self.broken(&error),
+                Ok(Input::LineEnd) => {
+                    self.peer_eof = true;
+                    self.peer_done = true;
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }
         }
         self.close_own();
-        self.peer.close_stdin();
         self.peer.reap(WIND_DOWN);
     }
 

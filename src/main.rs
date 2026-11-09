@@ -1770,7 +1770,9 @@ fn main() -> Result<()> {
                 account: Some(account),
                 ..
             }) => exit_with(cli::machines::accept_for_ssh(&from, &account, &ctx)?),
-            Some(MachinesCommands::Pair { accept: true, .. }) => cli::machines::accept(&ctx),
+            Some(MachinesCommands::Pair { accept: true, .. }) => {
+                exit_with(cli::machines::accept(&ctx)?)
+            }
             Some(MachinesCommands::Pair {
                 machine,
                 over_ssh: Some(destination),
@@ -1783,9 +1785,10 @@ fn main() -> Result<()> {
                 json,
                 &ctx,
             )),
-            Some(MachinesCommands::Pair { machine, .. }) => {
-                cli::machines::pair(machine.as_deref().unwrap_or_default(), &ctx)
-            }
+            Some(MachinesCommands::Pair { machine, .. }) => exit_with(cli::machines::pair(
+                machine.as_deref().unwrap_or_default(),
+                &ctx,
+            )?),
             Some(MachinesCommands::Unpair { machine }) => {
                 cli::machines::unpair(&machine, json, &ctx)
             }

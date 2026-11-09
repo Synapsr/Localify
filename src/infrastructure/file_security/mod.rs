@@ -46,7 +46,9 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .open(path)?;
     // The mode above only applies to a new file.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(contents)
+    file.write_all(contents)?;
+    // On disk before any rename makes it the file others read.
+    file.sync_all()
 }
 
 /// Fallback for unsupported platforms — always returns an error.
