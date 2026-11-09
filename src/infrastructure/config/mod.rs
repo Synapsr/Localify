@@ -1046,9 +1046,12 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// A config that doesn't exist yet is a new install's, so anything
+    /// saved before `localify install`, such as a setting changed during
+    /// the app's welcome, keeps automatic updates on.
     pub fn load(&self) -> Result<Config, ConfigError> {
         if !self.path.exists() {
-            return Ok(Config::default());
+            return Ok(new_install_config());
         }
 
         let content = fs::read_to_string(&self.path).map_err(ConfigError::ReadError)?;
@@ -1733,18 +1736,22 @@ fn map_config_error(e: ConfigError) -> ConfigLoadError {
     }
 }
 
+/// A new install's config: automatic updates start on, unlike a config
+/// that predates them.
+fn new_install_config() -> Config {
+    let mut config = Config::default();
+    config.updates.automatic = true;
+    config
+}
+
 impl ConfigLoader for ConfigStore {
     fn load(&self) -> Result<(DaemonConfig, LocalifyPaths), ConfigLoadError> {
         let config = ConfigStore::load(self).map_err(map_config_error)?;
         Ok((config.daemon, config.paths))
     }
 
-    /// A new install's config: automatic updates start on, unlike a config
-    /// that predates them.
     fn save_defaults(&self) -> Result<(), ConfigLoadError> {
-        let mut config = Config::default();
-        config.updates.automatic = true;
-        self.save(&config).map_err(map_config_error)
+        self.save(&new_install_config()).map_err(map_config_error)
     }
 
     fn exists(&self) -> bool {
@@ -1821,6 +1828,15 @@ mod tests {
         assert!(store.load().unwrap().updates.automatic);
         let text = fs::read_to_string(store.path.clone()).unwrap();
         assert!(text.contains("[updates]\nautomatic = true"), "{text}");
+    }
+
+    #[test]
+    fn a_setting_saved_before_the_install_keeps_automatic_updates_on() {
+        let (_dir, store) = temp_store();
+        let mut config = store.load().unwrap();
+        config.agent.connect_agents = false;
+        store.save(&config).unwrap();
+        assert!(store.load().unwrap().updates.automatic);
     }
 
     #[test]
