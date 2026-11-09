@@ -326,6 +326,26 @@ impl LegacyInstall {
     }
 }
 
+/// What an install from before the user daemon leaves, for telling a new
+/// install from an old one: its helpers, their copies, and its run files.
+/// A folder that can't be read for any reason but being absent counts as
+/// one, so a doubt never reads as a new install.
+pub fn legacy_install_traces(roots: &LegacyRoots) -> Vec<PathBuf> {
+    let legacy = LegacyInstall::detect(roots);
+    let mut traces = Vec::new();
+    traces.extend(legacy.helper_plists);
+    traces.extend(legacy.helper_copies);
+    traces.extend(legacy.run_files);
+    for dir in [&roots.launch_daemons, &roots.helper_tools, &roots.var_run] {
+        if let Err(error) = fs::read_dir(dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            traces.push(dir.clone());
+        }
+    }
+    traces
+}
+
 fn entries_starting_with(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
@@ -1316,6 +1336,20 @@ mod tests {
                 "{script}"
             );
         }
+    }
+
+    #[test]
+    fn an_old_helper_left_alone_is_a_trace_of_an_earlier_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = empty_roots(dir.path());
+        assert!(legacy_install_traces(&roots).is_empty());
+
+        let helper = roots
+            .launch_daemons
+            .join(format!("{}.dns.plist", BRANDING.legacy_helper_prefix()));
+        fs::write(&helper, "").unwrap();
+
+        assert_eq!(legacy_install_traces(&roots), vec![helper]);
     }
 
     fn empty_roots(dir: &Path) -> LegacyRoots {

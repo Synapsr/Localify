@@ -1127,15 +1127,27 @@ fn show_updating_message() -> Option<Child> {
     None
 }
 
+/// Set on the process `restart_if_replaced` starts, so it starts at most once:
+/// a bundle whose `Info.plist` names a newer version than its binary would
+/// otherwise start itself forever.
+#[cfg(target_os = "macos")]
+const RESTARTED_ENV: &str = "LOCALIFY_RESTARTED_FOR_UPDATE";
+
 /// An install may have replaced the bundle this process started from: the
-/// newer version installed now starts instead. Only a newer one, so a
-/// bundle whose version isn't this binary's never starts itself again.
+/// newer version installed now starts instead. Only a newer one, by semver
+/// precedence, and only once.
 #[cfg(target_os = "macos")]
 fn restart_if_replaced() {
     use std::os::unix::process::CommandExt;
 
     use localify::infrastructure::updates::{macos::bundle_version, rules::parse_version};
 
+    if std::env::var_os(RESTARTED_ENV).is_some() {
+        // SAFETY: this runs first thing in `run`, before the app starts any
+        // thread that reads the environment.
+        unsafe { std::env::remove_var(RESTARTED_ENV) };
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
@@ -1152,10 +1164,13 @@ fn restart_if_replaced() {
     ) else {
         return;
     };
-    if installed <= running {
+    if installed.cmp_precedence(&running) != std::cmp::Ordering::Greater {
         return;
     }
-    let error = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
+    let error = Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .env(RESTARTED_ENV, "1")
+        .exec();
     eprintln!("could not start Localify {installed}: {error}");
 }
 

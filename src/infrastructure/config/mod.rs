@@ -1789,9 +1789,10 @@ fn new_install_config(new_install: bool) -> Config {
 
 /// What an earlier Localify leaves on this machine: its root CA and
 /// certificates, the daemon's pid and log, the launchd service, the DNS
-/// resolver (or systemd-resolved's drop-in), and the old `/etc` and
-/// `/var/log` folders. Not the data dir or the app's folder: the app makes
-/// them on its first start.
+/// resolver (or systemd-resolved's drop-in), the old `/etc` and
+/// `/var/log` folders, and on macOS the old root helper's plists, copies
+/// and run files. Not the data dir or the app's folder: the app makes them
+/// on its first start.
 pub fn previous_install_traces() -> Vec<PathBuf> {
     let paths = LocalifyPaths::default();
     let slug = BRANDING.slug();
@@ -1806,7 +1807,11 @@ pub fn previous_install_traces() -> Vec<PathBuf> {
         PathBuf::from("/var/log").join(slug),
     ];
     if cfg!(target_os = "macos") {
-        traces.push(crate::infrastructure::macos_system::service_plist_path());
+        use crate::infrastructure::macos_system::{
+            LegacyRoots, legacy_install_traces, service_plist_path,
+        };
+        traces.push(service_plist_path());
+        traces.extend(legacy_install_traces(&LegacyRoots::system()));
     }
     traces
 }
