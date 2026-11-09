@@ -123,6 +123,33 @@ pub struct SettingsChange {
     pub background_starts: Option<bool>,
 }
 
+/// A person's answer to an access request, and what the request was
+/// recorded with.
+#[derive(Debug, Clone, Copy)]
+pub struct AccessAnswer<'a> {
+    /// The asker's machine id.
+    pub peer: &'a str,
+    /// The asker's pinned key when the request was recorded.
+    pub pinned_key: &'a str,
+    /// The settings and generation when the request was recorded.
+    pub seen: SettingsFile,
+    /// The switches an `Allow` turns on; `None` for `Don't allow`.
+    pub grant: Option<SettingsChange>,
+    /// "Don't ask again from A".
+    pub suppress: bool,
+}
+
+/// Whether an access answer was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    Applied,
+    /// A write since the request was recorded: the settings, or the
+    /// asker's pin.
+    Overtaken,
+    /// The request's deadline passed before the lock was free.
+    Late,
+}
+
 /// Why a settings change was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsError {
@@ -281,21 +308,50 @@ impl RemoteStore {
         self.write_settings(current, change)
     }
 
-    /// Applies a change only if the file still holds `expected`, generation
-    /// and switches both, so a write that came in between (a switch turned
-    /// off, a file edited by hand) wins. `None` when it did not apply.
-    pub fn update_settings_if(
+    /// Applies a person's answer to an access request, all of it under the
+    /// sign-in lock: only while the asker's pin still holds the key it asked
+    /// with, the file still holds the settings and generation the request
+    /// was recorded with, and `due` says its deadline has not passed. A
+    /// write that came in between (a switch turned off, a file edited by
+    /// hand, a pairing removed) wins, and the answer writes nothing: no
+    /// switch, no suppression.
+    pub fn answer_access(
         &self,
         machine_id: &str,
-        expected: SettingsFile,
-        change: SettingsChange,
-    ) -> Result<Option<TargetSettings>> {
+        answer: AccessAnswer<'_>,
+        due: impl FnOnce() -> bool,
+    ) -> Result<Answered> {
         let _lock = self.lock_for(machine_id)?;
         let current = self.settings_file()?;
-        if current != expected {
-            return Ok(None);
+        let pins = self.pins()?;
+        let pinned = pins
+            .get(answer.peer)
+            .filter(|pin| pin.public_key == answer.pinned_key);
+        let Some(pin) = pinned else {
+            return Ok(Answered::Overtaken);
+        };
+        if current != answer.seen {
+            return Ok(Answered::Overtaken);
         }
-        self.write_settings(current, change).map(Some)
+        if !due() {
+            return Ok(Answered::Late);
+        }
+        // First, so a failed write leaves every switch as it was.
+        if answer.suppress {
+            let mut suppressions = self.suppressions()?;
+            suppressions.insert(
+                answer.peer.to_string(),
+                Suppressed {
+                    name: pin.name.clone(),
+                    since: now_rfc3339(),
+                },
+            );
+            self.write(ACCESS_FILE, &suppressions)?;
+        }
+        if let Some(change) = answer.grant {
+            self.write_settings(current, change)?;
+        }
+        Ok(Answered::Applied)
     }
 
     fn write_settings(
@@ -816,22 +872,55 @@ mod tests {
         assert!(file.settings.share);
     }
 
-    #[test]
-    fn a_conditional_write_applies_only_over_what_it_expected() {
-        let (dir, store) = signed_in();
+    /// `m2` paired with key `k2`, sharing: what an access request records.
+    fn asked(store: &RemoteStore) -> SettingsFile {
+        store
+            .update_pins("m1", |pins| {
+                pins.insert(
+                    "m2".into(),
+                    Pin {
+                        public_key: "k2".into(),
+                        name: "teo-mini".into(),
+                        paired_at: "2026-11-09T10:00:00Z".into(),
+                    },
+                );
+            })
+            .unwrap();
         store.update_settings("m1", share_on()).unwrap();
-        let seen = store.settings_file().unwrap();
-        let control = SettingsChange {
-            control: Some(true),
-            ..SettingsChange::default()
-        };
+        store.settings_file().unwrap()
+    }
 
-        // Another write in between: nothing applies.
+    fn allow(seen: SettingsFile, suppress: bool) -> AccessAnswer<'static> {
+        AccessAnswer {
+            peer: "m2",
+            pinned_key: "k2",
+            seen,
+            grant: Some(SettingsChange {
+                control: Some(true),
+                ..SettingsChange::default()
+            }),
+            suppress,
+        }
+    }
+
+    fn nothing_written(store: &RemoteStore, seen: SettingsFile) {
+        assert_eq!(store.settings_file().unwrap(), seen);
+        assert!(store.suppressions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_access_answer_applies_only_over_what_the_request_recorded() {
+        let (dir, store) = signed_in();
+
+        // Another write in between: nothing applies, suppression included.
+        let seen = asked(&store);
         store
             .update_settings("m1", SettingsChange::default())
             .unwrap();
-        assert_eq!(store.update_settings_if("m1", seen, control).unwrap(), None);
+        let answered = store.answer_access("m1", allow(seen, true), || true);
+        assert_eq!(answered.unwrap(), Answered::Overtaken);
         assert!(!store.settings().unwrap().control);
+        assert!(store.suppressions().unwrap().is_empty());
 
         // A hand edit that keeps the generation but changes a switch.
         let seen = store.settings_file().unwrap();
@@ -843,17 +932,65 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(store.update_settings_if("m1", seen, control).unwrap(), None);
+        let answered = store.answer_access("m1", allow(seen, false), || true);
+        assert_eq!(answered.unwrap(), Answered::Overtaken);
 
         // Nothing in between: it applies, and raises the generation.
-        store.update_settings("m1", share_on()).unwrap();
-        let seen = store.settings_file().unwrap();
-        let applied = store.update_settings_if("m1", seen, control).unwrap();
-        assert!(applied.unwrap().control);
+        let seen = asked(&store);
+        let answered = store.answer_access("m1", allow(seen, true), || true);
+        assert_eq!(answered.unwrap(), Answered::Applied);
+        assert!(store.settings().unwrap().control);
         assert_eq!(
             store.settings_file().unwrap().generation,
             seen.generation + 1
         );
+        assert_eq!(store.suppressions().unwrap()["m2"].name, "teo-mini");
+    }
+
+    #[test]
+    fn an_access_answer_after_the_pin_changed_or_the_deadline_writes_nothing() {
+        let (_dir, store) = signed_in();
+
+        // Unpaired in between.
+        let seen = asked(&store);
+        store
+            .update_pins("m1", |pins| {
+                pins.remove("m2");
+            })
+            .unwrap();
+        let answered = store.answer_access("m1", allow(seen, true), || true);
+        assert_eq!(answered.unwrap(), Answered::Overtaken);
+        nothing_written(&store, seen);
+
+        // Paired again with another key.
+        let seen = asked(&store);
+        let other = AccessAnswer {
+            pinned_key: "old",
+            ..allow(seen, true)
+        };
+        assert_eq!(
+            store.answer_access("m1", other, || true).unwrap(),
+            Answered::Overtaken
+        );
+        nothing_written(&store, seen);
+
+        // Past its deadline once the lock was taken: a `Don't allow` with
+        // "Don't ask again" neither.
+        let refuse = AccessAnswer {
+            grant: None,
+            ..allow(seen, true)
+        };
+        assert_eq!(
+            store.answer_access("m1", refuse, || false).unwrap(),
+            Answered::Late
+        );
+        nothing_written(&store, seen);
+        assert_eq!(
+            store.answer_access("m1", refuse, || true).unwrap(),
+            Answered::Applied
+        );
+        assert!(store.suppressions().unwrap().contains_key("m2"));
+        assert_eq!(store.settings_file().unwrap(), seen);
     }
 
     #[test]

@@ -144,6 +144,9 @@ pub struct Waiting {
     /// The settings and their generation when it was recorded: it applies
     /// only over these.
     pub seen: SettingsFile,
+    /// The asker's pinned key when it was recorded: an answer applies only
+    /// while the pin still holds it.
+    pub pinned_key: String,
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use super::{Daemon, daemon_with, fast, next_event, pair, wait_until};
 use crate::daemon::remote::fake_relay::FakeCloud;
 use crate::daemon::remote::machines::SessionState;
 use crate::daemon::remote::{AccessEvent, Asking, Command, Event, Subscription, Timings};
+use crate::infrastructure::cloud::credentials::sign_in_lock;
 use crate::infrastructure::remote::store::SettingsChange;
 use crate::infrastructure::remote::wire::{AccessOutcome, AccessWants, ProtoRange, SessionMessage};
 
@@ -335,11 +336,16 @@ async fn with_the_app_absent_the_answer_is_nobody() {
 
 /// A late `Allow` changes nothing after the viewer cancelled, after the
 /// switch it needs was turned off meanwhile, or after a write that did not
-/// go through the daemon.
+/// go through the daemon; a late answer with "Don't ask again", allowing
+/// or not, neither suppresses the asker nor counts as a refusal.
 #[tokio::test]
 async fn a_late_allow_after_a_cancel_or_a_settings_change_changes_nothing() {
     let cloud = FakeCloud::start().await;
-    let (a, b) = asker_and_target(&cloud, unlimited()).await;
+    let timings = Timings {
+        access_after_refusal: Duration::from_secs(60),
+        ..unlimited()
+    };
+    let (a, b) = asker_and_target(&cloud, timings).await;
     let mut events = app(&b);
 
     // Cancelled: the viewer stopped waiting.
@@ -362,15 +368,95 @@ async fn a_late_allow_after_a_cancel_or_a_settings_change_changes_nothing() {
     assert_eq!(late, AccessOutcome::Cancelled);
     assert_eq!(switches(&b), (true, false, false));
 
-    // A write the daemon was not told about: the generation decides.
-    let mut asking = ask(&a, AccessWants::Control).await;
-    let id = request_id(&dialog(&mut events.events).await);
-    b.store()
-        .update_settings("mB", SettingsChange::default())
+    // A write the daemon was not told about: the generation decides, for
+    // an `Allow` with "Don't ask again", then for a `Don't allow` with it.
+    for allow in [true, false] {
+        let mut asking = ask(&a, AccessWants::Control).await;
+        let id = request_id(&dialog(&mut events.events).await);
+        b.store()
+            .update_settings("mB", SettingsChange::default())
+            .unwrap();
+        let late = b.link.answer_access(&id, allow, true).await.unwrap();
+        assert_eq!(late, AccessOutcome::Cancelled, "allow: {allow}");
+        assert_eq!(answer(&mut asking).await, result(AccessOutcome::Cancelled));
+        assert!(b.link.suppressed().unwrap().is_empty(), "allow: {allow}");
+        assert_eq!(switches(&b), (true, false, false));
+    }
+    // Nor did the stale refusal count: A asks again at once (the fifth
+    // dialog this hour, the last one allowed).
+    let _asking = ask(&a, AccessWants::Control).await;
+    dialog(&mut events.events).await;
+}
+
+/// Answers a dialog on another task, held before the settings lock as
+/// another writer holding it would hold it; returns once it waits there.
+async fn answer_held(
+    b: &Daemon,
+    id: String,
+) -> (
+    tokio::task::JoinHandle<anyhow::Result<AccessOutcome>>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (reached, release) = b.link.pause_next_answer();
+    let link = b.link.clone();
+    let answering = tokio::spawn(async move { link.answer_access(&id, true, false).await });
+    tokio::time::timeout(Duration::from_secs(6), reached)
+        .await
+        .expect("the answer reaches the lock")
         .unwrap();
-    let late = b.link.answer_access(&id, true, false).await.unwrap();
-    assert_eq!(late, AccessOutcome::Cancelled);
-    assert_eq!(answer(&mut asking).await, result(AccessOutcome::Cancelled));
+    (answering, release)
+}
+
+/// An unpair that lands while an `Allow` waits for the settings lock, its
+/// session's end still queued, wins: no switch turns on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unpair_while_an_allow_waits_for_the_lock_wins() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = asker_and_target(&cloud, unlimited()).await;
+    let mut events = app(&b);
+    let _asking = ask(&a, AccessWants::Control).await;
+    let id = request_id(&dialog(&mut events.events).await);
+
+    let (answering, release) = answer_held(&b, id).await;
+    assert!(b.link.unpair("mA").unwrap());
+    release.send(()).unwrap();
+
+    let outcome = answering.await.unwrap().unwrap();
+    assert_eq!(outcome, AccessOutcome::Cancelled);
+    assert_eq!(switches(&b), (true, false, false));
+}
+
+/// An `Allow` that gets the settings lock only after the request expired,
+/// because another writer held it, changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_allow_that_gets_the_lock_after_the_expiry_changes_nothing() {
+    let cloud = FakeCloud::start().await;
+    let timings = unlimited();
+    let (a, b) = asker_and_target(&cloud, timings).await;
+    let mut events = app(&b);
+    let _asking = ask(&a, AccessWants::Control).await;
+    let id = request_id(&dialog(&mut events.events).await);
+    // The request was recorded before its dialog reached the app.
+    let expired = std::time::Instant::now() + timings.access_expiry;
+
+    let (answering, release) = answer_held(&b, id).await;
+    let (held, holding) = tokio::sync::oneshot::channel();
+    let dir = b.dir.path().to_path_buf();
+    let writer = std::thread::spawn(move || {
+        let lock = sign_in_lock(&dir).unwrap();
+        held.send(()).unwrap();
+        std::thread::sleep(
+            expired.saturating_duration_since(std::time::Instant::now())
+                + Duration::from_millis(100),
+        );
+        drop(lock);
+    });
+    holding.await.unwrap();
+    release.send(()).unwrap();
+
+    let outcome = answering.await.unwrap().unwrap();
+    assert_eq!(outcome, AccessOutcome::Expired);
+    writer.join().unwrap();
     assert_eq!(switches(&b), (true, false, false));
 }
 

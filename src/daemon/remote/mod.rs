@@ -324,6 +324,17 @@ struct Shared {
     /// The session versions this link says it speaks, as an older build would.
     #[cfg(test)]
     proto: Mutex<ProtoRange>,
+    /// Holds the next access answer before it takes the settings lock.
+    #[cfg(test)]
+    answer_pause: Mutex<Option<AnswerPause>>,
+}
+
+/// Where a test holds an access answer: `reached` fires there, and the
+/// answer goes on once `release` hears from the test, or loses it.
+#[cfg(test)]
+struct AnswerPause {
+    reached: oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl Shared {
@@ -351,6 +362,21 @@ impl Shared {
             .proto
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Blocks the actor where a test paused the next access answer, as a
+    /// writer holding the settings lock would.
+    #[cfg(test)]
+    fn pause_answer(&self) {
+        let pause = self
+            .answer_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.reached.send(());
+            let _ = pause.release.recv();
+        }
     }
 
     fn pair_attempts(&self) -> MutexGuard<'_, VecDeque<Instant>> {
@@ -480,6 +506,8 @@ impl RemoteLink {
                 trusted_base: Mutex::new(None),
                 #[cfg(test)]
                 proto: Mutex::new(ProtoRange::OURS),
+                #[cfg(test)]
+                answer_pause: Mutex::new(None),
             }),
         }
     }
@@ -533,6 +561,24 @@ impl RemoteLink {
             .proto
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = proto;
+    }
+
+    /// Holds the next access answer before it takes the settings lock, as
+    /// another writer holding it would: the receiver fires once it waits
+    /// there, and it goes on when the sender sends or drops.
+    #[cfg(test)]
+    pub fn pause_next_answer(&self) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached, at_pause) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *self
+            .shared
+            .answer_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AnswerPause {
+            reached,
+            release: released,
+        });
+        (at_pause, release)
     }
 
     /// Lets the fake cloud's `401`s revoke, as `LOCALIFY_CLOUD_API` would.
@@ -718,8 +764,9 @@ impl RemoteLink {
     }
 
     /// `remote_access_answer`: a person's answer in the access dialog. It
-    /// changes the switches only if the request still waits, has not
-    /// expired, and nothing wrote the settings since it was recorded.
+    /// changes the switches, or suppresses the asker, only if the request
+    /// still waits, has not expired, the asker is still paired with the
+    /// same key, and nothing wrote the settings since it was recorded.
     pub async fn answer_access(
         &self,
         request_id: &str,

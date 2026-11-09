@@ -13,7 +13,7 @@ use super::{Actor, Event, Key};
 use crate::daemon::remote::access::{Admission, Ask, Limits, Waiting};
 use crate::infrastructure::launch_rev::random_bytes;
 use crate::infrastructure::remote::noise::{decode_key, fingerprint};
-use crate::infrastructure::remote::store::{SettingsChange, SettingsFile, Suppressed, now_rfc3339};
+use crate::infrastructure::remote::store::{AccessAnswer, Answered, SettingsChange, SettingsFile};
 use crate::infrastructure::remote::wire::{AccessOutcome, AccessWants, Role, SessionMessage};
 
 /// How many ended requests a late answer can still learn the end of.
@@ -133,6 +133,7 @@ impl Actor {
             wants,
             expires: now + expiry,
             seen,
+            pinned_key: pin.public_key.clone(),
         });
         self.shared.access_history().shown(&key.0, now);
         info!(peer = %key.0, ?wants, "A paired machine asks for remote controls");
@@ -180,20 +181,14 @@ impl Actor {
                 .find(|(id, _)| id == request_id)
                 .map_or(AccessOutcome::Cancelled, |(_, outcome)| *outcome);
         };
-        let now = Instant::now();
-        if now >= waiting.expires {
+        if Instant::now() >= waiting.expires {
             self.close_access(&key, AccessOutcome::Expired);
             return AccessOutcome::Expired;
         }
-        if suppress {
-            self.suppress(&key.0);
+        let outcome = self.apply_answer(&key.0, &waiting, allow, suppress);
+        if outcome == AccessOutcome::Declined {
+            self.shared.access_history().refused(&key.0, Instant::now());
         }
-        let outcome = if allow {
-            self.grant(&key.0, &waiting)
-        } else {
-            self.shared.access_history().refused(&key.0, now);
-            AccessOutcome::Declined
-        };
         self.close_access(&key, outcome);
         if outcome == AccessOutcome::Granted {
             info!(peer = %key.0, wants = ?waiting.wants, "Remote controls allowed here");
@@ -203,56 +198,47 @@ impl Actor {
         outcome
     }
 
-    /// Turns on exactly what was asked, never `share`, under the settings
-    /// lock and only over the settings the request was recorded with.
-    fn grant(&self, peer: &str, waiting: &Waiting) -> AccessOutcome {
-        // Unpaired in the meantime: its session is ending.
-        if !self
-            .shared
-            .store
-            .pins()
-            .is_ok_and(|pins| pins.contains_key(peer))
-        {
-            return AccessOutcome::Cancelled;
-        }
-        let change = SettingsChange {
+    /// Writes the answer under the settings lock, and only while the asker
+    /// is still pinned with the key it asked with, the settings are the ones
+    /// the request was recorded with, and its expiry has not passed: an
+    /// unpair, a settings write or the lock held past the expiry wins, and
+    /// the answer then writes nothing, suppression included. An `Allow`
+    /// turns on exactly what was asked, never `share`.
+    fn apply_answer(
+        &self,
+        peer: &str,
+        waiting: &Waiting,
+        allow: bool,
+        suppress: bool,
+    ) -> AccessOutcome {
+        let grant = allow.then_some(SettingsChange {
             share: None,
             control: Some(true),
             background_starts: (waiting.wants == AccessWants::BackgroundStarts).then_some(true),
+        });
+        let answer = AccessAnswer {
+            peer,
+            pinned_key: &waiting.pinned_key,
+            seen: waiting.seen,
+            grant,
+            suppress,
         };
+        #[cfg(test)]
+        self.shared.pause_answer();
+        let due = || Instant::now() < waiting.expires;
         match self
             .shared
             .store
-            .update_settings_if(&self.ctx.self_id, waiting.seen, change)
+            .answer_access(&self.ctx.self_id, answer, due)
         {
-            Ok(Some(_)) => AccessOutcome::Granted,
-            Ok(None) => AccessOutcome::Cancelled,
+            Ok(Answered::Applied) if allow => AccessOutcome::Granted,
+            Ok(Answered::Applied) => AccessOutcome::Declined,
+            Ok(Answered::Late) => AccessOutcome::Expired,
+            Ok(Answered::Overtaken) => AccessOutcome::Cancelled,
             Err(error) => {
-                warn!(error = %format!("{error:#}"), "Could not turn on remote controls");
+                warn!(error = %format!("{error:#}"), "Could not apply an answer to an access request");
                 AccessOutcome::Cancelled
             }
-        }
-    }
-
-    /// "Don't ask again from A": its requests get `declined` at once.
-    fn suppress(&self, peer: &str) {
-        let name = self.view().name_of(peer);
-        let name = self
-            .shared
-            .store
-            .pins()
-            .ok()
-            .and_then(|pins| pins.get(peer).map(|pin| pin.name.clone()))
-            .unwrap_or(name);
-        let since = now_rfc3339();
-        if let Err(error) = self
-            .shared
-            .store
-            .update_suppressions(&self.ctx.self_id, |suppressed| {
-                suppressed.insert(peer.to_string(), Suppressed { name, since });
-            })
-        {
-            warn!(error = %format!("{error:#}"), "Could not stop a machine's access requests");
         }
     }
 
