@@ -118,7 +118,7 @@
     // checkouts with 409 addons_unavailable; an add-on subscription that
     // exists still counts, and still ends with its Pro plan. Turn it on once
     // the organization allows multiple subscriptions per customer.
-    "ADDONS": "off"
+    "ADDONS": "on"
   },
   // Set with `wrangler secret put <NAME>`; locally, in .dev.vars. Deploys
   // refuse to run while one is missing. POLAR_WEBHOOK_SECRET is optional: it
