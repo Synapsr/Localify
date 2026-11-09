@@ -81,6 +81,19 @@ pub struct Release {
     pub archive: Option<ReleaseArchive>,
 }
 
+impl Release {
+    /// What tells this release apart before its archive is downloaded: its
+    /// version and its archive's signature, hashed. A release that failed
+    /// here is skipped by it, without a download.
+    pub fn identity(&self) -> String {
+        let signature = self
+            .archive
+            .as_ref()
+            .map_or("", |archive| archive.signature.as_str());
+        sha256_hex(format!("{}\n{signature}", self.version).as_bytes())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseArchive {
     pub url: String,
@@ -308,6 +321,19 @@ pub(crate) mod tests {
         let archive = release.archive.unwrap();
         assert_eq!(archive.url, "https://d.test/1.7.0/a.tar.gz");
         assert_eq!(archive.signature, "c2ln");
+    }
+
+    #[test]
+    fn a_release_is_known_by_its_version_and_signature() {
+        let release = parse_manifest(MANIFEST.as_bytes(), Some("darwin-aarch64")).unwrap();
+        let mut resigned = release.clone();
+        resigned.archive.as_mut().unwrap().signature = "b3RoZXI=".into();
+        let mut renamed = release.clone();
+        renamed.version = "1.7.1".into();
+        assert_eq!(release.identity(), release.clone().identity());
+        assert_ne!(release.identity(), resigned.identity());
+        assert_ne!(release.identity(), renamed.identity());
+        assert_eq!(release.identity().len(), 64);
     }
 
     #[test]

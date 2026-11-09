@@ -87,10 +87,7 @@ pub fn install(
         return print_json(&read_status(client, config_path)?);
     }
     match installed {
-        Some(version) => println!(
-            "Installed {} {version}. The daemon restarts on it in a few seconds.",
-            BRANDING.app_name
-        ),
+        Some(installed) => print_installed(&installed),
         None => println!(
             "{} {} is up to date.",
             BRANDING.app_name,
@@ -98,6 +95,22 @@ pub fn install(
         ),
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn print_installed(installed: &updates::install::Installed) {
+    use crate::infrastructure::updates::install::Previous;
+    let (name, version) = (BRANDING.app_name, &installed.version);
+    match &installed.previous {
+        Previous::Kept(_) => {
+            println!("Installed {name} {version}. The daemon restarts on it in a few seconds.");
+        }
+        Previous::Stranded { at, error } => {
+            println!("Installed {name} {version}, but the version it replaced was not kept.");
+            eprintln!("Moving it to previous/ failed: {error}");
+            eprintln!("{}", updates::stranded_reason(at));
+        }
+    }
 }
 
 /// Linux has no install path: its CLI is checked by SHA-256 only.
@@ -121,9 +134,8 @@ mod macos_install {
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
-    use semver::Version;
 
-    use crate::infrastructure::updates::install::{Installer, Mode};
+    use crate::infrastructure::updates::install::{self, Installed, Installer, Mode};
     use crate::infrastructure::updates::macos::{self, BUNDLE_ID, InstallTarget};
     use crate::infrastructure::updates::{UpdatePaths, release, state, unix_now};
 
@@ -132,7 +144,7 @@ mod macos_install {
 
     /// Checks (within the machine-wide cooldown), downloads, verifies and
     /// swaps in. `None` when there is nothing newer.
-    pub(super) fn run(paths: &UpdatePaths, relaunch: bool) -> Result<Option<Version>> {
+    pub(super) fn run(paths: &UpdatePaths, relaunch: bool) -> Result<Option<Installed>> {
         let target = InstallTarget::current()?;
         let endpoint = release::updater_endpoint()
             .ok_or_else(|| anyhow!("This build has no update feed: update it by hand."))?;
@@ -152,6 +164,10 @@ mod macos_install {
         let Some(version) = installer.wants(release)? else {
             return Ok(None);
         };
+        // Known from the manifest: no download for a release that failed here.
+        if installer.rejected(release)? {
+            return Err(install::failed_before(&release.version));
+        }
         let url = release
             .archive
             .as_ref()
