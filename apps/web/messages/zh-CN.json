@@ -142,63 +142,68 @@
     "section": {
       "titleLine1": "本机免费，",
       "titleLine2": "跨机用 Pro。",
-      "description": "在你电脑上运行的一切都免费开源。Localify Cloud Pro 增加公开 URL，让你随时随地访问它们。",
-      "more": "价格详情与常见问题"
+      "description": "在你电脑上运行的一切都免费开源。Localify Cloud Pro 增加公开 URL，让你随时随地访问它们。"
     },
     "titleLine1": "本机使用免费。",
     "titleLine2": "公开 URL 用 Pro。",
     "description": "本地代理免费、开源，无需账户。通过 Localify Cloud 从你的机器提供的公开 URL 需要付费方案。",
+    "interval": "计费周期",
+    "monthly": "按月",
+    "yearly": "按年",
+    "perMonth": "/ 月",
+    "perYear": "/ 年",
+    "billedMonthly": "每月计费",
+    "yearlyNote": "折合每月 {price}，按年计费",
+    "monthsFree": "免 {months} 个月",
     "free": {
-      "name": "免费",
-      "tagline": "本地代理：除公开 URL 外的一切。",
-      "note": "采用 AGPL 开源。无需账户。",
+      "name": "Localify",
+      "period": "永久",
+      "tagline": "本机上的一切。",
       "features": [
-        "不限数量的项目和 .localify 域名",
-        "可信的本地 HTTPS、DNS 和路由",
-        "macOS 桌面应用，macOS 和 Linux 上的 CLI",
-        "面向 Claude Code、Codex 和 Cursor 的 MCP 服务器",
-        "Docker 自动发现和实时请求日志"
+        "项目、域名和 worktree 不限数量",
+        "可信的本地 HTTPS",
+        "桌面应用、CLI 和 MCP 服务器",
+        "服务终端和请求日志",
+        "采用 AGPL 许可开源"
       ],
-      "cta": "下载"
+      "cta": "下载 macOS 版"
     },
     "pro": {
-      "name": "Pro",
-      "badge": "Localify Cloud",
-      "tagline": "为你的开发服务器提供公开 URL，地址为 {url}。",
-      "interval": "计费周期",
-      "monthly": "按月",
-      "yearly": "按年",
-      "save": "省 {percent}",
-      "perMonth": "/ 月",
-      "perYear": "/ 年",
-      "monthlyNote": "每月计费。",
-      "yearlyNote": "折合每月 {price}，每年计费一次。",
+      "name": "Localify Cloud Pro",
+      "badge": "最受欢迎",
+      "tagline": "随时随地访问你的机器。",
       "features": [
-        "从你的机器提供的公开 URL",
-        "{urls} 个公开 URL",
-        "{machines} 台机器同时提供服务",
-        "每个 URL 默认设有密码",
-        "通配符 URL，可访问项目的每个服务和每个 worktree",
-        "包含免费方案的全部内容"
+        "localify.fyi 上的 {urls} 个公开 URL",
+        "一个 URL 覆盖项目的所有服务和 worktree",
+        "最多由 {machines} 台机器提供服务",
+        "默认密码保护，外加自动登录链接",
+        "7 天免费试用"
       ],
-      "trial": "7 天免费试用。结账时需要提供银行卡，但试用结束前不会扣款。在此之前可随时取消。每个 GitHub 账户只能试用一次。",
-      "cta": "开始 7 天免费试用",
-      "steps": "安装 Localify，然后运行："
+      "cta": "开始 7 天免费试用"
     },
     "team": {
-      "name": "团队",
-      "badge": "以后推出",
-      "tagline": "供多人使用的 Localify Cloud，一张账单。",
-      "body": "目前还没有。如果你的团队需要，请告诉我们你们需要什么。",
-      "cta": "告诉我们你想要"
+      "name": "Localify Cloud Team",
+      "tagline": "适合共享机器的团队。",
+      "features": [
+        "包含 Pro 的全部功能",
+        "{seats} 个席位，一张账单",
+        "为团队提供更多机器和公开 URL",
+        "优先支持"
+      ],
+      "cta": "开通 Team"
     },
     "addons": {
       "title": "Pro 附加项",
-      "machine": "+1 台提供服务的机器，每月 {price}",
-      "urls": "+{count} 个公开 URL，每月 {price}",
-      "how": "按月计费，数量不限，需有效的 Pro 方案。从应用的下一个版本起，可在 Settings → Localify Cloud 中购买，并在账单门户中管理。"
+      "machine": "+1 台提供服务的机器",
+      "urls": "+{count} 个公开 URL",
+      "perMonth": "{price} / 月",
+      "how": "随时可在应用中或用 <cmd>localify subscribe</cmd> 添加。"
     },
-    "billing": "在欧盟和欧洲经济区以欧元计价，其他地区以美元计价，结账页面会显示含税总额。Polar 是记录商户（merchant of record）：由它销售方案、处理销售税和增值税，并向你发送发票。取消、在按月和按年之间切换或更新银行卡，都在 Polar 的客户门户中完成，可从应用中或用 localify billing 打开。",
+    "fineprint": {
+      "currency": "欧盟和欧洲经济区以 € 计价，其他地区以 $ 计价，税费在结账时计算",
+      "polar": "由 Polar 开票",
+      "cancel": "随时取消"
+    },
     "faq": {
       "title": "价格相关问题",
       "items": [
@@ -215,6 +220,10 @@
           "answer": "通过 Localify Cloud 让你的公开 URL 上线的电脑。Pro 允许 2 台同时这样做，比如你的笔记本电脑和运行代理的机器。在另一台电脑上登录不会占用名额。"
         },
         {
+          "question": "附加项怎么用？",
+          "answer": "附加项会提高 Pro 的上限：+1 台提供服务的机器，或 +10 个公开 URL，每项在有效的 Pro 方案之外按月计费。可在应用的 设置 → Localify Cloud 中添加，或用 localify subscribe --machines 或 localify subscribe --url-packs 添加，数量可在 Polar 的客户门户中修改。"
+        },
+        {
           "question": "可以取消或退款吗？",
           "answer": "可随时在客户门户中取消。Pro 会持续到你已付费周期结束，然后停止：你的公开 URL 将停止提供服务，但会连同地址和密码一起保留。对于首次扣款，请在 14 天内写信至 support@localify.dev，我们会全额退款。",
           "link": {
@@ -224,7 +233,7 @@
         },
         {
           "question": "谁来处理付款？",
-          "answer": "Polar（polar.sh），作为记录商户。Polar 是卖方：负责收款、处理销售税和增值税，并向你发送发票。你的银行卡信息只交给 Polar 及其支付处理商，绝不会到我们这里。",
+          "answer": "Polar（polar.sh），作为记录商户。Polar 是卖方：负责收款、处理销售税和增值税，并向你发送发票。你的银行卡信息只交给 Polar 及其支付处理商，绝不会到我们这里。在欧盟和欧洲经济区以欧元计价，其他地区以美元计价，结账页面会显示含税总额。取消、在按月和按年之间切换或更新银行卡，都在 Polar 的客户门户中完成，可从应用中或用 localify billing 打开。",
           "link": {
             "label": "阅读隐私政策",
             "href": "/privacy"
@@ -240,6 +249,25 @@
         }
       ]
     }
+  },
+  "TeamContact": {
+    "title": "开通 Localify Cloud Team",
+    "description": "介绍一下你的团队，我们今天就帮你开通。",
+    "name": "姓名",
+    "email": "工作邮箱",
+    "company": "公司",
+    "size": "团队人数",
+    "message": "留言",
+    "optional": "选填",
+    "messageTemplate": "你好，我们想为 {size} 人的开发团队使用 Localify Team。我们使用的技术是…",
+    "submit": "发送",
+    "sending": "发送中…",
+    "successTitle": "已发送",
+    "successBody": "谢谢，我们今天会通过 {email} 联系你。",
+    "errorBody": "消息没有发送成功。请改用邮件联系我们，消息内容已经填好。",
+    "emailUs": "发邮件到 support@localify.dev",
+    "close": "关闭",
+    "mailSubject": "Localify Cloud Team"
   },
   "Faq": {
     "titleLine1": "常见问题，",
@@ -501,13 +529,13 @@
   },
   "Privacy": {
     "title": "隐私政策",
-    "updatedAt": "2026 年 11 月 8 日",
+    "updatedAt": "2026 年 11 月 9 日",
     "intro": "你的本地开发环境留在你的机器上。桌面应用和 CLI 把 DNS、TLS、路由、项目和请求日志都保存在那里。本页说明数据离开你设备的情况，以及网站收集的内容。",
     "sections": [
       {
         "title": "1. 简要说明",
         "body": [
-          "Localify 不保存请求日志，也不保存你运行的服务的任何流量信息。对公开 URL 的请求会经过 Cloudflare 和 Localify Cloud 到达你的机器，但不会被存储。分析数据不包含本地路径，错误报告中的路径由过滤器移除。完成设置后，代理在本地工作。数据只在六种情况下到达我们：你访问网站、官方桌面应用发送产品分析和错误报告、应用检查更新、你登录 Localify Cloud 并使用公开 URL、你通过 Polar 为 Localify Cloud 方案付款，或你给我们发邮件。"
+          "Localify 不保存请求日志，也不保存你运行的服务的任何流量信息。对公开 URL 的请求会经过 Cloudflare 和 Localify Cloud 到达你的机器，但不会被存储。分析数据不包含本地路径，错误报告中的路径由过滤器移除。完成设置后，代理在本地工作。数据只在六种情况下到达我们：你访问网站、官方桌面应用发送产品分析和错误报告、应用检查更新、你登录 Localify Cloud 并使用公开 URL、你通过 Polar 为 Localify Cloud 方案付款，或你通过邮件或网站联系表单联系我们。"
         ]
       },
       {
@@ -560,7 +588,8 @@
           "生产环境的网站使用两个分析工具：Umami 和 PostHog。它们记录页面浏览和下载等按钮的点击。我们不使用广告跟踪器，也不做跨站再营销。为了以你的货币显示价格，网站会读取 Cloudflare 根据你的 IP 地址判断的国家。网站不会保存它。",
           "Umami 对所有访客运行。它从 analytics.teogoulois.com 加载，不使用 Cookie。",
           "PostHog 只有在你通过 Cookie 横幅接受后才会运行。此后，它会在 Cookie 和本地存储中保存访客标识符，并记录你已接受。它的 autocapture 和会话录制已关闭。如果你拒绝，PostHog 不会发送或存储任何内容。如果你接受后改变主意，它会停止记录并清除已保存在浏览器中的内容。无论哪种选择，本地存储中都会有一条记录保存你的选择，你可以通过页脚的 Cookie 链接更改。",
-          "如果你已接受，点击下载按钮时，网站可能会把一个简短的 Localify 归因令牌复制到你的剪贴板，替换其中原有的内容。如果你没有接受，网站不会动你的剪贴板。桌面应用启动时会读取剪贴板，并忽略此令牌以外的所有内容。如果找到令牌，它会在我们的分析数据中把你的网站访问与应用关联起来。令牌包含 PostHog 访客标识符、归因 ID、来源标签和时间戳。它不包含项目数据、域名、本地路径或流量。"
+          "如果你已接受，点击下载按钮时，网站可能会把一个简短的 Localify 归因令牌复制到你的剪贴板，替换其中原有的内容。如果你没有接受，网站不会动你的剪贴板。桌面应用启动时会读取剪贴板，并忽略此令牌以外的所有内容。如果找到令牌，它会在我们的分析数据中把你的网站访问与应用关联起来。令牌包含 PostHog 访客标识符、归因 ID、来源标签和时间戳。它不包含项目数据、域名、本地路径或流量。",
+          "如果你使用 Team 联系表单，网站会把你的姓名、邮箱地址、公司、团队人数、留言以及你选择的计费周期和价格，连同你提交时所在的页面和语言，发送到我们团队的 Discord 服务器，以便我们回复你。点击 Pro 和 Team 按钮会向同一处发送一个匿名事件：哪个按钮、显示的计费周期、页面和语言，不含任何标识符。为防止滥用，Cloudflare 会按 IP 地址在一分钟的窗口内统计这些请求；你的 IP 地址不会发送到 Discord。当联系留言不再需要用于回复时，我们会删除它们。"
         ]
       },
       {
@@ -572,6 +601,10 @@
           {
             "name": "Cloudflare",
             "description": "托管网站、下载文件、更新文件和 Localify Cloud，包括对公开 URL 的请求。"
+          },
+          {
+            "name": "Discord",
+            "description": "Team 联系表单和方案按钮的匿名点击，它们会发送到我们团队的服务器。"
           },
           {
             "name": "GitHub",
@@ -599,7 +632,8 @@
         "title": "9. 我们为何处理这些数据",
         "body": [
           "网站上的 PostHog 基于你的同意，你可以随时通过页脚的 Cookie 链接撤回同意。我们处理 Umami 分析、桌面应用分析和错误报告，是基于了解 Localify 使用情况并修复问题的正当利益。我们处理更新请求是为了交付更新，处理 Localify Cloud 数据是为了提供你登录后使用的公开 URL，处理支持邮件是为了回复你。",
-          "我们处理来自 Polar 的账单数据，是为了提供你所付费的方案。"
+          "我们处理来自 Polar 的账单数据，是为了提供你所付费的方案。",
+          "我们处理联系表单的留言是为了回复你；处理方案按钮的匿名点击，是基于了解访客对哪些方案感兴趣的正当利益。"
         ]
       },
       {

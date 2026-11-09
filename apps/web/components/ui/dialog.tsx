@@ -90,12 +90,14 @@ export const DialogOverlay = ({
 
 type DialogContentProps = DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
+  closeLabel?: string;
 };
 
 export const DialogContent = ({
   className,
   children,
   showCloseButton = true,
+  closeLabel = "Close",
   ...props
 }: DialogContentProps) => {
   return (
@@ -116,7 +118,7 @@ export const DialogContent = ({
             render={<Button className="absolute top-4 right-4" size="icon-sm" variant="ghost" />}
           >
             <RiCloseLine />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">{closeLabel}</span>
           </DialogPrimitive.Close>
         ) : null}
       </DialogPrimitive.Popup>

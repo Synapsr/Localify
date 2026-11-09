@@ -62,7 +62,7 @@ Rust conventions (DDD layer rules, module layout, YAGNI, testing strategy) live 
 | Translations | next-intl, with identical keys in every locale | Yes |
 | Runtime | Cloudflare Workers through OpenNext, with no data layer | Yes |
 
-The site points people at the install prompt, the download and the source, and shows the Localify Cloud plans. It has no checkout, accounts, API routes, or server-side secrets: buying Pro happens in the app and the CLI.
+The site points people at the install prompt, the download and the source, and shows the Localify Cloud plans. It has no checkout or accounts: buying Pro happens in the app and the CLI. Its only API routes, `POST /api/track` and `POST /api/contact`, forward clicks on the plan buttons and the Team contact form to the team's Discord, with per-IP rate-limit bindings. Their webhook URL is the site's one server-side secret, `DISCORD_CONTACT_WEBHOOK_URL` ([apps/web/README.md](../apps/web/README.md), "Contact and clicks").
 
 `apps/web` code stays isolated from desktop concerns. It imports nothing from `desktop-ui/` or `src/`, and they import nothing from it. Its copy describes what the product does today, using [apps/web/LANDING.md](../apps/web/LANDING.md) and [apps/web/TECHNICAL-REFERENCE.md](../apps/web/TECHNICAL-REFERENCE.md) as references.
 

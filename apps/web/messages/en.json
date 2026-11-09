@@ -142,63 +142,68 @@
     "section": {
       "titleLine1": "Free on your machines.",
       "titleLine2": "Pro across them.",
-      "description": "Everything that runs on your computers is free and open source. Localify Cloud Pro adds public URLs to reach them from anywhere.",
-      "more": "Pricing details and FAQ"
+      "description": "Everything that runs on your computers is free and open source. Localify Cloud Pro adds public URLs to reach them from anywhere."
     },
     "titleLine1": "Free on your machine.",
     "titleLine2": "Pro for public URLs.",
     "description": "The local proxy is free and open source, and needs no account. Public URLs, served from your machine through Localify Cloud, need a paid plan.",
+    "interval": "Billing interval",
+    "monthly": "Monthly",
+    "yearly": "Yearly",
+    "perMonth": "a month",
+    "perYear": "a year",
+    "billedMonthly": "Billed monthly",
+    "yearlyNote": "{price} a month, billed yearly",
+    "monthsFree": "{months, plural, one {# month free} other {# months free}}",
     "free": {
-      "name": "Free",
-      "tagline": "The local proxy: everything except public URLs.",
-      "note": "Open source under the AGPL. No account.",
+      "name": "Localify",
+      "period": "forever",
+      "tagline": "Everything on your machines.",
       "features": [
-        "Unlimited projects and .localify domains",
-        "Trusted local HTTPS, DNS, and routing",
-        "Desktop app for macOS, CLI for macOS and Linux",
-        "MCP server for Claude Code, Codex, and Cursor",
-        "Docker discovery and live request logs"
+        "Unlimited projects, domains, and worktrees",
+        "Trusted local HTTPS",
+        "Desktop app, CLI, and MCP server",
+        "Service terminals and request logs",
+        "Open source under the AGPL"
       ],
-      "cta": "Download"
+      "cta": "Download for macOS"
     },
     "pro": {
-      "name": "Pro",
-      "badge": "Localify Cloud",
-      "tagline": "Public URLs for your dev servers, at {url}.",
-      "interval": "Billing interval",
-      "monthly": "Monthly",
-      "yearly": "Yearly",
-      "save": "Save {percent}",
-      "perMonth": "/ month",
-      "perYear": "/ year",
-      "monthlyNote": "Billed every month.",
-      "yearlyNote": "{price} a month, billed once a year.",
+      "name": "Localify Cloud Pro",
+      "badge": "Most popular",
+      "tagline": "Reach your machines from anywhere.",
       "features": [
-        "Public URLs served from your machine",
-        "{urls} public URLs",
-        "{machines} machines serving at the same time",
-        "A password on every URL by default",
-        "Wildcard URLs that reach every service and worktree of a project",
-        "Everything in Free"
+        "{urls} public URLs on localify.fyi",
+        "One URL reaches every service and worktree of a project",
+        "Served from up to {machines} machines",
+        "Password by default, and a link that signs in by itself",
+        "7-day free trial"
       ],
-      "trial": "7-day free trial. Checkout asks for a card, and nothing is charged until the trial ends. Cancel any time before. One trial per GitHub account.",
-      "cta": "Start your 7-day free trial",
-      "steps": "Install Localify, then run:"
+      "cta": "Start your 7-day free trial"
     },
     "team": {
-      "name": "Team",
-      "badge": "Coming later",
-      "tagline": "Localify Cloud for several people, on one bill.",
-      "body": "It isn't built yet. If your team wants it, tell us what you'd need.",
-      "cta": "Tell us you want it"
+      "name": "Localify Cloud Team",
+      "tagline": "For a team that shares its machines.",
+      "features": [
+        "Everything in Pro",
+        "{seats} seats, one invoice",
+        "More machines and public URLs for the team",
+        "Priority support"
+      ],
+      "cta": "Get Team"
     },
     "addons": {
-      "title": "Add-ons for Pro",
-      "machine": "+1 serving machine, {price} a month",
-      "urls": "+{count} public URLs, {price} a month",
-      "how": "Billed monthly, in any quantity, with an active Pro plan. You'll buy them in the app, in Settings → Localify Cloud, from its next release, and manage them in your billing portal."
+      "title": "Pro add-ons",
+      "machine": "+1 serving machine",
+      "urls": "+{count} public URLs",
+      "perMonth": "{price}/month",
+      "how": "Add them anytime from the app or with <cmd>localify subscribe</cmd>."
     },
-    "billing": "Prices are in euros in the EU and EEA and in US dollars elsewhere, and checkout shows the total with tax. Polar is the merchant of record: it sells the plan, handles sales tax and VAT, and sends your invoices. Cancel, switch between monthly and yearly, or update your card in Polar's customer portal, from the app or with localify billing.",
+    "fineprint": {
+      "currency": "Prices in € in the EU and EEA, $ elsewhere, tax calculated at checkout",
+      "polar": "Billed by Polar",
+      "cancel": "Cancel anytime"
+    },
     "faq": {
       "title": "Pricing questions",
       "items": [
@@ -215,6 +220,10 @@
           "answer": "A computer that puts your public URLs online through Localify Cloud. Pro lets 2 do it at the same time, for example your laptop and the machine your agents run on. Signing in on another computer doesn't use one."
         },
         {
+          "question": "How do add-ons work?",
+          "answer": "Add-ons raise Pro's limits: +1 serving machine, or +10 public URLs, each billed monthly on top of an active Pro plan. Add them in the app, in Settings → Localify Cloud, or with localify subscribe --machines or localify subscribe --url-packs, and change their quantity in Polar's customer portal."
+        },
+        {
           "question": "Can I cancel or get a refund?",
           "answer": "Cancel any time from the customer portal. Pro stays on until the end of the period you paid for, then stops: your public URLs stop serving but are kept, with their addresses and passwords. For your first charge, write to support@localify.dev within 14 days for a full refund.",
           "link": {
@@ -224,7 +233,7 @@
         },
         {
           "question": "Who handles the payment?",
-          "answer": "Polar (polar.sh), as merchant of record. Polar is the seller, takes the payment, handles sales tax and VAT, and sends your invoices. Your card details go to Polar and its payment processor, never to us.",
+          "answer": "Polar (polar.sh), as merchant of record. Polar is the seller, takes the payment, handles sales tax and VAT, and sends your invoices. Your card details go to Polar and its payment processor, never to us. Prices are in euros in the EU and EEA and in US dollars elsewhere, and checkout shows the total with tax. Cancel, switch between monthly and yearly, or update your card in Polar's customer portal, from the app or with localify billing.",
           "link": {
             "label": "Read the privacy policy",
             "href": "/privacy"
@@ -240,6 +249,25 @@
         }
       ]
     }
+  },
+  "TeamContact": {
+    "title": "Get Localify Cloud Team",
+    "description": "Tell us about your team and we'll set it up for you today.",
+    "name": "Name",
+    "email": "Work email",
+    "company": "Company",
+    "size": "Team size",
+    "message": "Message",
+    "optional": "optional",
+    "messageTemplate": "Hi, we'd like Localify Team for our team of {size, plural, one {# developer} other {# developers}}. We work with…",
+    "submit": "Send",
+    "sending": "Sending…",
+    "successTitle": "Message sent",
+    "successBody": "Thanks, we'll be in touch today at {email}.",
+    "errorBody": "Your message didn't go through. Email us instead: your message is already in it.",
+    "emailUs": "Email support@localify.dev",
+    "close": "Close",
+    "mailSubject": "Localify Cloud Team"
   },
   "Faq": {
     "titleLine1": "Questions,",
@@ -501,13 +529,13 @@
   },
   "Privacy": {
     "title": "Privacy Policy",
-    "updatedAt": "November 8, 2026",
+    "updatedAt": "November 9, 2026",
     "intro": "Your local development environment stays on your machine. The desktop app and CLI keep DNS, TLS, routing, projects, and request logs there. This page covers the cases where data does leave your device, and what the website collects.",
     "sections": [
       {
         "title": "1. The short version",
         "body": [
-          "Localify doesn't keep request logs or anything about the traffic of the services you run. Requests to a public URL pass through Cloudflare and Localify Cloud on their way to your machine, without being stored. Localify's analytics leave out local paths, and a filter removes them from error reports. The proxy works locally after setup. Data reaches us in six cases: you visit the website, the official desktop app sends product analytics and error reports, the app checks for updates, you sign in to Localify Cloud and use public URLs, you pay for a Localify Cloud plan through Polar, or you email us."
+          "Localify doesn't keep request logs or anything about the traffic of the services you run. Requests to a public URL pass through Cloudflare and Localify Cloud on their way to your machine, without being stored. Localify's analytics leave out local paths, and a filter removes them from error reports. The proxy works locally after setup. Data reaches us in six cases: you visit the website, the official desktop app sends product analytics and error reports, the app checks for updates, you sign in to Localify Cloud and use public URLs, you pay for a Localify Cloud plan through Polar, or you email us or write through the website's contact form."
         ]
       },
       {
@@ -560,7 +588,8 @@
           "In production the website uses two analytics tools, Umami and PostHog. They record page views and clicks on buttons such as download. We don't run advertising trackers or cross-site retargeting. To show prices in your currency, the website reads the country that Cloudflare derives from your IP address. It doesn't store it.",
           "Umami runs for every visitor. It's loaded from analytics.teogoulois.com and uses no cookies.",
           "PostHog runs only if you accept in the cookie banner. It then keeps a visitor identifier in a cookie and in local storage, and records that you accepted. Its autocapture and session recording are off. If you decline, PostHog sends and stores nothing. If you accepted and change your mind, it stops recording and clears what it stored in your browser. Either way, a local storage entry remembers your choice, and you can change it from the Cookies link in the footer.",
-          "If you accepted, clicking a download button may copy a short Localify attribution token to your clipboard, replacing what was there. If you didn't, the website leaves your clipboard alone. When the desktop app starts, it reads the clipboard and ignores anything that isn't such a token. If it finds one, it links your website visit to the app in our analytics. The token contains a PostHog visitor identifier, an attribution ID, a source label, and a timestamp. It doesn't contain project data, domains, local paths, or traffic."
+          "If you accepted, clicking a download button may copy a short Localify attribution token to your clipboard, replacing what was there. If you didn't, the website leaves your clipboard alone. When the desktop app starts, it reads the clipboard and ignores anything that isn't such a token. If it finds one, it links your website visit to the app in our analytics. The token contains a PostHog visitor identifier, an attribution ID, a source label, and a timestamp. It doesn't contain project data, domains, local paths, or traffic.",
+          "If you use the Team contact form, the website sends your name, email address, company, team size, message, and the billing interval and price you picked, with the page and language you wrote from, to our team's Discord server so we can answer you. Clicks on the Pro and Team buttons send an anonymous event to the same place: which button, the billing interval shown, the page, and the language, with no identifier. To limit abuse, Cloudflare counts these requests per IP address over one-minute windows; your IP address isn't sent to Discord. We delete contact messages once they're no longer useful to answer you."
         ]
       },
       {
@@ -572,6 +601,10 @@
           {
             "name": "Cloudflare",
             "description": "hosting for the website, the downloads, the update files, and Localify Cloud, including the requests to public URLs."
+          },
+          {
+            "name": "Discord",
+            "description": "the Team contact form and the anonymous clicks on the plan buttons, which reach our team's server."
           },
           {
             "name": "GitHub",
@@ -599,7 +632,8 @@
         "title": "9. Why we process this data",
         "body": [
           "We rely on your consent for PostHog on the website, and you can withdraw it at any time from the Cookies link in the footer. We process Umami analytics, desktop app analytics, and error reports because we have a legitimate interest in understanding how Localify is used and fixing what breaks. We process update requests to deliver updates, Localify Cloud data to provide the public URLs you signed in for, and support emails to answer you.",
-          "We process billing data from Polar to provide the plan you pay for."
+          "We process billing data from Polar to provide the plan you pay for.",
+          "We process contact form messages to answer you, and the anonymous clicks on the plan buttons because we have a legitimate interest in knowing which plans interest visitors."
         ]
       },
       {
