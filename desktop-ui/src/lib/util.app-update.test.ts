@@ -144,6 +144,15 @@ test("the other states read as sentences", () => {
   );
 });
 
+test("a previous version the last install couldn't move says where it is", () => {
+  const stranded = "The version the last update replaced could not be moved to previous/.";
+  assert.equal(describeUpdate(status({ reason: stranded }), "Localify", 1_000).detail, stranded);
+  assert.equal(
+    describeUpdate(status({ state: "unknown", reason: stranded }), "Localify", 1_000).detail,
+    stranded,
+  );
+});
+
 test("the last check reads in the largest whole unit", () => {
   assert.equal(lastCheckLine(null, 100), "Not checked yet.");
   assert.equal(lastCheckLine(100, 130), "Last checked just now.");

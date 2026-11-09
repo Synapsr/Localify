@@ -34,7 +34,10 @@ function placeOf(session: TerminalSessionDto) {
 
 export interface UpdateSummary {
   title: string;
-  /** Why it waits, why the check failed, or when the last check ran. */
+  /**
+   * Why it waits, why the check failed, where the bundle the last install replaced was left when
+   * it couldn't go to `previous/`, or when the last check ran.
+   */
   detail: string | null;
   /** Offer `Restart to update`. */
   canRestart: boolean;
@@ -71,11 +74,15 @@ export function describeUpdate(
     case "upToDate":
       return {
         title: `${appName} ${status.installed} is up to date`,
-        detail: lastCheck,
+        detail: status.reason ?? lastCheck,
         canRestart: false,
       };
     case "unknown":
-      return { title: `${appName} ${status.installed}`, detail: lastCheck, canRestart: false };
+      return {
+        title: `${appName} ${status.installed}`,
+        detail: status.reason ?? lastCheck,
+        canRestart: false,
+      };
   }
 }
 
