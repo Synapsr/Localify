@@ -18,7 +18,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { usePathname } from "@/i18n/navigation";
-import { trackPlanClick } from "@/lib/track";
+import { type BillingInterval, trackPlanClick } from "@/lib/track";
 import { cn } from "@/lib/utils";
 
 const SUPPORT_EMAIL = "support@localify.dev";
@@ -27,15 +27,20 @@ type Status = "idle" | "sending" | "sent" | "failed";
 
 type Props = {
   label: string;
+  planName: string;
+  // The billing interval and price the card shows, as the visitor reads it.
+  interval: BillingInterval;
+  price: string;
   seats: number;
   source: string;
   className?: string;
 };
 
-// The Team card's button: it tells the team about the click, then opens a contact
-// form, pre-filled for the card's seats, that posts to /api/contact. When that
-// fails, the form offers the same message by email.
-export const TeamContactButton = ({ label, seats, source, className }: Props) => {
+// The Team card's purchase button. Team is set up by hand for now, so it tells the
+// team about the click, then opens a form, pre-filled for the card's seats, interval
+// and price, that posts to /api/contact. When that fails, the form offers the same
+// message by email.
+export const TeamContactButton = ({ label, planName, interval, price, seats, source, className }: Props) => {
   const t = useTranslations("TeamContact");
   const locale = useLocale();
   const page = usePathname();
@@ -81,7 +86,7 @@ export const TeamContactButton = ({ label, seats, source, className }: Props) =>
   };
 
   const signature = [name, company].filter(Boolean).join(", ");
-  const mailBody = signature ? `${message}\n\n${signature}` : message;
+  const mailBody = [`${planName} · ${price}`, message, signature].filter(Boolean).join("\n\n");
   const mailto = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(t("mailSubject"))}&body=${encodeURIComponent(mailBody)}`;
   const labelClass = "text-[13.5px] font-medium text-foreground";
   const fieldClass = "h-10 rounded-xl px-3";
@@ -92,7 +97,7 @@ export const TeamContactButton = ({ label, seats, source, className }: Props) =>
         className={className}
         data-umami-event="cloud_team_clicked"
         data-umami-event-source={source}
-        onClick={() => trackPlanClick({ plan: "team", locale, page })}
+        onClick={() => trackPlanClick({ plan: "team", interval, locale, page })}
       >
         {label}
       </DialogTrigger>
@@ -122,6 +127,10 @@ export const TeamContactButton = ({ label, seats, source, className }: Props) =>
             </DialogHeader>
 
             <DialogBody className="grid gap-4 sm:grid-cols-2">
+              <p className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 rounded-2xl bg-muted/60 px-4 py-3 ring-1 ring-border/60 sm:col-span-2">
+                <span className="text-[14px] font-semibold text-foreground">{planName}</span>
+                <span className="text-[14px] text-muted-foreground tabular-nums">{price}</span>
+              </p>
               <label className="grid gap-1.5">
                 <span className={labelClass}>{t("name")}</span>
                 <Input
@@ -186,6 +195,8 @@ export const TeamContactButton = ({ label, seats, source, className }: Props) =>
               </label>
 
               <input name="plan" type="hidden" value="team" />
+              <input name="interval" type="hidden" value={interval} />
+              <input name="price" type="hidden" value={price} />
               <input name="locale" type="hidden" value={locale} />
               <input name="page" type="hidden" value={page} />
               {/* The honeypot: hidden from people and screen readers, filled by bots. */}

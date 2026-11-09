@@ -80,6 +80,9 @@ export const cleanText = (value: unknown, max: number): string | null => {
   return text.length <= max ? text : null;
 };
 
+export const isInterval = (value: unknown): value is "monthly" | "yearly" =>
+  value === "monthly" || value === "yearly";
+
 export const isLocale = (value: unknown): value is string =>
   typeof value === "string" && (routing.locales as readonly string[]).includes(value);
 

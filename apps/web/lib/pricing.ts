@@ -47,7 +47,8 @@ const fallback = (currency: Currency): Pricing => ({
 
 // Team isn't sold through Polar yet, so the endpoint doesn't price it: the site quotes
 // it, with the same number in both currencies, and the Team button opens a contact form.
-export const TEAM_PLAN = { monthly: 4900, seats: 3 } as const;
+// A year costs 10 months, as Pro's roughly does.
+export const TEAM_PLAN = { monthly: 4900, yearly: 49000, seats: 3 } as const;
 
 // EU and EEA countries pay in euros, everyone else in US dollars, as the cloud decides.
 const EURO_COUNTRIES = new Set([

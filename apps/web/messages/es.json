@@ -147,6 +147,14 @@
     "titleLine1": "Gratis en tu máquina.",
     "titleLine2": "Pro para URLs públicas.",
     "description": "El proxy local es gratis, open source y no necesita cuenta. Las URLs públicas, servidas desde tu máquina a través de Localify Cloud, necesitan un plan de pago.",
+    "interval": "Periodo de facturación",
+    "monthly": "Mensual",
+    "yearly": "Anual",
+    "perMonth": "al mes",
+    "perYear": "al año",
+    "billedMonthly": "Facturado cada mes",
+    "yearlyNote": "{price} al mes, facturado al año",
+    "monthsFree": "{months, plural, one {# mes gratis} other {# meses gratis}}",
     "free": {
       "name": "Localify",
       "period": "para siempre",
@@ -163,8 +171,6 @@
     "pro": {
       "name": "Localify Cloud Pro",
       "badge": "El más popular",
-      "period": "al mes",
-      "yearly": "o {price} al año",
       "tagline": "Accede a tus máquinas desde cualquier sitio.",
       "features": [
         "{urls} URLs públicas en localify.fyi",
@@ -177,7 +183,6 @@
     },
     "team": {
       "name": "Localify Cloud Team",
-      "period": "al mes",
       "tagline": "Para un equipo que comparte sus máquinas.",
       "features": [
         "Todo lo de Pro",
@@ -185,16 +190,20 @@
         "Más máquinas y URLs públicas para el equipo",
         "Soporte prioritario"
       ],
-      "cta": "Contáctanos"
+      "cta": "Obtener Team"
     },
     "addons": {
       "title": "Complementos de Pro",
-      "soon": "Pronto",
-      "machine": "+1 máquina: {price} al mes",
-      "urls": "+{count} URLs públicas: {price} al mes",
-      "how": "Se cobran cada mes, en la cantidad que quieras, con un plan Pro activo. Podrás comprarlos en la app, en Settings → Localify Cloud, desde su próxima versión, y gestionarlos en tu portal de facturación."
+      "machine": "+1 máquina que sirve",
+      "urls": "+{count} URLs públicas",
+      "perMonth": "{price}/mes",
+      "how": "Añádelos cuando quieras desde la app o con <cmd>localify subscribe</cmd>."
     },
-    "billing": "Los precios están en euros en la UE y el EEE y en dólares estadounidenses en el resto, y el pago muestra el total con impuestos. Polar es el merchant of record: vende el plan, gestiona el IVA y los impuestos, y te envía las facturas. Cancela, cambia entre mensual y anual o actualiza tu tarjeta en el portal de cliente de Polar, desde la app o con localify billing.",
+    "fineprint": {
+      "currency": "Precios en € en la UE y el EEE, en $ en el resto, impuestos calculados al pagar",
+      "polar": "Facturado por Polar",
+      "cancel": "Cancela cuando quieras"
+    },
     "faq": {
       "title": "Preguntas sobre precios",
       "items": [
@@ -211,6 +220,10 @@
           "answer": "Un equipo que pone tus URLs públicas en línea a través de Localify Cloud. Pro permite que 2 lo hagan a la vez, por ejemplo tu laptop y la máquina donde corren tus agentes. Iniciar sesión en otro equipo no gasta ninguna."
         },
         {
+          "question": "¿Cómo funcionan los complementos?",
+          "answer": "Los complementos amplían los límites de Pro: +1 máquina que sirve o +10 URLs públicas, cada uno facturado cada mes además de un plan Pro activo. Añádelos en la app, en Ajustes → Localify Cloud, o con localify subscribe --machines o localify subscribe --url-packs, y cambia la cantidad en el portal de cliente de Polar."
+        },
+        {
           "question": "¿Puedo cancelar o pedir un reembolso?",
           "answer": "Cancela cuando quieras desde el portal de cliente. Pro sigue activo hasta el final del periodo que pagaste y después se detiene: tus URLs públicas dejan de servirse, pero se conservan con sus direcciones y contraseñas. Para tu primer cobro, escribe a support@localify.dev en un plazo de 14 días y te lo reembolsamos entero.",
           "link": {
@@ -220,7 +233,7 @@
         },
         {
           "question": "¿Quién gestiona el pago?",
-          "answer": "Polar (polar.sh), como merchant of record. Polar es el vendedor: cobra el pago, gestiona el IVA y los impuestos, y te envía las facturas. Los datos de tu tarjeta van a Polar y a su procesador de pagos, nunca a nosotros.",
+          "answer": "Polar (polar.sh), como merchant of record. Polar es el vendedor: cobra el pago, gestiona el IVA y los impuestos, y te envía las facturas. Los datos de tu tarjeta van a Polar y a su procesador de pagos, nunca a nosotros. Los precios están en euros en la UE y el EEE y en dólares estadounidenses en el resto, y el pago muestra el total con impuestos. Cancela, cambia entre mensual y anual o actualiza tu tarjeta en el portal de cliente de Polar, desde la app o con localify billing.",
           "link": {
             "label": "Leer la política de privacidad",
             "href": "/privacy"
@@ -238,8 +251,8 @@
     }
   },
   "TeamContact": {
-    "title": "Háblanos de Team",
-    "description": "Cuéntanos sobre tu equipo y te respondemos en un día.",
+    "title": "Obtener Localify Cloud Team",
+    "description": "Cuéntanos sobre tu equipo y te lo dejamos listo hoy mismo.",
     "name": "Nombre",
     "email": "Correo de trabajo",
     "company": "Empresa",
@@ -250,7 +263,7 @@
     "submit": "Enviar",
     "sending": "Enviando…",
     "successTitle": "Mensaje enviado",
-    "successBody": "Gracias, te responderemos en un día en {email}.",
+    "successBody": "Gracias, te escribiremos hoy mismo a {email}.",
     "errorBody": "Tu mensaje no se envió. Escríbenos por correo: tu mensaje ya está incluido.",
     "emailUs": "Escribir a support@localify.dev",
     "close": "Cerrar",
@@ -576,7 +589,7 @@
           "Umami funciona para todos los visitantes. Se carga desde analytics.teogoulois.com y no usa cookies.",
           "PostHog solo funciona si aceptas en el aviso de cookies. Entonces guarda un identificador de visitante en una cookie y en el almacenamiento local, y registra que aceptaste. Su autocapture y su grabación de sesiones están desactivados. Si rechazas, PostHog no envía ni guarda nada. Si habías aceptado y cambias de opinión, deja de registrar y borra lo que había guardado en tu navegador. En ambos casos, una entrada del almacenamiento local recuerda tu elección, y puedes cambiarla desde el enlace Cookies del pie de página.",
           "Si aceptaste, hacer clic en un botón de descarga puede copiar un breve token de atribución de Localify en tu portapapeles, reemplazando lo que hubiera. Si no, el sitio no toca tu portapapeles. Al arrancar, la app de escritorio lee el portapapeles e ignora todo lo que no sea ese token. Si encuentra uno, vincula tu visita al sitio con la app en nuestras analytics. El token contiene un identificador de visitante de PostHog, un identificador de atribución, una etiqueta de origen y una marca de tiempo. No contiene datos de proyectos, dominios, rutas locales ni tráfico.",
-          "Si usas el formulario de contacto de Team, el sitio envía tu nombre, tu correo electrónico, tu empresa, el tamaño de tu equipo y tu mensaje, con la página y el idioma desde los que escribes, al servidor de Discord de nuestro equipo para que podamos responderte. Los clics en los botones de Pro y Team envían un evento anónimo al mismo lugar: qué botón, la página y el idioma, sin ningún identificador. Para limitar abusos, Cloudflare cuenta estas solicitudes por dirección IP en ventanas de un minuto; tu dirección IP no se envía a Discord. Borramos los mensajes de contacto cuando ya no sirven para responderte."
+          "Si usas el formulario de contacto de Team, el sitio envía tu nombre, tu correo electrónico, tu empresa, el tamaño de tu equipo, tu mensaje y el periodo de facturación y el precio que elegiste, con la página y el idioma desde los que escribes, al servidor de Discord de nuestro equipo para que podamos responderte. Los clics en los botones de Pro y Team envían un evento anónimo al mismo lugar: qué botón, el periodo de facturación mostrado, la página y el idioma, sin ningún identificador. Para limitar abusos, Cloudflare cuenta estas solicitudes por dirección IP en ventanas de un minuto; tu dirección IP no se envía a Discord. Borramos los mensajes de contacto cuando ya no sirven para responderte."
         ]
       },
       {

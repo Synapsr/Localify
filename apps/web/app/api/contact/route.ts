@@ -3,6 +3,7 @@ import {
   emptyResponse,
   getEnv,
   isCrossSite,
+  isInterval,
   isLocale,
   isPage,
   isRateLimited,
@@ -19,6 +20,8 @@ type ContactRequest = {
   company: string;
   size: number | null;
   message: string;
+  interval: "monthly" | "yearly";
+  price: string;
   locale: string;
   page: string;
 };
@@ -29,6 +32,8 @@ const parseContact = (body: Record<string, unknown>): ContactRequest | null => {
   const email = cleanText(body.email, 254);
   const company = cleanText(body.company ?? "", 100);
   const message = cleanText(body.message ?? "", 2000);
+  // The price the card showed, as the visitor read it, such as "€490 a year".
+  const price = cleanText(body.price, 60);
   const rawSize = cleanText(String(body.size ?? ""), 10);
   const size = rawSize ? Number(rawSize) : null;
 
@@ -39,6 +44,8 @@ const parseContact = (body: Record<string, unknown>): ContactRequest | null => {
     !EMAIL.test(email) ||
     company === null ||
     message === null ||
+    !price ||
+    !isInterval(body.interval) ||
     rawSize === null ||
     (size !== null && (!Number.isInteger(size) || size < 1 || size > MAX_TEAM_SIZE)) ||
     !isLocale(body.locale) ||
@@ -46,7 +53,7 @@ const parseContact = (body: Record<string, unknown>): ContactRequest | null => {
   ) {
     return null;
   }
-  return { name, email, company, size, message, locale: body.locale, page: body.page };
+  return { name, email, company, size, message, interval: body.interval, price, locale: body.locale, page: body.page };
 };
 
 const field = (name: string, value: string) => ({ name, value: value || "—", inline: true });
@@ -73,7 +80,7 @@ export const POST = async (request: Request) => {
   const sent = await postToDiscord(webhook, {
     embeds: [
       {
-        title: "📨 Localify Cloud Team request",
+        title: "🛒 Localify Cloud Team request",
         description: contact.message || "—",
         color: 0x0d0d0d,
         fields: [
@@ -81,6 +88,7 @@ export const POST = async (request: Request) => {
           field("Email", contact.email),
           field("Company", contact.company),
           field("Team size", contact.size === null ? "" : String(contact.size)),
+          field("Billing", `${contact.interval} · ${contact.price}`),
           field("Locale", contact.locale),
           field("Page", contact.page),
         ],

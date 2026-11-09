@@ -2,6 +2,7 @@ import {
   emptyResponse,
   getEnv,
   isCrossSite,
+  isInterval,
   isLocale,
   isPage,
   isRateLimited,
@@ -12,7 +13,7 @@ import {
 const LABELS = { pro: "Pro trial", team: "Team" } as const;
 
 // A click on a plan button (lib/track.ts), told to the team's Discord as one line,
-// such as "👀 Team button clicked · fr · /pricing". It carries no identifier.
+// such as "🛒 Team · yearly clicked · fr · /pricing". It carries no identifier.
 export const POST = async (request: Request) => {
   const env = getEnv();
   const webhook = env.DISCORD_CONTACT_WEBHOOK_URL;
@@ -25,6 +26,7 @@ export const POST = async (request: Request) => {
   if (
     body?.event !== "plan_clicked" ||
     (plan !== "pro" && plan !== "team") ||
+    !isInterval(body.interval) ||
     !isLocale(body.locale) ||
     !isPage(body.page)
   ) {
@@ -32,7 +34,7 @@ export const POST = async (request: Request) => {
   }
 
   await postToDiscord(webhook, {
-    content: `👀 ${LABELS[plan]} button clicked · ${body.locale} · ${body.page}`,
+    content: `🛒 ${LABELS[plan]} · ${body.interval} clicked · ${body.locale} · ${body.page}`,
   });
   return emptyResponse(204);
 };

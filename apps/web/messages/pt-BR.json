@@ -147,6 +147,14 @@
     "titleLine1": "Grátis na sua máquina.",
     "titleLine2": "Pro para URLs públicas.",
     "description": "O proxy local é grátis, open source e não exige conta. URLs públicas, servidas da sua máquina pelo Localify Cloud, exigem um plano pago.",
+    "interval": "Período de cobrança",
+    "monthly": "Mensal",
+    "yearly": "Anual",
+    "perMonth": "por mês",
+    "perYear": "por ano",
+    "billedMonthly": "Cobrado todo mês",
+    "yearlyNote": "{price} por mês, cobrado por ano",
+    "monthsFree": "{months, plural, one {# mês grátis} other {# meses grátis}}",
     "free": {
       "name": "Localify",
       "period": "para sempre",
@@ -163,8 +171,6 @@
     "pro": {
       "name": "Localify Cloud Pro",
       "badge": "Mais popular",
-      "period": "por mês",
-      "yearly": "ou {price} por ano",
       "tagline": "Acesse suas máquinas de qualquer lugar.",
       "features": [
         "{urls} URLs públicas em localify.fyi",
@@ -177,7 +183,6 @@
     },
     "team": {
       "name": "Localify Cloud Team",
-      "period": "por mês",
       "tagline": "Para um time que compartilha suas máquinas.",
       "features": [
         "Tudo do Pro",
@@ -185,16 +190,20 @@
         "Mais máquinas e URLs públicas para o time",
         "Suporte prioritário"
       ],
-      "cta": "Fale com a gente"
+      "cta": "Assinar o Team"
     },
     "addons": {
       "title": "Complementos do Pro",
-      "soon": "Em breve",
-      "machine": "+1 máquina: {price} por mês",
-      "urls": "+{count} URLs públicas: {price} por mês",
-      "how": "Cobrados por mês, na quantidade que você quiser, com um plano Pro ativo. Você vai poder comprá-los no app, em Settings → Localify Cloud, a partir da próxima versão, e gerenciá-los no seu portal de cobrança."
+      "machine": "+1 máquina servindo",
+      "urls": "+{count} URLs públicas",
+      "perMonth": "{price}/mês",
+      "how": "Adicione quando quiser pelo app ou com <cmd>localify subscribe</cmd>."
     },
-    "billing": "Os preços são em euros na UE e no EEE e em dólares americanos no resto do mundo, e o checkout mostra o total com impostos. A Polar é a merchant of record: ela vende o plano, cuida dos impostos e envia as suas faturas. Cancele, troque entre mensal e anual ou atualize o cartão no portal do cliente da Polar, pelo app ou com localify billing.",
+    "fineprint": {
+      "currency": "Preços em € na UE e no EEE, em $ no resto, impostos calculados no checkout",
+      "polar": "Cobrado pela Polar",
+      "cancel": "Cancele quando quiser"
+    },
     "faq": {
       "title": "Perguntas sobre preços",
       "items": [
@@ -211,6 +220,10 @@
           "answer": "Um computador que coloca as suas URLs públicas online pelo Localify Cloud. O Pro deixa 2 fazerem isso ao mesmo tempo, por exemplo o seu notebook e a máquina onde rodam os seus agentes. Entrar em outro computador não usa nenhuma."
         },
         {
+          "question": "Como funcionam os complementos?",
+          "answer": "Os complementos aumentam os limites do Pro: +1 máquina servindo ou +10 URLs públicas, cada um cobrado todo mês além de um plano Pro ativo. Adicione pelo app, em Configurações → Localify Cloud, ou com localify subscribe --machines ou localify subscribe --url-packs, e mude a quantidade no portal do cliente da Polar."
+        },
+        {
           "question": "Posso cancelar ou pedir reembolso?",
           "answer": "Cancele quando quiser pelo portal do cliente. O Pro continua até o fim do período pago e depois para: as suas URLs públicas deixam de ser servidas, mas são mantidas com os endereços e as senhas. Para a sua primeira cobrança, escreva para support@localify.dev em até 14 dias e reembolsamos o valor integral.",
           "link": {
@@ -220,7 +233,7 @@
         },
         {
           "question": "Quem cuida do pagamento?",
-          "answer": "A Polar (polar.sh), como merchant of record. A Polar é a vendedora: recebe o pagamento, cuida dos impostos e envia as suas faturas. Os dados do seu cartão vão para a Polar e para o processador de pagamentos dela, nunca para nós.",
+          "answer": "A Polar (polar.sh), como merchant of record. A Polar é a vendedora: recebe o pagamento, cuida dos impostos e envia as suas faturas. Os dados do seu cartão vão para a Polar e para o processador de pagamentos dela, nunca para nós. Os preços são em euros na UE e no EEE e em dólares americanos no resto do mundo, e o checkout mostra o total com impostos. Cancele, troque entre mensal e anual ou atualize o cartão no portal do cliente da Polar, pelo app ou com localify billing.",
           "link": {
             "label": "Ler a política de privacidade",
             "href": "/privacy"
@@ -238,8 +251,8 @@
     }
   },
   "TeamContact": {
-    "title": "Fale com a gente sobre o Team",
-    "description": "Conte sobre sua equipe e respondemos em até um dia.",
+    "title": "Assinar o Localify Cloud Team",
+    "description": "Conte sobre sua equipe e deixamos tudo pronto ainda hoje.",
     "name": "Nome",
     "email": "E-mail de trabalho",
     "company": "Empresa",
@@ -250,7 +263,7 @@
     "submit": "Enviar",
     "sending": "Enviando…",
     "successTitle": "Mensagem enviada",
-    "successBody": "Obrigado, respondemos em até um dia em {email}.",
+    "successBody": "Obrigado, falamos com você ainda hoje em {email}.",
     "errorBody": "Sua mensagem não foi enviada. Mande um e-mail: sua mensagem já está nele.",
     "emailUs": "Escrever para support@localify.dev",
     "close": "Fechar",
@@ -576,7 +589,7 @@
           "O Umami roda para todos os visitantes. Ele é carregado de analytics.teogoulois.com e não usa cookies.",
           "O PostHog só roda se você aceitar no aviso de cookies. Ele então guarda um identificador de visitante em um cookie e no armazenamento local, e registra que você aceitou. O autocapture e a gravação de sessão dele ficam desligados. Se você recusar, o PostHog não envia nem guarda nada. Se você tinha aceitado e mudar de ideia, ele para de registrar e apaga o que guardou no seu navegador. Nos dois casos, uma entrada no armazenamento local lembra sua escolha, e você pode mudá-la pelo link Cookies no rodapé.",
           "Se você aceitou, clicar em um botão de download pode copiar um pequeno token de atribuição do Localify para a sua área de transferência, substituindo o que havia lá. Caso contrário, o site não mexe na sua área de transferência. Ao iniciar, o app desktop lê a área de transferência e ignora tudo o que não for esse token. Se encontrar um, ele liga sua visita ao site ao app nas nossas analytics. O token contém um identificador de visitante do PostHog, um identificador de atribuição, um rótulo de origem e um carimbo de data e hora. Ele não contém dados de projeto, domínios, caminhos locais nem tráfego.",
-          "Se você usa o formulário de contato do Team, o site envia seu nome, seu e-mail, sua empresa, o tamanho da sua equipe e sua mensagem, com a página e o idioma de onde você escreveu, para o servidor do Discord da nossa equipe, para que possamos responder. Cliques nos botões do Pro e do Team enviam um evento anônimo para o mesmo lugar: qual botão, a página e o idioma, sem nenhum identificador. Para limitar abusos, a Cloudflare conta essas solicitações por endereço IP em janelas de um minuto; seu endereço IP não é enviado ao Discord. Apagamos as mensagens de contato quando elas não servem mais para responder você."
+          "Se você usa o formulário de contato do Team, o site envia seu nome, seu e-mail, sua empresa, o tamanho da sua equipe, sua mensagem e o período de cobrança e o preço escolhidos, com a página e o idioma de onde você escreveu, para o servidor do Discord da nossa equipe, para que possamos responder. Cliques nos botões do Pro e do Team enviam um evento anônimo para o mesmo lugar: qual botão, o período de cobrança exibido, a página e o idioma, sem nenhum identificador. Para limitar abusos, a Cloudflare conta essas solicitações por endereço IP em janelas de um minuto; seu endereço IP não é enviado ao Discord. Apagamos as mensagens de contato quando elas não servem mais para responder você."
         ]
       },
       {

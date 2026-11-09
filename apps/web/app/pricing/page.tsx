@@ -32,10 +32,6 @@ const PricingPage = async () => {
           }
         />
         <PricingPlans source="pricing" />
-        <FadeIn className="mx-auto mt-10 max-w-3xl space-y-4 text-center">
-          <p className="text-[13.5px] leading-[1.6] text-pretty text-muted-foreground">{t("addons.how")}</p>
-          <p className="text-[13px] leading-[1.6] text-pretty text-muted-foreground">{t("billing")}</p>
-        </FadeIn>
       </section>
 
       <section className={sectionClass} id="pricing-faq">

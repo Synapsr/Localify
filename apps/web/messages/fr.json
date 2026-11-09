@@ -147,6 +147,14 @@
     "titleLine1": "Gratuit sur ta machine.",
     "titleLine2": "Pro pour les URLs publiques.",
     "description": "Le proxy local est gratuit, open source, et sans compte. Les URLs publiques, servies depuis ta machine via Localify Cloud, nécessitent un abonnement payant.",
+    "interval": "Périodicité de facturation",
+    "monthly": "Mensuel",
+    "yearly": "Annuel",
+    "perMonth": "par mois",
+    "perYear": "par an",
+    "billedMonthly": "Facturé chaque mois",
+    "yearlyNote": "{price} par mois, facturé à l'année",
+    "monthsFree": "{months, plural, one {# mois offert} other {# mois offerts}}",
     "free": {
       "name": "Localify",
       "period": "pour toujours",
@@ -163,8 +171,6 @@
     "pro": {
       "name": "Localify Cloud Pro",
       "badge": "Le plus populaire",
-      "period": "par mois",
-      "yearly": "ou {price} par an",
       "tagline": "Accède à tes machines de n'importe où.",
       "features": [
         "{urls} URLs publiques sur localify.fyi",
@@ -177,7 +183,6 @@
     },
     "team": {
       "name": "Localify Cloud Team",
-      "period": "par mois",
       "tagline": "Pour une équipe qui partage ses machines.",
       "features": [
         "Tout ce qu'inclut Pro",
@@ -185,16 +190,20 @@
         "Plus de machines et d'URLs publiques pour l'équipe",
         "Support prioritaire"
       ],
-      "cta": "Nous contacter"
+      "cta": "Choisir Team"
     },
     "addons": {
       "title": "Options Pro",
-      "soon": "Bientôt",
-      "machine": "+1 machine : {price} par mois",
-      "urls": "+{count} URLs publiques : {price} par mois",
-      "how": "Facturées chaque mois, en la quantité que tu veux, avec un abonnement Pro actif. Tu pourras les acheter dans l'app, dans Settings → Localify Cloud, dès sa prochaine version, et les gérer dans ton portail de facturation."
+      "machine": "+1 machine qui sert",
+      "urls": "+{count} URLs publiques",
+      "perMonth": "{price}/mois",
+      "how": "Ajoute-les quand tu veux depuis l'app ou avec <cmd>localify subscribe</cmd>."
     },
-    "billing": "Les prix sont en euros dans l'UE et l'EEE et en dollars américains ailleurs, et le paiement affiche le total, taxes comprises. Polar est le marchand officiel (merchant of record) : il vend l'abonnement, gère la TVA et les taxes, et t'envoie les factures. Annule, passe du mensuel à l'annuel ou change ta carte dans le portail client de Polar, depuis l'app ou avec localify billing.",
+    "fineprint": {
+      "currency": "Prix en € dans l'UE et l'EEE, en $ ailleurs, taxes calculées au paiement",
+      "polar": "Facturé par Polar",
+      "cancel": "Résiliable à tout moment"
+    },
     "faq": {
       "title": "Questions sur les tarifs",
       "items": [
@@ -211,6 +220,10 @@
           "answer": "Un ordinateur qui met tes URLs publiques en ligne via Localify Cloud. Pro permet à 2 machines de le faire en même temps, par exemple ton portable et la machine où tournent tes agents. Te connecter sur un autre ordinateur n'en utilise pas."
         },
         {
+          "question": "Comment fonctionnent les options ?",
+          "answer": "Les options augmentent les limites de Pro : +1 machine qui sert, ou +10 URLs publiques, chacune facturée chaque mois en plus d'un abonnement Pro actif. Ajoute-les dans l'app, dans Réglages → Localify Cloud, ou avec localify subscribe --machines ou localify subscribe --url-packs, et change leur quantité dans le portail client de Polar."
+        },
+        {
           "question": "Puis-je annuler ou être remboursé ?",
           "answer": "Annule à tout moment depuis le portail client. Pro reste actif jusqu'à la fin de la période payée, puis s'arrête : tes URLs publiques ne sont plus servies, mais sont conservées avec leurs adresses et leurs mots de passe. Pour ton premier prélèvement, écris à support@localify.dev dans les 14 jours pour un remboursement complet.",
           "link": {
@@ -220,7 +233,7 @@
         },
         {
           "question": "Qui gère le paiement ?",
-          "answer": "Polar (polar.sh), en tant que marchand officiel. Polar est le vendeur : il encaisse le paiement, gère la TVA et les taxes, et t'envoie les factures. Les données de ta carte vont à Polar et à son prestataire de paiement, jamais chez nous.",
+          "answer": "Polar (polar.sh), en tant que marchand officiel. Polar est le vendeur : il encaisse le paiement, gère la TVA et les taxes, et t'envoie les factures. Les données de ta carte vont à Polar et à son prestataire de paiement, jamais chez nous. Les prix sont en euros dans l'UE et l'EEE et en dollars américains ailleurs, et le paiement affiche le total, taxes comprises. Annule, passe du mensuel à l'annuel ou change ta carte dans le portail client de Polar, depuis l'app ou avec localify billing.",
           "link": {
             "label": "Lire la politique de confidentialité",
             "href": "/privacy"
@@ -238,8 +251,8 @@
     }
   },
   "TeamContact": {
-    "title": "Parlons de Team",
-    "description": "Parle-nous de ton équipe, on te répond sous 24 heures.",
+    "title": "Prendre Localify Cloud Team",
+    "description": "Parle-nous de ton équipe, on te l'installe dès aujourd'hui.",
     "name": "Nom",
     "email": "E-mail pro",
     "company": "Entreprise",
@@ -250,7 +263,7 @@
     "submit": "Envoyer",
     "sending": "Envoi…",
     "successTitle": "Message envoyé",
-    "successBody": "Merci, on te répond sous 24 heures à {email}.",
+    "successBody": "Merci, on te recontacte aujourd'hui à {email}.",
     "errorBody": "Ton message n'est pas parti. Écris-nous par e-mail : ton message y est déjà.",
     "emailUs": "Écrire à support@localify.dev",
     "close": "Fermer",
@@ -576,7 +589,7 @@
           "Umami tourne pour tous les visiteurs. Il est chargé depuis analytics.teogoulois.com et n'utilise aucun cookie.",
           "PostHog ne tourne que si tu acceptes dans le bandeau cookies. Il garde alors un identifiant de visiteur dans un cookie et dans le stockage local, et enregistre que tu as accepté. Son autocapture et son enregistrement de session sont désactivés. Si tu refuses, PostHog n'envoie et ne stocke rien. Si tu avais accepté et que tu changes d'avis, il arrête d'enregistrer et efface ce qu'il avait stocké dans ton navigateur. Dans les deux cas, une entrée du stockage local retient ton choix, et tu peux le changer depuis le lien Cookies du pied de page.",
           "Si tu as accepté, cliquer sur un bouton de téléchargement peut copier un court jeton d'attribution Localify dans ton presse-papiers, à la place de ce qui s'y trouvait. Sinon, le site ne touche pas à ton presse-papiers. Au démarrage, l'app desktop lit le presse-papiers et ignore tout ce qui n'est pas un tel jeton. Si elle en trouve un, elle relie ta visite du site à l'app dans nos analytics. Le jeton contient un identifiant de visiteur PostHog, un identifiant d'attribution, un libellé de source et un horodatage. Il ne contient ni données de projet, ni domaines, ni chemins locaux, ni trafic.",
-          "Si tu utilises le formulaire de contact Team, le site envoie ton nom, ton adresse e-mail, ton entreprise, la taille de ton équipe et ton message, avec la page et la langue depuis lesquelles tu écris, sur le serveur Discord de notre équipe pour qu'on puisse te répondre. Les clics sur les boutons Pro et Team envoient un événement anonyme au même endroit : quel bouton, la page et la langue, sans aucun identifiant. Pour limiter les abus, Cloudflare compte ces requêtes par adresse IP sur des fenêtres d'une minute ; ton adresse IP n'est pas envoyée à Discord. Nous supprimons les messages de contact quand ils ne servent plus à te répondre."
+          "Si tu utilises le formulaire de contact Team, le site envoie ton nom, ton adresse e-mail, ton entreprise, la taille de ton équipe, ton message, ainsi que la périodicité et le prix choisis, avec la page et la langue depuis lesquelles tu écris, sur le serveur Discord de notre équipe pour qu'on puisse te répondre. Les clics sur les boutons Pro et Team envoient un événement anonyme au même endroit : quel bouton, la périodicité affichée, la page et la langue, sans aucun identifiant. Pour limiter les abus, Cloudflare compte ces requêtes par adresse IP sur des fenêtres d'une minute ; ton adresse IP n'est pas envoyée à Discord. Nous supprimons les messages de contact quand ils ne servent plus à te répondre."
         ]
       },
       {
