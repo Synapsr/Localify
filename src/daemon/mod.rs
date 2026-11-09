@@ -14,5 +14,6 @@ pub mod server;
 pub mod static_files;
 pub mod theme;
 pub mod tls;
+pub mod updates;
 
 pub use server::Server;

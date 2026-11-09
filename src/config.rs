@@ -162,6 +162,16 @@ impl Default for AgentConfig {
     }
 }
 
+/// Automatic updates (docs/desktop.md, "Automatic updates").
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UpdatesConfig {
+    /// Install new versions without asking. A config without the key
+    /// predates the feature and keeps updating by hand: `localify install`
+    /// writes it on for a new install.
+    #[serde(default)]
+    pub automatic: bool,
+}
+
 /// All resolved paths needed by Localify components.
 /// Loaded once from config, then passed to components via DI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

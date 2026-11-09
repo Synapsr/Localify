@@ -32,3 +32,4 @@ pub mod stop;
 pub mod trust;
 pub mod uninstall;
 pub mod unregister;
+pub mod update;

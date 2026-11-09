@@ -255,7 +255,7 @@ async fn serve(
         cancel_signal.cancel();
     });
 
-    let result = server.run(shutdown).await;
+    let result = server.run(shutdown, managed).await;
 
     let _ = pid_file.remove();
     result

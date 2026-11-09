@@ -460,6 +460,25 @@ enum Commands {
         command: Option<MachinesCommands>,
     },
 
+    /// Show what is installed and available, turn automatic updates on or off, or install now
+    #[command(args_conflicts_with_subcommands = true)]
+    Update {
+        /// Show what is installed and available, and why an update waits (the default)
+        #[arg(long)]
+        status: bool,
+
+        /// Install new versions by themselves (on), or only when asked (off)
+        #[arg(long, value_enum)]
+        auto: Option<cli::machines::Switch>,
+
+        /// Print JSON (the default when stdout is not a terminal)
+        #[arg(long, global = true)]
+        json: bool,
+
+        #[command(subcommand)]
+        command: Option<UpdateCommands>,
+    },
+
     /// Share a project domain at https://<slug>.localify.fyi, behind a password unless opened
     PublicUrl {
         /// Print JSON (the default when stdout is not a terminal)
@@ -481,6 +500,16 @@ enum Commands {
     ShellEnv {
         /// 32 hex digits the app chose for this read
         nonce: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCommands {
+    /// Install the latest version now, once the app is closed (macOS)
+    Install {
+        /// Wait for the app to quit, then open the new version
+        #[arg(long)]
+        relaunch: bool,
     },
 }
 
@@ -1520,6 +1549,23 @@ fn main() -> Result<()> {
         Commands::Billing { json } => {
             cli::cloud::billing(json, &cloud_adapters(config_path, &paths))
         }
+        Commands::Update {
+            status: _,
+            auto,
+            json,
+            command,
+        } => match (command, auto) {
+            (Some(UpdateCommands::Install { relaunch }), _) => {
+                cli::update::install(relaunch, json, &ctx.mgmt_client, config_path)
+            }
+            (None, Some(switch)) => cli::update::set_automatic(
+                switch == cli::machines::Switch::On,
+                json,
+                &ctx.mgmt_client,
+                config_path,
+            ),
+            (None, None) => cli::update::status(json, &ctx.mgmt_client, config_path),
+        },
         Commands::Machines { json, command } => match command {
             None => cli::machines::list(json, &ctx),
             Some(MachinesCommands::Pair { accept: true, .. }) => cli::machines::accept(&ctx),

@@ -68,6 +68,9 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Build release binary
+        # The manifest the daemon checks to say an update is available.
+        env:
+          LOCALIFY_UPDATER_BASE_URL: https://downloads.localify.dev
         run: cargo build --release --bin localify
 
       - name: Package binary
@@ -126,6 +129,9 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Build release binary
+        # The manifest the daemon checks to say an update is available.
+        env:
+          LOCALIFY_UPDATER_BASE_URL: https://downloads.localify.dev
         run: cargo build --release --bin localify
 
       - name: Package binary

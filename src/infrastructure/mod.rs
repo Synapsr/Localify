@@ -44,3 +44,4 @@ pub mod system_service;
 pub mod target_probe;
 pub mod test_pause;
 pub mod tracing;
+pub mod updates;

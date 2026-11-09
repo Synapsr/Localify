@@ -2,7 +2,7 @@ mod dto;
 pub mod watcher;
 
 // Re-export shared config types so existing CLI/daemon code keeps compiling.
-pub use crate::config::{AgentConfig, DaemonConfig, DockerConfig, LocalifyPaths};
+pub use crate::config::{AgentConfig, DaemonConfig, DockerConfig, LocalifyPaths, UpdatesConfig};
 
 use crate::application::ports::{ConfigLoadError, ConfigLoader, DomainRepository, RepositoryError};
 use crate::branding::BRANDING;
@@ -169,6 +169,9 @@ pub struct Config {
 
     #[serde(default)]
     pub agent: AgentConfig,
+
+    #[serde(default)]
+    pub updates: UpdatesConfig,
 
     #[serde(default)]
     domains: HashMap<String, RegistrationDto>,
@@ -1736,8 +1739,11 @@ impl ConfigLoader for ConfigStore {
         Ok((config.daemon, config.paths))
     }
 
+    /// A new install's config: automatic updates start on, unlike a config
+    /// that predates them.
     fn save_defaults(&self) -> Result<(), ConfigLoadError> {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.updates.automatic = true;
         self.save(&config).map_err(map_config_error)
     }
 
@@ -1804,6 +1810,38 @@ mod tests {
         let pattern = DomainPattern::from_name(&normalized, true).unwrap();
         let route = Route::parse(&format!("/={port}")).unwrap();
         DomainRegistration::new(pattern, vec![route])
+    }
+
+    // --- [updates] automatic ---
+
+    #[test]
+    fn a_new_install_writes_automatic_updates_on() {
+        let (_dir, store) = temp_store();
+        ConfigLoader::save_defaults(&store).unwrap();
+        assert!(store.load().unwrap().updates.automatic);
+        let text = fs::read_to_string(store.path.clone()).unwrap();
+        assert!(text.contains("[updates]\nautomatic = true"), "{text}");
+    }
+
+    #[test]
+    fn a_config_from_before_automatic_updates_keeps_them_off() {
+        let (_dir, store) = temp_store();
+        fs::write(&store.path, "[daemon]\nlog_level = \"info\"\n").unwrap();
+        assert!(!store.load().unwrap().updates.automatic);
+        // Saving it again writes the setting it had: off.
+        let config = store.load().unwrap();
+        store.save(&config).unwrap();
+        assert!(!store.load().unwrap().updates.automatic);
+    }
+
+    #[test]
+    fn the_automatic_setting_survives_other_changes() {
+        let (_dir, store) = temp_store();
+        fs::write(&store.path, "[updates]\nautomatic = true\n").unwrap();
+        store
+            .add_domain(proxy_registration("app.localify", 3000))
+            .unwrap();
+        assert!(store.load().unwrap().updates.automatic);
     }
 
     // --- DaemonConfig::validate ---
