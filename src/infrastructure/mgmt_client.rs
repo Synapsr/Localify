@@ -128,6 +128,39 @@ impl MgmtSocketClient {
             .map(|_| ())
     }
 
+    /// The target's answer in the access dialog; returns its `{outcome}`.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn remote_access_answer(
+        &self,
+        request_id: &str,
+        allow: bool,
+        suppress: bool,
+    ) -> Result<serde_json::Value, DaemonConnectionError> {
+        let command = serde_json::json!({
+            "cmd": "remote_access_answer", "requestId": request_id,
+            "allow": allow, "suppress": suppress,
+        });
+        let mut response =
+            self.send_command_within(&command.to_string(), Duration::from_secs(10))?;
+        Ok(response["data"].take())
+    }
+
+    /// The peers whose access requests this machine declines at once.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn remote_access_suppressed(&self) -> Result<serde_json::Value, DaemonConnectionError> {
+        let mut response = self.send_command(r#"{"cmd":"remote_access_suppressed"}"#)?;
+        Ok(response["data"].take())
+    }
+
+    /// Lets a suppressed peer ask for access again; `true` when it was.
+    #[allow(dead_code)] // Used by the desktop through the library crate.
+    pub fn remote_access_restore(&self, machine_id: &str) -> Result<bool, DaemonConnectionError> {
+        let command =
+            serde_json::json!({ "cmd": "remote_access_restore", "machineId": machine_id });
+        let response = self.send_command(&command.to_string())?;
+        Ok(response["data"]["removed"].as_bool().unwrap_or(false))
+    }
+
     /// A streaming command (`remote_pair`, `remote_events`): one answer per
     /// line until the daemon or the caller closes it.
     pub fn remote_stream(

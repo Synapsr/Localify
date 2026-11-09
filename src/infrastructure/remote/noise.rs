@@ -15,20 +15,19 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::wire::{MAX_MESSAGE_BYTES, PROTO_MAX, Purpose};
+use super::wire::{MAX_MESSAGE_BYTES, Purpose};
 use crate::infrastructure::launch_rev::random_bytes;
 
 const NOISE_PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
-/// The first bytes of every prologue; `1` is the session protocol version.
+/// The first bytes of every prologue. The label names the handshake's
+/// format and does not change with the session protocol, which `hello`
+/// negotiates (`docs/remote-machines.md`, "Versioning").
 const PROLOGUE_LABEL: &[u8; 17] = b"localify-remote/1";
 pub const KEY_LEN: usize = 32;
 pub const HASH_LEN: usize = 32;
 const TAG_LEN: usize = 16;
 /// The longest Noise message.
 const MAX_NOISE_MESSAGE: usize = 65535;
-
-// The label carries the version as text; keep the two in step.
-const _: () = assert!(PROTO_MAX == 1);
 
 /// The 16 random bytes that name a session, chosen by the initiator.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

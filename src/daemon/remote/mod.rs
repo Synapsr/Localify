@@ -8,6 +8,7 @@
 //! one actor per connection ([`actor`]) owns the socket's sessions, so no
 //! session survives a reconnect and nothing queued is ever replayed.
 
+mod access;
 mod actor;
 mod backoff;
 mod lease;
@@ -42,7 +43,7 @@ use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
 use self::local::LocalSource;
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
-pub use self::viewing::{FollowEvent, Following, RemoteInventory};
+pub use self::viewing::{AccessEvent, Asking, FollowEvent, Following, RemoteInventory};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -53,7 +54,9 @@ use crate::infrastructure::cloud::passwords::PasswordStore;
 use crate::infrastructure::cloud::types::RosterMachine;
 use crate::infrastructure::remote::noise::{StaticKeys, decode_key, fingerprint};
 use crate::infrastructure::remote::store::{DEFAULT_SETTINGS, RemoteStore, SettingsChange};
-use crate::infrastructure::remote::wire::{Hello, Presence, TargetSettings};
+use crate::infrastructure::remote::wire::{
+    AccessOutcome, Hello, Presence, ProtoRange, TargetSettings,
+};
 
 const KEY_MISSING: &str =
     "This machine's remote key is missing. Sign out and sign in again, then pair it again.";
@@ -155,6 +158,12 @@ pub struct Timings {
     /// How often a target reads its switches from the file, for a change
     /// made without the management socket, which tells it at once.
     pub settings_recheck: Duration,
+    /// An access request nobody answered ends `expired` after this.
+    pub access_expiry: Duration,
+    /// A pinned peer asks for access at most once this often.
+    pub access_every: Duration,
+    /// After a refusal, a peer asks again only after this.
+    pub access_after_refusal: Duration,
 }
 
 impl Default for Timings {
@@ -189,6 +198,9 @@ impl Default for Timings {
             watch_expiry: seconds(120),
             follow_poll: Duration::from_millis(250),
             settings_recheck: seconds(1),
+            access_expiry: seconds(120),
+            access_every: seconds(10 * 60),
+            access_after_refusal: seconds(3600),
         }
     }
 }
@@ -228,6 +240,9 @@ pub(super) struct View {
     /// The last whole snapshot of each peer, so a request can say which
     /// revision it holds.
     inventories: HashMap<String, RemoteInventory>,
+    /// The session version agreed with each peer, from both `hello`s of
+    /// this machine's open session as its viewer.
+    protos: HashMap<String, u32>,
 }
 
 impl Default for View {
@@ -243,6 +258,7 @@ impl Default for View {
             settings: HashMap::new(),
             failures: HashMap::new(),
             inventories: HashMap::new(),
+            protos: HashMap::new(),
         }
     }
 }
@@ -287,6 +303,12 @@ struct Shared {
     events: broadcast::Sender<Event>,
     /// Clients of `remote_events`: a person who can confirm a pairing here.
     subscribers: AtomicUsize,
+    /// Those of them that show the access dialog: a person who can answer
+    /// an access request here.
+    access_subscribers: AtomicUsize,
+    /// The access requests of each peer and the dialogs shown, kept by the
+    /// link so a new connection does not reset the limits.
+    access_history: Mutex<access::History>,
     /// The pairing attempts of the last hour on this machine as a target.
     /// The link keeps them, so a new connection does not reset the limit.
     pair_attempts: Mutex<VecDeque<Instant>>,
@@ -299,6 +321,20 @@ struct Shared {
     /// The fake cloud's base, trusted for revocation as the override is.
     #[cfg(test)]
     trusted_base: Mutex<Option<String>>,
+    /// The session versions this link says it speaks, as an older build would.
+    #[cfg(test)]
+    proto: Mutex<ProtoRange>,
+    /// Holds the next access answer before it takes the settings lock.
+    #[cfg(test)]
+    answer_pause: Mutex<Option<AnswerPause>>,
+}
+
+/// Where a test holds an access answer: `reached` fires there, and the
+/// answer goes on once `release` hears from the test, or loses it.
+#[cfg(test)]
+struct AnswerPause {
+    reached: oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl Shared {
@@ -306,6 +342,41 @@ impl Shared {
         self.view
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn access_history(&self) -> MutexGuard<'_, access::History> {
+        self.access_history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The session versions this machine speaks.
+    #[cfg(not(test))]
+    fn ours(&self) -> ProtoRange {
+        ProtoRange::OURS
+    }
+
+    #[cfg(test)]
+    fn ours(&self) -> ProtoRange {
+        *self
+            .proto
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Blocks the actor where a test paused the next access answer, as a
+    /// writer holding the settings lock would.
+    #[cfg(test)]
+    fn pause_answer(&self) {
+        let pause = self
+            .answer_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.reached.send(());
+            let _ = pause.release.recv();
+        }
     }
 
     fn pair_attempts(&self) -> MutexGuard<'_, VecDeque<Instant>> {
@@ -341,6 +412,7 @@ impl Shared {
         if relay != RelayState::Connected {
             view.presence.clear();
             view.sessions.clear();
+            view.protos.clear();
         }
     }
 
@@ -385,15 +457,23 @@ pub struct RemoteLink {
 }
 
 /// A `remote_events` client. While one exists, a person can confirm a
-/// pairing on this machine.
+/// pairing on this machine; while one that shows the access dialog exists,
+/// a person can answer an access request.
 pub struct Subscription {
     pub events: broadcast::Receiver<Event>,
+    /// Whether it shows the access dialog: it hears access events only then.
+    pub access: bool,
     shared: Arc<Shared>,
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.shared.subscribers.fetch_sub(1, Ordering::SeqCst);
+        if self.access {
+            self.shared
+                .access_subscribers
+                .fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -414,6 +494,8 @@ impl RemoteLink {
                 conn: Mutex::new(None),
                 events,
                 subscribers: AtomicUsize::new(0),
+                access_subscribers: AtomicUsize::new(0),
+                access_history: Mutex::new(access::History::default()),
                 pair_attempts: Mutex::new(VecDeque::new()),
                 refresh: Notify::new(),
                 #[cfg(test)]
@@ -422,6 +504,10 @@ impl RemoteLink {
                 pending_peak: AtomicUsize::new(0),
                 #[cfg(test)]
                 trusted_base: Mutex::new(None),
+                #[cfg(test)]
+                proto: Mutex::new(ProtoRange::OURS),
+                #[cfg(test)]
+                answer_pause: Mutex::new(None),
             }),
         }
     }
@@ -465,6 +551,34 @@ impl RemoteLink {
             }
         }
         Ok(settings)
+    }
+
+    /// Speaks only `proto` from the next session on, as an older build.
+    #[cfg(test)]
+    pub fn speak(&self, proto: ProtoRange) {
+        *self
+            .shared
+            .proto
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = proto;
+    }
+
+    /// Holds the next access answer before it takes the settings lock, as
+    /// another writer holding it would: the receiver fires once it waits
+    /// there, and it goes on when the sender sends or drops.
+    #[cfg(test)]
+    pub fn pause_next_answer(&self) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached, at_pause) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *self
+            .shared
+            .answer_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AnswerPause {
+            reached,
+            release: released,
+        });
+        (at_pause, release)
     }
 
     /// Lets the fake cloud's `401`s revoke, as `LOCALIFY_CLOUD_API` would.
@@ -516,6 +630,7 @@ impl RemoteLink {
             pins: &pins,
             presence: &view.presence,
             sessions: &view.sessions,
+            protos: &view.protos,
             settings: &view.settings,
             failures: &view.failures,
         }))
@@ -631,13 +746,87 @@ impl RemoteLink {
         Ok(removed)
     }
 
-    pub fn subscribe(&self) -> Subscription {
+    /// Subscribes to `remote_events`. With `access`, the client shows the
+    /// access dialog, so access requests wait for its answer instead of
+    /// being answered `nobody`.
+    pub fn subscribe(&self, access: bool) -> Subscription {
         self.shared.subscribers.fetch_add(1, Ordering::SeqCst);
+        if access {
+            self.shared
+                .access_subscribers
+                .fetch_add(1, Ordering::SeqCst);
+        }
         Subscription {
             events: self.shared.events.subscribe(),
+            access,
             shared: Arc::clone(&self.shared),
         }
     }
+
+    /// `remote_access_answer`: a person's answer in the access dialog. It
+    /// changes the switches, or suppresses the asker, only if the request
+    /// still waits, has not expired, the asker is still paired with the
+    /// same key, and nothing wrote the settings since it was recorded.
+    pub async fn answer_access(
+        &self,
+        request_id: &str,
+        allow: bool,
+        suppress: bool,
+    ) -> Result<AccessOutcome> {
+        // Requests end with their connection: without one, none waits.
+        let Some(conn) = self.shared.conn() else {
+            return Ok(AccessOutcome::Cancelled);
+        };
+        let (reply, answered) = oneshot::channel();
+        conn.commands
+            .send(Command::AccessAnswer {
+                request_id: request_id.to_string(),
+                allow,
+                suppress,
+                reply,
+            })
+            .map_err(|_| anyhow!("The relay connection closed."))?;
+        Ok(answered.await.unwrap_or(AccessOutcome::Cancelled))
+    }
+
+    /// `remote_access_suppressed`: the peers whose requests are answered
+    /// `declined` at once.
+    pub fn suppressed(&self) -> Result<Vec<SuppressedPeer>> {
+        Ok(self
+            .shared
+            .store
+            .suppressions()?
+            .into_iter()
+            .map(|(machine_id, suppressed)| SuppressedPeer {
+                machine_id,
+                name: suppressed.name,
+                since: suppressed.since,
+            })
+            .collect())
+    }
+
+    /// `remote_access_restore`: lets `peer` ask again. `true` when it was
+    /// suppressed.
+    pub fn restore_access(&self, peer: &str) -> Result<bool> {
+        let machine_id = self.shared.signed_in_as()?;
+        let mut removed = false;
+        self.shared
+            .store
+            .update_suppressions(&machine_id, |suppressed| {
+                removed = suppressed.remove(peer).is_some();
+            })?;
+        Ok(removed)
+    }
+}
+
+/// A line of `remote_access_suppressed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuppressedPeer {
+    pub machine_id: String,
+    pub name: String,
+    /// RFC 3339.
+    pub since: String,
 }
 
 /// Why a viewer got no lease, as its caller says it. A revoked token also

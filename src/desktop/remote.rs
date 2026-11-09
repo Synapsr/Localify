@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 
 use super::DesktopApi;
 use super::dto::{
-    RemoteMachineRequest, RemotePairAnswerRequest, RemoteSettingsRequest, RemoteStreamRequest,
+    RemoteAccessAnswerRequest, RemoteMachineRequest, RemotePairAnswerRequest,
+    RemoteSettingsRequest, RemoteStreamRequest,
 };
 use crate::application::ports::DaemonConnectionError;
 use crate::infrastructure::cloud::api::CloudClient;
@@ -62,6 +63,28 @@ impl DesktopApi {
             .map_err(daemon_error)
     }
 
+    /// A person's answer in the access dialog: `{outcome}`, `granted` only
+    /// when the request still waited and nothing changed the settings since.
+    pub fn answer_remote_access(&self, request: RemoteAccessAnswerRequest) -> Result<Value> {
+        self.daemon()?
+            .remote_access_answer(&request.request_id, request.allow, request.suppress)
+            .map_err(daemon_error)
+    }
+
+    /// The machines whose access requests this Mac declines at once.
+    pub fn remote_access_suppressed(&self) -> Result<Value> {
+        self.daemon()?
+            .remote_access_suppressed()
+            .map_err(daemon_error)
+    }
+
+    /// Lets a machine ask for access again.
+    pub fn restore_remote_access(&self, request: RemoteMachineRequest) -> Result<bool> {
+        self.daemon()?
+            .remote_access_restore(&request.machine_id)
+            .map_err(daemon_error)
+    }
+
     /// Signs another machine out of the account. The relay tells every
     /// connected peer, which drops its pin; this one drops it now.
     pub fn remove_remote_machine(&self, request: RemoteMachineRequest) -> Result<()> {
@@ -81,7 +104,9 @@ impl DesktopApi {
     /// Opens a streaming command; closing the stream ends what it watched.
     pub fn open_remote_stream(&self, request: RemoteStreamRequest) -> Result<MgmtStream> {
         let command = match request {
-            RemoteStreamRequest::Events => json!({ "cmd": "remote_events" }),
+            RemoteStreamRequest::Events { access } => {
+                json!({ "cmd": "remote_events", "access": access })
+            }
             RemoteStreamRequest::Pair { machine_id } => {
                 json!({ "cmd": "remote_pair", "machineId": machine_id })
             }
@@ -97,6 +122,11 @@ impl DesktopApi {
                 "machineId": machine_id,
                 "runId": run_id,
                 "offset": offset,
+            }),
+            RemoteStreamRequest::Access { machine_id, wants } => json!({
+                "cmd": "remote_access",
+                "machineId": machine_id,
+                "wants": wants,
             }),
         };
         self.daemon()?.remote_stream(&command).map_err(daemon_error)

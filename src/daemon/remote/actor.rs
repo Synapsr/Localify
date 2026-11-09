@@ -6,13 +6,15 @@
 //! tick all arrive here in turn. When the connection ends, so does every
 //! session, and nothing is resent on the next one.
 //!
-//! As a target, it answers inventory and output requests (`target`); as a
-//! viewer, it carries the management socket's requests (`viewer`).
+//! As a target, it answers inventory and output requests (`target`) and
+//! access requests (`asking`); as a viewer, it carries the management
+//! socket's requests (`viewer`).
 
+mod asking;
 mod target;
 mod viewer;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -30,6 +32,7 @@ use tracing::{debug, info, warn};
 
 use self::viewer::Tap;
 pub use self::viewer::{TapEvent, TapRequest, WINDOW};
+use super::access::Waiting;
 use super::backoff::Ending;
 use super::lease::{LeaseError, LeaseKeeper};
 use super::local::LocalSource;
@@ -46,8 +49,8 @@ use crate::infrastructure::remote::noise::{
 use crate::infrastructure::remote::pairing::{Pairing, Step};
 use crate::infrastructure::remote::store::{Pin, now_rfc3339};
 use crate::infrastructure::remote::wire::{
-    AppPresence, ByeReason, DeclineReason, FrameKind, Hello, PresenceState, ProtoRange, Purpose,
-    RelayFrame, Role, Send, SessionMessage, is_later_message,
+    AccessOutcome, AccessWants, AppPresence, ByeReason, DeclineReason, FrameKind, Hello,
+    PresenceState, Purpose, RelayFrame, Role, Send, SessionMessage, is_later_message,
 };
 
 /// A target handles at most this many handshakes at once.
@@ -134,6 +137,30 @@ pub enum Event {
     Unpaired {
         machine_id: String,
     },
+    /// A paired machine asks for remote controls: show the dialog, then
+    /// answer with `remote_access_answer`. Heard only by a subscriber that
+    /// shows it. `name` and `fingerprint` come from the local pin, never
+    /// from the peer.
+    AccessRequest {
+        request_id: String,
+        machine_id: String,
+        name: String,
+        fingerprint: String,
+        wants: AccessWants,
+        /// RFC 3339.
+        expires_at: String,
+    },
+    /// The request ended, however it did: close its dialog.
+    AccessClosed {
+        request_id: String,
+    },
+}
+
+impl Event {
+    /// Whether only a subscriber that shows the access dialog hears it.
+    pub fn is_access(&self) -> bool {
+        matches!(self, Self::AccessRequest { .. } | Self::AccessClosed { .. })
+    }
 }
 
 pub enum Command {
@@ -186,6 +213,13 @@ pub enum Command {
     /// off stops every follow before the change is confirmed.
     SettingsChanged {
         reply: oneshot::Sender<()>,
+    },
+    /// A person's answer in the access dialog.
+    AccessAnswer {
+        request_id: String,
+        allow: bool,
+        suppress: bool,
+        reply: oneshot::Sender<AccessOutcome>,
     },
     /// Sends a message as the viewer of `peer`, whatever it is.
     #[cfg(test)]
@@ -246,6 +280,8 @@ struct Session {
     hash: Option<[u8; HASH_LEN]>,
     peer_key: Option<[u8; KEY_LEN]>,
     hello: Option<Hello>,
+    /// The version agreed from both `hello`s, once the peer's came.
+    proto: Option<u32>,
     messages: u64,
     last_heard: Instant,
     keep_sent: Option<Instant>,
@@ -261,6 +297,8 @@ struct Session {
     served: target::Served,
     /// Viewer: the requests carried over this session, by id.
     taps: HashMap<String, Tap>,
+    /// Target: the access request this viewer waits on.
+    access: Option<Waiting>,
 }
 
 impl Session {
@@ -277,6 +315,7 @@ impl Session {
             hash: None,
             peer_key: None,
             hello: None,
+            proto: None,
             messages: 0,
             last_heard: now,
             keep_sent: None,
@@ -289,6 +328,7 @@ impl Session {
             holder: Holder::None,
             served: target::Served::default(),
             taps: HashMap::new(),
+            access: None,
         }
     }
 
@@ -298,7 +338,7 @@ impl Session {
 
     /// Whether something still uses the session, so it is not idle.
     fn is_held(&self) -> bool {
-        if !self.taps.is_empty() || !self.served.is_empty() {
+        if !self.taps.is_empty() || !self.served.is_empty() || self.access.is_some() {
             return true;
         }
         match &self.holder {
@@ -344,6 +384,8 @@ struct Actor {
     shelf: target::Shelf,
     /// Viewer: numbers the requests it carries.
     taps_made: u64,
+    /// Target: how the last access requests ended, so a late answer says.
+    access_ended: VecDeque<(String, AccessOutcome)>,
 }
 
 pub async fn run(
@@ -378,6 +420,7 @@ pub async fn run(
         tasks: Vec::new(),
         shelf: target::Shelf::new(sharing),
         taps_made: 0,
+        access_ended: VecDeque::new(),
     };
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1015,7 +1058,7 @@ impl Actor {
                 .unwrap_or(crate::infrastructure::remote::store::DEFAULT_SETTINGS)
         });
         Hello {
-            proto: ProtoRange::OURS,
+            proto: self.shared.ours(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             now: now_rfc3339(),
             role,
@@ -1031,6 +1074,7 @@ impl Actor {
         let Some(session) = self.sessions.get_mut(key) else {
             return;
         };
+        let agreed = session.proto.unwrap_or(1);
         let Phase::Open(transport) = &mut session.phase else {
             return self.end(
                 key,
@@ -1083,7 +1127,8 @@ impl Actor {
             .unwrap_or_default()
             .to_string();
         match serde_json::from_value::<SessionMessage>(value.clone()) {
-            Ok(message) => self.on_session_message(key, message),
+            // A type of a later version than the session's is unknown here.
+            Ok(message) if message.proto() <= agreed => self.on_session_message(key, message),
             Err(_) if is_later_message(&kind) => {
                 let re = value
                     .get("id")
@@ -1097,7 +1142,7 @@ impl Actor {
                 };
                 self.send_message(key, &answer);
             }
-            Err(_) => self.end(
+            Ok(_) | Err(_) => self.end(
                 key,
                 End::Error("bad_request", format!("Unknown message {kind}.")),
                 &bad_request(),
@@ -1148,10 +1193,21 @@ impl Actor {
             {
                 self.deliver(key, message);
             }
-            message @ SessionMessage::Error { re: Some(_), .. }
+            message @ (SessionMessage::Error { re: Some(_), .. }
+            | SessionMessage::AccessResult { .. })
                 if role == Role::Viewer && purpose == Purpose::Session =>
             {
                 self.deliver(key, message);
+            }
+            SessionMessage::AccessRequest { id, wants }
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_access_request(key, id, wants);
+            }
+            SessionMessage::AccessCancel { re }
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_access_cancel(key, &re);
             }
             message @ (SessionMessage::InventoryGet { .. }
             | SessionMessage::InventoryWatch { .. }
@@ -1201,10 +1257,12 @@ impl Actor {
     }
 
     fn on_hello(&mut self, key: &Key, hello: Hello) {
+        let ours = self.shared.ours();
         let Some(session) = self.sessions.get_mut(key) else {
             return;
         };
-        if !hello.proto.overlaps(&ProtoRange::OURS) {
+        // From the two authenticated hellos, never from presence.
+        let Some(agreed) = hello.proto.agreed(&ours) else {
             let message = format!(
                 "Update Localify: this machine runs {}.",
                 env!("CARGO_PKG_VERSION")
@@ -1214,7 +1272,7 @@ impl Actor {
                 End::Error("unsupported", message.clone()),
                 &Failure::new("unsupported", message),
             );
-        }
+        };
         let expected = match session.role {
             Role::Viewer => Role::Target,
             Role::Target => Role::Viewer,
@@ -1228,6 +1286,7 @@ impl Actor {
         }
         let settings = hello.settings;
         session.hello = Some(hello.clone());
+        session.proto = Some(agreed);
         let (role, purpose) = (session.role, session.purpose);
         if !self.ctx.lease.covers(&key.0, Instant::now()) {
             return self.end(key, End::Bye(ByeReason::LeaseExpired), &lease_expired());
@@ -1236,6 +1295,7 @@ impl Actor {
             (Role::Viewer, Purpose::Session) => {
                 let mut view = self.view();
                 view.failures.remove(&key.0);
+                view.protos.insert(key.0.clone(), agreed);
                 if let Some(settings) = settings {
                     view.settings.insert(key.0.clone(), settings);
                 }
@@ -1520,8 +1580,16 @@ impl Actor {
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
             Command::Snapshot { result } => self.on_snapshot(result),
             Command::SettingsChanged { reply } => {
-                self.reload_share();
+                self.reload_settings();
                 let _ = reply.send(());
+            }
+            Command::AccessAnswer {
+                request_id,
+                allow,
+                suppress,
+                reply,
+            } => {
+                let _ = reply.send(self.on_access_answer(&request_id, allow, suppress));
             }
             #[cfg(test)]
             Command::Raw { peer, message } => {
@@ -1654,6 +1722,7 @@ impl Actor {
         for key in keys {
             self.check(&key, now);
         }
+        self.expire_access(now);
         self.serve_tick(now);
     }
 
@@ -1824,7 +1893,12 @@ impl Actor {
             });
             if current {
                 view.sessions.remove(&key.0);
+                view.protos.remove(&key.0);
             }
+        }
+        if let Some(waiting) = session.access.take() {
+            // The session is gone: the viewer hears nothing more.
+            self.access_closed(&waiting.request_id, AccessOutcome::Cancelled);
         }
         if session.paired {
             return;

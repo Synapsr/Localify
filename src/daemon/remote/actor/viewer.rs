@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use super::{Actor, End, Failure, Holder, Key};
-use crate::infrastructure::remote::wire::{ByeReason, Have, Purpose, Role, SessionMessage};
+use crate::infrastructure::remote::wire::{
+    AccessWants, ByeReason, Have, PROTO_ACCESS, Purpose, Role, SessionMessage,
+};
 
 /// The window a viewer gives each follow.
 pub const WINDOW: u32 = 64 * 1024;
@@ -29,6 +31,10 @@ pub enum TapRequest {
         run_id: String,
         offset: u64,
         max_bytes: u32,
+    },
+    /// Session protocol 2: ask the target to turn switches on.
+    Access {
+        wants: AccessWants,
     },
 }
 
@@ -91,6 +97,15 @@ impl Tap {
                 offset,
                 max_bytes,
             },
+            TapRequest::Access { wants } => SessionMessage::AccessRequest { id, wants },
+        }
+    }
+
+    /// The first session version that carries this request.
+    fn proto(&self) -> u32 {
+        match self.request {
+            TapRequest::Access { .. } => PROTO_ACCESS,
+            _ => 1,
         }
     }
 
@@ -103,6 +118,7 @@ impl Tap {
             TapRequest::Follow { .. } => {
                 Some(SessionMessage::OutputUnfollow { re: id.to_string() })
             }
+            TapRequest::Access { .. } => Some(SessionMessage::AccessCancel { re: id.to_string() }),
             _ => None,
         }
     }
@@ -120,6 +136,7 @@ impl Tap {
             }
             (SessionMessage::OutputData(data), TapRequest::Follow { .. }) => data.ended,
             (SessionMessage::OutputData(_), TapRequest::Read { .. }) => true,
+            (SessionMessage::AccessResult { .. }, TapRequest::Access { .. }) => true,
             _ => false,
         }
     }
@@ -143,7 +160,9 @@ fn answer_to(answer: &SessionMessage) -> Option<&str> {
         SessionMessage::InventoryPage { re, .. }
         | SessionMessage::InventoryUnchanged { re, .. } => Some(re),
         SessionMessage::OutputData(data) => Some(&data.re),
-        SessionMessage::Error { re: Some(re), .. } => Some(re),
+        SessionMessage::Error { re: Some(re), .. } | SessionMessage::AccessResult { re, .. } => {
+            Some(re)
+        }
         _ => None,
     }
 }
@@ -261,13 +280,26 @@ impl Actor {
     }
 
     fn send_tap(&mut self, key: &Key, id: &str) {
-        let Some(tap) = self
-            .sessions
-            .get_mut(key)
-            .and_then(|session| session.taps.get_mut(id))
-        else {
+        let Some(session) = self.sessions.get_mut(key) else {
             return;
         };
+        let agreed = session.proto.unwrap_or(1);
+        let Some(tap) = session.taps.get_mut(id) else {
+            return;
+        };
+        // Never sent in a session of a version that lacks it.
+        if tap.proto() > agreed {
+            let unsupported = SessionMessage::Error {
+                re: Some(id.to_string()),
+                code: "unsupported".into(),
+                message: "Update Localify on that machine to ask from here.".into(),
+                retry_after: None,
+            };
+            if let Some(tap) = session.taps.remove(id) {
+                let _ = tap.events.try_send(TapEvent::Answer(unsupported));
+            }
+            return self.close_if_unused(key);
+        }
         tap.sent = true;
         let message = tap.message(id);
         self.send_message(key, &message);

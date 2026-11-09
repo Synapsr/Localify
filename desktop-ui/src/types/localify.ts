@@ -1162,6 +1162,11 @@ export interface RemoteMachineDto {
   fingerprint: string | null;
   /** RFC 3339: when the relay saw it come or go. */
   since: string | null;
+  /**
+   * The session protocol agreed from both `hello`s of the open session to
+   * it; null without one. Access requests need 2.
+   */
+  proto: number | null;
 }
 
 export interface RemoteSettingsRequest {
@@ -1179,11 +1184,19 @@ export interface RemotePairAnswerRequest {
   accept: boolean;
 }
 
+/** What an access request asks for: `backgroundStarts` asks for `control` too. */
+export type RemoteAccessWants = "control" | "backgroundStarts";
+
+/** How an access request ended, as `access.result` says it. */
+export type RemoteAccessOutcome = "granted" | "declined" | "nobody" | "expired" | "cancelled";
+
 export type RemoteStreamRequest =
-  | { kind: "events" }
+  /** With `access`, the app shows the access dialog; until then, requests get `nobody`. */
+  | { kind: "events"; access?: boolean }
   | { kind: "pair"; machineId: string }
   | { kind: "watch"; machineId: string }
-  | { kind: "follow"; machineId: string; runId: string; offset: number | null };
+  | { kind: "follow"; machineId: string; runId: string; offset: number | null }
+  | { kind: "access"; machineId: string; wants: RemoteAccessWants };
 
 /** One line of a stream, or its end. */
 export interface RemoteStreamPayload {
@@ -1201,7 +1214,46 @@ export type RemoteEventDto =
   | { event: "pair_cancelled"; pairingId: string; machineId: string; reason: string }
   | { event: "presence"; machineId: string; state: "online" | "offline" }
   | { event: "revoked"; machineId: string }
-  | { event: "unpaired"; machineId: string };
+  | { event: "unpaired"; machineId: string }
+  /** Heard only with `access`. Name and fingerprint come from the local pin. */
+  | {
+      event: "access_request";
+      requestId: string;
+      machineId: string;
+      name: string;
+      fingerprint: string;
+      wants: RemoteAccessWants;
+      /** RFC 3339. */
+      expiresAt: string;
+    }
+  | { event: "access_closed"; requestId: string };
+
+/** What `remote_access` streams to the machine that asked. */
+export type RemoteAccessEventDto =
+  | { event: "waiting" }
+  | { event: "result"; outcome: RemoteAccessOutcome }
+  | { event: "error"; code: string; message: string; retryAfter?: number }
+  | { event: "lost"; code: string; message: string };
+
+/** A person's answer in the access dialog, on the target. */
+export interface RemoteAccessAnswerRequest {
+  requestId: string;
+  allow: boolean;
+  /** "Don't ask again from this machine". */
+  suppress: boolean;
+}
+
+export interface RemoteAccessAnswerDto {
+  outcome: RemoteAccessOutcome;
+}
+
+/** A machine whose access requests are declined at once. */
+export interface RemoteAccessSuppressedDto {
+  machineId: string;
+  name: string;
+  /** RFC 3339. */
+  since: string;
+}
 
 /** What `remote_pair` says to the machine that asked. */
 export type RemotePairEventDto =

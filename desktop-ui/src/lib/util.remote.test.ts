@@ -45,6 +45,7 @@ function machine(overrides: Partial<RemoteMachineDto> = {}): RemoteMachineDto {
     sharing: true,
     fingerprint: null,
     since: null,
+    proto: null,
     ...overrides,
   };
 }
