@@ -1,9 +1,9 @@
-//! `<data dir>/remote/`: this machine's key, its pins and its target
-//! settings (`docs/remote-machines.md`, "Keys"). Every file is 0600 and
-//! written through a temporary file renamed over it, under the sign-in lock,
-//! so the daemon, the app and the CLI never undo each other's change, and
-//! nothing outlives the sign-in it belongs to. Signing out deletes the
-//! folder.
+//! `<data dir>/remote/`: this machine's key, its pins, its target settings
+//! and the peers whose access requests it stops (`docs/remote-machines.md`,
+//! "Keys" and "Asking for access"). Every file is 0600 and written through a
+//! temporary file renamed over it, under the sign-in lock, so the daemon, the
+//! app and the CLI never undo each other's change, and nothing outlives the
+//! sign-in it belongs to. Signing out deletes the folder.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,6 +25,10 @@ const DIR_NAME: &str = "remote";
 const IDENTITY_FILE: &str = "identity.json";
 const PEERS_FILE: &str = "peers.json";
 const SETTINGS_FILE: &str = "settings.json";
+/// The peers whose access requests are suppressed.
+const ACCESS_FILE: &str = "access.json";
+/// Every file of one sign-in.
+const SIGN_IN_FILES: [&str; 4] = [IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE, ACCESS_FILE];
 /// The sign-in the folder belongs to: `{"machineId"}`.
 const OWNER_FILE: &str = "owner.json";
 
@@ -83,6 +87,32 @@ pub struct Pin {
 }
 
 pub type Pins = BTreeMap<String, Pin>;
+
+/// A peer whose access requests this machine answers `declined` at once,
+/// until a person here lets it ask again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Suppressed {
+    /// The pin's name when it was suppressed: a label only.
+    pub name: String,
+    /// RFC 3339.
+    pub since: String,
+}
+
+pub type Suppressions = BTreeMap<String, Suppressed>;
+
+/// The switches as `settings.json` holds them, with the generation every
+/// write raises: an access request recorded at one generation is applied
+/// only if no write came in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsFile {
+    #[serde(flatten)]
+    pub settings: TargetSettings,
+    /// Absent from files written before access requests: 0.
+    #[serde(default)]
+    pub generation: u64,
+}
 
 /// A change to the target settings. `None` keeps a switch as it is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -173,7 +203,7 @@ impl RemoteStore {
         match self.load_identity()? {
             Some(identity) if identity.machine_id == machine_id => return Ok(identity),
             // A key of another sign-in: nothing next to it is this one's.
-            Some(_) => self.clear(&[IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE])?,
+            Some(_) => self.clear(&SIGN_IN_FILES)?,
             // Settings this sign-in chose before its first connection stay.
             None => {}
         }
@@ -214,28 +244,93 @@ impl RemoteStore {
     /// Every switch off when the file does not exist, or is not this
     /// sign-in's.
     pub fn settings(&self) -> Result<TargetSettings> {
+        Ok(self.settings_file()?.settings)
+    }
+
+    /// The switches with their generation.
+    pub fn settings_file(&self) -> Result<SettingsFile> {
+        let empty = SettingsFile {
+            settings: DEFAULT_SETTINGS,
+            generation: 0,
+        };
         if !self.owned_by_current()? {
-            return Ok(DEFAULT_SETTINGS);
+            return Ok(empty);
         }
-        let settings = self.read(SETTINGS_FILE)?.unwrap_or(DEFAULT_SETTINGS);
+        let file: SettingsFile = self.read(SETTINGS_FILE)?.unwrap_or(empty);
+        let settings = file.settings;
         // A file edited by hand still never holds a switch without the one
         // it needs.
-        Ok(TargetSettings {
-            share: settings.share,
-            control: settings.control && settings.share,
-            background_starts: settings.background_starts && settings.control && settings.share,
+        Ok(SettingsFile {
+            settings: TargetSettings {
+                share: settings.share,
+                control: settings.control && settings.share,
+                background_starts: settings.background_starts && settings.control && settings.share,
+            },
+            generation: file.generation,
         })
     }
 
+    /// Applies a change and raises the generation, under the sign-in lock.
     pub fn update_settings(
         &self,
         machine_id: &str,
         change: SettingsChange,
     ) -> Result<TargetSettings> {
         let _lock = self.lock_for(machine_id)?;
-        let next = apply_change(self.settings()?, change)?;
+        let current = self.settings_file()?;
+        self.write_settings(current, change)
+    }
+
+    /// Applies a change only if the file still holds `expected`, generation
+    /// and switches both, so a write that came in between (a switch turned
+    /// off, a file edited by hand) wins. `None` when it did not apply.
+    pub fn update_settings_if(
+        &self,
+        machine_id: &str,
+        expected: SettingsFile,
+        change: SettingsChange,
+    ) -> Result<Option<TargetSettings>> {
+        let _lock = self.lock_for(machine_id)?;
+        let current = self.settings_file()?;
+        if current != expected {
+            return Ok(None);
+        }
+        self.write_settings(current, change).map(Some)
+    }
+
+    fn write_settings(
+        &self,
+        current: SettingsFile,
+        change: SettingsChange,
+    ) -> Result<TargetSettings> {
+        let next = SettingsFile {
+            settings: apply_change(current.settings, change)?,
+            generation: current.generation.wrapping_add(1),
+        };
         self.write(SETTINGS_FILE, &next)?;
-        Ok(next)
+        Ok(next.settings)
+    }
+
+    /// Empty when nothing is suppressed, or the folder is not this
+    /// sign-in's.
+    pub fn suppressions(&self) -> Result<Suppressions> {
+        if !self.owned_by_current()? {
+            return Ok(Suppressions::new());
+        }
+        Ok(self.read(ACCESS_FILE)?.unwrap_or_default())
+    }
+
+    /// Changes the suppressed peers of sign-in `machine_id`.
+    pub fn update_suppressions(
+        &self,
+        machine_id: &str,
+        change: impl FnOnce(&mut Suppressions),
+    ) -> Result<Suppressions> {
+        let _lock = self.lock_for(machine_id)?;
+        let mut suppressions = self.suppressions()?;
+        change(&mut suppressions);
+        self.write(ACCESS_FILE, &suppressions)?;
+        Ok(suppressions)
     }
 
     /// Deletes the folder; the caller holds the sign-in lock, as
@@ -268,7 +363,7 @@ impl RemoteStore {
         // is this sign-in's: adopted, key, pins and settings kept. Only a
         // folder whose owner cannot be told is reset.
         if self.owner()?.as_deref() != Some(machine_id) {
-            self.clear(&[IDENTITY_FILE, PEERS_FILE, SETTINGS_FILE])?;
+            self.clear(&SIGN_IN_FILES)?;
         }
         self.write(
             OWNER_FILE,
@@ -698,6 +793,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.settings().unwrap(), DEFAULT_SETTINGS);
+    }
+
+    #[test]
+    fn every_settings_write_raises_the_generation() {
+        let (dir, store) = signed_in();
+        assert_eq!(store.settings_file().unwrap().generation, 0);
+        store.update_settings("m1", share_on()).unwrap();
+        store
+            .update_settings("m1", SettingsChange::default())
+            .unwrap();
+        assert_eq!(store.settings_file().unwrap().generation, 2);
+
+        // A file from before generations reads as 0.
+        fs::write(
+            dir.path().join("remote/settings.json"),
+            r#"{"share": true, "control": false, "backgroundStarts": false}"#,
+        )
+        .unwrap();
+        let file = store.settings_file().unwrap();
+        assert_eq!(file.generation, 0);
+        assert!(file.settings.share);
+    }
+
+    #[test]
+    fn a_conditional_write_applies_only_over_what_it_expected() {
+        let (dir, store) = signed_in();
+        store.update_settings("m1", share_on()).unwrap();
+        let seen = store.settings_file().unwrap();
+        let control = SettingsChange {
+            control: Some(true),
+            ..SettingsChange::default()
+        };
+
+        // Another write in between: nothing applies.
+        store
+            .update_settings("m1", SettingsChange::default())
+            .unwrap();
+        assert_eq!(store.update_settings_if("m1", seen, control).unwrap(), None);
+        assert!(!store.settings().unwrap().control);
+
+        // A hand edit that keeps the generation but changes a switch.
+        let seen = store.settings_file().unwrap();
+        fs::write(
+            dir.path().join("remote/settings.json"),
+            format!(
+                r#"{{"share": false, "control": false, "backgroundStarts": false, "generation": {}}}"#,
+                seen.generation
+            ),
+        )
+        .unwrap();
+        assert_eq!(store.update_settings_if("m1", seen, control).unwrap(), None);
+
+        // Nothing in between: it applies, and raises the generation.
+        store.update_settings("m1", share_on()).unwrap();
+        let seen = store.settings_file().unwrap();
+        let applied = store.update_settings_if("m1", seen, control).unwrap();
+        assert!(applied.unwrap().control);
+        assert_eq!(
+            store.settings_file().unwrap().generation,
+            seen.generation + 1
+        );
+    }
+
+    #[test]
+    fn suppressions_are_kept_in_a_private_file_of_the_sign_in() {
+        let (dir, store) = signed_in();
+        assert!(store.suppressions().unwrap().is_empty());
+        store
+            .update_suppressions("m1", |suppressed| {
+                suppressed.insert(
+                    "m2".into(),
+                    Suppressed {
+                        name: "teo-mini".into(),
+                        since: "2026-11-09T10:00:00Z".into(),
+                    },
+                );
+            })
+            .unwrap();
+        assert_eq!(store.suppressions().unwrap()["m2"].name, "teo-mini");
+        assert_eq!(mode(&dir.path().join("remote/access.json")), 0o600);
+
+        // A new sign-in starts with nobody suppressed.
+        sign_in(dir.path(), "m9");
+        assert!(store.suppressions().unwrap().is_empty());
+        store.identity_for("m9").unwrap();
+        assert!(!dir.path().join("remote/access.json").exists());
     }
 
     #[test]

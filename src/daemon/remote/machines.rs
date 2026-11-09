@@ -55,6 +55,9 @@ pub struct MachineView {
     pub fingerprint: Option<String>,
     /// When the relay saw it come or go, RFC 3339.
     pub since: Option<String>,
+    /// The session version agreed from both authenticated `hello`s of the
+    /// open session to it; `None` without one. Never from `presence`.
+    pub proto: Option<u32>,
 }
 
 /// A viewer session's state, as the link keeps it for this listing.
@@ -71,6 +74,8 @@ pub struct Facts<'a> {
     pub pins: &'a Pins,
     pub presence: &'a HashMap<String, Presence>,
     pub sessions: &'a HashMap<String, SessionState>,
+    /// The version each open session agreed on.
+    pub protos: &'a HashMap<String, u32>,
     /// The settings of each peer's last `hello` as a target.
     pub settings: &'a HashMap<String, TargetSettings>,
     /// The last peer check that failed, by machine id: `not_paired` or
@@ -109,6 +114,7 @@ pub fn list(facts: &Facts<'_>) -> Vec<MachineView> {
                 sharing: None,
                 fingerprint: print(&pin.public_key),
                 since: None,
+                proto: None,
             });
         }
     }
@@ -131,6 +137,7 @@ fn view(facts: &Facts<'_>, machine: &RosterMachine) -> MachineView {
             .map(|settings| settings.share),
         fingerprint: machine.remote_key.as_deref().and_then(print),
         since: presence.map(|presence| presence.since.clone()),
+        proto: facts.protos.get(&machine.id).copied(),
     }
 }
 
@@ -264,12 +271,14 @@ mod tests {
             },
         )]);
         let failures = HashMap::new();
+        let protos = HashMap::from([("b".to_string(), 2)]);
         let facts = Facts {
             relay: RelayState::Connected,
             roster: &roster,
             pins: &pins,
             presence: &presence,
             sessions: &sessions,
+            protos: &protos,
             settings: &settings,
             failures: &failures,
         };
@@ -287,6 +296,10 @@ mod tests {
         assert_eq!(state("closed"), MachineState::NotSharing);
         assert_eq!(state("dialing"), MachineState::Connecting);
         assert_eq!(state("gone"), MachineState::SignedOut);
+        let proto = |id: &str| views.iter().find(|view| view.id == id).unwrap().proto;
+        // From the open session's hellos; the presence of `b` said 1.
+        assert_eq!(proto("b"), Some(2));
+        assert_eq!(proto("quiet"), None);
         let gone = views.iter().find(|view| view.id == "gone").unwrap();
         assert_eq!(gone.name, "old-name");
         assert!(gone.paired);
@@ -309,6 +322,7 @@ mod tests {
                 pins: &empty_pins,
                 presence: &empty,
                 sessions: &sessions,
+                protos: &HashMap::new(),
                 settings: &settings,
                 failures: &failures,
             };
@@ -332,6 +346,7 @@ mod tests {
                 pins: &pins,
                 presence: &empty,
                 sessions: &sessions,
+                protos: &HashMap::new(),
                 settings: &settings,
                 failures: &failures,
             };

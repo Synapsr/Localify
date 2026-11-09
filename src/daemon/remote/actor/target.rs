@@ -161,7 +161,7 @@ impl Served {
 
     /// Whether `id` names a request still going: waiting, watched,
     /// followed, or with answers still to send.
-    fn is_active(&self, id: &str) -> bool {
+    pub(super) fn is_active(&self, id: &str) -> bool {
         self.in_flight.iter().any(|(active, _)| active == id)
             || self.gets.iter().any(|(active, _)| active == id)
             || self.watch.as_ref().is_some_and(|watch| watch.id == id)
@@ -242,18 +242,17 @@ impl Actor {
         self.shelf.sharing
     }
 
-    /// Reads `share` from the settings file, which every change is written
-    /// to atomically before anyone is told, and acts on it when it changed.
-    /// Never from a notice: one can arrive after a newer change.
-    pub(super) fn reload_share(&mut self) {
-        let share = self
-            .shared
-            .store
-            .settings()
-            .is_ok_and(|settings| settings.share);
+    /// Reads the settings file, which every change is written to
+    /// atomically before anyone is told, and acts on it: `share` when it
+    /// changed, and an access request whose generation is no longer the
+    /// file's. Never from a notice: one can arrive after a newer change.
+    pub(super) fn reload_settings(&mut self) {
+        let file = self.shared.store.settings_file().ok();
+        let share = file.is_some_and(|file| file.settings.share);
         if share != self.shelf.sharing {
             self.on_share(share);
         }
+        self.recheck_access(file.map(|file| file.generation));
     }
 
     /// `share` changed here: turned off, every watch, follow and waiting
@@ -408,11 +407,14 @@ impl Actor {
         };
         // An id names one request at a time, whatever its kind: a second
         // one would share its answers and its slot.
-        if self
-            .sessions
-            .get(key)
-            .is_some_and(|session| session.served.is_active(&id))
-        {
+        let in_use = self.sessions.get(key).is_some_and(|session| {
+            session.served.is_active(&id)
+                || session
+                    .access
+                    .as_ref()
+                    .is_some_and(|waiting| waiting.re == id)
+        });
+        if in_use {
             return self.refuse(
                 key,
                 &id,
@@ -832,7 +834,7 @@ impl Actor {
         // A change made without the management socket.
         if self.shelf.next_recheck.is_none_or(|at| now >= at) {
             self.shelf.next_recheck = Some(now + self.shared.timings.settings_recheck);
-            self.reload_share();
+            self.reload_settings();
         }
         let served = self.served_sessions();
         if served.is_empty() || !self.sharing() {

@@ -12,13 +12,14 @@ use tracing::{error, info, warn};
 use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
 use super::remote::local::build_snapshot;
-use super::remote::{Failure, FollowEvent, Following, PairEvent, RemoteLink};
+use super::remote::{AccessEvent, Asking, Failure, FollowEvent, Following, PairEvent, RemoteLink};
 use super::router::SharedState;
 use crate::application::inventory::Have;
 use crate::infrastructure::cloud::credentials::CredentialsStore;
 use crate::infrastructure::inventory::LocalInventory;
 use crate::infrastructure::launch_sessions::LaunchSessionUpdate;
 use crate::infrastructure::remote::store::SettingsChange;
+use crate::infrastructure::remote::wire::AccessWants;
 
 /// Management commands sent over the Unix socket.
 #[derive(Debug, Deserialize)]
@@ -80,9 +81,35 @@ enum MgmtCommand {
     RemotePairAnswer { pairing_id: String, accept: bool },
     #[serde(rename = "remote_unpair", rename_all = "camelCase")]
     RemoteUnpair { machine_id: String },
-    /// Streaming: pairing requests, presence, revocations.
+    /// Streaming: pairing requests, presence, revocations. With `access`,
+    /// the client shows the access dialog: it hears access requests, and
+    /// they wait for its answer instead of being answered `nobody`.
     #[serde(rename = "remote_events")]
-    RemoteEvents,
+    RemoteEvents {
+        #[serde(default)]
+        access: bool,
+    },
+    /// Streaming, as a viewer: asks a target to turn on remote controls,
+    /// then its answer. Closing the connection cancels the request.
+    #[serde(rename = "remote_access", rename_all = "camelCase")]
+    RemoteAccess {
+        machine_id: String,
+        wants: AccessWants,
+    },
+    /// As a target, from the access dialog.
+    #[serde(rename = "remote_access_answer", rename_all = "camelCase")]
+    RemoteAccessAnswer {
+        request_id: String,
+        allow: bool,
+        #[serde(default)]
+        suppress: bool,
+    },
+    /// The peers whose access requests are suppressed here.
+    #[serde(rename = "remote_access_suppressed")]
+    RemoteAccessSuppressed,
+    /// Lets a suppressed peer ask again.
+    #[serde(rename = "remote_access_restore", rename_all = "camelCase")]
+    RemoteAccessRestore { machine_id: String },
     /// Another machine's inventory: one snapshot, every page.
     #[serde(rename = "remote_inventory", rename_all = "camelCase")]
     RemoteInventory { machine_id: String },
@@ -168,7 +195,8 @@ fn parse_command(line: &str) -> Option<MgmtCommand> {
         "inventory" => Some(MgmtCommand::Inventory { have: None }),
         "remote_status" => Some(MgmtCommand::RemoteStatus),
         "remote_machines" => Some(MgmtCommand::RemoteMachines { probe: false }),
-        "remote_events" => Some(MgmtCommand::RemoteEvents),
+        "remote_events" => Some(MgmtCommand::RemoteEvents { access: false }),
+        "remote_access_suppressed" => Some(MgmtCommand::RemoteAccessSuppressed),
         _ => None,
     }
 }
@@ -252,8 +280,12 @@ pub async fn serve(
                 Some(MgmtCommand::RemotePair { machine_id }) => {
                     return stream_pairing(&remote, &machine_id, reader, writer).await;
                 }
-                Some(MgmtCommand::RemoteEvents) => {
-                    return stream_events(&remote, reader, writer).await;
+                Some(MgmtCommand::RemoteEvents { access }) => {
+                    return stream_events(&remote, access, reader, writer).await;
+                }
+                Some(MgmtCommand::RemoteAccess { machine_id, wants }) => {
+                    let asking = remote.access(&machine_id, wants).await;
+                    return stream_access(asking, reader, writer).await;
                 }
                 Some(MgmtCommand::RemoteWatch { machine_id }) => {
                     return stream_watch(&remote, &machine_id, reader, writer).await;
@@ -409,6 +441,20 @@ async fn remote_answer(remote: &RemoteLink, command: MgmtCommand) -> MgmtRespons
         MgmtCommand::RemoteUnpair { machine_id } => remote
             .unpair(&machine_id)
             .map(|removed| serde_json::json!({ "ok": true, "removed": removed })),
+        MgmtCommand::RemoteAccessAnswer {
+            request_id,
+            allow,
+            suppress,
+        } => remote
+            .answer_access(&request_id, allow, suppress)
+            .await
+            .map(|outcome| serde_json::json!({ "outcome": outcome })),
+        MgmtCommand::RemoteAccessSuppressed => remote
+            .suppressed()
+            .and_then(|suppressed| Ok(serde_json::to_value(suppressed)?)),
+        MgmtCommand::RemoteAccessRestore { machine_id } => remote
+            .restore_access(&machine_id)
+            .map(|removed| serde_json::json!({ "ok": true, "removed": removed })),
         MgmtCommand::RemoteInventory { machine_id } => remote
             .inventory(&machine_id)
             .await
@@ -482,13 +528,14 @@ async fn stream_pairing(
 }
 
 /// `remote_events`: while connected, this client counts as a person who can
-/// confirm a pairing here.
+/// confirm a pairing here, and with `access`, answer an access request.
 async fn stream_events(
     remote: &RemoteLink,
+    access: bool,
     mut reader: BufReader<OwnedReadHalf>,
     mut writer: OwnedWriteHalf,
 ) {
-    let mut subscription = remote.subscribe();
+    let mut subscription = remote.subscribe(access);
     let ready = MgmtResponse::success(serde_json::json!({ "event": "subscribed" }));
     if !write_line(&mut writer, &ready).await {
         return;
@@ -497,6 +544,7 @@ async fn stream_events(
         tokio::select! {
             _ = client_gone(&mut reader) => return,
             event = subscription.events.recv() => match event {
+                Ok(event) if event.is_access() && !subscription.access => continue,
                 Ok(event) => {
                     let Ok(data) = serde_json::to_value(&event) else { return };
                     if !write_line(&mut writer, &MgmtResponse::success(data)).await {
@@ -512,6 +560,41 @@ async fn stream_events(
 
 fn failure_error(failure: Failure) -> anyhow::Error {
     anyhow::anyhow!("{}", failure.message)
+}
+
+/// `remote_access`: `waiting`, then the answer. Closing the connection
+/// first sends `access.cancel`.
+async fn stream_access(
+    asking: Result<Asking, Failure>,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+) {
+    let mut asking = match asking {
+        Ok(asking) => asking,
+        Err(failure) => {
+            let lost = AccessEvent::Lost {
+                code: failure.code,
+                message: failure.message,
+            };
+            if let Ok(data) = serde_json::to_value(&lost) {
+                write_line(&mut writer, &MgmtResponse::success(data)).await;
+            }
+            return;
+        }
+    };
+    loop {
+        tokio::select! {
+            _ = client_gone(&mut reader) => return,
+            event = asking.next() => {
+                let Some(event) = event else { return };
+                let last = !matches!(event, AccessEvent::Waiting);
+                let Ok(data) = serde_json::to_value(&event) else { return };
+                if !write_line(&mut writer, &MgmtResponse::success(data)).await || last {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// `remote_watch`: one line per snapshot or loss, until the client closes
@@ -773,6 +856,40 @@ mod tests {
             parse_command("  status  "),
             Some(MgmtCommand::Status)
         ));
+    }
+
+    /// An app from before the access dialog subscribes without `access`, so
+    /// access requests on this machine are answered `nobody`.
+    #[test]
+    fn parse_command_remote_access_commands() {
+        assert!(matches!(
+            parse_command(r#"{"cmd":"remote_events"}"#),
+            Some(MgmtCommand::RemoteEvents { access: false })
+        ));
+        assert!(matches!(
+            parse_command("remote_events"),
+            Some(MgmtCommand::RemoteEvents { access: false })
+        ));
+        assert!(matches!(
+            parse_command(r#"{"cmd":"remote_events","access":true}"#),
+            Some(MgmtCommand::RemoteEvents { access: true })
+        ));
+        assert!(matches!(
+            parse_command(r#"{"cmd":"remote_access","machineId":"mB","wants":"backgroundStarts"}"#),
+            Some(MgmtCommand::RemoteAccess { machine_id, wants: AccessWants::BackgroundStarts })
+                if machine_id == "mB"
+        ));
+        assert!(matches!(
+            parse_command(r#"{"cmd":"remote_access_answer","requestId":"q","allow":true}"#),
+            Some(MgmtCommand::RemoteAccessAnswer {
+                allow: true,
+                suppress: false,
+                ..
+            })
+        ));
+        assert!(
+            parse_command(r#"{"cmd":"remote_access","machineId":"mB","wants":"share"}"#).is_none()
+        );
     }
 
     #[test]

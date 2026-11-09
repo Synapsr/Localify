@@ -86,7 +86,7 @@ Pins live in `<data dir>/remote/peers.json` (0600), written through a temporary 
 { "<machine id>": { "publicKey": "…", "name": "teo-mini", "pairedAt": "2026-11-08T10:12:00Z" } }
 ```
 
-The target settings live in `<data dir>/remote/settings.json` (0600): `{"share": false, "control": false, "backgroundStarts": false}`. Signing out deletes the whole `remote/` directory, so a new sign-in starts with a new key, no pins and every switch off.
+The target settings live in `<data dir>/remote/settings.json` (0600): `{"share": false, "control": false, "backgroundStarts": false, "generation": 0}`, where `generation` rises with every write (see "Asking for access"). The peers whose access requests are suppressed live in `<data dir>/remote/access.json` (0600): `{"<machine id>": {"name": "teo-laptop", "since": "…"}}`. Signing out deletes the whole `remote/` directory, so a new sign-in starts with a new key, no pins and every switch off.
 
 The roster's keys are never the root of trust. They tell a viewer which machines have a key and show a fingerprint, but a session only proceeds with a key pinned through pairing. The cloud can remove trust (by revoking a machine, which ends its token) but cannot add any.
 
@@ -750,7 +750,7 @@ New management socket commands. The streaming ones keep the connection open and 
 | `remote_access_suppressed` | target side: `[{machineId, name, since}]`, the peers whose requests are suppressed |
 | `remote_access_restore {machineId}` | target side: lets that peer ask again; `{ok}` |
 | `remote_access_answer {requestId, allow, suppress}` | target side, from the app's dialog: `{outcome}`, `granted` only when the request was still waiting and the settings unchanged (see "Asking for access") |
-| `remote_events` | streaming: pairing requests, access requests (`access_request {requestId, machineId, name, fingerprint, wants, expiresAt}`) and their end (`access_closed {requestId}`), presence, revocations; the app subscribes while it runs |
+| `remote_events {access?}` | streaming: pairing requests, access requests (`access_request {requestId, machineId, name, fingerprint, wants, expiresAt}`) and their end (`access_closed {requestId}`), presence, revocations; the app subscribes while it runs. Access events go only to a client subscribed with `access: true`, one that shows the access dialog, and "no app is subscribed" in "Asking for access" means none of those: until PR 4d, the app subscribes without it, so requests get `nobody` |
 
 One local command serves this machine's own inventory: `inventory {have?}` answers the snapshot the relay will page (`schema`, `epoch`, `rev`, `pages`, `truncated`, `items`), or `{unchanged: true, epoch, rev}` when `have` names its revision. One snapshot is built at a time; a request that arrives during a build shares its result. Until PR 4, every switch counts as off for `controls` and the app as absent, so each control is refused with `control_disabled`, whatever `control` says; the inventory pages' `machine.settings` show the switches as set. The hidden `localify inventory [--have <epoch>:<rev>]` prints it, for tests.
 

@@ -4,10 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The session protocol versions this build speaks, in `hello` and the
-/// prologue.
+/// The session protocol versions this build speaks, in `hello`, `presence`
+/// and `X-Localify-Proto` (`docs/remote-machines.md`, "Versioning"). The
+/// prologue's label does not follow them.
 pub const PROTO_MIN: u32 = 1;
-pub const PROTO_MAX: u32 = 1;
+pub const PROTO_MAX: u32 = 2;
+/// The version that adds access requests.
+pub const PROTO_ACCESS: u32 = 2;
 /// A relay frame, as text, never exceeds this.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// A session message, before encryption, never exceeds this.
@@ -58,6 +61,13 @@ impl ProtoRange {
     /// Whether two ranges share a version.
     pub fn overlaps(&self, other: &Self) -> bool {
         self.min <= other.max && other.min <= self.max
+    }
+
+    /// The session's version: the highest one in both ranges, `None` when
+    /// they share none. Each side computes it from the two authenticated
+    /// `hello`s, never from `presence`, which the relay could alter.
+    pub fn agreed(&self, other: &Self) -> Option<u32> {
+        self.overlaps(other).then(|| self.max.min(other.max))
     }
 }
 
@@ -168,6 +178,36 @@ pub enum DeclineReason {
     Cancelled,
 }
 
+/// The switches an `access.request` asks for: `backgroundStarts` asks for
+/// `control` too. Access never turns `share` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessWants {
+    Control,
+    BackgroundStarts,
+}
+
+impl AccessWants {
+    /// Whether `settings` already allow what is asked.
+    pub fn is_granted_by(self, settings: &TargetSettings) -> bool {
+        match self {
+            Self::Control => settings.control,
+            Self::BackgroundStarts => settings.control && settings.background_starts,
+        }
+    }
+}
+
+/// How an `access.request` ended; `busy` and `too_many` come as an `error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessOutcome {
+    Granted,
+    Declined,
+    Nobody,
+    Expired,
+    Cancelled,
+}
+
 /// The longest request id a viewer may pick.
 pub const MAX_ID: usize = 32;
 /// The most an `output.read` may ask for.
@@ -226,7 +266,8 @@ pub struct OutputData {
 
 /// The session messages this build handles. Controls (`control`,
 /// `control.status`) come with a later version of the daemon and are
-/// answered `unsupported` (see [`is_later_message`]).
+/// answered `unsupported` (see [`is_later_message`]). The access messages
+/// belong to protocol 2 ([`SessionMessage::proto`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all_fields = "camelCase")]
 pub enum SessionMessage {
@@ -300,6 +341,12 @@ pub enum SessionMessage {
     OutputUnfollow { re: String },
     #[serde(rename = "output.data")]
     OutputData(OutputData),
+    #[serde(rename = "access.request")]
+    AccessRequest { id: String, wants: AccessWants },
+    #[serde(rename = "access.cancel")]
+    AccessCancel { re: String },
+    #[serde(rename = "access.result")]
+    AccessResult { re: String, outcome: AccessOutcome },
     #[serde(rename = "pair.commit")]
     PairCommit { c: String },
     #[serde(rename = "pair.nonce")]
@@ -349,8 +396,21 @@ impl SessionMessage {
             }
             Self::OutputFollow { id, window, .. } => id_ok(id) && (1..=MAX_WINDOW).contains(window),
             Self::OutputAck { re, .. } | Self::OutputUnfollow { re } => id_ok(re),
+            Self::AccessRequest { id, .. } => id_ok(id),
+            Self::AccessCancel { re } => id_ok(re),
             Self::Keep { ids } => ids.len() <= 16 && ids.iter().all(|id| id_ok(id)),
             _ => true,
+        }
+    }
+
+    /// The first session protocol version that has this message. A session
+    /// of an older version never sends it, and treats it as an unknown `t`.
+    pub fn proto(&self) -> u32 {
+        match self {
+            Self::AccessRequest { .. } | Self::AccessCancel { .. } | Self::AccessResult { .. } => {
+                PROTO_ACCESS
+            }
+            _ => 1,
         }
     }
 }
@@ -476,6 +536,65 @@ mod tests {
     fn ranges_overlap_only_when_they_share_a_version() {
         let ours = ProtoRange::OURS;
         assert!(ours.overlaps(&ProtoRange { min: 1, max: 3 }));
-        assert!(!ours.overlaps(&ProtoRange { min: 2, max: 3 }));
+        assert!(ours.overlaps(&ProtoRange { min: 2, max: 3 }));
+        assert!(!ours.overlaps(&ProtoRange { min: 3, max: 4 }));
+    }
+
+    #[test]
+    fn the_session_version_is_the_highest_in_both_ranges() {
+        let ours = ProtoRange::OURS;
+        assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 2 }), Some(2));
+        assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 1 }), Some(1));
+        assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 9 }), Some(2));
+        assert_eq!(ours.agreed(&ProtoRange { min: 3, max: 9 }), None);
+    }
+
+    #[test]
+    fn access_messages_use_the_contract_names_and_take_version_2() {
+        let request: SessionMessage = serde_json::from_value(
+            json!({"t": "access.request", "id": "r1", "wants": "backgroundStarts"}),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            SessionMessage::AccessRequest {
+                id: "r1".into(),
+                wants: AccessWants::BackgroundStarts,
+            }
+        );
+        assert_eq!(request.proto(), 2);
+        let result = SessionMessage::AccessResult {
+            re: "r1".into(),
+            outcome: AccessOutcome::Nobody,
+        };
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({"t": "access.result", "re": "r1", "outcome": "nobody"})
+        );
+        let cancel = SessionMessage::AccessCancel { re: "r1".into() };
+        assert_eq!(
+            serde_json::to_value(&cancel).unwrap(),
+            json!({"t": "access.cancel", "re": "r1"})
+        );
+        assert_eq!(SessionMessage::Kept.proto(), 1);
+        assert!(
+            !SessionMessage::AccessCancel {
+                re: "x".repeat(MAX_ID + 1)
+            }
+            .within_bounds()
+        );
+    }
+
+    #[test]
+    fn background_starts_are_granted_only_with_control() {
+        let settings = |control, background_starts| TargetSettings {
+            share: true,
+            control,
+            background_starts,
+        };
+        assert!(AccessWants::Control.is_granted_by(&settings(true, false)));
+        assert!(!AccessWants::BackgroundStarts.is_granted_by(&settings(true, false)));
+        assert!(AccessWants::BackgroundStarts.is_granted_by(&settings(true, true)));
+        assert!(!AccessWants::Control.is_granted_by(&settings(false, false)));
     }
 }

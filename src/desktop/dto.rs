@@ -1704,6 +1704,26 @@ pub struct RemotePairAnswerRequest {
     pub accept: bool,
 }
 
+/// What an access request asks a target to turn on: `backgroundStarts`
+/// asks for `control` too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteAccessWants {
+    Control,
+    BackgroundStarts,
+}
+
+/// A person's answer in the access dialog, on the target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAccessAnswerRequest {
+    pub request_id: String,
+    pub allow: bool,
+    /// "Don't ask again from this machine".
+    #[serde(default)]
+    pub suppress: bool,
+}
+
 /// A streaming management command the window listens to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
@@ -1713,7 +1733,13 @@ pub struct RemotePairAnswerRequest {
 )]
 pub enum RemoteStreamRequest {
     /// Pairing requests, presence and revocations, while the app runs.
-    Events,
+    /// With `access`, access requests too, which then wait for the app's
+    /// answer instead of being answered `nobody`: only an app that shows
+    /// the access dialog sets it.
+    Events {
+        #[serde(default)]
+        access: bool,
+    },
     /// A pairing this machine starts.
     Pair { machine_id: String },
     /// Another machine's inventory, while it is on screen.
@@ -1724,5 +1750,11 @@ pub enum RemoteStreamRequest {
         run_id: String,
         #[serde(default)]
         offset: Option<u64>,
+    },
+    /// Asks another machine for remote controls, then its answer. Closing
+    /// the stream cancels the request.
+    Access {
+        machine_id: String,
+        wants: RemoteAccessWants,
     },
 }

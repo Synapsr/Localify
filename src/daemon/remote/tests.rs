@@ -2,6 +2,7 @@
 //! the Rust side of the PR 2 gates in `docs/remote-machines.md`, "Gates".
 //! Viewing, and the PR 3 gate, are in `viewing`.
 
+mod access;
 mod viewing;
 
 use std::sync::Arc;
@@ -55,6 +56,9 @@ fn fast() -> Timings {
         // Long: the tests change the switches through the link, which must
         // act on them by itself.
         settings_recheck: ms(60_000),
+        access_expiry: ms(1500),
+        access_every: ms(60_000),
+        access_after_refusal: ms(60_000),
     }
 }
 
@@ -111,12 +115,23 @@ async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 async fn daemon(cloud: &FakeCloud, id: &str, name: &str) -> Daemon {
-    let token = cloud.add_machine(id, name);
-    start(cloud, id, name, &token, tempfile::tempdir().unwrap()).await
+    daemon_with(cloud, id, name, fast()).await
 }
 
-async fn start(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) -> Daemon {
-    let daemon = launch(cloud, id, name, token, dir);
+async fn daemon_with(cloud: &FakeCloud, id: &str, name: &str, timings: Timings) -> Daemon {
+    let token = cloud.add_machine(id, name);
+    let daemon = launch_with(
+        cloud,
+        id,
+        name,
+        &token,
+        tempfile::tempdir().unwrap(),
+        timings,
+    );
+    connected(daemon).await
+}
+
+async fn connected(daemon: Daemon) -> Daemon {
     wait_until("the link connects", || {
         daemon.link.status().relay == RelayState::Connected
     })
@@ -125,6 +140,17 @@ async fn start(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDi
 }
 
 fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) -> Daemon {
+    launch_with(cloud, id, name, token, dir, fast())
+}
+
+fn launch_with(
+    cloud: &FakeCloud,
+    id: &str,
+    name: &str,
+    token: &str,
+    dir: TempDir,
+    timings: Timings,
+) -> Daemon {
     CredentialsStore::in_data_dir(dir.path())
         .save(&CloudCredentials {
             api_base: cloud.base.clone(),
@@ -135,7 +161,8 @@ fn launch(cloud: &FakeCloud, id: &str, name: &str, token: &str, dir: TempDir) ->
         })
         .unwrap();
     let source = Arc::new(FakeSource::default());
-    let link = link_with(dir.path(), &source);
+    let shared: Arc<dyn LocalSource> = source.clone();
+    let link = RemoteLink::with_timings(dir.path(), shared, timings);
     // As `LOCALIFY_CLOUD_API` makes a `wrangler dev` trusted.
     link.trust_api_base(&cloud.base);
     let cancel = CancellationToken::new();
@@ -183,13 +210,14 @@ async fn to_codes(
     events_b: &mut broadcast::Receiver<Event>,
 ) -> (mpsc::Receiver<PairEvent>, String, String, String, String) {
     let mut events = a.link.pair(&b.id).await.unwrap();
+    let first = next_pair_event(&mut events).await;
     let PairEvent::Code {
         pairing_id: id_a,
         code: code_a,
         ..
-    } = next_pair_event(&mut events).await
+    } = first
     else {
-        panic!("no code");
+        panic!("no code: {first:?}");
     };
     let Event::PairRequest {
         pairing_id: id_b,
@@ -203,7 +231,7 @@ async fn to_codes(
 }
 
 async fn pair(a: &Daemon, b: &Daemon) {
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
     let (mut events, id_a, code_a, id_b, code_b) = to_codes(a, b, &mut subscription.events).await;
     assert_eq!(code_a, code_b);
     a.link.answer(&id_a, true).await.unwrap();
@@ -483,7 +511,7 @@ async fn a_pairing_with_nobody_to_confirm_on_the_target_is_declined() {
 async fn a_cancel_on_either_side_pins_nothing() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
 
     let (mut events, id_a, _, id_b, _) = to_codes(&a, &b, &mut subscription.events).await;
     a.link.answer(&id_a, true).await.unwrap();
@@ -512,7 +540,7 @@ async fn a_cancel_on_either_side_pins_nothing() {
 async fn a_pairing_nobody_answers_times_out_and_pins_nothing() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
     let (mut events, id_a, _, _, _) = to_codes(&a, &b, &mut subscription.events).await;
     // A accepts; B's person never answers.
     a.link.answer(&id_a, true).await.unwrap();
@@ -527,7 +555,7 @@ async fn a_pairing_nobody_answers_times_out_and_pins_nothing() {
 async fn pairing_messages_out_of_order_or_twice_abandon_the_pairing() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let _subscription = b.link.subscribe();
+    let _subscription = b.link.subscribe(false);
     // The relay repeats B's commitment, its second message after hello.
     // The copy fails the transport counter before pairing ever sees it
     // (the pairing's own refusal of a second commitment is a unit test).
@@ -576,7 +604,7 @@ async fn pairing_messages_out_of_order_or_twice_abandon_the_pairing() {
 async fn a_relay_that_alters_the_handshake_pins_nothing() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let _subscription = b.link.subscribe();
+    let _subscription = b.link.subscribe(false);
     // A key substituted in B's handshake message.
     cloud.set_hook(Some(Box::new(|from, frame| {
         if from == "mB" && frame.kind == FrameKind::Hs {
@@ -604,7 +632,7 @@ async fn a_relay_that_alters_the_handshake_pins_nothing() {
 async fn a_target_takes_one_pairing_at_a_time_and_five_an_hour() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
     for _ in 0..5 {
         let (mut events, id_a, _, _, _) = to_codes(&a, &b, &mut subscription.events).await;
         a.link.answer(&id_a, false).await.unwrap();
@@ -1097,7 +1125,7 @@ async fn a_revoked_machine_loses_its_pin_everywhere_and_signs_out() {
         })
         .await
         .unwrap();
-    let mut subscription = a.link.subscribe();
+    let mut subscription = a.link.subscribe(false);
     cloud.revoke("mB");
     next_event(&mut subscription.events, |event| {
         matches!(event, Event::Revoked { .. })
@@ -1160,7 +1188,7 @@ async fn a_revoked_token_on_a_lease_signs_the_machine_out() {
 async fn signing_out_while_connected_closes_the_link_and_pins_nothing() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
     let (mut events, id_a, _, id_b, _) = to_codes(&a, &b, &mut subscription.events).await;
     a.link.answer(&id_a, true).await.unwrap();
 
@@ -1190,7 +1218,7 @@ async fn signing_out_while_connected_closes_the_link_and_pins_nothing() {
 async fn a_stale_pairing_writes_nothing_into_a_newer_sign_in() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
     let (mut events, id_a, _, id_b, _) = to_codes(&a, &b, &mut subscription.events).await;
     a.link.answer(&id_a, true).await.unwrap();
 
@@ -1530,7 +1558,7 @@ async fn an_update_from_before_owner_json_keeps_the_key_pins_and_settings() {
 async fn reconnecting_does_not_reset_the_pairing_limit() {
     let cloud = FakeCloud::start().await;
     let (a, b) = two(&cloud).await;
-    let mut subscription = b.link.subscribe();
+    let mut subscription = b.link.subscribe(false);
     for _ in 0..5 {
         let (mut events, id_a, _, _, _) = to_codes(&a, &b, &mut subscription.events).await;
         a.link.answer(&id_a, false).await.unwrap();

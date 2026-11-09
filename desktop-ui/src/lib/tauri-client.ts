@@ -70,6 +70,9 @@ import type {
   RemoveProjectEnvironmentResultDto,
   RemoveProjectResultDto,
   RemoveRouteRequest,
+  RemoteAccessAnswerDto,
+  RemoteAccessAnswerRequest,
+  RemoteAccessSuppressedDto,
   RemoteMachineDto,
   RemoteMachineRequest,
   RemotePairAnswerRequest,
@@ -149,6 +152,7 @@ import {
 } from "./validators/validator.project-worktree";
 import { relinkProjectRootRequestSchema } from "./validators/validator.relink-project-root";
 import {
+  remoteAccessAnswerRequestSchema,
   remoteMachineRequestSchema,
   remotePairAnswerRequestSchema,
   remoteSettingsRequestSchema,
@@ -336,6 +340,11 @@ export interface DesktopClient {
   unpairRemoteMachine(request: RemoteMachineRequest): Promise<boolean>;
   /** Signs another machine out of the account. */
   removeRemoteMachine(request: RemoteMachineRequest): Promise<void>;
+  /** The target's answer in the access dialog. */
+  answerRemoteAccess(request: RemoteAccessAnswerRequest): Promise<RemoteAccessAnswerDto>;
+  getRemoteAccessSuppressed(): Promise<RemoteAccessSuppressedDto[]>;
+  /** Lets a machine ask for access again; `true` when it was suppressed. */
+  restoreRemoteAccess(request: RemoteMachineRequest): Promise<boolean>;
   /** Opens a streaming command; its lines come as `remote-stream` events with its id. */
   openRemoteStream(request: RemoteStreamRequest): Promise<number>;
   closeRemoteStream(streamId: number): Promise<void>;
@@ -582,6 +591,15 @@ export function createDesktopClient(): DesktopClient {
       }),
     removeRemoteMachine: (request) =>
       tauriInvoke("remove_remote_machine", {
+        request: remoteMachineRequestSchema.parse(request),
+      }),
+    answerRemoteAccess: (request) =>
+      tauriInvoke("answer_remote_access", {
+        request: remoteAccessAnswerRequestSchema.parse(request),
+      }),
+    getRemoteAccessSuppressed: () => tauriInvoke("get_remote_access_suppressed"),
+    restoreRemoteAccess: (request) =>
+      tauriInvoke("restore_remote_access", {
         request: remoteMachineRequestSchema.parse(request),
       }),
     openRemoteStream: (request) =>
