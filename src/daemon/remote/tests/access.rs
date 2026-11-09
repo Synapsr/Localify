@@ -14,7 +14,9 @@ use crate::daemon::remote::machines::SessionState;
 use crate::daemon::remote::{AccessEvent, Asking, Command, Event, Subscription, Timings};
 use crate::infrastructure::cloud::credentials::sign_in_lock;
 use crate::infrastructure::remote::store::SettingsChange;
-use crate::infrastructure::remote::wire::{AccessOutcome, AccessWants, ProtoRange, SessionMessage};
+use crate::infrastructure::remote::wire::{
+    AccessOutcome, AccessWants, PROTO_MAX, ProtoRange, SessionMessage,
+};
 
 /// No per-peer limit: each test that needs one says so.
 fn unlimited() -> Timings {
@@ -136,7 +138,7 @@ fn switches(daemon: &Daemon) -> (bool, bool, bool) {
 /// A relay that alters `presence` to claim version 1 for both changes
 /// nothing: the `hello`s decide, and access requests go through.
 #[tokio::test]
-async fn presence_claiming_version_1_does_not_downgrade_two_version_2_peers() {
+async fn presence_claiming_version_1_does_not_downgrade_two_current_peers() {
     let cloud = FakeCloud::start().await;
     cloud.claim_proto(1, 1);
     let (a, b) = asker_and_target(&cloud, fast()).await;
@@ -144,10 +146,10 @@ async fn presence_claiming_version_1_does_not_downgrade_two_version_2_peers() {
     assert_eq!(presence, ProtoRange { min: 1, max: 1 });
 
     a.link.open("mB", true).await.unwrap();
-    assert_eq!(proto(&a, "mB"), Some(2));
+    assert_eq!(proto(&a, "mB"), Some(PROTO_MAX));
     let listed = a.link.machines(false).await.unwrap();
     let listed = listed.iter().find(|machine| machine.id == "mB").unwrap();
-    assert_eq!(listed.proto, Some(2));
+    assert_eq!(listed.proto, Some(PROTO_MAX));
 
     let mut events = app(&b);
     let _asking = ask(&a, AccessWants::Control).await;
@@ -216,7 +218,11 @@ async fn a_protocol_2_message_in_a_version_1_session_is_an_unknown_type() {
 async fn hello_ranges_that_do_not_overlap_end_the_session() {
     let cloud = FakeCloud::start().await;
     let (a, b) = asker_and_target(&cloud, fast()).await;
-    b.link.speak(ProtoRange { min: 3, max: 3 });
+    let later = PROTO_MAX + 1;
+    b.link.speak(ProtoRange {
+        min: later,
+        max: later,
+    });
 
     let failure = a.link.open("mB", true).await.unwrap_err();
     assert_eq!(failure.code, "unsupported", "{failure:?}");

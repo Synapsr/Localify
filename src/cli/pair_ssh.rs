@@ -30,6 +30,8 @@ use crate::infrastructure::remote::ssh_pair::{
 /// 15 s for `ssh` to connect, its own `ConnectTimeout`, then 15 s more for
 /// `ready`.
 const READY_WAIT: Duration = Duration::from_secs(30);
+/// The helper's wait for its daemon to register the acceptor.
+const REGISTER_WAIT: Duration = Duration::from_secs(15);
 /// The pairing's 2 minutes, from a valid `ready`.
 const PAIRING_WAIT: Duration = Duration::from_secs(120);
 /// Once the attempt is decided, how long the other side gets to say how it
@@ -128,7 +130,8 @@ fn read_daemon(mut stream: MgmtStream, tx: Sender<Input>) {
                     return;
                 }
                 Err(error) => {
-                    let _ = tx.send(Input::DaemonEnd(Some(error.to_string())));
+                    let error = super::machines::daemon_error(error).to_string();
+                    let _ = tx.send(Input::DaemonEnd(Some(error)));
                     return;
                 }
             }
@@ -213,26 +216,43 @@ pub fn run_helper(
     input: impl Read + Send + 'static,
     out: &mut impl Write,
 ) -> Result<i32> {
+    run_helper_within(client, args, input, out, REGISTER_WAIT)
+}
+
+/// [`run_helper`], with `register_wait` for the daemon's first answer.
+pub fn run_helper_within(
+    client: &MgmtSocketClient,
+    args: &HelperArgs,
+    input: impl Read + Send + 'static,
+    out: &mut impl Write,
+    register_wait: Duration,
+) -> Result<i32> {
     let command = json!({
         "cmd": "remote_pair_accept", "machineId": args.from, "account": args.account,
     });
-    let mut stream = client
+    let stream = client
         .remote_stream(&command)
         .map_err(super::machines::daemon_error)?;
-    let ready = stream
-        .next_answer()
-        .map_err(super::machines::daemon_error)?
-        .ok_or_else(|| anyhow!("The daemon closed the connection before it was ready."))?;
-    let ready = ready_line(&ready, args)?;
+    let closer = stream.closer()?;
+    // A's stdin is watched from the start: closing it, or any line before
+    // `ready`, stops the registration.
+    let (tx, rx) = mpsc::channel();
+    read_lines(input, tx.clone());
+    read_daemon(stream, tx);
+    let ready = registered(&rx, register_wait).and_then(|ready| ready_line(&ready, args));
+    let ready = match ready {
+        Ok(ready) => ready,
+        Err(error) => {
+            // Closing the stream cancels the acceptor, if it was made.
+            let _ = closer.shutdown(Shutdown::Both);
+            return Err(error);
+        }
+    };
     let HelperLine::Ready { attempt, .. } = &ready else {
         bail!("The daemon's answer is not ready.");
     };
     let attempt = attempt.clone();
-    let closer = stream.closer()?;
     write_line(out, &ready.to_line())?;
-    let (tx, rx) = mpsc::channel();
-    read_lines(input, tx.clone());
-    read_daemon(stream, tx);
     let mut helper = Helper {
         client,
         closer,
@@ -250,6 +270,23 @@ pub fn run_helper(
     };
     write_line(out, &result.to_line())?;
     Ok(exit_code(outcome))
+}
+
+/// The daemon's first answer, within `wait`, unless A gives up first.
+fn registered(rx: &Receiver<Input>, wait: Duration) -> Result<Value> {
+    match rx.recv_timeout(wait) {
+        Ok(Input::Daemon(answer)) => Ok(answer),
+        Ok(Input::DaemonEnd(error)) => Err(anyhow!(error.unwrap_or_else(|| {
+            "The daemon closed the connection before it was ready.".into()
+        }))),
+        Ok(Input::Line(_) | Input::LineEnd) => {
+            bail!("The initiator gave up before this machine was ready.")
+        }
+        Err(_) => bail!(
+            "This machine's daemon did not answer within {} s.",
+            wait.as_secs_f32()
+        ),
+    }
 }
 
 /// The daemon's `ready`, checked against what A expects.
@@ -538,6 +575,7 @@ pub fn drive(own: &MgmtSocketClient, target: &Target, peer: Peer, started: Insta
         own_closed: false,
         peer_result: None,
         peer_done: false,
+        broke: None,
         failure: None,
     };
     let attempt = match run.await_ready(started + READY_WAIT) {
@@ -574,6 +612,9 @@ struct Run<'a> {
     peer_result: Option<(PinState, String)>,
     /// B said how it ended, closed its stdout, or broke the protocol.
     peer_done: bool,
+    /// How B's stdout broke the protocol. From then on, none of its lines
+    /// is trusted, not even an earlier `result`.
+    broke: Option<String>,
     /// Why the attempt ended early, for the report.
     failure: Option<String>,
 }
@@ -711,6 +752,7 @@ impl Run<'_> {
             }
             Input::Line(Ok(line)) => self.take_line(&line),
             Input::Line(Err(error)) => self.broken(&error),
+            Input::LineEnd if self.broke.is_some() => {}
             Input::LineEnd => {
                 self.peer_done = true;
                 let name = &self.target.name;
@@ -722,6 +764,9 @@ impl Run<'_> {
     }
 
     fn take_line(&mut self, line: &[u8]) {
+        if self.broke.is_some() {
+            return;
+        }
         match self.lines.take(line) {
             Ok(HelperLine::Code { code, .. }) => {
                 self.theirs = Some(code);
@@ -742,14 +787,19 @@ impl Run<'_> {
         }
     }
 
-    /// A line that breaks the protocol ends the attempt: nothing more from
-    /// B is trusted.
+    /// A line that breaks the protocol ends the attempt: nothing from B's
+    /// stdout is trusted any more, and the report says why, even after
+    /// both sides were told to confirm.
     fn broken(&mut self, error: &ProtocolError) {
-        self.peer_done = true;
+        if self.broke.is_some() {
+            return;
+        }
         let name = &self.target.name;
-        self.abandon(format!(
-            "{name} sent a line this version cannot take: {error}."
-        ));
+        let why = format!("{name} sent a line this version cannot take: {error}.");
+        self.broke = Some(why.clone());
+        self.peer_result = None;
+        self.peer_done = true;
+        self.abandon(why);
         self.peer.close_stdin();
     }
 
@@ -814,6 +864,7 @@ impl Run<'_> {
                 Ok(Input::Daemon(event)) if ended(&event).is_some() => self.own_end = Some(event),
                 Ok(Input::DaemonEnd(_)) => self.own_closed = true,
                 Ok(Input::Line(Ok(line))) if !self.peer_done => self.take_line(&line),
+                Ok(Input::Line(Err(error))) if !self.peer_done => self.broken(&error),
                 Ok(Input::Line(Err(_)) | Input::LineEnd) => self.peer_done = true,
                 Ok(_) => {}
                 Err(_) => break,
@@ -836,12 +887,19 @@ impl Run<'_> {
         // B accepts only on this machine's confirm line.
         let (peer, peer_detail) = match &self.peer_result {
             Some((state, detail)) => (*state, detail.clone()),
+            // After a break, B is never reported pinned: the attempt failed,
+            // and it exits 2 or 4.
+            None if accepted && self.broke.is_some() && heard == PinState::Pinned => {
+                (PinState::Unknown, String::new())
+            }
             None if accepted => (heard, String::new()),
             None => (PinState::NotPinned, String::new()),
         };
         let outcome = Outcome::of(local, peer);
         let nonempty = |detail: String| Some(detail).filter(|detail| !detail.is_empty());
         let detail = match outcome {
+            // The break is the first thing to know, whatever the states.
+            _ if self.broke.is_some() => self.broke.clone(),
             Outcome::Paired => None,
             // Why it stopped; the states already say what each side saved.
             Outcome::Partial => self.failure.clone().or_else(|| {

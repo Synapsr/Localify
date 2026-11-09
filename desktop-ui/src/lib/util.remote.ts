@@ -183,11 +183,16 @@ export function pairingPartialMessage(
   machine: string,
   local: RemotePinState,
   peer: RemotePinState,
+  reason: string,
 ): string {
   const here =
     local === "pinned"
       ? `This Mac saved ${machine}'s key`
       : `This Mac did not save ${machine}'s key`;
+  // Pairing again would end the same way.
+  if (reason === "unconfirmed") {
+    return `${here}. ${machine} runs an older version of Localify, which doesn't say whether it saved this Mac's key: check on ${machine}, or update Localify there and pair again.`;
+  }
   const there =
     peer === "pinned"
       ? `${machine} saved this Mac's key`

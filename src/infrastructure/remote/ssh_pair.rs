@@ -251,6 +251,37 @@ pub enum ArgumentError {
     RemoteLocalify,
     #[error("A machine id or account id holds a newline or a NUL.")]
     Unquotable,
+    #[error(
+        "Pairing over SSH needs OpenSSH 8.7 or newer on this machine, for its StdinNull and ForkAfterAuthentication options. `ssh -V` says: {0}"
+    )]
+    OldSsh(String),
+}
+
+/// The oldest OpenSSH that has every option of [`SSH_OPTIONS`].
+const MIN_OPENSSH: (u32, u32) = (8, 7);
+
+/// Checks `ssh -V`'s output before `ssh` runs with options it may not
+/// know. Another ssh, or a version that does not read as `OpenSSH_X.Y`,
+/// fails closed.
+pub fn require_openssh(version_output: &str) -> Result<(), ArgumentError> {
+    match openssh_version(version_output) {
+        Some(version) if version >= MIN_OPENSSH => Ok(()),
+        _ => {
+            let said = version_output.lines().next().unwrap_or_default().trim();
+            let said = if said.is_empty() { "nothing" } else { said };
+            Err(ArgumentError::OldSsh(said.to_string()))
+        }
+    }
+}
+
+/// `(8, 7)` from `OpenSSH_8.7p1, LibreSSL 3.3.6`.
+fn openssh_version(output: &str) -> Option<(u32, u32)> {
+    let version = output
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("OpenSSH_"))?;
+    let (major, rest) = version.split_once('.')?;
+    let minor: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
 /// The options the contract fixes: no shell, no prompt, a host key that
@@ -642,6 +673,35 @@ mod tests {
         assert_eq!(
             remote_command("/bin/localify", "mA", "u\u{0}1"),
             Err(ArgumentError::Unquotable)
+        );
+    }
+
+    #[test]
+    fn only_openssh_8_7_or_newer_runs() {
+        for ok in [
+            "OpenSSH_8.7p1, OpenSSL 3.0.2 15 Mar 2022",
+            "OpenSSH_8.9p1 Ubuntu-3ubuntu0.10, OpenSSL 3.0.2",
+            "OpenSSH_9.0",
+            "OpenSSH_10.3p1, LibreSSL 3.3.6",
+        ] {
+            assert_eq!(require_openssh(ok), Ok(()), "{ok}");
+        }
+        for old in [
+            "OpenSSH_8.6p1, OpenSSL 1.1.1k",
+            "OpenSSH_7.4p1, OpenSSL 1.0.2k-fips",
+            "OpenSSH_for_Windows_8.1p1, LibreSSL 3.0.2",
+            "Sun_SSH_1.1",
+            "OpenSSH_",
+            "",
+        ] {
+            let error = require_openssh(old).unwrap_err();
+            assert!(error.to_string().contains("OpenSSH 8.7 or newer"), "{old}");
+        }
+        let error = require_openssh("OpenSSH_8.6p1, OpenSSL 1.1.1k\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with("says: OpenSSH_8.6p1, OpenSSL 1.1.1k")
         );
     }
 }

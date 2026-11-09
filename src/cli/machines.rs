@@ -351,6 +351,12 @@ pub fn accept(ctx: &AppContext) -> Result<()> {
                 } else {
                     "did not save"
                 };
+                // Pairing again would end the same way.
+                if event["reason"] == "unconfirmed" {
+                    bail!(
+                        "This machine {here} {name}'s key. {name} runs an older version of Localify, which does not say whether it saved this machine's key: check on {name}, or update Localify there and pair again."
+                    );
+                }
                 bail!(
                     "Pairing did not finish on both machines: this machine {here} {name}'s key, and {name}'s side is {}. Pair them again to complete it.",
                     event["peer"]
@@ -376,7 +382,11 @@ pub fn pair_over_ssh(
     json_flag: bool,
     ctx: &AppContext,
 ) -> i32 {
-    let report = match ssh_target(query, ctx) {
+    let ready = ssh_target(query, ctx).and_then(|target| {
+        require_openssh()?;
+        Ok(target)
+    });
+    let report = match ready {
         Ok(target) => match ssh_command(destination, remote_localify, &target) {
             Ok(args) => {
                 let started = std::time::Instant::now();
@@ -418,6 +428,20 @@ fn ssh_target(query: &str, ctx: &AppContext) -> Result<pair_ssh::Target> {
         own_id: self_id.to_string(),
         account: account.to_string(),
     })
+}
+
+/// Fails before `ssh` runs when it is not OpenSSH 8.7 or newer, rather
+/// than letting it refuse the contract's options.
+fn require_openssh() -> Result<()> {
+    let output = std::process::Command::new("ssh")
+        .arg("-V")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| anyhow!("Could not run ssh: {error}"))?;
+    // `ssh -V` writes its version to stderr.
+    let mut said = String::from_utf8_lossy(&output.stderr).into_owned();
+    said.push_str(&String::from_utf8_lossy(&output.stdout));
+    Ok(ssh_pair::require_openssh(&said)?)
 }
 
 /// `ssh`'s arguments, with the helper's command for the remote shell.

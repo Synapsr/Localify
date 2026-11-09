@@ -128,6 +128,15 @@ test("with controls off, an action that runs in the background asks for backgrou
   });
 });
 
+test("a target of a later protocol asks and relaunches as on protocol 2", () => {
+  assert.deepEqual(quickAction(item(), "start", 3, "B", true), { kind: "ask", wants: "control" });
+  const relaunch = legacy({ start: allowed, stop: allowed, restart: allowed });
+  assert.deepEqual(quickAction(relaunch, "restart", 3, "B", true), {
+    kind: "relaunch",
+    access: null,
+  });
+});
+
 test("a target of protocol 1 only gets the command to run there", () => {
   assert.deepEqual(quickAction(item(), "start", 1, "B", true), {
     kind: "command",

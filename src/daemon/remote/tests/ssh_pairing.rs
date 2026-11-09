@@ -20,7 +20,7 @@ use crate::cli::pair_ssh::{self, HelperArgs, Peer, Report, Target};
 use crate::daemon::remote::PairEvent;
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
 use crate::infrastructure::remote::pairing::{Outcome, PinState};
-use crate::infrastructure::remote::ssh_pair::{self, ControlLine, ProtocolError};
+use crate::infrastructure::remote::ssh_pair::{self, ControlLine, HelperLine, ProtocolError};
 
 fn account(daemon: &Daemon) -> String {
     daemon.link.status().account.expect("connected")
@@ -295,6 +295,49 @@ async fn the_helper_confirms_only_on_its_exact_code() {
     assert!(!a.pinned("mB") && !b.pinned("mA"));
 }
 
+/// A management socket that takes connections and never answers.
+fn silent_socket(dir: &Path) -> PathBuf {
+    let path = dir.join("silent.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            held.push(stream);
+        }
+    });
+    path
+}
+
+#[test]
+fn the_helper_never_waits_forever_for_its_daemon_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = MgmtSocketClient::new(&silent_socket(dir.path()));
+    let args = HelperArgs {
+        from: "mA".into(),
+        account: "u1".into(),
+    };
+    // The daemon never answers: the wait bounds it.
+    let (input, _open) = std::io::pipe().unwrap();
+    let mut out = Vec::new();
+    let started = std::time::Instant::now();
+    let wait = Duration::from_millis(300);
+    let error = pair_ssh::run_helper_within(&client, &args, input, &mut out, wait).unwrap_err();
+    assert!(error.to_string().contains("did not answer"), "{error}");
+    assert!(out.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // A gives up and closes stdin while it waits: it stops at once.
+    let (input, closed) = std::io::pipe().unwrap();
+    drop(closed);
+    let started = std::time::Instant::now();
+    let wait = Duration::from_secs(60);
+    let error = pair_ssh::run_helper_within(&client, &args, input, &mut out, wait).unwrap_err();
+    assert!(error.to_string().contains("gave up"), "{error}");
+    assert!(out.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
 #[tokio::test]
 async fn a_closed_stdin_cancels_the_helper() {
     let cloud = FakeCloud::start().await;
@@ -534,6 +577,69 @@ async fn a_ready_for_another_machine_or_account_pins_nothing() {
         // B was told to cancel.
         assert_eq!(first_line(stdin), Ok(ControlLine::Cancel));
     }
+}
+
+#[tokio::test]
+async fn after_a_broken_line_nothing_from_b_is_trusted() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = two(&cloud).await;
+    let on_a = serve_management(&a).await;
+    // B's daemon holds the acceptor; its lines are written here.
+    let (ready, mut accepted) = b.link.accept("mA", &account(&b)).await.unwrap();
+    let (stdin, stdin_writer) = std::io::pipe().unwrap();
+    let (stdout, mut lines) = std::io::pipe().unwrap();
+    let (stderr, _stderr_writer) = std::io::pipe().unwrap();
+    let attempt = ready.attempt.clone();
+    let ready = HelperLine::Ready {
+        machine_id: ready.machine_id,
+        account: ready.account,
+        attempt: attempt.clone(),
+    };
+    lines.write_all(ready.to_line().as_bytes()).unwrap();
+    let peer = Peer::from_pipes(stdin_writer, stdout, stderr, "teo-mini");
+    let target = Target {
+        machine_id: "mB".into(),
+        name: "teo-mini".into(),
+        own_id: "mA".into(),
+        account: account(&a),
+    };
+    let driving = tokio::spawn(async move { drive_from(&on_a, target, peer).await });
+
+    let code = code_of(&mut accepted).await;
+    let line = HelperLine::Code {
+        attempt: attempt.clone(),
+        code: code.clone(),
+    };
+    lines.write_all(line.to_line().as_bytes()).unwrap();
+    // The codes match: A confirms its side and B's.
+    let confirm = tokio::task::spawn_blocking(move || first_line(stdin))
+        .await
+        .unwrap();
+    assert_eq!(confirm, Ok(ControlLine::Confirm(code)));
+
+    // Then B's stdout breaks the protocol, and claims success after that,
+    // while A's daemon still waits for B's.
+    let result = HelperLine::Result {
+        attempt,
+        outcome: Outcome::Paired,
+        local: PinState::Pinned,
+        peer: PinState::Pinned,
+        detail: String::new(),
+    };
+    lines.write_all(b"not json\n").unwrap();
+    lines.write_all(result.to_line().as_bytes()).unwrap();
+    drop(lines);
+
+    // B's daemon never answers: its 2 minutes (2.5 s here) decide.
+    let report = driving.await.unwrap();
+    assert_eq!(report.outcome, Outcome::Partial, "{report:?}");
+    assert_eq!(
+        (report.local, report.peer),
+        (PinState::NotPinned, PinState::Unknown)
+    );
+    assert_eq!(report.exit_code(), 4);
+    assert!(report.detail.contains("cannot take"), "{}", report.detail);
+    assert!(!a.pinned("mB") && !b.pinned("mA"));
 }
 
 #[tokio::test]

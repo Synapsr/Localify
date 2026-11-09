@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(headers["Authorization"], "Bearer lfy_t");
         assert_eq!(headers["Sec-WebSocket-Protocol"], "localify-remote.1");
         assert_eq!(headers["X-Localify-Version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(headers["X-Localify-Proto"], "1-2");
+        assert_eq!(headers["X-Localify-Proto"], "1-3");
     }
 
     #[test]

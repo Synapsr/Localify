@@ -484,10 +484,12 @@ it. Pairing needs a person at a terminal or in the app, with one exception: from
 machine that can reach the other over SSH, `localify machines pair teo-desktop
 --over-ssh teo@teo-desktop.local` starts the other side through `ssh`, compares both
 codes itself, and confirms both only when they match. So an agent you gave SSH access to
-both machines can pair them. The host key must already be trusted, and when ssh's shell
-doesn't find `localify` there, pass its path with `--remote-localify`. It exits 0 once
-both machines saved each other, 2 when nothing was saved, and 4 when only one may have:
-pairing again completes it. Removing a machine always needs a person.
+both machines can pair them. It needs OpenSSH 8.7 or later on the machine you run it
+on, and the host key must already be trusted; when ssh's shell doesn't find `localify`
+there, pass its path with `--remote-localify`. It exits 0 once both machines saved each
+other, 2 when nothing was saved, and 4 when only one may have: pairing again completes
+it. A machine on Localify 1.7.0 or earlier can't say whether it saved, so pairing with it
+always exits 4 until you update it. Removing a machine always needs a person.
 `localify machines unpair <machine>` forgets a paired machine, and
 `localify machines remove <machine>` signs it out of the account.
 

@@ -150,7 +150,7 @@ export function RemoteProvider({ children }: PropsWithChildren) {
                   step: "partial",
                   pairingId: event.pairingId,
                   name: event.name,
-                  message: pairingPartialMessage(event.name, event.local, event.peer),
+                  message: pairingPartialMessage(event.name, event.local, event.peer, event.reason),
                 }
               : current,
           );
@@ -239,7 +239,7 @@ export function RemoteProvider({ children }: PropsWithChildren) {
             setOutgoing({
               step: "partial",
               machine,
-              message: pairingPartialMessage(machine.name, event.local, event.peer),
+              message: pairingPartialMessage(machine.name, event.local, event.peer, event.reason),
             });
             refreshMachines();
             return;

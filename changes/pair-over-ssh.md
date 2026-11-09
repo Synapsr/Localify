@@ -8,5 +8,7 @@ link: docs/README.md
 From a machine that reaches the other over SSH, `localify machines pair <machine>
 --over-ssh <destination>` starts the other side through `ssh`, compares both codes
 itself, and confirms both only when they match. An agent you gave SSH access to both
-machines can now pair them. A pairing cut short after a confirm now says what each
-machine saved, instead of claiming nothing was, and pairing again completes it.
+machines can now pair them. It needs OpenSSH 8.7 or later on the machine you run it on.
+A pairing cut short after a confirm now says what each machine saved, instead of claiming
+nothing was, and pairing again completes it. A machine on 1.7.0 or earlier can't say
+whether it saved, so a pairing with it reports only what this machine saved.

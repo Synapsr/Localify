@@ -1283,6 +1283,8 @@ export type RemoteEventDto =
       name: string;
       local: RemotePinState;
       peer: RemotePinState;
+      /** `unconfirmed`: the peer runs a version that cannot say it saved. */
+      reason: string;
     }
   | { event: "presence"; machineId: string; state: "online" | "offline" }
   | { event: "revoked"; machineId: string }

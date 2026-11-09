@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 /// and `X-Localify-Proto` (`docs/remote-machines.md`, "Versioning"). The
 /// prologue's label does not follow them.
 pub const PROTO_MIN: u32 = 1;
-pub const PROTO_MAX: u32 = 2;
+pub const PROTO_MAX: u32 = 3;
 /// The version that adds access requests.
 pub const PROTO_ACCESS: u32 = 2;
+/// The version that adds `pair.saved`.
+pub const PROTO_PAIR_SAVED: u32 = 3;
 /// A relay frame, as text, never exceeds this.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// A session message, before encryption, never exceeds this.
@@ -423,7 +425,8 @@ pub struct ControlResult {
 }
 
 /// The session messages this build handles. The access messages and
-/// `expect.legacyId` belong to protocol 2 ([`SessionMessage::proto`]).
+/// `expect.legacyId` belong to protocol 2, `pair.saved` to protocol 3
+/// ([`SessionMessage::proto`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all_fields = "camelCase")]
 pub enum SessionMessage {
@@ -519,6 +522,9 @@ pub enum SessionMessage {
     PairReveal { n: String },
     #[serde(rename = "pair.confirm")]
     PairConfirm { accept: bool },
+    /// Protocol 3: this side durably wrote its pin.
+    #[serde(rename = "pair.saved")]
+    PairSaved,
     #[serde(rename = "pair.declined")]
     PairDeclined {
         reason: DeclineReason,
@@ -576,6 +582,7 @@ impl SessionMessage {
             Self::AccessRequest { .. } | Self::AccessCancel { .. } | Self::AccessResult { .. } => {
                 PROTO_ACCESS
             }
+            Self::PairSaved => PROTO_PAIR_SAVED,
             _ => 1,
         }
     }
@@ -723,7 +730,8 @@ mod tests {
         let ours = ProtoRange::OURS;
         assert!(ours.overlaps(&ProtoRange { min: 1, max: 3 }));
         assert!(ours.overlaps(&ProtoRange { min: 2, max: 3 }));
-        assert!(!ours.overlaps(&ProtoRange { min: 3, max: 4 }));
+        assert!(ours.overlaps(&ProtoRange { min: 3, max: 4 }));
+        assert!(!ours.overlaps(&ProtoRange { min: 4, max: 5 }));
     }
 
     #[test]
@@ -731,8 +739,17 @@ mod tests {
         let ours = ProtoRange::OURS;
         assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 2 }), Some(2));
         assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 1 }), Some(1));
-        assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 9 }), Some(2));
-        assert_eq!(ours.agreed(&ProtoRange { min: 3, max: 9 }), None);
+        assert_eq!(ours.agreed(&ProtoRange { min: 1, max: 9 }), Some(3));
+        assert_eq!(ours.agreed(&ProtoRange { min: 4, max: 9 }), None);
+    }
+
+    #[test]
+    fn pair_saved_uses_the_contract_name_and_takes_version_3() {
+        let saved = serde_json::to_value(SessionMessage::PairSaved).unwrap();
+        assert_eq!(saved, json!({"t": "pair.saved"}));
+        let parsed: SessionMessage = serde_json::from_value(saved).unwrap();
+        assert_eq!(parsed, SessionMessage::PairSaved);
+        assert_eq!(parsed.proto(), 3);
     }
 
     #[test]
