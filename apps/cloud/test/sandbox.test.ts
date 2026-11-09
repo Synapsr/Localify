@@ -79,12 +79,12 @@ describe("the sandbox environment", () => {
     }
   });
 
-  it("keeps production's add-ons off, with production's products", () => {
+  it("sells production's add-ons, with production's products", () => {
     expect(top.vars).toMatchObject({
       POLAR_API_BASE: "https://api.polar.sh",
       POLAR_PRODUCT_ADDON_MACHINE: "55653a9a-228d-4f23-8c66-266ec950ae7c",
       POLAR_PRODUCT_ADDON_URLS: "6385e584-ea00-4ac6-a838-7a5e0f3346c4",
-      ADDONS: "off",
+      ADDONS: "on",
     });
   });
 
