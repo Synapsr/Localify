@@ -19,7 +19,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt,
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -45,6 +45,8 @@ pub const BRIDGE_VERSION: u32 = 1;
 const LOCK_NAME: &str = "app-bridge.lock";
 /// The longest request line the app reads.
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
+/// Connections served at once; more are closed as they come.
+const MAX_HANDLERS: usize = 16;
 /// How long the app waits for a client's request line.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// A launch whose expiry is further away than this is out of bounds.
@@ -87,18 +89,39 @@ impl AppBridge {
             .with_context(|| format!("Failed to read '{}'", path.display()))?;
         let closed = Arc::new(AtomicBool::new(false));
         let accepting = Arc::clone(&closed);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                if accepting.load(Ordering::SeqCst) {
-                    return;
+        let handlers = Arc::new(AtomicUsize::new(0));
+        thread::Builder::new()
+            .name("app-bridge-accept".into())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    if accepting.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let Ok(stream) = stream else {
+                        continue;
+                    };
+                    // A bounded number of handlers, each on a thread that may fail
+                    // to start: one more connection is then closed, and the
+                    // listener goes on.
+                    if handlers.fetch_add(1, Ordering::SeqCst) >= MAX_HANDLERS {
+                        handlers.fetch_sub(1, Ordering::SeqCst);
+                        continue;
+                    }
+                    let launcher = Arc::clone(&launcher);
+                    let running = Arc::clone(&handlers);
+                    let spawned =
+                        thread::Builder::new()
+                            .name("app-bridge".into())
+                            .spawn(move || {
+                                let _slot = HandlerSlot(running);
+                                serve(stream, launcher.as_ref());
+                            });
+                    if spawned.is_err() {
+                        handlers.fetch_sub(1, Ordering::SeqCst);
+                    }
                 }
-                let Ok(stream) = stream else {
-                    continue;
-                };
-                let launcher = Arc::clone(&launcher);
-                thread::spawn(move || serve(stream, launcher.as_ref()));
-            }
-        });
+            })
+            .context("Failed to start the app bridge")?;
         Ok(Self {
             path,
             inode: (metadata.dev(), metadata.ino()),
@@ -109,6 +132,15 @@ impl AppBridge {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Frees a handler's place when its thread ends, a panic included.
+struct HandlerSlot(Arc<AtomicUsize>);
+
+impl Drop for HandlerSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -563,6 +595,37 @@ mod tests {
 
         assert_eq!(hello.bridge, BRIDGE_VERSION);
         assert_eq!(hello.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn connections_past_the_limit_are_closed_and_the_bridge_goes_on() {
+        let (_dir, bridge, _) = bridge();
+        // Silent clients hold every handler.
+        let silent: Vec<UnixStream> = (0..MAX_HANDLERS)
+            .map(|_| UnixStream::connect(bridge.path()).unwrap())
+            .collect();
+        wait_for(|| {
+            // One more is closed at once: it reads the end, not an answer.
+            let mut extra = UnixStream::connect(bridge.path()).unwrap();
+            extra
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let _ = extra.write_all(b"{\"cmd\":\"hello\"}\n");
+            let mut answer = String::new();
+            matches!(extra.read_to_string(&mut answer), Ok(0))
+        });
+
+        drop(silent);
+        // Their handlers end, and the bridge answers again.
+        wait_for(|| hello(bridge.path()).is_some());
+    }
+
+    fn wait_for(mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A data dir holding what a crashed app leaves: its bridge's folder,

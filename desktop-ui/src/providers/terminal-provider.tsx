@@ -494,9 +494,12 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
 
       await tauriClient.terminalClose({ sessionId });
       goneSessionIdsRef.current.add(sessionId);
-      const closedIndex = currentSessions.findIndex((candidate) => candidate.id === sessionId);
-      const next = currentSessions.filter((candidate) => candidate.id !== sessionId);
-      setSessions(next);
+      // From the sessions as they are now: a tab the bridge opened while the
+      // close was awaited stays.
+      const latestSessions = sessionsRef.current;
+      const closedIndex = latestSessions.findIndex((candidate) => candidate.id === sessionId);
+      const next = latestSessions.filter((candidate) => candidate.id !== sessionId);
+      setSessions((current) => current.filter((candidate) => candidate.id !== sessionId));
       setActiveSessionIdState((currentActive) => {
         if (currentActive !== sessionId) return currentActive;
         const neighbors = [next[closedIndex], next[closedIndex - 1]].filter(Boolean);
