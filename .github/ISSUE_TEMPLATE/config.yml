@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: User guide
+    url: https://github.com/Synapsr/Localify/blob/main/docs/README.md
+    about: How to install Localify, run your apps through it, and fix common problems.
   - name: Security vulnerability
     url: https://github.com/Synapsr/Localify/security/advisories/new
-    about: Please report security issues privately, not in public issues.
+    about: Report security issues privately, not in public issues.

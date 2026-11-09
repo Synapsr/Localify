@@ -1,193 +1,126 @@
-# Localify
+<p align="center">
+  <img src="desktop-ui/public/logo.png" alt="Localify" width="96" height="96">
+</p>
 
-Localify gives each local project a stable `.localify` domain with trusted
-HTTPS, so you open `https://my-app.localify` instead of remembering which
-`localhost` port a service landed on. OAuth callbacks, cookies, and CORS origins
-get a fixed HTTPS address, and coding agents reach your app at a URL that stays
-the same between runs.
+<h1 align="center">Localify</h1>
 
-It ships as a Rust CLI and daemon plus a Tauri desktop app. Everything that runs
-on your machine is free, with no limit on projects or domains.
+<p align="center">
+  Stable <code>https://&lt;name&gt;.localify</code> URLs for the apps you run on your machine.
+</p>
 
-## What it does
+<p align="center">
+  <a href="https://localify.dev">Website</a> ·
+  <a href="docs/README.md">User guide</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-- Routes memorable `.localify` domains to local services.
-- Generates and trusts local TLS certificates.
-- Supports HTTP, HTTPS, WebSockets, static directories, and wildcard domains.
-- Groups domains and services into projects with worktree-aware development
-  commands.
-- Shows request logs, project controls, and diagnostics in the desktop app.
-- Starts services in the desktop app's terminal from the CLI (`localify dev --in-app`),
-  and reads their output, status, and stops them from anywhere (`localify logs`,
-  `services status`, `stop`).
-- Gives coding agents every action through an MCP server (`localify mcp`), including
-  starting services in the app and removing the worktrees they are done with. See
-  [Coding agents](docs/README.md#coding-agents).
+Localify is a local development proxy. A Rust daemon runs its own DNS server, issues
+trusted certificates, and routes `https://journal.localify` to the port your dev server
+listens on. You stop remembering ports, and OAuth callbacks, cookies, CORS origins and
+webhooks get a fixed HTTPS address. Coding agents use the same URLs through Localify's
+MCP server.
+
+It ships as a command line tool for macOS and Linux and a desktop app for macOS.
+Everything that runs on your machine is free, with no limit on projects or domains.
+
+## A quick look
+
+```bash
+cd ~/code/journal
+localify dev
+```
+
+The first run in a folder sets the project up. Localify picks a free port, registers a
+domain such as `journal.localify`, allows it in Next.js `allowedDevOrigins` or Vite
+`server.allowedHosts` when the project has that config file, and starts the `dev`
+script with `PORT`, `HOST` and `LOCALIFY_URL` set. Then open `https://journal.localify`.
+
+In a monorepo, each app it detects gets its own domain (`web.journal.localify`,
+`api.journal.localify`). A Git worktree gets its own domains and ports, next to the main
+checkout.
 
 ## Install
 
-### Desktop app
+**macOS app.** Download it from [localify.dev](https://localify.dev), or take the DMG
+directly: <https://downloads.localify.dev/latest/localify.dmg>. On first launch it asks
+for your administrator password once, then sets up DNS, the certificate authority, the
+background service and the `localify` command. Updates install from Settings in the app.
 
-Download the app from [localify.dev](https://localify.dev). On first launch it
-asks for your administrator password once, then sets up HTTPS, DNS, and the
-daemon. The first time you need HTTPS in a browser, macOS asks you to confirm the
-certificate once.
-
-### CLI from source
-
-You need Rust stable, on macOS or Linux. On Linux, read
-[docs/linux.md](docs/linux.md) first.
+**Command line, macOS (Apple Silicon) or Linux (x86_64):**
 
 ```bash
-git clone https://github.com/Synapsr/Localify.git
-cd Localify
-cargo build --release --bin localify
-sudo install -m 755 target/release/localify /usr/local/bin/localify
+curl -fsSL https://localify.dev/install.sh | sh
 ```
 
-Set up the local certificate authority, DNS and the background service:
+The script checks the download's SHA-256, puts `localify` in `~/.local/bin`, then runs
+`localify install`, which asks for your password once. Run it again to update. On Linux
+you need systemd for the setup to run without root; read
+[Localify on Linux](docs/linux.md) first.
 
-```bash
-localify install
-```
+With a normal install (macOS, or Linux with systemd), nothing of Localify's runs as root
+afterwards, and only your machine can reach it until you run `localify lan enable`. On
+macOS, browsers trust Localify's HTTPS once you click Trust HTTPS in the app or run
+`localify trust`. `localify uninstall` removes everything.
 
-On macOS this asks for an administrator's approval once. After that nothing of
-Localify's runs as root: the daemon runs as you, starts at boot, and only this Mac
-can reach it unless you run `localify lan enable`. `localify uninstall --force`
-removes all of it, with one more approval.
+To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-HTTP and Node.js work right away. For HTTPS in browsers, run `localify trust` once
-and confirm in the macOS window.
+## The commands you'll use
 
-On Linux with systemd it works the same way: one `sudo` password at install, then nothing
-of Localify's runs as root. The install also trusts the certificate, so HTTPS works in
-tools that use the system store. See [Localify on Linux](docs/linux.md).
+| Command | What it does |
+| --- | --- |
+| `localify dev [service]` | Start a service at its `.localify` URL. Add `--in-app` to run it in the desktop app's terminal, or `--detach` to run it in the background. |
+| `localify services status` | Show what Localify started: running or not, PID, URL, port, since when, exit code. |
+| `localify logs <service> [-f]` | Print a service's output, from any folder. |
+| `localify stop <service>` / `restart <service>` | Stop a service, or restart it where it ran. |
+| `localify register <domain> --route "/=3000"` | Point a domain at any port, address or folder, without a project. |
 
-## Local CLI example
+`localify status` checks the daemon, and `localify --help` lists everything else. The
+[user guide](docs/README.md) covers projects, worktrees, routes, wildcards, [launch
+profiles](docs/launch-profiles.md), [Docker](docs/docker.md) and troubleshooting.
 
-With the setup above done, point a domain at a service on port 3000:
+## Coding agents
 
-```bash
-localify register my-app.localify --route "/=3000"
-localify status
-localify logs -f
-```
+`localify mcp` is an MCP server that gives Claude Code, Codex and Cursor every Localify
+action as a tool: start a service and get its URL, read its output, restart it, clean up
+a finished worktree. Each tool runs one `localify` command. `localify install`
+and the app connect the agents they find; `localify agent install` does it again later.
+See [Coding agents](docs/README.md#coding-agents).
 
-The app is now at `https://my-app.localify`. The
-[CLI reference](docs/README.md) covers routes, wildcards, and static directories.
+## Localify Cloud
 
-On macOS, `localify init-project my-app --yes` creates a project from the current
-folder instead, with `my-app.localify` as its default domain. Localify picks a
-free target port unless you provide one.
+The paid part. [Public URLs](docs/README.md#public-urls) open a project at
+`https://<name>.localify.fyi`, behind a password, so you can reach it from your phone or
+send it to someone. [Remote machines](docs/remote-machines.md) let you see, start and
+stop the services of your other machines from the app. Both need Localify Cloud Pro: `localify
+subscribe` starts it after a 7-day trial. Prices are on
+[localify.dev/pricing](https://localify.dev/pricing).
 
-## Telemetry
+## Privacy
 
-Official desktop builds send product analytics and error reports to PostHog.
-They send explicit events only, with no autocapture, and analytics events never
-include project names, domains, request logs, or local paths. Before an error
-report is sent, a filter removes URLs, file paths, `.localify` domains, and quoted
-names. It matches patterns, so it can miss something in an unusual message.
-Session replay is off by default, and you can turn it on in Settings. Builds
-without `VITE_PUBLIC_POSTHOG_TOKEN` send nothing, and the CLI and daemon have no
-telemetry.
-
-## Repository layout
-
-- `src/`: Rust library, CLI, daemon, DNS, TLS, routing, and project logic.
-- `src-tauri/`: Tauri desktop shell and commands.
-- `desktop-ui/`: React, Vite, and TanStack desktop interface.
-- `apps/web/`: Next.js website, [localify.dev](https://localify.dev). See
-  [apps/web/README.md](apps/web/README.md).
-
-## Development
-
-Requirements:
-
-- Rust stable
-- Node.js and pnpm
-- macOS for the primary desktop development flow
-
-Install JavaScript dependencies:
-
-```bash
-pnpm install
-```
-
-Build the CLI:
-
-```bash
-cargo build --bin localify
-```
-
-Run the desktop app with the development profile:
-
-```bash
-pnpm tauri:dev
-```
-
-Run the website:
-
-```bash
-pnpm web:dev
-```
-
-## Quality checks
-
-Rust changes must pass:
-
-```bash
-cargo fmt
-cargo clippy -- -D warnings
-cargo test
-```
-
-Desktop UI changes must also pass:
-
-```bash
-pnpm run typecheck
-```
-
-Website changes must pass:
-
-```bash
-pnpm web:typecheck
-pnpm web:build
-```
-
-## Documentation
-
-- [CLI reference](docs/README.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Desktop development](docs/desktop.md)
-- [Docker integration](docs/docker.md)
-- [Launch profiles](docs/launch-profiles.md)
-- [Linux setup](docs/linux.md)
-- [Technical overview](docs/localify-technical-overview.md)
-
-Design notes for features that are not built yet:
-
-- [Public URLs](docs/public-urls.md)
-- [Remote machines](docs/remote-machines.md)
+Official desktop builds send product analytics and error reports to PostHog. They send
+explicit events only, with no autocapture. Analytics events never include project names,
+domains, request logs or local paths. Before an error report leaves your Mac, a filter
+removes URLs, file paths, `.localify` domains and quoted names. It matches patterns, so
+it can miss something in an unusual message. Session replay is off unless you turn it on
+in Settings. Builds without `VITE_PUBLIC_POSTHOG_TOKEN` send nothing, and the CLI and the
+daemon have no telemetry.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started,
-including the [contributor license agreement](CLA.md) every contribution needs,
-and the [code of conduct](CODE_OF_CONDUCT.md). To report a vulnerability, see
-[SECURITY.md](SECURITY.md).
-
-## Acknowledgements
-
-Localify started as a fork of [Roxy](https://github.com/rbas/roxy) by
-Martin Voldřich, which provides the original DNS, TLS, and reverse proxy
-foundations.
+Bug reports, fixes and docs are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how
+to build, run and test Localify, and how pull requests work. Every contribution needs the
+[contributor license agreement](CLA.md), and everyone follows the
+[code of conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately, as
+[SECURITY.md](SECURITY.md) explains.
 
 ## License
 
-Localify is licensed under the [GNU Affero General Public License v3.0
-only](LICENSE). It derives from Roxy, whose code remains under the
-[MIT license](LICENSE-MIT).
+Localify is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
+It started as a fork of [Roxy](https://github.com/rbas/roxy) by Martin Voldřich, which
+provided the original DNS, TLS and reverse proxy foundations, and whose code remains
+under the [MIT license](LICENSE-MIT).
 
-The AGPL doesn't cover everything here. The Localify name and logo aren't
-licensed, and neither is the media in `apps/web/public/`. `progresive-blur.tsx` is adapted from Skiper UI.
-[NOTICE](NOTICE) has the details.
+The AGPL doesn't cover everything here. The Localify name and logo aren't licensed, and
+neither is the media in `apps/web/public/`. `progresive-blur.tsx` is adapted from Skiper
+UI. [NOTICE](NOTICE) has the details.
