@@ -1,41 +1,21 @@
 # Desktop App
 
-This repo now includes a minimal Tauri shell in `src-tauri/` backed by a
-structured Rust API in `src/desktop/`, plus a small Vite + TypeScript
-frontend shell in `desktop-ui/`.
+The desktop app is a Tauri shell in `src-tauri/` with a React interface in `desktop-ui/`.
+It holds no business logic: the interface calls Tauri commands, the commands call
+`localify::desktop::DesktopApi` (`src/desktop/`), and `DesktopApi` calls the same use cases
+as the CLI. [ARCHITECTURE.md](ARCHITECTURE.md) has the interface's rules.
 
-## What Exists
+## Where Things Live
 
-- A separate Tauri crate in `src-tauri/`
-- A Vite + TypeScript frontend scaffold in `desktop-ui/`
-- A `localify::desktop::DesktopApi` facade that exposes the current backend
-  actions as serializable DTOs for Tauri commands
-- A typed Tauri client and lightweight app store for future frontend work
-
-The goal is to keep future frontend work isolated from the core Rust
-application code.
-
-## Exposed Commands
-
-- `get_bootstrap`
-- `get_config`
-- `update_config`
-- `get_daemon_status`
-- `list_domains`
-- `install_localify`
-- `get_uninstall_preview`
-- `uninstall_localify`
-- `register_domain`
-- `unregister_domain`
-- `add_route`
-- `remove_route`
-- `list_routes`
-- `start_daemon`
-- `stop_daemon`
-- `restart_daemon`
-- `reload_daemon`
-- `trust_ca`
-- `read_logs`
+- `src-tauri/src/commands.rs`: the `#[tauri::command]` functions, one per action of
+  `DesktopApi`. With the remote commands in `remote.rs`, this is the list of what the
+  interface can ask for.
+- `src-tauri/src/terminal.rs`: shell and service tabs, which stream PTY output to the
+  interface as events.
+- `src-tauri/src/remote.rs`: the remote machine commands, and the daemon's streams
+  (output, controls, events) forwarded to the interface as events.
+- `src/desktop/`: `DesktopApi`, its DTOs (`dto.rs`), PTYs (`pty.rs`, `run_pty.rs`),
+  the shell environment, and the app bridge (`app_bridge.rs`).
 
 ## Development Notes
 
@@ -79,7 +59,7 @@ You can override both when running the desktop app:
 ```bash
 LOCALIFY_CONFIG_PATH=/custom/config.toml \
 LOCALIFY_CLI_PATH=/custom/path/to/localify \
-npm run tauri:dev
+pnpm tauri:dev
 ```
 
 ## Run It
@@ -386,15 +366,10 @@ pnpm desktop:postprocess-macos-bundles
 
 ## Frontend Files
 
-- `desktop-ui/src/lib/tauri-client.ts`
-  typed wrappers around Tauri `invoke`
-- `desktop-ui/src/state/app-store.ts`
-  lightweight state container for bootstrap/log data
-- `desktop-ui/src/types/localify.ts`
-  frontend DTO contracts mirroring the Rust desktop API
-- `desktop-ui/src/main.ts`
-  shell rendering and event wiring
-
-The current UI is still intentionally thin. The point of this scaffold is to
-make future frontend implementation a straight screen-building exercise
-instead of more infrastructure work.
+- `desktop-ui/src/lib/tauri-client.ts`: typed wrappers around Tauri `invoke`
+- `desktop-ui/src/lib/queries/`: TanStack Query hooks over those wrappers
+- `desktop-ui/src/types/localify.ts`: DTOs mirroring the Rust desktop API
+- `desktop-ui/src/routes/`: the screens (TanStack Router, file-based)
+- `desktop-ui/src/providers/`: app-wide state: terminal sessions, remote machines,
+  updates, hotkeys
+- `desktop-ui/src/main.tsx`: the entry point
