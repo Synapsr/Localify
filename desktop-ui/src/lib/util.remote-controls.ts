@@ -27,15 +27,42 @@ export type QuickAction =
   /** Why, with nothing to do from here. */
   | { kind: "message"; text: string };
 
-/** The switch a refusal asks for, when asking can fix it. */
-export function accessWants(code: string | undefined): RemoteAccessWants | null {
+/**
+ * The switch a refusal asks for, when asking can fix it. With `control` off, an action that
+ * would run in the background on the target asks for `backgroundStarts`, which turns
+ * `control` on too: asking for `control` alone would get `background_disabled` next, and a
+ * second request within 10 minutes is refused `too_many`.
+ */
+export function accessWants(
+  code: string | undefined,
+  background: boolean,
+): RemoteAccessWants | null {
   switch (code) {
     case "control_disabled":
-      return "control";
+      return background ? "backgroundStarts" : "control";
     case "background_disabled":
       return "backgroundStarts";
     default:
       return null;
+  }
+}
+
+/**
+ * Whether `action` would run in the background on the target (docs/remote-machines.md, "Who
+ * acts"): a start while its app is absent, or a restart of a background run.
+ */
+export function runsInBackground(
+  item: RemoteInventoryItemDto,
+  action: RemoteControlAction,
+  appRunning: boolean,
+): boolean {
+  switch (action) {
+    case "start":
+      return !appRunning;
+    case "restart":
+      return item.owner === "background";
+    case "stop":
+      return false;
   }
 }
 
@@ -48,14 +75,16 @@ export function accessCommand(wants: RemoteAccessWants): string {
 
 /**
  * What a control of `item` offers, from the snapshot's `controls` and the session's protocol
- * (docs/remote-machines.md, "Quick actions"). Restart of a run with a `legacyId`, and any
- * control refused `legacy_run` on one, is a relaunch, even when `controls.restart` allows it.
+ * (docs/remote-machines.md, "Quick actions"), and whether the target's app runs. Restart of a
+ * run with a `legacyId`, and any control refused `legacy_run` on one, is a relaunch, even when
+ * `controls.restart` allows it.
  */
 export function quickAction(
   item: RemoteInventoryItemDto,
   action: RemoteControlAction,
   proto: number | null,
   machine: string,
+  appRunning: boolean,
 ): QuickAction {
   const control = item.controls[action];
   const legacyId = item.run?.legacyId;
@@ -64,13 +93,13 @@ export function quickAction(
     // A relaunch is a restart: the restart's checks decide.
     const restart = item.controls.restart;
     if (restart.allowed) return { kind: "relaunch", access: null };
-    const wants = accessWants(restart.code);
+    const wants = accessWants(restart.code, runsInBackground(item, "restart", appRunning));
     if (wants) return { kind: "relaunch", access: wants };
     return { kind: "message", text: refusalText(restart.code, machine) };
   }
   if (control.allowed) return { kind: "run" };
   if (control.code === "legacy_run") return { kind: "message", text: `Relaunch it on ${machine}.` };
-  const wants = accessWants(control.code);
+  const wants = accessWants(control.code, runsInBackground(item, action, appRunning));
   if (wants) return proto === 2 ? { kind: "ask", wants } : { kind: "command", wants };
   return { kind: "message", text: refusalText(control.code, machine) };
 }
@@ -188,20 +217,45 @@ export function controlResultText(
       return { ok: true, text: `Started on ${machine}, not listening yet.` };
     case "failed":
       return { ok: false, text: result.message || `${service} failed to start on ${machine}.` };
+    // Never the last event: the daemon keeps asking until a result or `lost`.
     case "unknown":
-      return { ok: false, text: `Outcome unknown. Checking ${machine}…` };
+      return { ok: false, text: controlLostText("unknown", machine) };
     case "refused":
     case "conflict":
       return {
         ok: false,
-        text: remoteErrorMessage(result.code ?? result.outcome, machine, result.message),
+        text: controlRefusalText(result.code ?? result.outcome, machine, result.message),
       };
   }
 }
 
-/** A control whose outcome could not be learned: the list shows the state. */
-export function controlLostText(machine: string): string {
-  return `${machine} didn't say what happened. The list shows its current state.`;
+/**
+ * Why a control was refused, by the target or before it was sent: the connection state when
+ * no session was open, the target's checks otherwise. A control result carries no
+ * `retryAfter`.
+ */
+function controlRefusalText(code: string, machine: string, message: string): string {
+  switch (code) {
+    case "busy":
+      return `${remoteErrorMessage(code, machine, message)} Try again in a moment.`;
+    case "too_many":
+      return `This Mac sent ${machine} too many controls lately. Try again later.`;
+    default:
+      return remoteErrorMessage(code, machine, message);
+  }
+}
+
+/** A control whose outcome could not be learned, by the `lost` event's code. */
+export function controlLostText(code: string, machine: string): string {
+  switch (code) {
+    case "not_shared":
+      return `${machine} stopped sharing before it said what happened.`;
+    case "not_paired":
+    case "key_mismatch":
+      return `${machine} didn't say what happened. ${remoteErrorMessage(code, machine, "")}`;
+    default:
+      return `${machine} didn't say what happened. The list shows its current state.`;
+  }
 }
 
 /** An access request, as the card shows it. */

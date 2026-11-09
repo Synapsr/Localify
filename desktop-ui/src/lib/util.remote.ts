@@ -160,6 +160,12 @@ export function remoteErrorMessage(code: string, machine: string, fallback: stri
       return `Update Localify on ${machine}.`;
     case "peer_offline":
       return `${machine} is offline.`;
+    case "not_connected":
+      return `Not connected to ${machine}.`;
+    case "connecting":
+      return `Still connecting to ${machine}. Try again once it is connected.`;
+    case "not_responding":
+      return `${machine} isn't responding right now.`;
     case "revoked":
       return `${machine} was removed from the account.`;
     case "unpaired":

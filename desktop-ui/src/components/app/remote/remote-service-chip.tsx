@@ -60,10 +60,12 @@ export function RemoteServiceChip({ item, machineName, onOutput }: RemoteService
   const [card, setCard] = useState<RemoteControlAction | null>(null);
   const toggle: RemoteControlAction = item.process === "running" ? "stop" : "start";
   const controlOff = controls.down ?? controls.inFlight(item)?.text ?? null;
-  const restart = quickAction(item, "restart", controls.proto, machineName);
-  const cardQuick = card ? quickAction(item, card, controls.proto, machineName) : null;
+  const quickFor = (action: RemoteControlAction) =>
+    quickAction(item, action, controls.proto, machineName, controls.appRunning);
+  const restart = quickFor("restart");
+  const cardQuick = card ? quickFor(card) : null;
   const press = (action: RemoteControlAction) => {
-    const quick = quickAction(item, action, controls.proto, machineName);
+    const quick = quickFor(action);
     if (quick.kind === "run") controls.run(item, action);
     // Restart of a legacy run goes straight to its confirmation.
     else if (quick.kind === "relaunch" && action === "restart") controls.relaunch(item);

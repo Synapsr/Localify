@@ -8,6 +8,7 @@ import {
   accessCommand,
   accessRequestTitle,
   accessEventView,
+  controlLostText,
   controlProgressText,
   controlRequest,
   controlResultText,
@@ -65,8 +66,8 @@ function legacy(controls: RemoteInventoryItemDto["controls"]): RemoteInventoryIt
 
 test("an allowed control runs; a disabled one asks on protocol 2", () => {
   const ready = item({ controls: { start: allowed, stop: allowed, restart: allowed } });
-  assert.deepEqual(quickAction(ready, "start", 2, "B"), { kind: "run" });
-  assert.deepEqual(quickAction(item(), "start", 2, "B"), { kind: "ask", wants: "control" });
+  assert.deepEqual(quickAction(ready, "start", 2, "B", true), { kind: "run" });
+  assert.deepEqual(quickAction(item(), "start", 2, "B", true), { kind: "ask", wants: "control" });
   const background = item({
     controls: {
       start: refused("background_disabled"),
@@ -74,14 +75,59 @@ test("an allowed control runs; a disabled one asks on protocol 2", () => {
       restart: refused("background_disabled"),
     },
   });
-  assert.deepEqual(quickAction(background, "start", 2, "B"), {
+  assert.deepEqual(quickAction(background, "start", 2, "B", true), {
     kind: "ask",
     wants: "backgroundStarts",
   });
 });
 
+test("with controls off, an action that runs in the background asks for background starts", () => {
+  // A start while B's app is absent runs in the background: one request for both switches.
+  assert.deepEqual(quickAction(item(), "start", 2, "B", false), {
+    kind: "ask",
+    wants: "backgroundStarts",
+  });
+  assert.deepEqual(quickAction(item(), "start", 1, "B", false), {
+    kind: "command",
+    wants: "backgroundStarts",
+  });
+  // A restart of a background run, whether or not the app runs.
+  const background = item({ owner: "background", process: "running" });
+  assert.deepEqual(quickAction(background, "restart", 2, "B", true), {
+    kind: "ask",
+    wants: "backgroundStarts",
+  });
+  // A stop starts nothing.
+  assert.deepEqual(quickAction(background, "stop", 2, "B", false), {
+    kind: "ask",
+    wants: "control",
+  });
+  // A restart of an app run goes through the app (and is `owner_gone` without it).
+  const inApp = item({ owner: "app", process: "running" });
+  assert.deepEqual(quickAction(inApp, "restart", 2, "B", false), {
+    kind: "ask",
+    wants: "control",
+  });
+  // The relaunch of a legacy `dev --detach` run is a background restart.
+  const detached: RemoteInventoryItemDto = {
+    ...legacy({
+      start: refused("control_disabled"),
+      stop: refused("control_disabled"),
+      restart: refused("control_disabled"),
+    }),
+    owner: "background",
+  };
+  assert.deepEqual(quickAction(detached, "restart", 2, "B", true), {
+    kind: "relaunch",
+    access: "backgroundStarts",
+  });
+});
+
 test("a target of protocol 1 only gets the command to run there", () => {
-  assert.deepEqual(quickAction(item(), "start", 1, "B"), { kind: "command", wants: "control" });
+  assert.deepEqual(quickAction(item(), "start", 1, "B", true), {
+    kind: "command",
+    wants: "control",
+  });
   assert.equal(accessCommand("control"), "localify machines settings --control on");
   assert.equal(
     accessCommand("backgroundStarts"),
@@ -99,14 +145,14 @@ test("other refusals say why, with nothing to do", () => {
       restart: refused("not_owned"),
     },
   });
-  assert.deepEqual(quickAction(terminal, "stop", 2, "B"), {
+  assert.deepEqual(quickAction(terminal, "stop", 2, "B", true), {
     kind: "message",
     text: "This runs in a terminal on B. Stop it there.",
   });
   const gone = item({
     controls: { start: allowed, stop: allowed, restart: refused("owner_gone") },
   });
-  assert.deepEqual(quickAction(gone, "restart", 2, "B"), {
+  assert.deepEqual(quickAction(gone, "restart", 2, "B", true), {
     kind: "message",
     text: "Stop it, then start it again.",
   });
@@ -121,7 +167,7 @@ test("a legacy run without a legacyId can only be relaunched on its machine", ()
       restart: refused("legacy_run"),
     },
   });
-  assert.deepEqual(quickAction(unproven, "stop", 2, "B"), {
+  assert.deepEqual(quickAction(unproven, "stop", 2, "B", true), {
     kind: "message",
     text: "Relaunch it on B.",
   });
@@ -133,15 +179,15 @@ test("a legacy run with a legacyId is relaunched, asking for access first when n
     stop: refused("legacy_run"),
     restart: allowed,
   });
-  assert.deepEqual(quickAction(open, "stop", 2, "B"), { kind: "relaunch", access: null });
+  assert.deepEqual(quickAction(open, "stop", 2, "B", true), { kind: "relaunch", access: null });
   // Restart of such a run is a relaunch even when restart is allowed.
-  assert.deepEqual(quickAction(open, "restart", 2, "B"), { kind: "relaunch", access: null });
+  assert.deepEqual(quickAction(open, "restart", 2, "B", true), { kind: "relaunch", access: null });
   const closed = legacy({
     start: refused("control_disabled"),
     stop: refused("control_disabled"),
     restart: refused("control_disabled"),
   });
-  assert.deepEqual(quickAction(closed, "restart", 2, "B"), {
+  assert.deepEqual(quickAction(closed, "restart", 2, "B", true), {
     kind: "relaunch",
     access: "control",
   });
@@ -150,7 +196,7 @@ test("a legacy run with a legacyId is relaunched, asking for access first when n
     stop: refused("legacy_run"),
     restart: refused("background_disabled"),
   });
-  assert.deepEqual(quickAction(background, "stop", 2, "B"), {
+  assert.deepEqual(quickAction(background, "stop", 2, "B", true), {
     kind: "relaunch",
     access: "backgroundStarts",
   });
@@ -159,12 +205,12 @@ test("a legacy run with a legacyId is relaunched, asking for access first when n
     stop: refused("legacy_run"),
     restart: refused("owner_gone"),
   });
-  assert.deepEqual(quickAction(appGone, "restart", 2, "B"), {
+  assert.deepEqual(quickAction(appGone, "restart", 2, "B", true), {
     kind: "message",
     text: "Stop it, then start it again.",
   });
   // Protocol 1 cannot name a legacy run.
-  assert.deepEqual(quickAction(open, "restart", 1, "B"), {
+  assert.deepEqual(quickAction(open, "restart", 1, "B", true), {
     kind: "message",
     text: "Update Localify on B.",
   });
@@ -267,10 +313,6 @@ test("a control's progress and result read as the contract says", () => {
     { ok: false, text: "B changed in the meantime." },
   );
   assert.equal(
-    controlResultText({ outcome: "refused", code: "busy", message: "x" }, "stop", "web", "B").text,
-    "Something else is starting or stopping it on B.",
-  );
-  assert.equal(
     controlResultText(
       { outcome: "failed", code: "failed", message: "exit 1: boom" },
       "start",
@@ -278,6 +320,46 @@ test("a control's progress and result read as the contract says", () => {
       "B",
     ).text,
     "exit 1: boom",
+  );
+});
+
+test("a control refused before it was sent, or lost, says why", () => {
+  const refusedWith = (code: string, message = "") =>
+    controlResultText({ outcome: "refused", code, message }, "start", "web", "B").text;
+  // Without an open session: the connection state.
+  assert.equal(refusedWith("not_connected"), "Not connected to B.");
+  assert.equal(refusedWith("connecting"), "Still connecting to B. Try again once it is connected.");
+  assert.equal(refusedWith("not_responding"), "B isn't responding right now.");
+  assert.equal(refusedWith("peer_offline"), "B is offline.");
+  assert.equal(refusedWith("not_paired"), "This Mac is not paired with B. Pair them again.");
+  assert.equal(
+    refusedWith("unavailable", "The relay dropped a frame; try again in 3 s."),
+    "The relay dropped a frame; try again in 3 s.",
+  );
+  assert.equal(
+    refusedWith("busy"),
+    "Something else is starting or stopping it on B. Try again in a moment.",
+  );
+  assert.equal(
+    refusedWith("too_many"),
+    "This Mac sent B too many controls lately. Try again later.",
+  );
+  // `unknown` is never the last event; were it, the toast would not stay on "Checking B…".
+  assert.equal(
+    controlResultText({ outcome: "unknown", code: null, message: "" }, "stop", "web", "B").text,
+    "B didn't say what happened. The list shows its current state.",
+  );
+  assert.equal(
+    controlLostText("not_shared", "B"),
+    "B stopped sharing before it said what happened.",
+  );
+  assert.equal(
+    controlLostText("timeout", "B"),
+    "B didn't say what happened. The list shows its current state.",
+  );
+  assert.equal(
+    controlLostText("key_mismatch", "B"),
+    "B didn't say what happened. Don't trust this machine until you pair it again.",
   );
 });
 

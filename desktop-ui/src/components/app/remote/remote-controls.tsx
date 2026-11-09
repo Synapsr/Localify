@@ -65,6 +65,8 @@ interface RemoteControlsValue {
   proto: number | null;
   /** Why controls are off: the session is down, and nothing is queued. */
   down: string | null;
+  /** Whether the target's app runs: a start without it runs in the background there. */
+  appRunning: boolean;
   inFlight: (item: RemoteInventoryItemDto) => ControlInFlight | null;
   run: (item: RemoteInventoryItemDto, action: RemoteControlAction) => void;
   access: AccessRequestState | null;
@@ -121,12 +123,14 @@ export function RemoteControlsProvider({
   const live = useRef({ machineName, appRunning });
   live.current = { machineName, appRunning };
 
-  // A machine left on screen keeps nothing open with it.
+  // A machine left on screen keeps nothing open with it, its request's toast included: the
+  // request's events are dropped from here on, so nothing else would close it.
   useEffect(
     () => () => {
       askSeq.current += 1;
       closeAccess.current?.();
       closeAccess.current = null;
+      toast.dismiss(`remote-access:${machineId}`);
     },
     [machineId],
   );
@@ -175,7 +179,7 @@ export function RemoteControlsProvider({
           }
           case "lost":
             ended = true;
-            settle(false, controlLostText(name));
+            settle(false, controlLostText(event.code, name));
             return;
         }
       };
@@ -184,7 +188,7 @@ export function RemoteControlsProvider({
         {
           onData: onEvent,
           onEnd: (error) => {
-            if (!ended) settle(false, error ?? controlLostText(live.current.machineName));
+            if (!ended) settle(false, error ?? controlLostText("closed", live.current.machineName));
           },
         },
       ).catch((error: unknown) =>
@@ -296,7 +300,7 @@ export function RemoteControlsProvider({
       toast.error(down);
       return;
     }
-    const next = quickAction(item, "restart", proto, machineName);
+    const next = quickAction(item, "restart", proto, machineName, appRunning);
     if (next.kind !== "relaunch") {
       toast.error(next.kind === "message" ? next.text : `${machineName} changed in the meantime.`);
       return;
@@ -319,7 +323,7 @@ export function RemoteControlsProvider({
       toast.error(`This service no longer exists on ${machineName}.`);
       return;
     }
-    const next = quickAction(item, "restart", proto, machineName);
+    const next = quickAction(item, "restart", proto, machineName, appRunning);
     if (next.kind === "relaunch" && next.access === null) {
       setPending(null);
       if (relaunchStillConfirmed(pending.confirmed, item)) run(item, "restart", pending.confirmed);
@@ -340,7 +344,7 @@ export function RemoteControlsProvider({
             `${machineName} changed in the meantime.`,
           ),
     );
-  }, [items, pending, proto, machineName, run, down]);
+  }, [items, pending, proto, machineName, appRunning, run, down]);
 
   useEffect(() => {
     if (!pending?.granted) return;
@@ -356,6 +360,7 @@ export function RemoteControlsProvider({
       machineName,
       proto,
       down,
+      appRunning,
       inFlight: (item) => controls[serviceKey(item)] ?? null,
       run: (item, action) => run(item, action),
       access,
@@ -368,7 +373,7 @@ export function RemoteControlsProvider({
       dismissAccess,
       relaunch: setConfirming,
     }),
-    [machineName, proto, down, controls, run, access, ask, cancelAsk, dismissAccess],
+    [machineName, proto, down, appRunning, controls, run, access, ask, cancelAsk, dismissAccess],
   );
 
   return (

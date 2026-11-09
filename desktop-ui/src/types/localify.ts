@@ -1228,9 +1228,10 @@ export type RemoteControlOutcome =
   | "unknown";
 
 /**
- * What `remote_control` streams: `sent`, its progress, then its result. A
- * lost session is `unknown`, followed by the result `control.status` gives,
- * or `lost`.
+ * What `remote_control` streams: `sent`, its progress, then its result.
+ * Without an open session, or when it could not be sent, only a `refused`
+ * result. A lost session is `unknown`, followed by the result
+ * `control.status` gives, or `lost`; `unknown` is never the last event.
  */
 export type RemoteControlEventDto =
   | { event: "sent"; requestId: string }
