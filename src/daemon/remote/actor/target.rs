@@ -821,7 +821,11 @@ impl Actor {
             return;
         };
         let follow = &mut served.follows[index];
-        let room = (follow.window - follow.unacked()).min(u64::from(MAX_READ_BYTES));
+        // The window is the viewer's: never trusted to cover what is unacked.
+        let room = follow
+            .window
+            .saturating_sub(follow.unacked())
+            .min(u64::from(MAX_READ_BYTES));
         let room = usize::try_from(room).unwrap_or(0);
         let data = match read_fitting(&follow.dir, id, &follow.run_id, follow.next, room) {
             Ok(data) => data,

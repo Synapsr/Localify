@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use super::actor::WINDOW;
+use super::actor::{Tapped, WINDOW};
 use super::{Command, Failure, RemoteLink, TapEvent, TapRequest, lease_refused};
 use crate::infrastructure::launch_rev::random_bytes;
 use crate::infrastructure::remote::wire::{
@@ -171,9 +171,7 @@ impl ControlEvent {
 /// An access request this machine waits on. Dropping it sends
 /// `access.cancel` when the target still waits.
 pub struct Asking {
-    link: RemoteLink,
-    peer: String,
-    id: String,
+    _tapped: Tapped,
     events: mpsc::Receiver<TapEvent>,
     announced: bool,
     ended: bool,
@@ -209,12 +207,6 @@ impl Asking {
             None => lost(closed()),
         };
         Some(event)
-    }
-}
-
-impl Drop for Asking {
-    fn drop(&mut self) {
-        self.link.untap(&self.peer, &self.id);
     }
 }
 
@@ -256,19 +248,6 @@ fn control_answer(answer: SessionMessage) -> ControlEvent {
                 run_id: None,
             }
         }
-    }
-}
-
-/// Ends a request when dropped, whether it was answered or abandoned.
-struct Untap<'a> {
-    link: &'a RemoteLink,
-    peer: &'a str,
-    id: &'a str,
-}
-
-impl Drop for Untap<'_> {
-    fn drop(&mut self) {
-        self.link.untap(self.peer, self.id);
     }
 }
 
@@ -416,8 +395,8 @@ fn retry_in(failure: &Failure, failures: u32) -> Duration {
 /// An open follow. Dropping it unfollows.
 pub struct Following {
     link: RemoteLink,
+    tapped: Tapped,
     peer: String,
-    id: String,
     events: mpsc::Receiver<TapEvent>,
     /// Started inside the run's output: its first line is a piece.
     skip_piece: bool,
@@ -462,24 +441,20 @@ impl Following {
     pub fn shown(&mut self, next: u64) {
         if next.saturating_sub(self.acked) >= ACK_EVERY {
             self.acked = next;
-            self.link.ack(&self.peer, &self.id, next);
+            self.link.ack(&self.peer, self.tapped.id(), next);
         }
-    }
-}
-
-impl Drop for Following {
-    fn drop(&mut self) {
-        self.link.untap(&self.peer, &self.id);
     }
 }
 
 impl RemoteLink {
     /// Carries one request to `peer`; its answers come on the receiver.
+    /// Dropping the [`Tapped`] ends it, and so does dropping this future
+    /// at any point.
     async fn tap(
         &self,
         peer: &str,
         request: TapRequest,
-    ) -> Result<(String, mpsc::Receiver<TapEvent>), Failure> {
+    ) -> Result<(Tapped, mpsc::Receiver<TapEvent>), Failure> {
         let conn = self
             .connected()
             .map_err(|error| Failure::new("unavailable", error.to_string()))?;
@@ -495,17 +470,8 @@ impl RemoteLink {
             reply,
         };
         conn.commands.send(command).map_err(|_| closed())?;
-        let id = answer.await.map_err(|_| closed())??;
-        Ok((id, receiver))
-    }
-
-    fn untap(&self, peer: &str, id: &str) {
-        if let Some(conn) = self.shared.conn() {
-            let _ = conn.commands.send(Command::Untap {
-                peer: peer.to_string(),
-                id: id.to_string(),
-            });
-        }
+        let tapped = answer.await.map_err(|_| closed())??;
+        Ok((tapped, receiver))
     }
 
     fn ack(&self, peer: &str, id: &str, offset: u64) {
@@ -533,7 +499,7 @@ impl RemoteLink {
     pub async fn inventory(&self, peer: &str) -> Result<RemoteInventory, Failure> {
         let cached = self.cached(peer);
         let have = cached.as_ref().map(RemoteInventory::have);
-        let (id, mut events) = self
+        let (tapped, mut events) = self
             .tap(peer, TapRequest::Inventory { watch: false, have })
             .await?;
         let mut pages = Pages::default();
@@ -558,7 +524,7 @@ impl RemoteLink {
             }
         })
         .await;
-        self.untap(peer, &id);
+        drop(tapped);
         answer.unwrap_or_else(|_| Err(Failure::new("timeout", "The machine did not answer.")))
     }
 
@@ -606,7 +572,7 @@ impl RemoteLink {
     ) -> Option<Failure> {
         let cached = self.cached(peer);
         let have = cached.as_ref().map(RemoteInventory::have);
-        let (id, mut events) = match self
+        let (tapped, mut events) = match self
             .tap(peer, TapRequest::Inventory { watch: true, have })
             .await
         {
@@ -642,7 +608,7 @@ impl RemoteLink {
                 break None;
             }
         };
-        self.untap(peer, &id);
+        drop(tapped);
         failure
     }
 
@@ -660,11 +626,11 @@ impl RemoteLink {
             offset: offset.unwrap_or(0),
             tail: offset.is_none().then_some(tail),
         };
-        let (id, events) = self.tap(peer, request).await?;
+        let (tapped, events) = self.tap(peer, request).await?;
         Ok(Following {
             link: self.clone(),
+            tapped,
             peer: peer.to_string(),
-            id,
             events,
             skip_piece: offset.is_none(),
             acked: 0,
@@ -675,11 +641,9 @@ impl RemoteLink {
     /// decides; this waits for the answer until the returned request is
     /// dropped, which cancels it.
     pub async fn access(&self, peer: &str, wants: AccessWants) -> Result<Asking, Failure> {
-        let (id, events) = self.tap(peer, TapRequest::Access { wants }).await?;
+        let (tapped, events) = self.tap(peer, TapRequest::Access { wants }).await?;
         Ok(Asking {
-            link: self.clone(),
-            peer: peer.to_string(),
-            id,
+            _tapped: tapped,
             events,
             announced: false,
             ended: false,
@@ -752,7 +716,7 @@ impl RemoteLink {
             request_id: request_id.to_string(),
             expect: ask.expect,
         };
-        let (id, mut events) = match self.tap(peer, request).await {
+        let (tapped, mut events) = match self.tap(peer, request).await {
             Ok(tap) => tap,
             // Never sent: refused, with nothing to reconcile.
             Err(failure) => {
@@ -764,7 +728,6 @@ impl RemoteLink {
             request_id: request_id.to_string(),
         };
         if sender.send(sent).await.is_err() {
-            self.untap(peer, &id);
             return None;
         }
         let deadline = tokio::time::Instant::now() + CONTROL_WAIT;
@@ -784,7 +747,7 @@ impl RemoteLink {
                 break None;
             }
         };
-        self.untap(peer, &id);
+        drop(tapped);
         failure
     }
 
@@ -831,12 +794,7 @@ impl RemoteLink {
         let request = TapRequest::ControlStatus {
             request_id: request_id.to_string(),
         };
-        let (id, mut events) = self.tap(peer, request).await?;
-        let _untap = Untap {
-            link: self,
-            peer,
-            id: &id,
-        };
+        let (_tapped, mut events) = self.tap(peer, request).await?;
         let answer = tokio::time::timeout(ANSWER_WAIT, events.recv()).await;
         match answer {
             Ok(Some(TapEvent::Answer(answer))) => Ok(control_answer(answer)),
@@ -859,9 +817,9 @@ impl RemoteLink {
             offset,
             max_bytes,
         };
-        let (id, mut events) = self.tap(peer, request).await?;
+        let (tapped, mut events) = self.tap(peer, request).await?;
         let answer = tokio::time::timeout(ANSWER_WAIT, events.recv()).await;
-        self.untap(peer, &id);
+        drop(tapped);
         match answer {
             Ok(Some(TapEvent::Answer(SessionMessage::OutputData(mut data)))) => {
                 clean_output(&mut data);

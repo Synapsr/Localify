@@ -478,7 +478,7 @@ fn read_with(dir: &Path, offset: u64, max_bytes: usize, segment_size: u64) -> Re
             bail!("Offset {offset} is past the {total} bytes this run has written.");
         }
         let start = offset.max(extent.first);
-        let wanted = (total - start).min(max_bytes);
+        let wanted = total.saturating_sub(start).min(max_bytes);
         match read_bytes(dir, start, wanted, segment_size) {
             Ok(bytes) => {
                 let mut read = to_lines(start, &bytes, total, end.as_ref());

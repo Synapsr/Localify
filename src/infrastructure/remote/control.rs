@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow};
 
 use super::requests::{
-    Fingerprint, LinkedLaunch, Published, Report, RequestEntries, RequestEntry, Stopped,
-    SweepCursor, Via,
+    Fingerprint, LinkedLaunch, Published, Report, RequestEntries, RequestEntry, Stopped, SweepWalk,
+    Via,
 };
 use super::wire::{Control, ControlAction, ControlOutcome, ControlPhase};
 use crate::application::inventory::{
@@ -58,8 +58,8 @@ const MESSAGE_BUDGET: usize = 16 * 1024;
 /// each one is kept 24 hours.
 const ENTRIES_PER_WINDOW: usize = 20;
 const ENTRY_WINDOW: Duration = Duration::from_secs(10 * 60);
-/// Entries past their retention are swept at most this often, looking at
-/// this many entries a pass.
+/// Entries past their retention are swept at most this often, reading this
+/// many directory entries a pass, peer folders included.
 const SWEEP_EVERY: Duration = Duration::from_secs(10 * 60);
 const SWEEP_BUDGET: usize = 512;
 
@@ -186,11 +186,12 @@ pub struct ControlRunner {
     swept: Mutex<SweepState>,
 }
 
-/// When the last sweep ran, and where the next one goes on.
+/// When the last sweep ran, and where the next one goes on: its walk stays
+/// open between passes, two folders at most.
 #[derive(Default)]
 struct SweepState {
     at: Option<Instant>,
-    resume: Option<SweepCursor>,
+    resume: Option<SweepWalk>,
 }
 
 /// `too_many` when `peer` created [`ENTRIES_PER_WINDOW`] entries within
@@ -344,8 +345,9 @@ impl ControlRunner {
     }
 
     /// Sweeps the entries past their retention, at most every
-    /// [`SWEEP_EVERY`] and [`SWEEP_BUDGET`] entries a pass, on from where
-    /// the last pass stopped: a publication never scans them all.
+    /// [`SWEEP_EVERY`] and [`SWEEP_BUDGET`] directory entries a pass, on
+    /// from where the last pass stopped: a publication never scans them
+    /// all, and no pass lists a folder whole.
     fn sweep_now_and_then(&self) {
         let now = Instant::now();
         let from = {
@@ -359,7 +361,7 @@ impl ControlRunner {
             swept.at = Some(now);
             swept.resume.take()
         };
-        let pass = self.entries.sweep(from.as_ref(), SWEEP_BUDGET);
+        let pass = self.entries.sweep(from, SWEEP_BUDGET);
         lock(&self.swept).resume = pass.ok().and_then(|pass| pass.resume);
     }
 

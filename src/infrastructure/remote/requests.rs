@@ -275,67 +275,75 @@ impl RequestEntries {
         Ok(entry)
     }
 
-    /// Removes the entries past their retention, looking at `budget`
-    /// entries at most, in name order, after `from`. The pass says where
-    /// the next one goes on, `None` once it reached the end, so a large
-    /// folder is swept over several passes rather than walked whole.
-    pub fn sweep(&self, from: Option<&SweepCursor>, budget: usize) -> Result<SweepPass> {
+    /// Removes the entries past their retention, reading `budget`
+    /// directory entries at most: each peer folder costs one, and each
+    /// file in it one. `from` is where the last pass stopped, an open walk
+    /// of the folders in the order the file system lists them, so nothing
+    /// is listed whole or sorted. The pass returns the walk to go on with,
+    /// `None` once it reached the end: the next pass starts over.
+    pub fn sweep(&self, from: Option<SweepWalk>, budget: usize) -> Result<SweepPass> {
         let mut pass = SweepPass {
             removed: 0,
+            looked: 0,
             resume: None,
         };
-        let peers = match sorted_names(&self.dir) {
-            Ok(peers) => peers,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(pass),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("Failed to read '{}'", self.dir.display()));
-            }
+        let mut walk = match from {
+            Some(walk) => walk,
+            None => match fs::read_dir(&self.dir) {
+                Ok(peers) => SweepWalk { peers, peer: None },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(pass),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("Failed to read '{}'", self.dir.display()));
+                }
+            },
         };
-        let mut looked = 0;
-        for peer in peers {
-            if from.is_some_and(|from| peer < from.peer) {
+        while pass.looked < budget {
+            pass.looked += 1;
+            if let Some((dir, names)) = walk.peer.as_mut() {
+                match names.next() {
+                    Some(Ok(entry)) => {
+                        let path = dir.join(entry.file_name());
+                        if is_stale(&path) && fs::remove_file(&path).is_ok() {
+                            pass.removed += 1;
+                        }
+                    }
+                    Some(Err(_)) => {}
+                    None => walk.peer = None,
+                }
                 continue;
             }
-            let Ok(names) = sorted_names(&self.dir.join(&peer)) else {
-                continue;
-            };
-            for name in names {
-                if from.is_some_and(|from| peer == from.peer && name <= from.name) {
-                    continue;
+            match walk.peers.next() {
+                Some(Ok(entry)) => {
+                    let dir = entry.path();
+                    walk.peer = fs::read_dir(&dir).ok().map(|names| (dir, names));
                 }
-                if looked == budget {
-                    return Ok(pass);
-                }
-                looked += 1;
-                let path = self.dir.join(&peer).join(&name);
-                if is_stale(&path) && fs::remove_file(&path).is_ok() {
-                    pass.removed += 1;
-                }
-                pass.resume = Some(SweepCursor {
-                    peer: peer.clone(),
-                    name,
-                });
+                Some(Err(_)) => {}
+                None => return Ok(pass),
             }
         }
-        pass.resume = None;
+        pass.resume = Some(walk);
         Ok(pass)
     }
 }
 
-/// Where a sweep goes on: after this entry of this peer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SweepCursor {
-    peer: String,
-    name: String,
+/// Where a sweep goes on: the folders as the file system lists them, read
+/// up to where the last pass stopped. An entry there for the whole walk is
+/// listed once; one added or removed meanwhile may be or not.
+#[derive(Debug)]
+pub struct SweepWalk {
+    peers: fs::ReadDir,
+    peer: Option<(PathBuf, fs::ReadDir)>,
 }
 
 /// What one sweep did.
 #[derive(Debug)]
 pub struct SweepPass {
     pub removed: usize,
+    /// How many directory entries it read: never more than its budget.
+    pub looked: usize,
     /// Where the next pass goes on, while entries are left to look at.
-    pub resume: Option<SweepCursor>,
+    pub resume: Option<SweepWalk>,
 }
 
 /// An entry past its retention, or a temporary file left over an hour.
@@ -344,16 +352,6 @@ fn is_stale(path: &Path) -> bool {
     extension.is_some_and(|extension| extension == "json") && is_past_retention(path)
         || extension.is_some_and(|extension| extension == "tmp")
             && is_older_than(path, Duration::from_secs(3600))
-}
-
-/// The names in `dir`, sorted, so a sweep can go on where it stopped.
-fn sorted_names(dir: &Path) -> io::Result<Vec<String>> {
-    let mut names: Vec<String> = fs::read_dir(dir)?
-        .flatten()
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect();
-    names.sort();
-    Ok(names)
 }
 
 /// A machine id as a folder name: letters, digits, `-` and `_`.
@@ -562,37 +560,73 @@ mod tests {
         assert_eq!(entries.sweep(None, usize::MAX).unwrap().removed, 1);
     }
 
-    /// A sweep looks at a bounded number of entries a pass, and the next
-    /// pass goes on where it stopped, across peers, until every stale entry
-    /// went.
+    /// Makes `peer`'s entry for `request` one past its retention.
+    fn stale(entries: &RequestEntries, dir: &Path, peer: &str, request: &str) {
+        entries
+            .publish(peer, request, &entry(ControlAction::Stop))
+            .unwrap();
+        File::options()
+            .write(true)
+            .open(dir.join(peer).join(format!("{request}.json")))
+            .unwrap()
+            .set_modified(SystemTime::now() - RETENTION - Duration::from_secs(1))
+            .unwrap();
+    }
+
+    /// Every pass of a sweep from the start to its end, with `budget`.
+    fn passes(entries: &RequestEntries, budget: usize) -> Vec<SweepPass> {
+        let mut passes = vec![entries.sweep(None, budget).unwrap()];
+        while let Some(walk) = passes.last_mut().unwrap().resume.take() {
+            passes.push(entries.sweep(Some(walk), budget).unwrap());
+        }
+        passes
+    }
+
+    /// A sweep reads a bounded number of directory entries a pass, and the
+    /// next pass goes on where it stopped, across peers, until every stale
+    /// entry went.
     #[test]
     fn a_sweep_has_a_budget_and_goes_on_where_it_stopped() {
         let dir = tempfile::tempdir().unwrap();
         let entries = RequestEntries::new(dir.path().to_path_buf());
-        let old = SystemTime::now() - RETENTION - Duration::from_secs(1);
         for (peer, n) in [("mA", 0), ("mA", 1), ("mA", 2), ("mB", 3), ("mB", 4)] {
-            let request = format!("{}{n}", "C".repeat(21));
-            entries
-                .publish(peer, &request, &entry(ControlAction::Stop))
-                .unwrap();
-            File::options()
-                .write(true)
-                .open(dir.path().join(peer).join(format!("{request}.json")))
-                .unwrap()
-                .set_modified(old)
-                .unwrap();
+            stale(
+                &entries,
+                dir.path(),
+                peer,
+                &format!("{}{n}", "C".repeat(21)),
+            );
         }
 
-        let first = entries.sweep(None, 2).unwrap();
-        assert_eq!(first.removed, 2);
-        assert!(first.resume.is_some());
-        let second = entries.sweep(first.resume.as_ref(), 2).unwrap();
-        assert_eq!(second.removed, 2);
-        let third = entries.sweep(second.resume.as_ref(), 2).unwrap();
-        assert_eq!(third.removed, 1);
-        assert!(third.resume.is_none(), "the pass reached the end");
+        let passes = passes(&entries, 2);
+
+        assert!(passes.iter().all(|pass| pass.looked <= 2), "{passes:?}");
+        // 2 folders, 5 entries, the end of each folder and of the top one.
+        assert_eq!(passes.len(), 5, "{passes:?}");
+        assert_eq!(passes.iter().map(|pass| pass.removed).sum::<usize>(), 5);
         for peer in ["mA", "mB"] {
             assert_eq!(fs::read_dir(dir.path().join(peer)).unwrap().count(), 0);
         }
+    }
+
+    /// Peer folders cost the budget too, empty ones included: many of them
+    /// before the only stale entry take several passes, never one.
+    #[test]
+    fn every_folder_a_sweep_reads_counts_against_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = RequestEntries::new(dir.path().to_path_buf());
+        for n in 0..40 {
+            fs::create_dir(dir.path().join(format!("m{n:02}"))).unwrap();
+        }
+        stale(&entries, dir.path(), "mZ", &"C".repeat(22));
+
+        let passes = passes(&entries, 8);
+
+        assert!(passes.iter().all(|pass| pass.looked <= 8), "{passes:?}");
+        // 41 folders, the end of each and of the top folder, one entry.
+        assert_eq!(passes.iter().map(|pass| pass.looked).sum::<usize>(), 84);
+        assert_eq!(passes.len(), 11);
+        assert_eq!(passes.iter().map(|pass| pass.removed).sum::<usize>(), 1);
+        assert_eq!(fs::read_dir(dir.path().join("mZ")).unwrap().count(), 0);
     }
 }

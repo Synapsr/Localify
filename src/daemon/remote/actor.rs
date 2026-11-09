@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 use self::control::ControlEvent;
 pub use self::control::ControlSlots;
 use self::viewer::Tap;
-pub use self::viewer::{TapEvent, TapRequest, WINDOW};
+pub use self::viewer::{TapEvent, TapRequest, Tapped, WINDOW};
 use super::access::Waiting;
 use super::backoff::Ending;
 use super::lease::{LeaseError, LeaseKeeper};
@@ -197,7 +197,8 @@ pub enum Command {
         peer: String,
         request: TapRequest,
         events: mpsc::Sender<TapEvent>,
-        reply: oneshot::Sender<Result<String, Failure>>,
+        /// Dropping the [`Tapped`], heard or not, ends the request.
+        reply: oneshot::Sender<Result<Tapped, Failure>>,
     },
     /// The client of a request went away: unwatch or unfollow.
     Untap {
@@ -1109,7 +1110,7 @@ impl Actor {
         Hello {
             proto: self.shared.ours(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            now: now_rfc3339(),
+            now: self.shared.hello_now(),
             role,
             settings,
             app: settings.map(|_| self.ctx.source.app()),
@@ -1646,10 +1647,12 @@ impl Actor {
                 events,
                 reply,
             } => {
-                // A caller that left before it heard the id cannot untap it.
-                if let Err(Ok(id)) = reply.send(self.on_tap(&peer, request, events)) {
-                    self.untap(&peer, &id);
-                }
+                // A caller that left, before or after the reply came, drops
+                // the guard with it: the request ends either way.
+                let tapped = self
+                    .on_tap(&peer, request, events)
+                    .map(|id| Tapped::new(self.commands.clone(), peer, id));
+                let _ = reply.send(tapped);
             }
             Command::Untap { peer, id } => self.untap(&peer, &id),
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),

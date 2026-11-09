@@ -923,6 +923,15 @@ impl LocalSource for FakeSource {
     }
 
     fn control_admits(&self, peer: &str, request_id: &str) -> Result<(), Report> {
+        let gate = {
+            let host = self.host();
+            let mut state = host.state();
+            state.admits += 1;
+            state.admits_gate.clone()
+        };
+        if let Some(gate) = gate {
+            let _ = gate.lock().unwrap().recv();
+        }
         self.runner().admits(peer, request_id)
     }
 
@@ -976,6 +985,11 @@ pub struct HostState {
     pub status_hold: Option<std::sync::mpsc::Receiver<()>>,
     /// How many `control.status` queries reached the executor.
     pub statuses: usize,
+    /// While set, every entry-limit check before a lease waits on it, until
+    /// the test drops the other end.
+    pub admits_gate: Option<Arc<Mutex<std::sync::mpsc::Receiver<()>>>>,
+    /// How many entry-limit checks reached the executor.
+    pub admits: usize,
 }
 
 /// A target's services in memory: stops end their run, launches run

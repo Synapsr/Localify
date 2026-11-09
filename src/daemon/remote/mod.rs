@@ -55,7 +55,9 @@ use crate::infrastructure::cloud::http::{
 use crate::infrastructure::cloud::passwords::PasswordStore;
 use crate::infrastructure::cloud::types::RosterMachine;
 use crate::infrastructure::remote::noise::{StaticKeys, decode_key, fingerprint};
-use crate::infrastructure::remote::store::{DEFAULT_SETTINGS, RemoteStore, SettingsChange};
+use crate::infrastructure::remote::store::{
+    DEFAULT_SETTINGS, RemoteStore, SettingsChange, now_rfc3339,
+};
 use crate::infrastructure::remote::wire::{
     AccessOutcome, Hello, Presence, ProtoRange, TargetSettings,
 };
@@ -345,6 +347,9 @@ struct Shared {
     /// While set, the relay writer sends nothing, as a stuck socket.
     #[cfg(test)]
     writer_hold: Arc<std::sync::atomic::AtomicBool>,
+    /// The time this link's `hello`s give, as a machine with that clock.
+    #[cfg(test)]
+    hello_now: Mutex<Option<String>>,
 }
 
 /// Where a test holds an access answer: `reached` fires there, and the
@@ -380,6 +385,21 @@ impl Shared {
             .proto
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The time a `hello` gives: this machine's clock.
+    #[cfg(not(test))]
+    fn hello_now(&self) -> String {
+        now_rfc3339()
+    }
+
+    #[cfg(test)]
+    fn hello_now(&self) -> String {
+        self.hello_now
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(now_rfc3339)
     }
 
     /// Blocks the actor where a test paused the next access answer, as a
@@ -530,6 +550,8 @@ impl RemoteLink {
                 answer_pause: Mutex::new(None),
                 #[cfg(test)]
                 writer_hold: Arc::default(),
+                #[cfg(test)]
+                hello_now: Mutex::new(None),
             }),
         }
     }
@@ -607,6 +629,17 @@ impl RemoteLink {
             .proto
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = proto;
+    }
+
+    /// Gives `now` in every `hello` from the next session on, as a machine
+    /// whose clock says so.
+    #[cfg(test)]
+    pub fn set_hello_now(&self, now: &str) {
+        *self
+            .shared
+            .hello_now
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now.to_string());
     }
 
     /// Holds the next access answer before it takes the settings lock, as

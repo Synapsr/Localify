@@ -226,13 +226,25 @@ impl Actor {
                 });
             };
             // A new request id past the peer's entry limit costs no lease.
+            // The permit goes with the blocking work and comes back with its
+            // answer, so aborting this task never frees it while that work
+            // goes on.
             let (asked, peer) = (Arc::clone(&source), order.peer.clone());
             let request_id = order.control.request_id.clone();
-            let admitted =
-                tokio::task::spawn_blocking(move || asked.control_admits(&peer, &request_id)).await;
-            if let Ok(Err(refused)) = admitted {
-                return send(ControlEvent::Result(refused));
-            }
+            let admitted = tokio::task::spawn_blocking(move || {
+                (asked.control_admits(&peer, &request_id), permit)
+            })
+            .await;
+            let permit = match admitted {
+                Ok((Ok(()), permit)) => permit,
+                Ok((Err(refused), _)) => return send(ControlEvent::Result(refused)),
+                Err(error) => {
+                    return send(ControlEvent::Result(Report::refused(
+                        "unavailable",
+                        format!("The control failed here: {error}"),
+                    )));
+                }
+            };
             // 3: a fresh lease, asked for now, that still lists the viewer.
             let renewed = tokio::select! {
                 _ = pairing.cancel.cancelled() => None,

@@ -1139,6 +1139,105 @@ async fn reloading_the_shell_environment_recovers_from_a_failure() {
     );
 }
 
+// --- Third review ----------------------------------------------------------
+
+/// A target's `hello` may give any valid time, the last one there is
+/// included. A control to it then has no expiry that can be written: it is
+/// refused before it is sealed, and the daemon goes on.
+#[tokio::test]
+async fn a_target_clock_at_the_end_of_time_refuses_the_control_and_keeps_the_daemon() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = set_up(&cloud, None).await;
+    b.link.set_hello_now("9999-12-31T23:59:59Z");
+    a.link.open("mB", true).await.unwrap();
+
+    let seen = control(&a, ask(ControlAction::Start, None)).await;
+
+    assert_eq!(seen.len(), 1, "never announced as sent: {seen:?}");
+    assert_eq!(
+        ended(&seen),
+        (ControlOutcome::Refused, Some("bad_request".into()))
+    );
+    assert_eq!(handed(&b), 0);
+    assert!(a.link.inventory("mB").await.is_ok(), "the daemon goes on");
+}
+
+/// Work on a blocking thread keeps its permit, though the task that waits
+/// for it is aborted with B's relay connection: once B is back, A's next
+/// control is `busy` while that work still goes on.
+#[tokio::test]
+async fn blocking_work_keeps_its_permit_when_its_task_is_aborted() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = controlled(&cloud, None).await;
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    b.source.host().state().admits_gate = Some(Arc::new(std::sync::Mutex::new(gate)));
+    let mut waiting = Vec::new();
+    for _ in 0..4 {
+        let mut pending = a.link.control("mB", ask(ControlAction::Start, None));
+        let sent = pending.recv().await;
+        assert!(matches!(sent, Some(ControlEvent::Sent { .. })), "{sent:?}");
+        waiting.push(pending);
+    }
+    wait_until("B checks four entry limits", || {
+        b.source.host().state().admits == 4
+    })
+    .await;
+
+    // B's connection drops: its actor ends, and every task with it.
+    let connections = cloud.connections();
+    cloud.close("mB", 1012, "restart");
+    wait_until("B is back", || {
+        cloud.connections() > connections && cloud.connected("mB") && a.sees("mB")
+    })
+    .await;
+    a.link.open("mB", true).await.unwrap();
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        control(&a, ask(ControlAction::Start, None)),
+    )
+    .await
+    .expect("refused at once, never admitted");
+
+    assert_eq!(
+        ended(&again),
+        (ControlOutcome::Refused, Some("busy".into()))
+    );
+    drop(release);
+}
+
+/// A client that goes away right after the actor handed it a request,
+/// before it took the id, still ends that request: the session it alone
+/// held closes.
+#[tokio::test]
+async fn a_request_dropped_before_its_id_was_taken_is_untapped() {
+    use crate::daemon::remote::actor::{Command, TapRequest};
+
+    let cloud = FakeCloud::start().await;
+    let (a, b) = set_up(&cloud, None).await;
+    let (_release, held) = std::sync::mpsc::channel();
+    b.source.host().state().status_hold = Some(held);
+    let (events, receiver) = mpsc::channel(8);
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let conn = a.link.shared.conn().unwrap();
+    let tap = Command::Tap {
+        peer: "mB".into(),
+        request: TapRequest::ControlStatus {
+            request_id: request_id(1),
+        },
+        events,
+        reply,
+    };
+    conn.commands.send(tap).unwrap();
+    // B works on the query: the actor sent the reply before it.
+    wait_until("B is asked", || b.source.host().state().statuses == 1).await;
+    assert!(a.session("mB").is_some());
+
+    drop(answer);
+    drop(receiver);
+
+    wait_until("the session ends", || a.session("mB").is_none()).await;
+}
+
 /// Copies a daemon's folder, as it is left on disk.
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
     for entry in std::fs::read_dir(from).unwrap().flatten() {
