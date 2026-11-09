@@ -1,6 +1,6 @@
 # Remote machines
 
-The contract for remote machines: what the cloud, the relay, the daemon, the desktop app, the CLI and the MCP server each do, and the messages between them. The decisions behind it are ADRs 0028 to 0033; ADRs 0030 and 0031 amend ADR 0012. It builds on [public-urls.md](public-urls.md) for accounts, machines, plans and the Worker, and on the entitlement model of PR #56.
+The contract for remote machines: what the cloud, the relay, the daemon, the desktop app, the CLI and the MCP server each do, and the messages between them. The decisions behind it are ADRs 0028 to 0033 and 0035; ADRs 0030 and 0031 amend ADR 0012. It builds on [public-urls.md](public-urls.md) for accounts, machines, plans and the Worker, and on the entitlement model of PR #56.
 
 ## What it does
 
@@ -96,7 +96,7 @@ Pairing runs over the relay as a Noise session with purpose `pair` (see "Session
 
 1. On the viewer A, the switcher lists B as "Not paired" with a `Pair` button. `localify machines pair <B>` does the same.
 2. A sends a pairing request: the three Noise XX handshake messages, the first one's envelope carrying purpose `pair`. Both now hold the other's static key and the final handshake hash `h`.
-3. B's daemon checks that a person can answer: the desktop app is subscribed to its events, or `localify machines pair --accept` is waiting. Otherwise it answers `pair.declined` with `nobody_to_confirm`, and A shows: "Nobody can confirm on B. Open Localify on B, or run `localify machines pair --accept` there, then try again."
+3. B's daemon checks that someone can answer: the desktop app is subscribed to its events, or `localify machines pair --accept` is waiting (with or without `--for-ssh`). Otherwise it answers `pair.declined` with `nobody_to_confirm`, and A shows: "Nobody can confirm on B. Open Localify on B, or run `localify machines pair --accept` there, then try again."
 4. B picks a random 32-byte `nB` and sends `pair.commit` with `c = BLAKE2s("localify-pair-commit" ‖ h ‖ nB)`.
 5. A picks a random 32-byte `nA` and sends `pair.nonce` with it.
 6. B sends `pair.reveal` with `nB`. A checks it against `c`, and abandons the pairing on a mismatch.
@@ -105,6 +105,7 @@ Pairing runs over the relay as a Noise session with purpose `pair` (see "Session
    - A: title "Pair with B", body "Check that B shows this code: **482 913**", buttons `Codes match` and `Cancel`.
    - B: title "A wants to pair with this Mac" (or "this computer" on Linux), body "Pair only if A shows the same code: **482 913**. A will then see this Mac's name. It sees projects and output, or controls services, only after you turn that on in Settings → Remote access.", buttons `Codes match, pair` and `Cancel`.
    - CLI: `A wants to pair. Code: 482 913. Type yes if A shows the same code:`.
+   - Over SSH (ADR 0035): `localify machines pair B --over-ssh <destination>` on A starts `localify machines pair --accept --for-ssh` on B through `ssh <destination>`. It sends `{"event": "code", "code": "482913"}` to stdout, and A's CLI compares that code with its own. On a match, A writes the code back to B's stdin and confirms its own side; on a mismatch, a timeout or anything unexpected, it cancels both and exits non-zero. `--for-ssh` confirms only when the line it reads equals its own code. It refuses when stdin or stdout is a terminal, and it ends when stdin closes.
 9. Each side sends `pair.confirm` with `accept` once its person answers. A side writes its pin only when its own person accepted and the peer's `accept: true` arrived. A cancel, a mismatch, a message out of order or repeated, a closed session or 2 minutes without both answers pins nothing, and both show "Pairing cancelled. Nothing was saved."
 10. After pairing, B shows "Paired with A" and a link to Settings → Remote access, with the three switches still off. A shows B as "Paired · not sharing" until B turns `share` on.
 
@@ -798,6 +799,7 @@ All of it goes through `DesktopApi` and the management socket. The UI does no ne
 ```bash
 localify machines                          # the roster: name, id, state, paired, sharing, version
 localify machines pair <machine>           # pairs with another machine: a code to confirm on both
+localify machines pair <machine> --over-ssh <destination> [--remote-localify <path>]  # pairs over SSH, comparing both codes itself
 localify machines pair --accept            # waits on this machine for a pairing request
 localify machines unpair <machine>
 localify machines remove <machine> [--yes] # signs it out of the account
@@ -814,7 +816,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - **What `--machine` refuses:** with `dev`, every option but `--project`, `--env` and `--profile`: no command after `--`, no `--detach`, `--in-app`, `--env-file`, `--confirm-profile` or `--domain`. The target decides where the service runs.
 - **Launch flags:** `--launch-id`, `--launch-expires`, `--remote-launch`, `--expect-rev`, `--request` and `--replace-legacy` are hidden flags for dispatchers, documented here and not in `--help`.
 - **Output:** human on a terminal, JSON otherwise, as everywhere. A control prints its progress, then its result; an outcome it could not learn (`lost`) prints the fresh status and exits with code 3. A refusal prints the message of "Errors" and exits with code 2.
-- `pair` and `remove` need a terminal: an agent cannot pair or remove machines.
+- `pair` needs a terminal, or `--over-ssh` (see "Pairing" and ADR 0035), which lets an agent with SSH access to both machines pair them. `remove` needs a terminal: an agent cannot remove a machine.
 
 ## MCP
 
@@ -822,7 +824,7 @@ localify restart <service> --machine <machine> [--project <id>] [--env <slug>]
 - An optional `machine` argument on `list_services`, `service_status`, `service_logs`, `service_start`, `service_stop` and `service_restart`, and on no other tool. With it, a tool ignores `cwd`.
 - With `machine`, `service_start` takes only `service`, `project`, `env` and `profile`. `background`, `env_files`, `confirm_profile`, `command` and `domain` make it fail with an error that says the target decides how its services start. It never creates a project.
 - `service_logs` with `machine` returns a cursor `<runId>:<offset>`.
-- Pairing, unpairing, settings and removal have no tool. Like signing in (ADR 0018), they stay a person's decision.
+- Pairing, unpairing, settings and removal have no tool. Like signing in (ADR 0018), they stay a person's decision, except that an agent a person gave SSH access to both machines may pair them with `localify machines pair --over-ssh` (ADR 0035).
 - An error from a target reaches the agent with its code and message, so `control_disabled` tells it to ask the user to allow controls on that machine, and an outcome it could not learn (`lost`) tells it to check `service_status` before trying again.
 
 ## Failure modes
