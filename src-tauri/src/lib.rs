@@ -1063,12 +1063,14 @@ fn setup_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     sync_app_menu(app)
 }
 
-/// The app's first step (docs/desktop.md, "Automatic updates"): it holds
-/// `app.lock` for its lifetime, so the installer never replaces the bundle
-/// under it. While an install holds the lock, the app waits for it. Without
-/// the lock the app still starts: the installer also looks for processes
-/// running from the bundle.
-fn hold_app_lock() -> Option<File> {
+/// The app's first step (docs/desktop.md, "Automatic updates"): it takes
+/// `app.lock`, which it holds for its lifetime, so the installer never
+/// replaces the bundle under it. While an install holds the lock, the app
+/// waits for it. Then, whatever it found, it checks whether an install
+/// replaced its bundle. `None` when the lock can't be taken: the app still
+/// starts, as the installer also looks for processes running from the
+/// bundle.
+fn hold_app_lock() -> Option<AppLock> {
     let paths = UpdatePaths::for_user()?;
     let mut message = None;
     let lock = take_app_lock(&paths, || message = show_updating_message());
@@ -1076,19 +1078,32 @@ fn hold_app_lock() -> Option<File> {
         let _ = message.kill();
         let _ = message.wait();
     }
-    match lock {
-        Ok(AppLock::Held { file, waited }) => {
-            if waited {
-                restart_if_replaced();
+    restart_if_replaced();
+    lock.inspect_err(|error| eprintln!("the app lock is off: {error:#}"))
+        .ok()
+}
+
+/// `app.lock`, held for the app's lifetime.
+struct HeldAppLock {
+    _file: Option<File>,
+}
+
+/// The lock the copy the single-instance plugin kept holds. A copy that
+/// found `app.lock` held by another app was handed over and quit, unless
+/// no other copy runs: then whoever held it has let go (an installer that
+/// just ended, or a copy that quit since), and this one takes it now.
+fn primary_app_lock(at_start: Option<AppLock>) -> Option<File> {
+    match at_start {
+        Some(AppLock::Held(file)) => Some(file),
+        Some(AppLock::HeldByAnotherApp) => match hold_app_lock() {
+            Some(AppLock::Held(file)) => Some(file),
+            Some(AppLock::HeldByAnotherApp) => {
+                eprintln!("the app lock is off: another copy of the app holds it");
+                None
             }
-            Some(file)
-        }
-        // That copy gets this launch through the single-instance plugin.
-        Ok(AppLock::HeldByAnotherApp) => None,
-        Err(error) => {
-            eprintln!("the app lock is off: {error:#}");
-            None
-        }
+            None => None,
+        },
+        None => None,
     }
 }
 
@@ -1112,22 +1127,32 @@ fn show_updating_message() -> Option<Child> {
     None
 }
 
-/// An install that held the lock may have replaced the bundle this process
-/// started from: the version installed now starts instead.
+/// An install may have replaced the bundle this process started from: the
+/// newer version installed now starts instead. Only a newer one, so a
+/// bundle whose version isn't this binary's never starts itself again.
 #[cfg(target_os = "macos")]
 fn restart_if_replaced() {
     use std::os::unix::process::CommandExt;
 
+    use localify::infrastructure::updates::{macos::bundle_version, rules::parse_version};
+
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let Some(bundle) = exe.ancestors().nth(3) else {
+    let Some(bundle) = exe
+        .ancestors()
+        .nth(3)
+        .filter(|bundle| bundle.extension().is_some_and(|ext| ext == "app"))
+    else {
         return;
     };
-    let Ok(installed) = localify::infrastructure::updates::macos::bundle_version(bundle) else {
+    let (Ok(installed), Some(running)) = (
+        bundle_version(bundle),
+        parse_version(env!("CARGO_PKG_VERSION")),
+    ) else {
         return;
     };
-    if installed.to_string() == env!("CARGO_PKG_VERSION") {
+    if installed <= running {
         return;
     }
     let error = Command::new(&exe).args(std::env::args_os().skip(1)).exec();
@@ -1139,9 +1164,11 @@ fn restart_if_replaced() {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Held until the process exits.
-    let _app_lock = hold_app_lock();
+    let app_lock = hold_app_lock();
     let api = DesktopApi::new(default_config_path(), default_binary_path());
+    if let Err(error) = api.start_new_install() {
+        eprintln!("could not write a new install's config: {error:#}");
+    }
 
     let mut builder = tauri::Builder::default();
 
@@ -1185,6 +1212,10 @@ pub fn run() {
 
     builder
         .setup(move |app| {
+            // Only the copy the single-instance plugin keeps gets here.
+            app.manage(HeldAppLock {
+                _file: primary_app_lock(app_lock),
+            });
             // In setup: the panel's events need the app's handle.
             let terminal = TerminalManager::new(
                 executable.clone(),

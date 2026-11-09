@@ -377,19 +377,24 @@ fn copy_config_to_user_folder(legacy_path: &Path, config_path: &Path) -> Result<
         )
     })?;
     // The script removes the old folder, so its domains must not be lost when a newer
-    // config already exists. That config keeps its own settings.
+    // config already exists. That config keeps its own settings, except automatic
+    // updates: the app's welcome can write that config before this runs, and an
+    // install that predates them keeps them off until its owner turns them on.
     if config_path.exists() {
         let store = ConfigStore::new(config_path.to_path_buf());
         let mut current = store
             .load()
             .context("Failed to read the config in your user folder")?;
+        let automatic = migrated.updates.automatic;
+        let changed = current.updates.automatic != automatic;
+        current.updates.automatic = automatic;
         let added = current.adopt_missing_from(migrated);
-        if added > 0 {
+        if added > 0 || changed {
             store
                 .save(&current)
                 .context("Failed to save the config in your user folder")?;
         }
-        return Ok(added > 0);
+        return Ok(added > 0 || changed);
     }
 
     migrated.paths = LocalifyPaths::default();
@@ -1890,6 +1895,36 @@ SHA-1 hash: AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:00:11:22:33
         assert!(text.contains("old.localify"), "{text}");
         let config = ConfigStore::new(target).load().unwrap();
         assert_eq!(config.daemon.http_port, 9000);
+    }
+
+    #[test]
+    fn migrating_after_the_welcome_saved_a_setting_keeps_automatic_updates_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy.toml");
+        fs::write(&legacy, "[daemon]\nhttp_port = 8081\n").unwrap();
+        let target = dir.path().join("config.toml");
+        // The welcome's "Connect agents" saves a config before activation.
+        let store = ConfigStore::new(target.clone());
+        let mut config = store.load().unwrap();
+        config.agent.connect_agents = false;
+        store.save(&config).unwrap();
+
+        copy_config_to_user_folder(&legacy, &target).unwrap();
+
+        assert!(!store.load().unwrap().updates.automatic);
+    }
+
+    #[test]
+    fn migrating_takes_automatic_updates_from_the_old_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy.toml");
+        fs::write(&legacy, "[daemon]\nhttp_port = 8081\n").unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, "[updates]\nautomatic = true\n").unwrap();
+
+        assert!(copy_config_to_user_folder(&legacy, &target).unwrap());
+
+        assert!(!ConfigStore::new(target).load().unwrap().updates.automatic);
     }
 
     #[test]

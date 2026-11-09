@@ -11,29 +11,48 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::DesktopApi;
+use crate::branding::BRANDING;
+use crate::infrastructure::config::ConfigStore;
 use crate::infrastructure::mgmt_client::MgmtSocketClient;
-use crate::infrastructure::updates::{self, UpdatePaths, UpdateStatus, release, state};
+use crate::infrastructure::updates::{
+    self, UpdatePaths, UpdatePhase, UpdateStatus, release, state,
+};
 
 impl DesktopApi {
+    /// On a new install, writes the config with automatic updates on, before
+    /// the welcome can save a setting into a config without them. An
+    /// install that predates them, or left anything on this machine, is
+    /// left as it is (docs/desktop.md, "Automatic updates").
+    pub fn start_new_install(&self) -> Result<bool> {
+        Ok(ConfigStore::new(self.config_path().to_path_buf()).start_new_install()?)
+    }
+
     /// The daemon's status, which knows whether it is checking or
     /// installing now. With the daemon down, the CLI reads the same status
     /// from the files: only the bundle's `localify` can tell whether its
     /// bundle may be replaced.
+    ///
+    /// Either describes the daemon's bundle, so it is narrowed to what the
+    /// open app can do ([`open_app_blocker`]).
     pub fn update_status(&self) -> Result<UpdateStatus> {
-        if let Ok(status) = self.update_client()?.update_status() {
-            return Ok(status);
-        }
-        self.update_cli(&["update", "--status", "--json"])
+        let status = match self.update_client()?.update_status() {
+            Ok(status) => status,
+            Err(_) => self.update_cli(&["update", "--status", "--json"])?,
+        };
+        Ok(for_open_app(status, open_app_blocker()))
     }
 
     /// `Install updates automatically`. The daemon reads the setting again
     /// before any unattended install, so it needs no restart.
     pub fn set_automatic_updates(&self, automatic: bool) -> Result<UpdateStatus> {
-        if let Ok(status) = self.update_client()?.update_settings(automatic) {
-            return Ok(status);
-        }
-        let on = if automatic { "on" } else { "off" };
-        self.update_cli(&["update", "--auto", on, "--json"])
+        let status = match self.update_client()?.update_settings(automatic) {
+            Ok(status) => status,
+            Err(_) => {
+                let on = if automatic { "on" } else { "off" };
+                self.update_cli(&["update", "--auto", on, "--json"])?
+            }
+        };
+        Ok(for_open_app(status, open_app_blocker()))
     }
 
     /// `Check now`: the check every caller goes through, so it shares the
@@ -69,6 +88,32 @@ impl DesktopApi {
         serde_json::from_slice(&output.stdout)
             .context("The update status from the CLI could not be read")
     }
+}
+
+/// Why the open app can't install an update itself, if it can't.
+/// `Restart to update` hands off to this bundle's own CLI, whose installer
+/// replaces this bundle and no other. The daemon's status speaks for the
+/// daemon's bundle, which may be another copy: one in /Applications while
+/// this one runs from a disk image or Downloads.
+pub fn open_app_blocker() -> Option<String> {
+    let exe = std::env::current_exe().unwrap_or_default();
+    updates::blocker_of(&exe.with_file_name(BRANDING.cli_command()))
+}
+
+/// The status, for an app whose own bundle `blocker` keeps from being
+/// replaced: no `Restart to update`, and an update that waits says why, as
+/// the daemon's own blocker would.
+fn for_open_app(mut status: UpdateStatus, blocker: Option<String>) -> UpdateStatus {
+    let Some(blocker) = blocker else {
+        return status;
+    };
+    if status.can_install {
+        status.can_install = false;
+        if status.state == UpdatePhase::Available {
+            status.reason = Some(blocker);
+        }
+    }
+    status
 }
 
 /// `Restart to update`: starts `localify update install --relaunch` from the
@@ -147,12 +192,48 @@ mod tests {
 
         assert_eq!(status.available.as_deref(), Some("1.7.0"));
         assert_eq!(status.last_check_at, Some(5));
-        assert!(status.can_install);
         let config = dir.path().join("config.toml");
         assert_eq!(
             fs::read_to_string(args).unwrap().trim(),
             format!("--config {} update --status --json", config.display())
         );
+    }
+
+    #[test]
+    fn an_app_whose_own_bundle_cant_be_replaced_offers_no_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        // The daemon's bundle may be replaced; this test binary, like a copy
+        // run from a disk image, is not one that may.
+        let api = api_without_daemon(dir.path(), &format!("echo '{STATUS}'"));
+
+        let status = api.update_status().unwrap();
+
+        assert!(!status.can_install);
+        let reason = status.reason.unwrap();
+        assert_eq!(Some(reason), open_app_blocker());
+    }
+
+    #[test]
+    fn the_open_apps_blocker_keeps_the_reason_of_a_status_that_waits_for_nothing() {
+        let status: UpdateStatus = serde_json::from_str(
+            r#"{"installed":"1.6.0","available":null,"state":"upToDate","reason":"kept","automatic":true,"lastCheckAt":5,"canInstall":true}"#,
+        )
+        .unwrap();
+
+        let status = for_open_app(status, Some("moved".into()));
+
+        assert!(!status.can_install);
+        assert_eq!(status.reason.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn an_installable_app_keeps_the_daemons_status() {
+        let status: UpdateStatus = serde_json::from_str(STATUS).unwrap();
+
+        let status = for_open_app(status, None);
+
+        assert!(status.can_install);
+        assert_eq!(status.reason, None);
     }
 
     #[test]

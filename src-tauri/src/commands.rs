@@ -42,7 +42,7 @@ use localify::desktop::terminal::{
     TerminalManager, TerminalResizeRequest, TerminalRestartServiceRequest, TerminalSessionDto,
     TerminalSessionRequest, TerminalWriteRequest,
 };
-use localify::desktop::updates::hand_off_update;
+use localify::desktop::updates::{hand_off_update, open_app_blocker};
 use localify::infrastructure::updates::UpdateStatus;
 
 pub struct AppState {
@@ -253,9 +253,11 @@ pub async fn check_for_updates(state: tauri::State<'_, AppState>) -> Result<Upda
 /// says why and stays open.
 #[tauri::command]
 pub fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
-    // The CLI next to a dev build would open the installed app instead.
-    if cfg!(debug_assertions) {
-        return Err("A development build doesn't install updates: update it by hand.".into());
+    // Checked again now: the installer would refuse this bundle after the
+    // app quit, closing its tabs for nothing. A dev build is refused here
+    // too, as the CLI next to it would open the installed app instead.
+    if let Some(reason) = open_app_blocker() {
+        return Err(reason);
     }
     let cli = super::sibling_binary_path().ok_or_else(|| {
         "This copy of Localify has no CLI in its bundle, so it can't install updates. Update it by hand."

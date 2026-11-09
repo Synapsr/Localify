@@ -15,46 +15,64 @@ use super::UpdatePaths;
 const POLL: Duration = Duration::from_millis(200);
 /// A swap takes a second or two: the app says it is updating only past this.
 pub const MESSAGE_AFTER: Duration = Duration::from_secs(1);
+/// An installer lets go of `update.lock` just before `app.lock`, and the
+/// daemon's check takes `app.lock` alone for an instant: `app.lock` held
+/// with `update.lock` free is tried again this many times before it counts
+/// as another app.
+const RELEASE_TRIES: u32 = 5;
+const RELEASE_POLL: Duration = Duration::from_millis(20);
 
 /// What the app's start found.
 #[derive(Debug)]
 pub enum AppLock {
     /// The app holds the lock for as long as it keeps `file` open.
-    /// `waited` is true when an install held it first, so the bundle may
-    /// have changed under this process.
-    Held { file: File, waited: bool },
+    Held(File),
     /// Another copy of the app holds it. This copy hands its launch over to
-    /// that one and exits, so it never waits for it.
+    /// that one, so it never waits for it.
     HeldByAnotherApp,
 }
 
 /// Takes `app.lock`. An installer holds it only while it also holds
 /// `update.lock`, so a lock held without `update.lock` is another copy of
-/// the app. While an install holds it, this waits, and calls `on_wait`
-/// once the wait passes [`MESSAGE_AFTER`].
+/// the app, once it stays held a little. While an install holds it, this
+/// waits, and calls `on_wait` once the wait passes [`MESSAGE_AFTER`].
 ///
 /// Looking at `update.lock` takes it for an instant when it is free. An
 /// unattended install that tries it at that instant gives up until its next
 /// check, which it would do anyway, since the app holds `app.lock`.
 pub fn take_app_lock(paths: &UpdatePaths, on_wait: impl FnOnce()) -> Result<AppLock> {
+    take(paths, on_wait, || {})
+}
+
+/// [`take_app_lock`], with `between_probes` called after `app.lock` was
+/// found held and before `update.lock` is looked at: tests end an install
+/// there.
+fn take(
+    paths: &UpdatePaths,
+    on_wait: impl FnOnce(),
+    mut between_probes: impl FnMut(),
+) -> Result<AppLock> {
     let app_lock = paths.app_lock();
     let file = open_lock(&app_lock)?;
     let started = Instant::now();
     let mut on_wait = Some(on_wait);
-    let mut waited = false;
     loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(AppLock::Held { file, waited }),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(error)) => {
-                return Err(error)
-                    .with_context(|| format!("Could not lock {}", app_lock.display()));
+        if try_lock(&file, &app_lock)? {
+            return Ok(AppLock::Held(file));
+        }
+        between_probes();
+        if !is_held(&paths.update_lock())? {
+            // No install now: one may have just ended, letting go of both.
+            for _ in 0..RELEASE_TRIES {
+                if try_lock(&file, &app_lock)? {
+                    return Ok(AppLock::Held(file));
+                }
+                std::thread::sleep(RELEASE_POLL);
+            }
+            if !is_held(&paths.update_lock())? {
+                return Ok(AppLock::HeldByAnotherApp);
             }
         }
-        if !is_held(&paths.update_lock())? {
-            return Ok(AppLock::HeldByAnotherApp);
-        }
-        waited = true;
         if started.elapsed() >= MESSAGE_AFTER
             && let Some(on_wait) = on_wait.take()
         {
@@ -64,14 +82,18 @@ pub fn take_app_lock(paths: &UpdatePaths, on_wait: impl FnOnce()) -> Result<AppL
     }
 }
 
-fn is_held(path: &Path) -> Result<bool> {
-    match open_lock(path)?.try_lock() {
-        Ok(()) => Ok(false),
-        Err(TryLockError::WouldBlock) => Ok(true),
+fn try_lock(file: &File, path: &Path) -> Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
         Err(TryLockError::Error(error)) => {
             Err(error).with_context(|| format!("Could not lock {}", path.display()))
         }
     }
+}
+
+fn is_held(path: &Path) -> Result<bool> {
+    Ok(!try_lock(&open_lock(path)?, path)?)
 }
 
 fn open_lock(path: &Path) -> Result<File> {
@@ -109,10 +131,9 @@ mod tests {
     #[test]
     fn a_free_lock_is_taken_and_kept_until_the_file_closes() {
         let (_dir, paths) = paths();
-        let AppLock::Held { file, waited } = take_app_lock(&paths, || {}).unwrap() else {
+        let AppLock::Held(file) = take_app_lock(&paths, || {}).unwrap() else {
             panic!("the lock was free");
         };
-        assert!(!waited);
         assert!(is_held(&paths.app_lock()).unwrap());
         drop(file);
         assert!(!is_held(&paths.app_lock()).unwrap());
@@ -143,10 +164,7 @@ mod tests {
         });
         let lock = take_app_lock(&paths, move || said.send(()).unwrap()).unwrap();
         installer.join().unwrap();
-        let AppLock::Held { waited, .. } = lock else {
-            panic!("the install ended");
-        };
-        assert!(waited);
+        assert!(matches!(lock, AppLock::Held(_)), "the install ended");
         assert!(is_held(&paths.app_lock()).unwrap());
     }
 
@@ -163,7 +181,18 @@ mod tests {
         let called = AtomicBool::new(false);
         let lock = take_app_lock(&paths, || called.store(true, Ordering::SeqCst)).unwrap();
         installer.join().unwrap();
-        assert!(matches!(lock, AppLock::Held { waited: true, .. }));
+        assert!(matches!(lock, AppLock::Held(_)));
         assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn an_install_that_ends_between_the_two_probes_is_not_another_app() {
+        let (_dir, paths) = paths();
+        let mut installer = Some((held(&paths.update_lock()), held(&paths.app_lock())));
+        // The installer lets go of both locks right after `app.lock` was
+        // found held, and before `update.lock` is looked at.
+        let lock = take(&paths, || {}, || drop(installer.take())).unwrap();
+        assert!(matches!(lock, AppLock::Held(_)));
+        assert!(is_held(&paths.app_lock()).unwrap());
     }
 }

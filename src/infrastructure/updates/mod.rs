@@ -132,7 +132,8 @@ pub(crate) fn random_u64() -> u64 {
     hasher.finish()
 }
 
-/// `[updates] automatic`. A config that can't be read counts as off.
+/// `[updates] automatic`. A config that is missing or can't be read counts
+/// as off.
 pub fn automatic(config_path: &Path) -> bool {
     ConfigStore::new(config_path.to_path_buf())
         .load()
@@ -441,6 +442,21 @@ fn blocker() -> Option<String> {
     Some(LINUX_REASON.to_string())
 }
 
+/// Why the bundle whose `localify` is `cli` can't be replaced, if it
+/// can't: [`blocker`]'s rules, for another copy than this binary's.
+#[allow(dead_code)] // Used by the desktop through the library crate.
+pub fn blocker_of(cli: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return macos::InstallTarget::of(cli)
+        .err()
+        .map(|error| error.to_string());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cli;
+        Some(LINUX_REASON.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::release::Release;
@@ -459,6 +475,15 @@ mod tests {
 
     fn v(value: &str) -> Version {
         parse_version(value).unwrap()
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_config_reads_automatic_updates_off() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!automatic(&dir.path().join("config.toml")));
+        let broken = dir.path().join("broken.toml");
+        std::fs::write(&broken, "[updates\nautomatic = true\n").unwrap();
+        assert!(!automatic(&broken));
     }
 
     #[test]
