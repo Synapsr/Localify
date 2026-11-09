@@ -738,7 +738,7 @@ mod tests {
         let source = DaemonSource::new(
             Arc::clone(&inventory),
             tunnel.clone(),
-            crate::infrastructure::app_bridge::socket_path(&data_dir),
+            crate::daemon::remote::local::AppSeen::default(),
         );
         let test_ports = DaemonPorts {
             http: 80,

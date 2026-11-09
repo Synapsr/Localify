@@ -1,38 +1,72 @@
 //! The app bridge (docs/remote-machines.md, "The app bridge"): the Unix
-//! socket the desktop app listens on while it runs, `<data dir>/app-bridge.sock`,
-//! through which the daemon and `localify dev --in-app` hand it a launch to
-//! run in a service tab. One JSON request per connection, one JSON answer, as
-//! on the management socket.
+//! socket the desktop app listens on while it runs,
+//! `<data dir>/app-bridge/app-bridge.sock`, through which the daemon and
+//! `localify dev --in-app` hand it a launch to run in a service tab. One JSON
+//! request per connection, one JSON answer, as on the management socket.
 //!
 //! This is the protocol and its client. The app's side is
 //! `localify::desktop::app_bridge`.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs;
+use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use socket2::{Domain, SockAddr, Socket, Type};
 
-use crate::infrastructure::process::NativeProcesses;
+use crate::infrastructure::process::{NativeProcesses, effective_uid};
 use crate::infrastructure::remote::wire::AppPresence;
 use crate::infrastructure::running_services::RunningServiceStore;
 use crate::infrastructure::runs::RunId;
 use crate::infrastructure::runs::launches::{LaunchReport, reconcile, unix_ms_now};
 
-/// In the data dir.
+/// The bridge's own folder in the data dir, which the app makes `0700`: the
+/// data dir itself may be shared, and is never changed.
+pub const DIR_NAME: &str = "app-bridge";
+/// In the bridge's folder.
 pub const SOCKET_NAME: &str = "app-bridge.sock";
-/// How long the app has to answer a launch once it was sent: it answers once
-/// the run PTY is spawned.
+/// How long the app has to answer a launch once the client starts
+/// connecting: it answers once the run PTY is spawned.
 pub const ACK_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a `hello` waits: the app answers it at once.
+/// How long a `hello` takes at most, connecting included: the app answers
+/// it at once.
 const HELLO_TIMEOUT: Duration = Duration::from_millis(500);
+/// The longest answer line the client reads. The app's are a few dozen
+/// bytes.
+const MAX_ANSWER_BYTES: usize = 16 * 1024;
 
-/// `<data dir>/app-bridge.sock`.
+/// `<data dir>/app-bridge`.
+pub fn bridge_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(DIR_NAME)
+}
+
+/// `<data dir>/app-bridge/app-bridge.sock`.
 pub fn socket_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(SOCKET_NAME)
+    bridge_dir(data_dir).join(SOCKET_NAME)
+}
+
+/// Whether an app of this user can listen on the bridge in `data_dir`: its
+/// folder is this user's, or does not exist yet in a data dir this user
+/// owns and may write, where the app makes it. Not on a layout whose data
+/// dir belongs to root, such as `/etc/localify`: there the app has no
+/// bridge, and `dev --in-app` opens the app with its deep link instead.
+pub fn available(data_dir: &Path) -> bool {
+    let uid = effective_uid();
+    match fs::symlink_metadata(bridge_dir(data_dir)) {
+        Ok(metadata) => metadata.is_dir() && metadata.uid() == uid,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::metadata(data_dir).is_ok_and(|metadata| {
+                metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o300 == 0o300
+            })
+        }
+        Err(_) => false,
+    }
 }
 
 /// A launch handed to the app: it spawns `localify dev` for it in a run PTY,
@@ -130,22 +164,27 @@ pub fn probe(socket: &Path) -> AppPresence {
     }
 }
 
-/// The app's `hello`, or `None` when it does not answer one.
+/// The app's `hello`, or `None` when it does not answer one within half a
+/// second, connecting included.
 pub fn hello(socket: &Path) -> Option<AppHello> {
-    let mut stream = UnixStream::connect(socket).ok()?;
+    let deadline = Instant::now() + HELLO_TIMEOUT;
+    let mut stream = connect(socket, deadline).ok()?;
     let answer = exchange(
         &mut stream,
         &serde_json::json!({ "cmd": "hello" }),
-        HELLO_TIMEOUT,
+        deadline,
     )
     .ok()?;
     serde_json::from_value(answer.data?).ok()
 }
 
-/// Hands `launch` to the app and waits up to [`ACK_TIMEOUT`] for its
-/// answer. Never retried: an unanswered launch may have started.
+/// Hands `launch` to the app and waits for its answer, [`ACK_TIMEOUT`] at
+/// most from the start of the connect. Never retried: an unanswered launch
+/// may have started.
 pub fn launch(socket: &Path, launch: &LaunchRequest) -> Handoff {
-    let Ok(mut stream) = UnixStream::connect(socket) else {
+    let deadline = Instant::now() + ACK_TIMEOUT;
+    // Nothing was sent until the connection is made.
+    let Ok(mut stream) = connect(socket, deadline) else {
         return Handoff::Absent;
     };
     let mut request = match serde_json::to_value(launch) {
@@ -153,7 +192,7 @@ pub fn launch(socket: &Path, launch: &LaunchRequest) -> Handoff {
         Err(error) => return Handoff::Unanswered(error.to_string()),
     };
     request["cmd"] = serde_json::json!("launch");
-    match exchange(&mut stream, &request, ACK_TIMEOUT) {
+    match exchange(&mut stream, &request, deadline) {
         Ok(answer) if answer.ok => Handoff::Accepted,
         Ok(BridgeAnswer {
             error: Some(error), ..
@@ -182,30 +221,94 @@ pub fn settle_unanswered(
     reconcile(store, &NativeProcesses, launch_id, Some(expires_at))
 }
 
-/// Sends one request line and reads one answer line within `timeout`.
+/// Connects without blocking past `deadline`: a suspended app whose backlog
+/// is full would otherwise hold a plain connect forever.
+fn connect(socket: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let address = SockAddr::unix(socket)?;
+    let raw = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+    raw.connect_timeout(&address, left(deadline)?)?;
+    raw.set_nonblocking(false)?;
+    Ok(UnixStream::from(OwnedFd::from(raw)))
+}
+
+/// What is left until `deadline`, or a timeout once it passed.
+fn left(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "The app did not answer in time.",
+        ));
+    }
+    Ok(left)
+}
+
+/// Sends one request line and reads one answer line, both before
+/// `deadline`: each read and write waits only for what is left of it, so an
+/// app that answers a byte at a time cannot stretch it, and an answer longer
+/// than [`MAX_ANSWER_BYTES`] is refused.
 fn exchange(
     stream: &mut UnixStream,
     request: &serde_json::Value,
-    timeout: Duration,
+    deadline: Instant,
 ) -> io::Result<BridgeAnswer> {
-    stream.set_write_timeout(Some(timeout))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.write_all(format!("{request}\n").as_bytes())?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
+    let request = format!("{request}\n").into_bytes();
+    let mut sent = 0;
+    while sent < request.len() {
+        stream.set_write_timeout(Some(left(deadline)?))?;
+        match stream.write(&request[sent..]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => sent += written,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let line = read_line(stream, deadline)?;
+    serde_json::from_slice(&line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// One answer line, without its newline.
+fn read_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut chunk = [0; 1024];
+    loop {
+        stream.set_read_timeout(Some(left(deadline)?))?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            break;
+        }
+        line.extend_from_slice(&chunk[..read]);
+        let end = line.iter().position(|&byte| byte == b'\n');
+        if let Some(end) = end {
+            line.truncate(end);
+        }
+        if line.len() > MAX_ANSWER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("The app's answer is longer than {MAX_ANSWER_BYTES} bytes."),
+            ));
+        }
+        if end.is_some() {
+            return Ok(line);
+        }
+    }
     if line.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "The app closed the connection without answering.",
         ));
     }
-    serde_json::from_str(&line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    Ok(line)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufRead;
     use std::os::unix::net::UnixListener;
-    use std::time::Instant;
 
     use super::*;
 
@@ -233,22 +336,45 @@ mod tests {
     /// A server that answers each connection with `answer`, or, with
     /// `None`, reads the request and never answers.
     fn serve(answer: Option<&'static str>) -> (tempfile::TempDir, PathBuf) {
+        serve_with(move |mut stream| match answer {
+            Some(answer) => stream.write_all(answer.as_bytes()).unwrap(),
+            // Held open, unanswered, until the test ends.
+            None => thread::sleep(Duration::from_secs(60)),
+        })
+    }
+
+    /// A server that reads each connection's request line, then hands the
+    /// connection to `then` on a thread of its own.
+    fn serve_with(
+        then: impl Fn(UnixStream) + Send + Sync + Copy + 'static,
+    ) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(bridge_dir(dir.path())).unwrap();
         let socket = socket_path(dir.path());
         let listener = UnixListener::bind(&socket).unwrap();
         thread::spawn(move || {
-            let mut held = Vec::new();
             for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+                let stream = stream.unwrap();
                 let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                match answer {
-                    Some(answer) => stream.write_all(answer.as_bytes()).unwrap(),
-                    None => held.push(stream),
-                }
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .unwrap();
+                thread::spawn(move || then(stream));
             }
         });
         (dir, socket)
+    }
+
+    /// Runs `call` on a thread, and fails the test when it has not returned
+    /// within `bound`, instead of hanging it.
+    fn within<T: Send + 'static>(bound: Duration, call: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(call());
+        });
+        receiver
+            .recv_timeout(bound)
+            .unwrap_or_else(|_| panic!("still waiting after {bound:?}"))
     }
 
     #[test]
@@ -332,5 +458,96 @@ mod tests {
 
         assert!(unix_ms_now() > expires_at);
         assert_eq!(report, LaunchReport::Expired);
+    }
+
+    #[test]
+    fn an_answer_trickled_a_byte_at_a_time_ends_at_the_deadline() {
+        // Each byte comes before a per-read timeout would fire, so only an
+        // overall deadline ends it.
+        let (_dir, socket) = serve_with(|mut stream| {
+            while stream.write_all(b" ").is_ok() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+
+        let presence = within(Duration::from_secs(3), move || probe(&socket));
+
+        assert_eq!(presence, AppPresence::Absent);
+        assert!(started.elapsed() < HELLO_TIMEOUT + Duration::from_millis(500));
+    }
+
+    #[test]
+    fn an_endless_answer_is_cut_at_its_cap() {
+        let (_dir, socket) = serve_with(|mut stream| {
+            let chunk = [b'x'; 4096];
+            while stream.write_all(&chunk).is_ok() {}
+        });
+        let started = Instant::now();
+
+        let handoff = within(Duration::from_secs(4), move || launch(&socket, &request()));
+
+        let Handoff::Unanswered(reason) = handoff else {
+            panic!("{handoff:?}");
+        };
+        assert!(reason.contains("longer than"), "{reason}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "read past the cap"
+        );
+    }
+
+    #[test]
+    fn a_listener_that_never_accepts_is_absent_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(bridge_dir(dir.path())).unwrap();
+        let socket = socket_path(dir.path());
+        // Bound with the smallest backlog and never accepted: a suspended app.
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        listener.bind(&SockAddr::unix(&socket).unwrap()).unwrap();
+        listener.listen(0).unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..64 {
+            let client = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+            client.set_nonblocking(true).unwrap();
+            if client.connect(&SockAddr::unix(&socket).unwrap()).is_err() {
+                break;
+            }
+            queued.push(client);
+        }
+        let started = Instant::now();
+
+        let presence = within(Duration::from_secs(3), move || probe(&socket));
+
+        assert_eq!(presence, AppPresence::Absent);
+        assert!(started.elapsed() < HELLO_TIMEOUT + Duration::from_millis(500));
+        drop((listener, queued));
+    }
+
+    #[test]
+    fn the_bridge_is_available_only_where_this_user_can_make_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        assert!(!available(&data), "no data dir yet");
+        fs::create_dir(&data).unwrap();
+        assert!(available(&data), "a data dir of this user's");
+        fs::create_dir(bridge_dir(&data)).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(available(&data), "the folder is made already");
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir(bridge_dir(&data)).unwrap();
+
+        // As `/etc/localify` is to a desktop user: not writable.
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+        let read_only = available(&data);
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!read_only);
+
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, bridge_dir(&data)).unwrap();
+        assert!(!available(&data), "a link is no folder of the bridge's");
     }
 }

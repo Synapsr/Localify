@@ -46,9 +46,11 @@ launch the daemon. Production defaults are:
 - CLI binary at `target/debug/localify` in debug builds
 - a launchd service, `dev.localify.daemon`, that runs that binary as the installing
   user and holds ports 80 and 443 for it
-- while the app runs, the app bridge at `<data dir>/app-bridge.sock`, through which
-  the daemon and `localify dev --in-app` hand it launches to run in service tabs; the
-  app makes the data dir private (`0700`) and removes the socket when it quits
+- while the app runs, the app bridge at `<data dir>/app-bridge/app-bridge.sock`,
+  through which the daemon and `localify dev --in-app` hand it launches to run in
+  service tabs; the app makes the `app-bridge` folder private (`0700`), never changes
+  the data dir, and removes the socket when it quits. Where it cannot make that
+  folder, as in a data dir of root's, it runs without the bridge
   (docs/remote-machines.md, "The app bridge")
 
 The Root CA is trusted in your login keychain, for your account only. That needs no

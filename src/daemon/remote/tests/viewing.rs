@@ -16,6 +16,7 @@ use crate::daemon::remote::local::RunLookup;
 use crate::daemon::remote::viewing::WatchEvent;
 use crate::daemon::remote::{FollowEvent, Following};
 use crate::infrastructure::remote::store::SettingsChange;
+use crate::infrastructure::remote::wire::AppPresence as WireApp;
 use crate::infrastructure::runs::output::{
     EndReason, RunEnd, StreamWriter, create_run_dir, publish_end,
 };
@@ -170,6 +171,28 @@ async fn a_watch_sends_each_change_and_nothing_once_nobody_watches() {
     let builds = b.source.builds();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(b.source.builds(), builds, "no snapshot without a watch");
+}
+
+#[tokio::test]
+async fn the_app_opening_or_quitting_moves_the_revision() {
+    let cloud = FakeCloud::start().await;
+    let (a, b) = paired_and_shared(&cloud).await;
+    b.source.set_items(vec![item("web")]);
+
+    let mut watch = a.link.watch("mB");
+    let closed = next_snapshot(&mut watch).await;
+    assert_eq!(closed.machine.app, WireApp::Absent);
+    b.source.set_app(WireApp::Running);
+    let opened = next_snapshot(&mut watch).await;
+    assert_eq!(opened.machine.app, WireApp::Running);
+    assert!(opened.rev > closed.rev, "the same items, a new summary");
+    b.source.set_app(WireApp::Absent);
+    let quit = next_snapshot(&mut watch).await;
+    assert_eq!(quit.machine.app, WireApp::Absent);
+    assert!(quit.rev > opened.rev);
+
+    let got = a.link.inventory("mB").await.unwrap();
+    assert_eq!(got.rev, quit.rev, "a get sees the watch's revision");
 }
 
 async fn next_snapshot(

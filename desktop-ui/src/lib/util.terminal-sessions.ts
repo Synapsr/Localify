@@ -16,6 +16,27 @@ export function laterSession(
   return known?.status === "exited" && incoming.status === "running" ? known : incoming;
 }
 
+/**
+ * The sessions once the first list of them is in. The events were listened to before the list
+ * was asked for, so `current` holds what they brought meanwhile: a session in both keeps its later
+ * state, one only the list knows joins, and one that an event replaced, or that was closed
+ * meanwhile (`gone`), stays out.
+ */
+export function mergeSessionList(
+  current: TerminalSessionDto[],
+  listed: TerminalSessionDto[],
+  gone: ReadonlySet<string>,
+): TerminalSessionDto[] {
+  const listedById = new Map(listed.map((session) => [session.id, session]));
+  const kept = current.map((session) => {
+    const fromList = listedById.get(session.id);
+    return fromList ? laterSession(session, fromList) : session;
+  });
+  const known = new Set(current.map((session) => session.id));
+  const joined = listed.filter((session) => !known.has(session.id) && !gone.has(session.id));
+  return [...joined, ...kept];
+}
+
 /** `failed` is a service that stopped while its tab was in the background. */
 export type TerminalSessionState = "live" | "idle" | "failed";
 

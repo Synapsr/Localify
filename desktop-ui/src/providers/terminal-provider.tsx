@@ -30,6 +30,7 @@ import { bootstrapQueries } from "@/lib/queries";
 import { tauriClient } from "@/lib/tauri-client";
 import {
   laterSession,
+  mergeSessionList,
   reachableServiceSessionIds,
   sortTerminalSessions,
   type TerminalSessionState,
@@ -122,6 +123,8 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     latestSessionsRef.current.set(incoming.id, next);
     return next;
   }, []);
+  // Sessions replaced or closed here, so a list of sessions asked for earlier never brings them back.
+  const goneSessionIdsRef = useRef(new Set<string>());
   const [stoppedSessionIds, setStoppedSessionIds] = useState<ReadonlySet<string>>(new Set());
   const previousReachableIdsRef = useRef<ReadonlySet<string>>(new Set());
   const expectedStopIdsRef = useRef(new Set<string>());
@@ -135,36 +138,11 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    void tauriClient
-      .terminalListSessions()
-      .then((nextSessions) => {
-        if (cancelled) return;
-        const initialSession = nextSessions[0] ?? null;
-        setSessions(nextSessions.map(reconcile));
-        setActiveSessionIdState((current) => current ?? initialSession?.id ?? null);
-        setSelectedTargetState(
-          (current) =>
-            current ?? (initialSession ? toTerminalTargetRequest(initialSession.target) : null),
-        );
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSessions([]);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [reconcile]);
-
   // Puts a new run in its tab's place: the one it took over, or a new one.
   const insertRun = useCallback(
     (result: TerminalLaunchServiceResultDto) => {
       const { replaced } = result;
+      if (replaced) goneSessionIdsRef.current.add(replaced);
       const session = reconcile(result.session);
       setSessions((current) => {
         const index = replaced ? current.findIndex((candidate) => candidate.id === replaced) : -1;
@@ -190,13 +168,19 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
     [reconcile],
   );
 
+  // Every event is listened to before the sessions are listed, and the list is merged into what
+  // the events brought meanwhile: a tab the app bridge opens during startup is in one or both, and
+  // never lost or overwritten by an older list.
   useEffect(() => {
-    let unlistenOutput: (() => void) | null = null;
-    let unlistenExit: (() => void) | null = null;
-    let unlistenSession: (() => void) | null = null;
-    let unlistenOpened: (() => void) | null = null;
-    let unlistenShellEnvironment: (() => void) | null = null;
+    const unlisteners: (() => void)[] = [];
     let cancelled = false;
+    const subscribe = async <T,>(name: string, handler: (payload: T) => void) => {
+      const unlisten = await listen<T>(name, (event) => {
+        if (!cancelled) handler(event.payload);
+      });
+      if (cancelled) unlisten();
+      else unlisteners.push(unlisten);
+    };
 
     void tauriClient
       .shellEnvironmentStatus()
@@ -205,78 +189,71 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       })
       .catch(() => {});
 
-    // A service tab's run ended and its output was finalized. Kept even before the answer
-    // that opened the tab arrives, so that answer cannot show it running again.
-    void listen<TerminalSessionDto>("terminal-session", (event) => {
-      if (cancelled) return;
-      const ended = reconcile(event.payload);
-      setSessions((current) =>
-        current.map((session) => (session.id === ended.id ? ended : session)),
-      );
-      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
-    }).then((unlisten) => {
-      unlistenSession = unlisten;
-    });
+    const subscribed = Promise.allSettled([
+      // A service tab's run ended and its output was finalized. Kept even before the answer
+      // that opened the tab arrives, so that answer cannot show it running again.
+      subscribe<TerminalSessionDto>("terminal-session", (payload) => {
+        const ended = reconcile(payload);
+        setSessions((current) =>
+          current.map((session) => (session.id === ended.id ? ended : session)),
+        );
+        void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+      }),
+      // A launch handed to the app, by `localify dev --in-app` or a paired machine: its tab
+      // joins the others without taking focus, unless it took over the tab in view.
+      subscribe<TerminalOpenedPayload>("terminal-session-opened", (payload) => {
+        const { replaced, startedBy: name } = payload;
+        const session = insertRun(payload);
+        setActiveSessionIdState((current) =>
+          current === null || current === replaced ? session.id : current,
+        );
+        if (name) {
+          setStartedBy((current) => ({ ...current, [session.id]: name }));
+          window.setTimeout(() => {
+            setStartedBy((current) => {
+              const next = { ...current };
+              delete next[session.id];
+              return next;
+            });
+          }, STARTED_BY_MS);
+        }
+        void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+      }),
+      subscribe<ShellEnvironmentDto>("shell-environment", setShellEnvironment),
+      subscribe<TerminalOutputPayload>("terminal-output", (payload) => {
+        const chunk = new Uint8Array(payload.bytes);
+        setOutputBySessionId((current) => appendOutputChunk(current, payload.sessionId, chunk));
+      }),
+      subscribe<TerminalExitPayload>("terminal-exit", (payload) => {
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === payload.sessionId
+              ? reconcile({ ...session, status: "exited" })
+              : session,
+          ),
+        );
+        void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
+      }),
+    ]);
 
-    // A launch handed to the app, by `localify dev --in-app` or a paired machine: its tab
-    // joins the others without taking focus, unless it took over the tab in view.
-    void listen<TerminalOpenedPayload>("terminal-session-opened", (event) => {
-      if (cancelled) return;
-      const { replaced, startedBy: name } = event.payload;
-      const session = insertRun(event.payload);
-      setActiveSessionIdState((current) =>
-        current === null || current === replaced ? session.id : current,
-      );
-      if (name) {
-        setStartedBy((current) => ({ ...current, [session.id]: name }));
-        window.setTimeout(() => {
-          setStartedBy((current) => {
-            const next = { ...current };
-            delete next[session.id];
-            return next;
-          });
-        }, STARTED_BY_MS);
-      }
-      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
-    }).then((unlisten) => {
-      unlistenOpened = unlisten;
-    });
-
-    void listen<ShellEnvironmentDto>("shell-environment", (event) => {
-      if (!cancelled) setShellEnvironment(event.payload);
-    }).then((unlisten) => {
-      unlistenShellEnvironment = unlisten;
-    });
-
-    void listen<TerminalOutputPayload>("terminal-output", (event) => {
-      if (cancelled) return;
-      const chunk = new Uint8Array(event.payload.bytes);
-      setOutputBySessionId((current) => appendOutputChunk(current, event.payload.sessionId, chunk));
-    }).then((unlisten) => {
-      unlistenOutput = unlisten;
-    });
-
-    void listen<TerminalExitPayload>("terminal-exit", (event) => {
-      if (cancelled) return;
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === event.payload.sessionId
-            ? reconcile({ ...session, status: "exited" })
-            : session,
-        ),
-      );
-      void queryClient.invalidateQueries({ queryKey: bootstrapQueries.all() });
-    }).then((unlisten) => {
-      unlistenExit = unlisten;
-    });
+    void subscribed
+      .then(() => (cancelled ? null : tauriClient.terminalListSessions()))
+      .then((listed) => {
+        if (cancelled || !listed) return;
+        const initialSession = listed[0] ?? null;
+        const known = listed.map(reconcile);
+        setSessions((current) => mergeSessionList(current, known, goneSessionIdsRef.current));
+        setActiveSessionIdState((current) => current ?? initialSession?.id ?? null);
+        setSelectedTargetState(
+          (current) =>
+            current ?? (initialSession ? toTerminalTargetRequest(initialSession.target) : null),
+        );
+      })
+      .catch(() => {});
 
     return () => {
       cancelled = true;
-      unlistenOutput?.();
-      unlistenExit?.();
-      unlistenSession?.();
-      unlistenOpened?.();
-      unlistenShellEnvironment?.();
+      for (const unlisten of unlisteners) unlisten();
     };
   }, [insertRun, queryClient, reconcile]);
 
@@ -516,6 +493,7 @@ export const TerminalProvider = ({ children }: PropsWithChildren) => {
       }
 
       await tauriClient.terminalClose({ sessionId });
+      goneSessionIdsRef.current.add(sessionId);
       const closedIndex = currentSessions.findIndex((candidate) => candidate.id === sessionId);
       const next = currentSessions.filter((candidate) => candidate.id !== sessionId);
       setSessions(next);

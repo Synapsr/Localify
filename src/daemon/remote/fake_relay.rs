@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures_util::{SinkExt, StreamExt};
@@ -747,6 +747,8 @@ pub struct FakeSource {
     builds: AtomicUsize,
     /// How long each build takes, in milliseconds.
     build_ms: AtomicUsize,
+    /// Whether the desktop app runs.
+    app_running: AtomicBool,
 }
 
 impl FakeSource {
@@ -762,6 +764,12 @@ impl FakeSource {
     /// `run_id` is its service's last run, with its output in `dir`.
     pub fn set_run(&self, run_id: &str, found: Result<PathBuf, RunLookup>) {
         self.runs.lock().unwrap().insert(run_id.into(), found);
+    }
+
+    /// The desktop app opens or quits.
+    pub fn set_app(&self, app: AppPresence) {
+        self.app_running
+            .store(app == AppPresence::Running, Ordering::SeqCst);
     }
 
     /// How many snapshots were built.
@@ -798,6 +806,10 @@ impl LocalSource for FakeSource {
     }
 
     fn app(&self) -> AppPresence {
-        AppPresence::Absent
+        if self.app_running.load(Ordering::SeqCst) {
+            AppPresence::Running
+        } else {
+            AppPresence::Absent
+        }
     }
 }

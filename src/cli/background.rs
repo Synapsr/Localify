@@ -356,6 +356,9 @@ pub fn start_in_app(
         return Ok(());
     }
 
+    if !app_bridge::available(data_dir) {
+        return start_through_deep_link(&store, &launch.key, &environment, profile);
+    }
     let socket = app_bridge::socket_path(data_dir);
     open_app(&socket)?;
     // Once the run it replaces has stopped, so that stop never counts
@@ -376,6 +379,51 @@ pub fn start_in_app(
     };
     hand_to_app(&store, &socket, &request)?;
     wait_for_launch(&store, &launch.key, &request.launch_id, request.expires_at)
+}
+
+/// Where the app can have no bridge, as on a data dir of root's such as
+/// `/etc/localify`: asks it to start the service through its deep link, as
+/// before the bridge, and waits for a run newer than the ask. That launch has
+/// no id of this command's, so a run it stopped is not marked replaced.
+fn start_through_deep_link(
+    store: &RunningServiceStore,
+    key: &ServiceKey,
+    environment: &str,
+    profile: Option<&str>,
+) -> Result<()> {
+    let since = unix_now();
+    open_url(&launch_service_link(key, environment, profile))?;
+    println!(
+        "Asked the {} app to start '{}' in its terminal.",
+        BRANDING.app_name, key.service_id
+    );
+    wait_for_app_run(store, key, since)
+}
+
+/// `localify://action/launch-service?project=…&env=…&service=…[&profile=…]`
+fn launch_service_link(key: &ServiceKey, environment: &str, profile: Option<&str>) -> String {
+    let mut link = format!(
+        "localify://action/launch-service?project={}&env={}&service={}",
+        percent_encode(&key.project_id),
+        percent_encode(environment),
+        percent_encode(&key.service_id)
+    );
+    if let Some(profile) = profile {
+        link.push_str(&format!("&profile={}", percent_encode(profile)));
+    }
+    link
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 /// Hands the launch to the app once. When the app does not confirm it, waits
@@ -497,6 +545,41 @@ fn open_url(url: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Waits for the run the app starts: a record newer than `since` whose process
+/// listens, or ended.
+fn wait_for_app_run(store: &RunningServiceStore, key: &ServiceKey, since: u64) -> Result<()> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let run = store.get(key)?.filter(|run| run.started_at >= since);
+        if let Some(run) = &run {
+            if let Some(exit) = &run.exit {
+                bail!(
+                    "'{}' stopped while starting ({}). Its last output:\n\n{}",
+                    key.service_id,
+                    describe_exit_code(exit.code),
+                    last_lines(store, run)
+                );
+            }
+            if listens(run.port) {
+                print_started(run, "Started");
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            match run {
+                Some(run) => print_started(&run, "Still starting"),
+                None => println!(
+                    "The app has not started '{}' yet. Look at its terminal panel, or check with: {} services status",
+                    key.service_id,
+                    BRANDING.cli_command()
+                ),
+            }
+            return Ok(());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
 }
 
 /// Waits for the launch handed to the app, from its launch record: until its
@@ -1206,5 +1289,19 @@ mod tests {
         assert_eq!(Cursor::parse("17").unwrap(), Cursor::File(17));
         assert!(Cursor::parse("../x:1").is_err());
         assert!(Cursor::parse("abc").is_err());
+    }
+
+    #[test]
+    fn the_launch_link_names_the_service_and_escapes_values() {
+        let key = ServiceKey {
+            project_id: "my app".into(),
+            environment: Some("feat-auth".into()),
+            service_id: "web".into(),
+        };
+
+        assert_eq!(
+            launch_service_link(&key, "feat-auth", Some("staging")),
+            "localify://action/launch-service?project=my%20app&env=feat-auth&service=web&profile=staging"
+        );
     }
 }

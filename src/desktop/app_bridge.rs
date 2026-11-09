@@ -1,18 +1,21 @@
 //! The app's side of the app bridge (docs/remote-machines.md, "The app
 //! bridge"): while the desktop app runs, it listens on
-//! `<data dir>/app-bridge.sock`, and runs each launch handed to it in a
-//! service tab, through the same run-PTY path as its launch button. The
+//! `<data dir>/app-bridge/app-bridge.sock`, and runs each launch handed to it
+//! in a service tab, through the same run-PTY path as its launch button. The
 //! protocol and the client are in `crate::infrastructure::app_bridge`.
 //!
-//! Only the app's own user can open the socket: the data dir is made `0700`
-//! before the socket is bound in it, and the socket `0600`. One JSON request
-//! per connection, one JSON answer; a launch is answered once its run PTY is
-//! spawned, so `localify dev` then decides, under the service's lock and its
-//! launch record, whether it starts.
+//! Only the app's own user can open the socket: it is `0600`, in a folder of
+//! the bridge's own that the app makes `0700`. The data dir around it is
+//! never changed, since a layout may share it, such as `/etc/localify`; where
+//! the app cannot make that folder, it has no bridge. A lock file in the
+//! folder, held while the app runs, makes one app the bridge's owner. One
+//! JSON request per connection, one JSON answer; a launch is answered once
+//! its run PTY is spawned, so `localify dev` then decides, under the
+//! service's lock and its launch record, whether it starts.
 
-use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,13 +33,16 @@ use crate::desktop::terminal::{
 };
 use crate::domain::launch_profile::LaunchProfileName;
 use crate::infrastructure::app_bridge::{
-    AppHello, BridgeAnswer, BridgeError, LaunchRequest, socket_path,
+    AppHello, BridgeAnswer, BridgeError, LaunchRequest, bridge_dir, socket_path,
 };
+use crate::infrastructure::process::effective_uid;
 use crate::infrastructure::runs::launches::{RequestedBy, unix_ms_now};
 use crate::infrastructure::test_pause::pause_at;
 
 /// What `hello` answers in `bridge`.
 pub const BRIDGE_VERSION: u32 = 1;
+/// In the bridge's folder: held by the app that owns the bridge.
+const LOCK_NAME: &str = "app-bridge.lock";
 /// The longest request line the app reads.
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 /// How long the app waits for a client's request line.
@@ -56,14 +62,21 @@ pub struct AppBridge {
     /// The socket's inode, so only the socket this bridge bound is removed.
     inode: (u64, u64),
     closed: Arc<AtomicBool>,
+    /// Held while the bridge is this app's; released after the socket is
+    /// removed.
+    _lock: File,
 }
 
 impl AppBridge {
-    /// Listens on `<data_dir>/app-bridge.sock`. The data dir is made private
-    /// first. A socket a crashed app left is replaced; one another app still
-    /// answers on is not, and neither is anything that is not a socket.
+    /// Listens on `<data_dir>/app-bridge/app-bridge.sock`, making the
+    /// bridge's folder first; fails where it cannot, as on a data dir of
+    /// root's. Under the folder's lock, a socket a crashed app left is
+    /// replaced; another app holding the lock owns the bridge, and is left
+    /// alone, and so is anything that is not a socket.
     pub fn listen(data_dir: &Path, launcher: Arc<Launcher>) -> Result<Self> {
-        make_private_dir(data_dir)?;
+        let dir = bridge_dir(data_dir);
+        make_bridge_dir(data_dir, &dir)?;
+        let lock = take_lock(&dir.join(LOCK_NAME))?;
         let path = socket_path(data_dir);
         remove_stale_socket(&path)?;
         let listener = UnixListener::bind(&path)
@@ -90,6 +103,7 @@ impl AppBridge {
             path,
             inode: (metadata.dev(), metadata.ino()),
             closed,
+            _lock: lock,
         })
     }
 
@@ -100,7 +114,7 @@ impl AppBridge {
 
 impl Drop for AppBridge {
     /// Stops accepting and removes the socket, unless another app replaced
-    /// it meanwhile.
+    /// it meanwhile. The lock goes after, once the socket is gone.
     fn drop(&mut self) {
         self.closed.store(true, Ordering::SeqCst);
         // Wakes the accepting thread, which then sees it is closed.
@@ -321,36 +335,71 @@ fn error(code: &str, message: impl Into<String>) -> BridgeError {
     }
 }
 
-/// Creates `dir` if needed, and makes it enterable by its owner only. A
-/// symbolic link is refused, and so is a folder of another user, which this
-/// one may not change.
-fn make_private_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
+/// Makes the bridge's folder `dir`, in `data_dir`, enterable by this user
+/// only. The data dir is made when missing, and its permissions are never
+/// changed. A folder that is a symbolic link, or another user's, is refused.
+fn make_bridge_dir(data_dir: &Path, dir: &Path) -> Result<()> {
+    // Its permissions are whatever the layout gave it, or the umask's.
+    let _ = fs::create_dir_all(data_dir);
+    match DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(failure) if failure.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(failure) => {
+            return Err(failure).with_context(|| {
+                format!(
+                    "Failed to make '{}', so the app bridge is unavailable on this layout: is '{}' another user's?",
+                    dir.display(),
+                    data_dir.display()
+                )
+            });
+        }
+    }
     let metadata =
         fs::symlink_metadata(dir).with_context(|| format!("Failed to read '{}'", dir.display()))?;
-    if !metadata.is_dir() {
+    if !metadata.is_dir() || metadata.uid() != effective_uid() {
         bail!(
-            "'{}' is not a folder, so the app bridge cannot listen in it.",
+            "'{}' is not a folder of this user, so the app bridge cannot listen in it.",
             dir.display()
         );
     }
     if metadata.mode() & 0o077 != 0 {
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).with_context(|| {
-            format!(
-                "Failed to make '{}' private: is it a folder of this user?",
-                dir.display()
-            )
-        })?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to make '{}' private", dir.display()))?;
     }
     Ok(())
 }
 
-/// Removes a socket nobody answers on. Fails when an app still answers on
-/// it, or when something other than a socket is there.
+/// Takes the bridge's lock for as long as the returned file is open. The
+/// file stays: only the lock on it comes and goes.
+fn take_lock(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("Failed to open '{}'", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => bail!(
+            "Another Localify app owns the app bridge ('{}' is locked).",
+            path.display()
+        ),
+        Err(fs::TryLockError::Error(failure)) => {
+            Err(failure).with_context(|| format!("Failed to lock '{}'", path.display()))
+        }
+    }
+}
+
+/// Removes a socket nobody listens on, which only a refused connection
+/// proves. Fails when an app still answers on it, when connecting fails in
+/// any other way, or when something other than a socket is there. Called
+/// with the bridge's lock held, so no other app is between this and its
+/// bind.
 fn remove_stale_socket(path: &Path) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(failure) => {
             return Err(failure).with_context(|| format!("Failed to read '{}'", path.display()));
         }
@@ -361,13 +410,21 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
             path.display()
         );
     }
-    if UnixStream::connect(path).is_ok() {
-        bail!(
+    match UnixStream::connect(path) {
+        Ok(_) => bail!(
             "Another Localify app already listens on '{}'.",
             path.display()
-        );
+        ),
+        Err(failure) if failure.kind() == io::ErrorKind::ConnectionRefused => {
+            fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()))
+        }
+        Err(failure) => Err(failure).with_context(|| {
+            format!(
+                "Failed to tell whether an app still listens on '{}'",
+                path.display()
+            )
+        }),
     }
-    fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()))
 }
 
 #[cfg(test)]
@@ -437,12 +494,13 @@ mod tests {
         let socket = fs::symlink_metadata(bridge.path()).unwrap();
         assert!(socket.file_type().is_socket());
         assert_eq!(socket.mode() & 0o777, 0o600);
-        let data = fs::metadata(dir.path().join("data")).unwrap();
-        assert_eq!(data.mode() & 0o777, 0o700);
+        assert_eq!(bridge.path(), socket_path(&dir.path().join("data")));
+        let folder = fs::metadata(bridge_dir(&dir.path().join("data"))).unwrap();
+        assert_eq!(folder.mode() & 0o777, 0o700);
     }
 
     #[test]
-    fn an_open_data_dir_is_made_private_first() {
+    fn the_data_dir_is_never_changed() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         fs::create_dir(&data).unwrap();
@@ -450,7 +508,51 @@ mod tests {
 
         let _bridge = AppBridge::listen(&data, Arc::new(|_| Ok(()))).unwrap();
 
-        assert_eq!(fs::metadata(&data).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&data).unwrap().mode() & 0o777, 0o755);
+    }
+
+    #[test]
+    fn a_data_dir_this_user_cannot_write_has_no_bridge() {
+        // As `/etc/localify` is to a desktop user: readable, not writable.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let listening = AppBridge::listen(&data, Arc::new(|_| Ok(())));
+
+        let mode = fs::metadata(&data).unwrap().mode() & 0o777;
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = format!("{:#}", listening.err().expect("listened anyway"));
+        assert!(error.contains("unavailable on this layout"), "{error}");
+        assert_eq!(mode, 0o555, "the data dir was changed");
+        assert!(!bridge_dir(&data).exists());
+    }
+
+    #[test]
+    fn an_open_bridge_folder_is_made_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir_all(bridge_dir(&data)).unwrap();
+        fs::set_permissions(bridge_dir(&data), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _bridge = AppBridge::listen(&data, Arc::new(|_| Ok(()))).unwrap();
+
+        let mode = fs::metadata(bridge_dir(&data)).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn a_bridge_folder_that_is_a_link_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, bridge_dir(&data)).unwrap();
+
+        assert!(AppBridge::listen(&data, Arc::new(|_| Ok(()))).is_err());
+        assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
     }
 
     #[test]
@@ -463,30 +565,123 @@ mod tests {
         assert_eq!(hello.version, env!("CARGO_PKG_VERSION"));
     }
 
-    #[test]
-    fn a_stale_socket_is_replaced_and_a_live_one_kept() {
+    /// A data dir holding what a crashed app leaves: its bridge's folder,
+    /// and a socket nobody listens on.
+    fn crashed_app_left() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        fs::create_dir(&data).unwrap();
-        // What a crashed app leaves: a socket nobody listens on.
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(bridge_dir(&data))
+            .unwrap();
         drop(UnixListener::bind(socket_path(&data)).unwrap());
+        // A child another test is forking holds a copy of every descriptor
+        // until it execs, the listener's included: stale once refused.
+        let stale = || {
+            UnixStream::connect(socket_path(&data))
+                .is_err_and(|failure| failure.kind() == io::ErrorKind::ConnectionRefused)
+        };
+        eventually(stale);
+        (dir, data)
+    }
+
+    /// Waits up to 2 seconds for `done`, for what a forking child of another
+    /// test holds for a moment.
+    fn eventually(mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "still not done");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_stale_socket_is_replaced_and_a_live_one_kept() {
+        let (_dir, data) = crashed_app_left();
 
         let bridge = AppBridge::listen(&data, Arc::new(|_| Ok(()))).unwrap();
         assert!(hello(bridge.path()).is_some());
 
         let second = AppBridge::listen(&data, Arc::new(|_| Ok(())));
-        assert!(second.is_err(), "took over a socket another app answers on");
+        let error = format!(
+            "{:#}",
+            second.err().expect("took over a bridge another app owns")
+        );
+        assert!(error.contains("owns the app bridge"), "{error}");
         assert!(hello(bridge.path()).is_some());
 
         drop(bridge);
         assert!(!socket_path(&data).exists(), "the socket outlived its app");
+        assert!(
+            bridge_dir(&data).join(LOCK_NAME).exists(),
+            "the lock file went"
+        );
+        // The lock is free again once a forking child let go of its copy.
+        let mut next = None;
+        eventually(|| {
+            next = AppBridge::listen(&data, Arc::new(|_| Ok(()))).ok();
+            next.is_some()
+        });
+        assert!(hello(&socket_path(&data)).is_some());
+    }
+
+    #[test]
+    fn apps_starting_together_leave_one_bridge_that_answers() {
+        for _ in 0..20 {
+            let (_dir, data) = crashed_app_left();
+            let start = Arc::new(std::sync::Barrier::new(8));
+            let starts: Vec<_> = (0..8)
+                .map(|_| {
+                    let data = data.clone();
+                    let start = Arc::clone(&start);
+                    thread::spawn(move || {
+                        start.wait();
+                        AppBridge::listen(&data, Arc::new(|_| Ok(())))
+                    })
+                })
+                .collect();
+            let bridges: Vec<_> = starts
+                .into_iter()
+                .filter_map(|start| start.join().unwrap().ok())
+                .collect();
+
+            assert_eq!(
+                bridges.len(),
+                1,
+                "{} apps think they own the bridge",
+                bridges.len()
+            );
+            let socket = fs::symlink_metadata(socket_path(&data)).unwrap();
+            assert_eq!(
+                (socket.dev(), socket.ino()),
+                bridges[0].inode,
+                "the owner's socket was removed or replaced"
+            );
+        }
+    }
+
+    #[test]
+    fn a_socket_that_cannot_be_probed_is_never_removed() {
+        let (_dir, data) = crashed_app_left();
+        // Connecting fails, but not with a refusal: nothing proves it stale.
+        fs::set_permissions(socket_path(&data), fs::Permissions::from_mode(0o000)).unwrap();
+
+        let listening = AppBridge::listen(&data, Arc::new(|_| Ok(())));
+
+        let kept = fs::symlink_metadata(socket_path(&data)).is_ok();
+        // Root connects whatever the mode says, and then sees it stale.
+        if effective_uid() != 0 {
+            assert!(listening.is_err());
+            assert!(kept, "removed a socket it could not probe");
+        }
     }
 
     #[test]
     fn what_is_not_a_socket_is_never_removed() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        fs::create_dir(&data).unwrap();
+        fs::create_dir_all(bridge_dir(&data)).unwrap();
         fs::write(socket_path(&data), "mine").unwrap();
 
         assert!(AppBridge::listen(&data, Arc::new(|_| Ok(()))).is_err());

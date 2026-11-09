@@ -7,15 +7,18 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 
-use crate::application::inventory::Snapshot;
+use crate::application::inventory::{Have, Snapshot};
 use crate::daemon::public_tunnel::PublicTunnel;
 use crate::infrastructure::app_bridge;
 use crate::infrastructure::cloud::types::TunnelState;
 use crate::infrastructure::inventory::{LocalInventory, PublicFacts};
-use crate::infrastructure::remote::wire::AppPresence;
+use crate::infrastructure::remote::wire::{AppPresence, MachineSummary};
 use crate::infrastructure::running_services::RunningServiceStore;
 use crate::infrastructure::runs::RunId;
 use localify::desktop::ProjectRootStore;
@@ -38,25 +41,68 @@ pub trait LocalSource: Send + Sync {
     /// The output folder of `run_id`, while it is its service's last run
     /// and has a stream. Reads the run records: quick, and blocking.
     fn run_output(&self, run_id: &RunId) -> Result<Result<PathBuf, RunLookup>>;
-    /// Whether the desktop app runs, as its bridge's `hello` says: quick,
-    /// and blocking for half a second at most.
+    /// Whether the desktop app runs, as its bridge's `hello` last said:
+    /// never waits for the app.
     fn app(&self) -> AppPresence;
+}
+
+/// How often [`AppSeen`] asks the app's bridge.
+const APP_PROBE_EVERY: Duration = Duration::from_secs(2);
+
+/// Whether the desktop app runs, as a task that asks its bridge every
+/// [`APP_PROBE_EVERY`] last saw it, so that a session's actor reads it
+/// without waiting for an app that is slow to answer.
+#[derive(Clone, Default)]
+pub struct AppSeen(Arc<AtomicBool>);
+
+impl AppSeen {
+    /// Watches the app's bridge in `data_dir` until `cancel`.
+    pub fn watch(data_dir: &std::path::Path, cancel: CancellationToken) -> Self {
+        Self::spawn(app_bridge::socket_path(data_dir), APP_PROBE_EVERY, cancel)
+    }
+
+    /// Asks the bridge at `socket` now and every `every`, until `cancel`.
+    pub fn spawn(socket: PathBuf, every: Duration, cancel: CancellationToken) -> Self {
+        let seen = Self::default();
+        let updated = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let asked = socket.clone();
+                let running = tokio::task::spawn_blocking(move || app_bridge::probe(&asked))
+                    .await
+                    .is_ok_and(|presence| presence == AppPresence::Running);
+                updated.0.store(running, Ordering::SeqCst);
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(every) => {}
+                }
+            }
+        });
+        seen
+    }
+
+    pub fn get(&self) -> AppPresence {
+        if self.0.load(Ordering::SeqCst) {
+            AppPresence::Running
+        } else {
+            AppPresence::Absent
+        }
+    }
 }
 
 /// The daemon's own inventory, tunnel and run records.
 pub struct DaemonSource {
     inventory: Arc<LocalInventory>,
     tunnel: PublicTunnel,
-    /// The app bridge's socket.
-    app_bridge: PathBuf,
+    app: AppSeen,
 }
 
 impl DaemonSource {
-    pub fn new(inventory: Arc<LocalInventory>, tunnel: PublicTunnel, app_bridge: PathBuf) -> Self {
+    pub fn new(inventory: Arc<LocalInventory>, tunnel: PublicTunnel, app: AppSeen) -> Self {
         Self {
             inventory,
             tunnel,
-            app_bridge,
+            app,
         }
     }
 }
@@ -74,7 +120,33 @@ impl LocalSource for DaemonSource {
     }
 
     fn app(&self) -> AppPresence {
-        app_bridge::probe(&self.app_bridge)
+        self.app.get()
+    }
+}
+
+/// Numbers what viewers are sent: a snapshot's items and the machine
+/// summary they go out with. The snapshot's own revision counts the items
+/// only, so a change of the summary alone, such as the app opening or a
+/// switch turned, moves this one too. Kept by the link, so a new relay
+/// connection never numbers a revision again.
+#[derive(Debug, Default)]
+pub struct SentRevisions {
+    rev: u64,
+    last: Option<(String, u64, MachineSummary)>,
+}
+
+impl SentRevisions {
+    /// The revision `snapshot` goes out as with `summary`.
+    pub fn number(&mut self, snapshot: &Snapshot, summary: &MachineSummary) -> Have {
+        let sent = (snapshot.epoch.clone(), snapshot.rev, summary.clone());
+        if self.last.as_ref() != Some(&sent) {
+            self.rev += 1;
+            self.last = Some(sent);
+        }
+        Have {
+            epoch: snapshot.epoch.clone(),
+            rev: self.rev,
+        }
     }
 }
 
@@ -120,4 +192,81 @@ pub async fn build_snapshot(
         inventory.snapshot(&public, &project_roots)
     })
     .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    use super::*;
+
+    /// An app answering `hello` at `socket`, until its socket is removed.
+    fn app_at(socket: &std::path::Path) {
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut line = String::new();
+                let _ = BufReader::new(&stream).read_line(&mut line);
+                let _ =
+                    stream.write_all(b"{\"ok\":true,\"data\":{\"version\":\"1\",\"bridge\":1}}\n");
+            }
+        });
+    }
+
+    async fn becomes(seen: &AppSeen, wanted: AppPresence) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while seen.get() != wanted {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "still not {wanted:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn a_new_summary_moves_the_revision_and_the_same_one_does_not() {
+        use crate::application::inventory::Revisions;
+        use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
+
+        let mut items = Revisions::new("epoch".into());
+        let snapshot = items.snapshot(Vec::new()).unwrap();
+        let mut summary = MachineSummary {
+            machine_id: "mB".into(),
+            name: "B".into(),
+            version: "1".into(),
+            os: "macos".into(),
+            settings: DEFAULT_SETTINGS,
+            app: AppPresence::Absent,
+        };
+        let mut sent = SentRevisions::default();
+
+        let first = sent.number(&snapshot, &summary);
+        assert_eq!(sent.number(&snapshot, &summary), first);
+        summary.app = AppPresence::Running;
+        let opened = sent.number(&snapshot, &summary);
+        assert!(opened.rev > first.rev);
+        summary.settings.control = !summary.settings.control;
+        assert!(sent.number(&snapshot, &summary).rev > opened.rev);
+        assert_eq!(first.epoch, snapshot.epoch);
+    }
+
+    #[tokio::test]
+    async fn the_app_is_seen_opening_and_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("app-bridge.sock");
+        let cancel = CancellationToken::new();
+        let seen = AppSeen::spawn(socket.clone(), Duration::from_millis(50), cancel.clone());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(seen.get(), AppPresence::Absent);
+
+        app_at(&socket);
+        becomes(&seen, AppPresence::Running).await;
+        // The app quit: its socket is gone.
+        std::fs::remove_file(&socket).unwrap();
+        becomes(&seen, AppPresence::Absent).await;
+        cancel.cancel();
+    }
 }
