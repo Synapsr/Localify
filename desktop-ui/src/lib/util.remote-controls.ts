@@ -357,3 +357,52 @@ export function accessRequestTitle(name: string, fingerprint: string): string {
     ? `${name} (${short}) asks for remote controls.`
     : `${name} asks for remote controls.`;
 }
+
+/** An access request on the target, as its dialog shows it. */
+export type AccessPrompt<R extends { requestId: string }> = R & {
+  /** The answer is on its way: the buttons are off. */
+  answering: boolean;
+  /** Why the last answer could not be sent; the request still waits. */
+  error: string | null;
+};
+
+/** A request the daemon sent, queued once. */
+export function accessPromptAdded<R extends { requestId: string }>(
+  queue: AccessPrompt<R>[],
+  request: R,
+): AccessPrompt<R>[] {
+  if (queue.some((prompt) => prompt.requestId === request.requestId)) return queue;
+  return [...queue, { ...request, answering: false, error: null }];
+}
+
+/** A request answered, or closed by the daemon (`access_closed`): its dialog goes. */
+export function accessPromptClosed<R extends { requestId: string }>(
+  queue: AccessPrompt<R>[],
+  requestId: string,
+): AccessPrompt<R>[] {
+  return queue.filter((prompt) => prompt.requestId !== requestId);
+}
+
+/** The answer is sent: the dialog stays, with its buttons off, until it is through. */
+export function accessPromptAnswering<R extends { requestId: string }>(
+  queue: AccessPrompt<R>[],
+  requestId: string,
+): AccessPrompt<R>[] {
+  return queue.map((prompt) =>
+    prompt.requestId === requestId ? { ...prompt, answering: true, error: null } : prompt,
+  );
+}
+
+/**
+ * The answer could not be sent: the request can be answered again, with the error shown, as
+ * long as it still waits. One the daemon closed meanwhile stays gone.
+ */
+export function accessPromptFailed<R extends { requestId: string }>(
+  queue: AccessPrompt<R>[],
+  requestId: string,
+  error: string,
+): AccessPrompt<R>[] {
+  return queue.map((prompt) =>
+    prompt.requestId === requestId ? { ...prompt, answering: false, error } : prompt,
+  );
+}

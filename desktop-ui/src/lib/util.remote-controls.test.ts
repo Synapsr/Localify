@@ -6,6 +6,11 @@ import type { RemoteInventoryItemDto } from "../types/localify.ts";
 
 import {
   accessCommand,
+  type AccessPrompt,
+  accessPromptAdded,
+  accessPromptAnswering,
+  accessPromptClosed,
+  accessPromptFailed,
   accessRequestTitle,
   accessEventView,
   controlLostText,
@@ -410,4 +415,43 @@ test("the access dialog names a peer by its fingerprint's first 8 characters", (
     accessRequestTitle("teo-laptop", "3f2a 91c0 5e6f 7a8b"),
     "teo-laptop (3F2A 91C0) asks for remote controls.",
   );
+});
+
+type Request = { requestId: string; name: string };
+const prompt = (requestId: string, more: Partial<AccessPrompt<Request>> = {}) => ({
+  requestId,
+  name: "teo-laptop",
+  answering: false,
+  error: null,
+  ...more,
+});
+
+test("access requests queue once each, the first on screen", () => {
+  let queue: AccessPrompt<Request>[] = [];
+  queue = accessPromptAdded(queue, { requestId: "a", name: "teo-laptop" });
+  queue = accessPromptAdded(queue, { requestId: "b", name: "teo-laptop" });
+  queue = accessPromptAdded(queue, { requestId: "a", name: "teo-laptop" });
+  assert.deepEqual(queue, [prompt("a"), prompt("b")]);
+});
+
+test("an answer on its way keeps the dialog, with its buttons off, until it is through", () => {
+  let queue = [prompt("a", { error: "The daemon is not running." }), prompt("b")];
+  queue = accessPromptAnswering(queue, "a");
+  assert.deepEqual(queue, [prompt("a", { answering: true }), prompt("b")]);
+
+  queue = accessPromptClosed(queue, "a");
+  assert.deepEqual(queue, [prompt("b")]);
+});
+
+test("an answer that failed lets the request be answered again, with the error", () => {
+  let queue = accessPromptAnswering([prompt("a")], "a");
+  queue = accessPromptFailed(queue, "a", "The daemon is not running.");
+  assert.deepEqual(queue, [prompt("a", { error: "The daemon is not running." })]);
+});
+
+test("an answer that failed after access_closed doesn't bring the dialog back", () => {
+  let queue = accessPromptAnswering([prompt("a"), prompt("b")], "a");
+  queue = accessPromptClosed(queue, "a");
+  queue = accessPromptFailed(queue, "a", "The daemon is not running.");
+  assert.deepEqual(queue, [prompt("b")]);
 });

@@ -1,7 +1,6 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -30,20 +29,9 @@ export function RemoteAccessDialog() {
 function AccessRequestDialog() {
   const { access, answerAccess } = useRemote();
   const [suppress, setSuppress] = useState(false);
-  const [answering, setAnswering] = useState(false);
   // Focus lands on the dialog, not a button, so typing in a terminal can't answer it.
   const popup = useRef<HTMLDivElement>(null);
   if (!access) return null;
-
-  const answer = (allow: boolean) => {
-    setAnswering(true);
-    void answerAccess(allow, suppress).catch((error: unknown) => {
-      setAnswering(false);
-      toast.error("Could not answer the request", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    });
-  };
 
   return (
     <Dialog open onOpenChange={() => undefined}>
@@ -69,17 +57,31 @@ function AccessRequestDialog() {
             <input
               type="checkbox"
               checked={suppress}
+              disabled={access.answering}
               onChange={(event) => setSuppress(event.target.checked)}
               className="size-4 accent-foreground"
             />
             Don't ask again from {access.name}
           </label>
+          {access.error ? (
+            <p role="alert" className="mt-2 text-sm text-destructive">
+              Could not answer the request: {access.error}
+            </p>
+          ) : null}
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" disabled={answering} onClick={() => answer(false)}>
+          <Button
+            variant="outline"
+            disabled={access.answering}
+            onClick={() => answerAccess(false, suppress)}
+          >
             Don't allow
           </Button>
-          <Button variant="primary" disabled={answering} onClick={() => answer(true)}>
+          <Button
+            variant="primary"
+            disabled={access.answering}
+            onClick={() => answerAccess(true, suppress)}
+          >
             Allow
           </Button>
         </DialogFooter>

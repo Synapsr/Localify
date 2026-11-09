@@ -31,7 +31,14 @@ import { remoteQueries } from "@/lib/queries";
 import { openRemoteStream } from "@/lib/remote-stream";
 import { tauriClient } from "@/lib/tauri-client";
 import { pairingCancelledMessage } from "@/lib/util.remote";
-import { accessRequestTitle } from "@/lib/util.remote-controls";
+import {
+  type AccessPrompt,
+  accessPromptAdded,
+  accessPromptAnswering,
+  accessPromptClosed,
+  accessPromptFailed,
+  accessRequestTitle,
+} from "@/lib/util.remote-controls";
 
 /** How long the app waits before it listens to the daemon again. */
 const EVENTS_RETRY_MS = 5000;
@@ -79,8 +86,9 @@ interface RemoteContextValue {
   answerIncoming: (accept: boolean) => Promise<void>;
   dismissIncoming: () => void;
   /** The access request on screen; the others wait their turn. */
-  access: IncomingAccess | null;
-  answerAccess: (allow: boolean, suppress: boolean) => Promise<void>;
+  access: AccessPrompt<IncomingAccess> | null;
+  /** Answers the request on screen; a failure shows in its dialog, which stays. */
+  answerAccess: (allow: boolean, suppress: boolean) => void;
   /** A remote service's output covers the bottom of the window, as the terminal does. */
   outputOpen: boolean;
   setOutputOpen: (open: boolean) => void;
@@ -95,7 +103,7 @@ export function RemoteProvider({ children }: PropsWithChildren) {
   const [outgoing, setOutgoing] = useState<OutgoingPairing | null>(null);
   const [incoming, setIncoming] = useState<IncomingPairing | null>(null);
   const [outputOpen, setOutputOpen] = useState(false);
-  const [accessQueue, setAccessQueue] = useState<IncomingAccess[]>([]);
+  const [accessQueue, setAccessQueue] = useState<AccessPrompt<IncomingAccess>[]>([]);
   const access = accessQueue[0] ?? null;
   const closeOutgoing = useRef<(() => void) | null>(null);
   const incomingRef = useRef(incoming);
@@ -134,18 +142,12 @@ export function RemoteProvider({ children }: PropsWithChildren) {
           return;
         case "access_request": {
           const { event: _, expiresAt: __, ...request } = event;
-          setAccessQueue((queue) =>
-            queue.some((waiting) => waiting.requestId === request.requestId)
-              ? queue
-              : [...queue, request],
-          );
+          setAccessQueue((queue) => accessPromptAdded(queue, request));
           void notify(accessRequestTitle(request.name, request.fingerprint));
           return;
         }
         case "access_closed":
-          setAccessQueue((queue) =>
-            queue.filter((waiting) => waiting.requestId !== event.requestId),
-          );
+          setAccessQueue((queue) => accessPromptClosed(queue, event.requestId));
           return;
         case "presence":
         case "revoked":
@@ -278,19 +280,31 @@ export function RemoteProvider({ children }: PropsWithChildren) {
 
   const accessRef = useRef(access);
   accessRef.current = access;
+  // Set at the click, before React renders: a second click finds it.
+  const answering = useRef(new Set<string>());
+  // The dialog stays until the answer is through or `access_closed` arrives: the daemon
+  // still waits when the answer could not be sent, and "Don't ask again" with it.
   const answerAccess = useCallback(
-    async (allow: boolean, suppress: boolean) => {
+    (allow: boolean, suppress: boolean) => {
       const current = accessRef.current;
-      if (!current) return;
-      setAccessQueue((queue) => queue.filter((waiting) => waiting.requestId !== current.requestId));
-      const { outcome } = await tauriClient.answerRemoteAccess({
-        requestId: current.requestId,
-        allow,
-        suppress,
-      });
-      void queryClient.invalidateQueries({ queryKey: remoteQueries.all() });
-      if (outcome === "granted") toast.success("Remote controls are on for every paired machine.");
-      else if (allow) toast.info("That request had already ended. Nothing changed.");
+      if (!current || answering.current.has(current.requestId)) return;
+      const { requestId } = current;
+      answering.current.add(requestId);
+      setAccessQueue((queue) => accessPromptAnswering(queue, requestId));
+      void tauriClient
+        .answerRemoteAccess({ requestId, allow, suppress })
+        .then(({ outcome }) => {
+          setAccessQueue((queue) => accessPromptClosed(queue, requestId));
+          void queryClient.invalidateQueries({ queryKey: remoteQueries.all() });
+          if (outcome === "granted") {
+            toast.success("Remote controls are on for every paired machine.");
+          } else if (allow) toast.info("That request had already ended. Nothing changed.");
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setAccessQueue((queue) => accessPromptFailed(queue, requestId, message));
+        })
+        .finally(() => answering.current.delete(requestId));
     },
     [queryClient],
   );

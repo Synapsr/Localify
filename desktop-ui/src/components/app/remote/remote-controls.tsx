@@ -32,6 +32,7 @@ import {
 import { openRemoteStream } from "@/lib/remote-stream";
 import { remoteErrorMessage, serviceKey } from "@/lib/util.remote";
 import {
+  accessCommand,
   type AccessView,
   accessEventView,
   type ControlPhase,
@@ -44,6 +45,9 @@ import {
   relaunchConfirmation,
   relaunchStillConfirmed,
 } from "@/lib/util.remote-controls";
+import { createStreamRegistry } from "@/lib/util.stream-registry";
+
+import { RemoteCommand } from "./remote-command";
 
 /** After access is granted, how long a relaunch waits for the snapshot that allows it. */
 const GRANTED_SNAPSHOT_MS = 15_000;
@@ -114,6 +118,8 @@ export function RemoteControlsProvider({
   const [controls, setControls] = useState<Record<string, ControlInFlight>>({});
   // Set at the click, before React renders: a second click finds it.
   const busy = useRef(new Set<string>());
+  // The control streams still open, closed when the machine leaves the screen.
+  const controlStreams = useRef(createStreamRegistry());
   const [access, setAccess] = useState<AccessRequestState | null>(null);
   const closeAccess = useRef<(() => void) | null>(null);
   // Counts asks: events of an ask replaced or cancelled since are dropped.
@@ -123,10 +129,13 @@ export function RemoteControlsProvider({
   const live = useRef({ machineName, appRunning });
   live.current = { machineName, appRunning };
 
-  // A machine left on screen keeps nothing open with it, its request's toast included: the
-  // request's events are dropped from here on, so nothing else would close it.
+  // A machine left on screen keeps nothing open with it, toasts included: the streams'
+  // events are dropped from here on, so nothing else would close them.
   useEffect(
     () => () => {
+      for (const key of controlStreams.current.closeAll()) {
+        toast.dismiss(controlToastId(machineId, key));
+      }
       askSeq.current += 1;
       closeAccess.current?.();
       closeAccess.current = null;
@@ -145,7 +154,8 @@ export function RemoteControlsProvider({
       if (busy.current.has(key)) return;
       busy.current.add(key);
       const service = item.service.name;
-      const toastId = `remote-control:${machineId}:${key}`;
+      const toastId = controlToastId(machineId, key);
+      const stream = controlStreams.current.add(key);
       const progress = (phase: ControlPhase) => {
         const { machineName: name, appRunning: app } = live.current;
         const text = controlProgressText(action, phase, name, app);
@@ -153,14 +163,15 @@ export function RemoteControlsProvider({
         toast.loading(text, { id: toastId });
       };
       const settle = (ok: boolean, text: string) => {
+        stream.ended();
         busy.current.delete(key);
         setControls(({ [key]: _, ...rest }) => rest);
         if (ok) toast.success(text, { id: toastId });
         else toast.error(text, { id: toastId });
       };
       progress("sent");
-      let ended = false;
       const onEvent = (event: RemoteControlEventDto) => {
+        if (!stream.live()) return;
         const name = live.current.machineName;
         switch (event.event) {
           case "sent":
@@ -172,13 +183,11 @@ export function RemoteControlsProvider({
             progress("unknown");
             return;
           case "result": {
-            ended = true;
             const view = controlResultText(event, action, service, name);
             settle(view.ok, view.text);
             return;
           }
           case "lost":
-            ended = true;
             settle(false, controlLostText(event.code, name));
             return;
         }
@@ -188,19 +197,24 @@ export function RemoteControlsProvider({
         {
           onData: onEvent,
           onEnd: (error) => {
-            if (!ended) settle(false, error ?? controlLostText("closed", live.current.machineName));
+            if (stream.live()) {
+              settle(false, error ?? controlLostText("closed", live.current.machineName));
+            }
           },
         },
-      ).catch((error: unknown) =>
-        settle(false, error instanceof Error ? error.message : String(error)),
-      );
+      )
+        .then(stream.opened)
+        .catch((error: unknown) => {
+          if (stream.live()) settle(false, error instanceof Error ? error.message : String(error));
+        });
     },
     [machineId],
   );
 
   /**
    * Asks the target for access. A card shows the request as it goes; a relaunch confirmed in
-   * its dialog has no card, so a toast shows it, with Cancel.
+   * its dialog has no card, so a toast shows it, with Cancel. When it ends without access, the
+   * toast stays, with the command to run on the target instead.
    */
   const ask = useCallback(
     (wants: RemoteAccessWants, inToast = false) => {
@@ -209,17 +223,35 @@ export function RemoteControlsProvider({
       const seq = ++askSeq.current;
       const isLatest = () => seq === askSeq.current;
       const toastId = `remote-access:${machineId}`;
+      // Updating a toast keeps the options it had: each step sets them all.
+      const options = {
+        id: toastId,
+        action: undefined,
+        description: undefined,
+        duration: undefined,
+      };
       const show = (view: AccessView) => {
         setAccess({ wants, view });
         if (view.step === "waiting") {
           if (inToast) {
             toast.loading(view.text, {
-              id: toastId,
+              ...options,
               action: { label: "Cancel", onClick: () => cancelRef.current() },
             });
           }
-        } else if (view.ok) toast.success(view.text, { id: toastId });
-        else if (inToast) toast.error(view.text, { id: toastId });
+        } else if (view.ok) toast.success(view.text, options);
+        else if (inToast) {
+          toast.error(view.text, {
+            ...options,
+            duration: Number.POSITIVE_INFINITY,
+            description: (
+              <div className="mt-1 flex flex-col gap-1">
+                <span>Or run this on {live.current.machineName}:</span>
+                <RemoteCommand command={accessCommand(wants)} />
+              </div>
+            ),
+          });
+        }
       };
       show(accessEventView({ event: "waiting" }, wants, live.current.machineName));
       let ended = false;
@@ -387,6 +419,10 @@ export function RemoteControlsProvider({
       />
     </RemoteControlsContext.Provider>
   );
+}
+
+function controlToastId(machineId: string, key: string): string {
+  return `remote-control:${machineId}:${key}`;
 }
 
 export function useRemoteControls(): RemoteControlsValue {

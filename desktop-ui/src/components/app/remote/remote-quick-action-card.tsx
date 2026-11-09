@@ -4,13 +4,13 @@ import { useEffect } from "react";
 
 import type { RemoteControlAction, RemoteInventoryItemDto } from "@/types/localify";
 
-import { CheckIcon, CopyIcon, SpinnerIcon } from "@/components/icons";
+import { SpinnerIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { remoteErrorMessage } from "@/lib/util.remote";
 import { accessCommand, type QuickAction } from "@/lib/util.remote-controls";
 import { cn } from "@/lib/utils";
 
+import { RemoteCommand } from "./remote-command";
 import { useRemoteControls } from "./remote-controls";
 
 /**
@@ -41,7 +41,7 @@ export function RemoteQuickActionCard({
         <div className="flex flex-col gap-2">
           <p className="text-foreground">{remoteErrorMessage(code, name, "Not available.")}</p>
           <p className="text-muted-foreground">Update Localify on {name} to ask from here.</p>
-          <Command command={accessCommand(quick.wants)} />
+          <RemoteCommand command={accessCommand(quick.wants)} />
         </div>
       );
     case "ask":
@@ -60,7 +60,7 @@ export function RemoteQuickActionCard({
             </Button>
           )}
           <p className="mt-1 text-xs text-muted-foreground">Or run this on {name}:</p>
-          <Command command={accessCommand(quick.wants)} />
+          <RemoteCommand command={accessCommand(quick.wants)} />
         </div>
       );
     case "relaunch":
@@ -88,6 +88,12 @@ export function RemoteQuickActionCard({
               Relaunch on {name}
             </Button>
           )}
+          {quick.access ? (
+            <>
+              <p className="mt-1 text-xs text-muted-foreground">Or run this on {name}:</p>
+              <RemoteCommand command={accessCommand(quick.access)} />
+            </>
+          ) : null}
         </div>
       );
   }
@@ -116,24 +122,5 @@ function AccessStatus() {
     >
       {view.text}
     </p>
-  );
-}
-
-function Command({ command }: { command: string }) {
-  const { copy, copied } = useCopyToClipboard();
-  return (
-    <div className="flex items-center gap-1 rounded-md bg-muted px-2 py-1">
-      <code className="min-w-0 flex-1 font-mono text-xs break-all text-foreground select-all">
-        {command}
-      </code>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        aria-label={copied ? "Command copied" : "Copy the command"}
-        onClick={() => void copy(command)}
-      >
-        {copied ? <CheckIcon className="text-emerald-500" /> : <CopyIcon />}
-      </Button>
-    </div>
   );
 }
