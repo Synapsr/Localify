@@ -45,7 +45,8 @@ checkout.
 **macOS app.** Download it from [localify.dev](https://localify.dev), or take the DMG
 directly: <https://downloads.localify.dev/latest/localify.dmg>. On first launch it asks
 for your administrator password once, then sets up DNS, the certificate authority, the
-background service and the `localify` command. Updates install from Settings in the app.
+background service and the `localify` command. Updates install by themselves while the
+app is closed; see [Updates](docs/README.md#updates).
 
 **Command line, macOS (Apple Silicon) or Linux (x86_64):**
 

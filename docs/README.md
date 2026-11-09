@@ -30,6 +30,7 @@ do when something goes wrong. Each feature with its own page is linked from here
   - [Configuration](#configuration)
   - [Files and directories](#files-and-directories)
   - [The daemon](#the-daemon)
+  - [Updates](#updates)
   - [Logging and verbosity](#logging-and-verbosity)
   - [Reverse proxy headers](#reverse-proxy-headers)
   - [Shell completions](#shell-completions)
@@ -708,6 +709,29 @@ The manager holds the ports, so outside it a daemon can only use ports from 1024
 loopback. With no systemd, `localify start` forks to the background and writes a PID
 file; as root it logs to `/var/log/localify/localify.log`. `localify start --foreground`
 stays in the terminal and logs to stdout until Ctrl+C, which helps when debugging.
+
+### Updates
+
+From 1.7 on macOS, Localify installs new versions by itself while the app is closed,
+even on a machine nobody sits at, and checks at once when a paired machine is on a newer
+version. It only installs official releases signed by Localify. With the app open,
+Settings and a small banner offer `Restart to update`, which says which tabs it will
+close; the app never restarts by itself.
+
+New installs start with automatic updates on. An install from before 1.7 keeps updating
+by hand until you turn them on, in Settings or from a terminal, which also works over
+SSH:
+
+```bash
+localify update --auto on    # or off
+localify update --status     # what is installed and available, and why it can't install
+localify update install      # install now
+```
+
+The previous version is kept in `~/Library/Application Support/Localify/previous/` if
+you ever need to go back. On Linux, Localify tells you when an update is available, and
+you run the install command again. The details are in
+[Automatic updates](desktop.md#automatic-updates).
 
 ### Logging and verbosity
 
