@@ -408,7 +408,10 @@ async fn answer_held(
 }
 
 /// An unpair that lands while an `Allow` waits for the settings lock, its
-/// session's end still queued, wins: no switch turns on.
+/// session's end still queued, wins: no switch turns on. The unpair's write
+/// happens under the lock the answer is blocked on, after the answer did
+/// everything it does before that lock, so an `Allow` that read the pin
+/// before taking the lock would grant here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unpair_while_an_allow_waits_for_the_lock_wins() {
     let cloud = FakeCloud::start().await;
@@ -418,10 +421,32 @@ async fn an_unpair_while_an_allow_waits_for_the_lock_wins() {
     let id = request_id(&dialog(&mut events.events).await);
 
     let (answering, release) = answer_held(&b, id).await;
-    assert!(b.link.unpair("mA").unwrap());
+    // Another writer takes the sign-in lock first.
+    let (held, holding) = tokio::sync::oneshot::channel();
+    let (unpair, unpairing) = std::sync::mpsc::channel::<()>();
+    let dir = b.dir.path().to_path_buf();
+    let writer = std::thread::spawn(move || {
+        let lock = sign_in_lock(&dir).unwrap();
+        held.send(()).unwrap();
+        // Once the answer waits on the lock, unpair A under it, as
+        // `RemoteLink::unpair` writes the pins.
+        unpairing.recv().unwrap();
+        let peers = dir.join("remote").join("peers.json");
+        let mut pins: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&peers).unwrap()).unwrap();
+        assert!(pins.remove("mA").is_some());
+        std::fs::write(&peers, serde_json::to_vec_pretty(&pins).unwrap()).unwrap();
+        drop(lock);
+    });
+    holding.await.unwrap();
     release.send(()).unwrap();
+    // Time for the answer to do whatever it does before the lock, and block.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!answering.is_finished(), "the answer waits for the lock");
+    unpair.send(()).unwrap();
 
     let outcome = answering.await.unwrap().unwrap();
+    writer.join().unwrap();
     assert_eq!(outcome, AccessOutcome::Cancelled);
     assert_eq!(switches(&b), (true, false, false));
 }
