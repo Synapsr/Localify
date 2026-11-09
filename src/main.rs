@@ -299,6 +299,16 @@ enum Commands {
         #[arg(long, hide = true, value_name = "MACHINE:REQUEST")]
         request: Option<String>,
 
+        /// For --remote-launch: a relaunch of the legacy run its dispatcher stopped. Starts only while the service's record still names that run.
+        #[arg(
+            long,
+            hide = true,
+            value_name = "LEGACY_ID",
+            requires = "remote_launch",
+            conflicts_with = "replace"
+        )]
+        replace_legacy: Option<String>,
+
         /// Temporary command override, passed after `--`
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
@@ -1331,6 +1341,7 @@ fn main() -> Result<()> {
             expect_rev,
             request,
             replace,
+            replace_legacy,
             ..
         } => {
             if !command.is_empty()
@@ -1339,6 +1350,7 @@ fn main() -> Result<()> {
                 || launch_expires.is_some()
                 || expect_rev.is_some()
                 || request.is_some()
+                || replace_legacy.is_some()
                 || !launch_profile.env_file.is_empty()
                 || launch_profile.confirm_profile.is_some()
                 || launch_profile.no_masking
@@ -1374,12 +1386,15 @@ fn main() -> Result<()> {
             expect_rev,
             request,
             replace,
+            replace_legacy,
             ..
         } => {
             // A remote launch has nobody at its terminal to ask, even in a
-            // run PTY: it stops only the run its dispatcher named.
-            let replace = match (&remote_launch, &replace) {
-                (Some(_), None) => cli::services::Replace::No,
+            // run PTY: it stops only the run its dispatcher named, and a
+            // relaunch stops nothing.
+            let replace = match (&remote_launch, &replace, replace_legacy) {
+                (_, _, Some(legacy_id)) => cli::services::Replace::Legacy(legacy_id),
+                (Some(_), None, None) => cli::services::Replace::No,
                 _ => cli::services::Replace::for_launch(replace.as_ref().map(|id| id.as_deref()))?,
             };
             exit_with(cli::services::run(

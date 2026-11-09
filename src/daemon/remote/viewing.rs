@@ -1,9 +1,9 @@
 //! Viewing another machine (`docs/remote-machines.md`, "Daemon"): what
 //! `remote_inventory`, `remote_watch`, `remote_output_read`,
-//! `remote_output_follow` and `remote_access` ask a target for, over the
-//! actor's one session to it. Everything that came from the target is shown
-//! as plain text: control characters and bidirectional overrides are removed
-//! here again, whatever the target sent.
+//! `remote_output_follow`, `remote_access` and `remote_control` ask a target
+//! for, over the actor's one session to it. Everything that came from the
+//! target is shown as plain text: control characters and bidirectional
+//! overrides are removed here again, whatever the target sent.
 
 use std::time::Duration;
 
@@ -13,8 +13,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::actor::WINDOW;
 use super::{Command, Failure, RemoteLink, TapEvent, TapRequest, lease_refused};
+use crate::infrastructure::launch_rev::random_bytes;
 use crate::infrastructure::remote::wire::{
-    AccessOutcome, AccessWants, Have, MachineSummary, OutputData, SessionMessage,
+    AccessOutcome, AccessWants, ControlAction, ControlExpect, ControlOutcome, ControlPhase,
+    ControlService, Have, MachineSummary, OutputData, SessionMessage,
 };
 use crate::infrastructure::runs::output::plain_line;
 
@@ -25,6 +27,10 @@ const TAP_EVENTS: usize = 256;
 const ANSWER_WAIT: Duration = Duration::from_secs(30);
 /// A follow acknowledges what its client showed once this much is unacked.
 const ACK_EVERY: u64 = WINDOW as u64 / 4;
+/// How long a control waits for its result before it is `unknown`.
+pub const CONTROL_WAIT: Duration = Duration::from_secs(120);
+/// How long an `unknown` control keeps asking `control.status`.
+const STATUS_WAIT: Duration = Duration::from_secs(60);
 
 /// A target's whole inventory: every page of one revision.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -106,6 +112,60 @@ pub enum AccessEvent {
     Lost { code: String, message: String },
 }
 
+/// What `remote_control` is asked for: a control, as the viewer saw the
+/// service.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlAsk {
+    pub action: ControlAction,
+    pub service: ControlService,
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub expect: ControlExpect,
+}
+
+/// What `remote_control` streams: `sent`, its progress, then its result.
+/// A session lost before the result is `unknown`, and the result comes from
+/// `control.status` on a new session when it can be had, or `lost` says it
+/// could not. A control is never sent again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "event",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ControlEvent {
+    /// On its way, with the request id that names it on the target.
+    Sent {
+        request_id: String,
+    },
+    Progress {
+        phase: ControlPhase,
+    },
+    Result {
+        outcome: ControlOutcome,
+        code: Option<String>,
+        message: String,
+        run_id: Option<String>,
+    },
+    /// No result came: the session was lost, or 120 s passed. Checking.
+    Unknown {
+        code: String,
+        message: String,
+    },
+    /// The outcome could not be learned; the next snapshot shows the state.
+    Lost {
+        code: String,
+        message: String,
+    },
+}
+
+impl ControlEvent {
+    fn is_last(&self) -> bool {
+        matches!(self, Self::Result { .. } | Self::Lost { .. })
+    }
+}
+
 /// An access request this machine waits on. Dropping it sends
 /// `access.cancel` when the target still waits.
 pub struct Asking {
@@ -161,6 +221,49 @@ fn lost(failure: Failure) -> AccessEvent {
         code: failure.code,
         message: plain_line(&failure.message),
     }
+}
+
+/// What a target's answer to a control says, as plain text.
+fn control_answer(answer: SessionMessage) -> ControlEvent {
+    match answer {
+        SessionMessage::ControlProgress { phase, .. } => ControlEvent::Progress { phase },
+        SessionMessage::ControlResult(result) => ControlEvent::Result {
+            outcome: result.outcome,
+            code: result.code.map(|code| plain_line(&code)),
+            message: plain_line(&result.message),
+            run_id: result.run_id.map(|run_id| plain_line(&run_id)),
+        },
+        // A refusal before the executor, `unsupported` among them.
+        other => {
+            let failure = answered_with(other);
+            let outcome = if failure.code == "conflict" {
+                ControlOutcome::Conflict
+            } else {
+                ControlOutcome::Refused
+            };
+            ControlEvent::Result {
+                outcome,
+                code: Some(failure.code),
+                message: plain_line(&failure.message),
+                run_id: None,
+            }
+        }
+    }
+}
+
+fn lost_control(failure: Failure) -> ControlEvent {
+    ControlEvent::Lost {
+        code: failure.code,
+        message: plain_line(&failure.message),
+    }
+}
+
+/// 16 random bytes, base64url: names one control across sessions.
+fn new_request_id() -> Result<String, Failure> {
+    use base64::Engine;
+    let mut bytes = [0_u8; 16];
+    random_bytes(&mut bytes).map_err(|error| Failure::new("internal", format!("{error:#}")))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Pages of one revision, until they are all in. Pages of an older revision
@@ -537,6 +640,133 @@ impl RemoteLink {
             announced: false,
             ended: false,
         })
+    }
+
+    /// `remote_control`: sends the control once, then streams its progress
+    /// and result. When the session is lost first, or no result comes in
+    /// [`CONTROL_WAIT`], it says `unknown` and asks `control.status` on a
+    /// new session, never sending the control again.
+    pub fn control(&self, peer: &str, ask: ControlAsk) -> mpsc::Receiver<ControlEvent> {
+        match new_request_id() {
+            Ok(request_id) => self.control_as(peer, ask, request_id),
+            Err(failure) => {
+                let (sender, receiver) = mpsc::channel(1);
+                let _ = sender.try_send(lost_control(failure));
+                receiver
+            }
+        }
+    }
+
+    /// [`RemoteLink::control`] under a given request id, as a viewer that
+    /// sends the same control again would.
+    pub(super) fn control_as(
+        &self,
+        peer: &str,
+        ask: ControlAsk,
+        request_id: String,
+    ) -> mpsc::Receiver<ControlEvent> {
+        let (sender, receiver) = mpsc::channel(8);
+        let link = self.clone();
+        let peer = peer.to_string();
+        tokio::spawn(async move {
+            let lost = link.control_once(&peer, ask, &request_id, &sender).await;
+            let Some(failure) = lost else { return };
+            let unknown = ControlEvent::Unknown {
+                code: failure.code,
+                message: plain_line(&failure.message),
+            };
+            if sender.send(unknown).await.is_err() {
+                return;
+            }
+            let ended = link.control_status(&peer, &request_id).await;
+            let _ = sender.send(ended).await;
+        });
+        receiver
+    }
+
+    /// Sends the control and streams what the target says, until its
+    /// result. Returns the failure when no result came.
+    async fn control_once(
+        &self,
+        peer: &str,
+        ask: ControlAsk,
+        request_id: &str,
+        sender: &mpsc::Sender<ControlEvent>,
+    ) -> Option<Failure> {
+        let request = TapRequest::Control {
+            action: ask.action,
+            service: ask.service,
+            profile: ask.profile,
+            request_id: request_id.to_string(),
+            expect: ask.expect,
+        };
+        let (id, mut events) = match self.tap(peer, request).await {
+            Ok(tap) => tap,
+            // Never sent: nothing to reconcile.
+            Err(failure) => {
+                let _ = sender.send(lost_control(failure)).await;
+                return None;
+            }
+        };
+        let sent = ControlEvent::Sent {
+            request_id: request_id.to_string(),
+        };
+        if sender.send(sent).await.is_err() {
+            self.untap(peer, &id);
+            return None;
+        }
+        let deadline = tokio::time::Instant::now() + CONTROL_WAIT;
+        let failure = loop {
+            let event = tokio::select! {
+                _ = sender.closed() => break None,
+                event = tokio::time::timeout_at(deadline, events.recv()) => event,
+            };
+            let event = match event {
+                Err(_) => break Some(Failure::new("timeout", "No result came in 120 seconds.")),
+                Ok(None) => break Some(closed()),
+                Ok(Some(TapEvent::Ended(failure))) => break Some(failure),
+                Ok(Some(TapEvent::Answer(answer))) => control_answer(answer),
+            };
+            let last = event.is_last();
+            if sender.send(event).await.is_err() || last {
+                break None;
+            }
+        };
+        self.untap(peer, &id);
+        failure
+    }
+
+    /// `control.status` for `request_id`, on a session of its own, tried
+    /// again while the target cannot be reached, for [`STATUS_WAIT`] at most.
+    pub(super) async fn control_status(&self, peer: &str, request_id: &str) -> ControlEvent {
+        let deadline = tokio::time::Instant::now() + STATUS_WAIT;
+        let mut wait = Duration::from_millis(500);
+        loop {
+            let failure = match self.status_once(peer, request_id).await {
+                Ok(event) => return event,
+                Err(failure) => failure,
+            };
+            if tokio::time::Instant::now() + wait >= deadline {
+                return lost_control(failure);
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(8));
+        }
+    }
+
+    async fn status_once(&self, peer: &str, request_id: &str) -> Result<ControlEvent, Failure> {
+        let request = TapRequest::ControlStatus {
+            request_id: request_id.to_string(),
+        };
+        let (id, mut events) = self.tap(peer, request).await?;
+        let answer = tokio::time::timeout(ANSWER_WAIT, events.recv()).await;
+        self.untap(peer, &id);
+        match answer {
+            Ok(Some(TapEvent::Answer(answer))) => Ok(control_answer(answer)),
+            Ok(Some(TapEvent::Ended(failure))) => Err(failure),
+            Ok(None) => Err(closed()),
+            Err(_) => Err(Failure::new("timeout", "The machine did not answer.")),
+        }
     }
 
     /// `remote_output_read`: one bounded read.

@@ -11,10 +11,11 @@
 //! socket's requests (`viewer`).
 
 mod asking;
+mod control;
 mod target;
 mod viewer;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -30,6 +31,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use self::control::ControlEvent;
 use self::viewer::Tap;
 pub use self::viewer::{TapEvent, TapRequest, WINDOW};
 use super::access::Waiting;
@@ -50,7 +52,7 @@ use crate::infrastructure::remote::pairing::{Pairing, Step};
 use crate::infrastructure::remote::store::{Pin, now_rfc3339};
 use crate::infrastructure::remote::wire::{
     AccessOutcome, AccessWants, ByeReason, DeclineReason, FrameKind, Hello, PresenceState, Purpose,
-    RelayFrame, Role, Send, SessionMessage, is_later_message,
+    RelayFrame, Role, Send, SessionMessage, unknown_control_field,
 };
 
 /// A target handles at most this many handshakes at once.
@@ -231,6 +233,13 @@ pub enum Command {
     Snapshot {
         result: Result<Arc<crate::application::inventory::Snapshot>, String>,
     },
+    /// The control executor's progress or result for a viewer's control or
+    /// `control.status`, `re` in the session `key`.
+    ControlDone {
+        key: Key,
+        re: String,
+        event: ControlEvent,
+    },
 }
 
 /// What this connection is for.
@@ -299,6 +308,12 @@ struct Session {
     taps: HashMap<String, Tap>,
     /// Target: the access request this viewer waits on.
     access: Option<Waiting>,
+    /// Target: the controls and `control.status`es of this viewer still
+    /// going, by id.
+    controls: HashSet<String>,
+    /// Viewer: the target's clock as its `hello` gave it, and when it came,
+    /// so a control expires in the target's clock.
+    clock: Option<viewer::PeerClock>,
 }
 
 impl Session {
@@ -329,6 +344,8 @@ impl Session {
             served: target::Served::default(),
             taps: HashMap::new(),
             access: None,
+            controls: HashSet::new(),
+            clock: None,
         }
     }
 
@@ -338,7 +355,11 @@ impl Session {
 
     /// Whether something still uses the session, so it is not idle.
     fn is_held(&self) -> bool {
-        if !self.taps.is_empty() || !self.served.is_empty() || self.access.is_some() {
+        if !self.taps.is_empty()
+            || !self.served.is_empty()
+            || self.access.is_some()
+            || !self.controls.is_empty()
+        {
             return true;
         }
         match &self.holder {
@@ -1125,22 +1146,23 @@ impl Actor {
             .and_then(|t| t.as_str())
             .unwrap_or_default()
             .to_string();
+        // An argument a control never takes is refused, never dropped.
+        let unknown_field = (kind == "control")
+            .then(|| unknown_control_field(&value, agreed))
+            .flatten();
+        let greeted_target = self
+            .sessions
+            .get(key)
+            .is_some_and(|session| session.hello.is_some() && session.role == Role::Target);
         match serde_json::from_value::<SessionMessage>(value.clone()) {
+            Ok(SessionMessage::Control(control))
+                if greeted_target && control.within_bounds() && unknown_field.is_some() =>
+            {
+                let field = unknown_field.unwrap_or_default();
+                self.refuse_argument(key, &control.id, &field);
+            }
             // A type of a later version than the session's is unknown here.
             Ok(message) if message.proto() <= agreed => self.on_session_message(key, message),
-            Err(_) if is_later_message(&kind) => {
-                let re = value
-                    .get("id")
-                    .and_then(|id| id.as_str())
-                    .map(str::to_string);
-                let answer = SessionMessage::Error {
-                    re,
-                    code: "unsupported".into(),
-                    message: format!("This version of Localify does not handle {kind} yet."),
-                    retry_after: None,
-                };
-                self.send_message(key, &answer);
-            }
             Ok(_) | Err(_) => self.end(
                 key,
                 End::Error("bad_request", format!("Unknown message {kind}.")),
@@ -1197,6 +1219,22 @@ impl Actor {
                 if role == Role::Viewer && purpose == Purpose::Session =>
             {
                 self.deliver(key, message);
+            }
+            message @ (SessionMessage::ControlProgress { .. }
+            | SessionMessage::ControlResult(_))
+                if role == Role::Viewer && purpose == Purpose::Session =>
+            {
+                self.deliver(key, message);
+            }
+            SessionMessage::Control(control)
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_control(key, *control);
+            }
+            SessionMessage::ControlStatus { id, request_id }
+                if role == Role::Target && purpose == Purpose::Session =>
+            {
+                self.on_control_status(key, id, request_id);
             }
             SessionMessage::AccessRequest { id, wants }
                 if role == Role::Target && purpose == Purpose::Session =>
@@ -1284,6 +1322,10 @@ impl Actor {
             );
         }
         let settings = hello.settings;
+        session.clock =
+            time::OffsetDateTime::parse(&hello.now, &time::format_description::well_known::Rfc3339)
+                .ok()
+                .map(|now| (now, Instant::now()));
         session.hello = Some(hello.clone());
         session.proto = Some(agreed);
         let (role, purpose) = (session.role, session.purpose);
@@ -1578,6 +1620,7 @@ impl Actor {
             Command::Untap { peer, id } => self.untap(&peer, &id),
             Command::Ack { peer, id, offset } => self.ack(&peer, &id, offset),
             Command::Snapshot { result } => self.on_snapshot(result),
+            Command::ControlDone { key, re, event } => self.on_control_done(&key, &re, event),
             Command::SettingsChanged { reply } => {
                 self.reload_settings();
                 let _ = reply.send(());

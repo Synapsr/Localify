@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::{Actor, Command, End, Failure, Key};
-use crate::application::inventory::{Snapshot, pages};
+use crate::application::inventory::{Snapshot, Switches, pages};
 use crate::daemon::remote::local::RunLookup;
 use crate::infrastructure::remote::store::DEFAULT_SETTINGS;
 use crate::infrastructure::remote::wire::{
@@ -107,6 +107,11 @@ impl Follow {
 }
 
 impl Served {
+    /// Whether the viewer watches the inventory.
+    pub(super) fn watches(&self) -> bool {
+        self.watch.is_some()
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.watch.is_none()
             && self.follows.is_empty()
@@ -475,16 +480,25 @@ impl Actor {
     }
 
     /// Builds a snapshot off this task; one at a time.
-    fn build_snapshot(&mut self) {
+    pub(super) fn build_snapshot(&mut self) {
         if self.shelf.building {
             return;
         }
         self.shelf.building = true;
         let source = Arc::clone(&self.ctx.source);
         let commands = self.commands.clone();
+        let switches = Switches {
+            settings: self
+                .shared
+                .store
+                .settings()
+                .unwrap_or(DEFAULT_SETTINGS)
+                .into(),
+            app: source.app().into(),
+        };
         self.spawn(async move {
             let result = source
-                .snapshot()
+                .snapshot(switches)
                 .await
                 .map(Arc::new)
                 .map_err(|error| format!("{error:#}"));

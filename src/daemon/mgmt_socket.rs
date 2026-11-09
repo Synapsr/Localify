@@ -12,7 +12,10 @@ use tracing::{error, info, warn};
 use super::lifecycle::ShutdownHandle;
 use super::public_tunnel::PublicTunnel;
 use super::remote::local::build_snapshot;
-use super::remote::{AccessEvent, Asking, Failure, FollowEvent, Following, PairEvent, RemoteLink};
+use super::remote::{
+    AccessEvent, Asking, ControlAsk, ControlEvent, Failure, FollowEvent, Following, PairEvent,
+    RemoteLink,
+};
 use super::router::SharedState;
 use crate::application::inventory::Have;
 use crate::infrastructure::cloud::credentials::CredentialsStore;
@@ -95,6 +98,15 @@ enum MgmtCommand {
     RemoteAccess {
         machine_id: String,
         wants: AccessWants,
+    },
+    /// Streaming, as a viewer: starts, stops or restarts a service on
+    /// another machine, then its progress and result. The client waits up
+    /// to 120 s, not the usual 2.
+    #[serde(rename = "remote_control", rename_all = "camelCase")]
+    RemoteControl {
+        machine_id: String,
+        #[serde(flatten)]
+        ask: ControlAsk,
     },
     /// As a target, from the access dialog.
     #[serde(rename = "remote_access_answer", rename_all = "camelCase")]
@@ -287,6 +299,10 @@ pub async fn serve(
                     let asking = remote.access(&machine_id, wants).await;
                     return stream_access(asking, reader, writer).await;
                 }
+                Some(MgmtCommand::RemoteControl { machine_id, ask }) => {
+                    let events = remote.control(&machine_id, ask);
+                    return stream_control(events, reader, writer).await;
+                }
                 Some(MgmtCommand::RemoteWatch { machine_id }) => {
                     return stream_watch(&remote, &machine_id, reader, writer).await;
                 }
@@ -393,7 +409,7 @@ pub async fn serve(
                     )
                 }
                 Some(MgmtCommand::Inventory { have }) => {
-                    inventory_answer(&inventory, &tunnel, have).await
+                    inventory_answer(&inventory, &tunnel, remote.switches(), have).await
                 }
                 Some(command) => remote_answer(&remote, command).await,
                 None => MgmtResponse::error(format!("Unknown command: {}", line.trim())),
@@ -666,13 +682,35 @@ async fn stream_follow(
     }
 }
 
+/// `remote_control`: one line per event, until the result. A client that
+/// closes its end stops listening; the control goes on, on the target.
+async fn stream_control(
+    mut events: mpsc::Receiver<ControlEvent>,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut writer: OwnedWriteHalf,
+) {
+    loop {
+        tokio::select! {
+            _ = client_gone(&mut reader) => return,
+            event = events.recv() => {
+                let Some(event) = event else { return };
+                let Ok(data) = serde_json::to_value(&event) else { return };
+                if !write_line(&mut writer, &MgmtResponse::success(data)).await {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// A fresh snapshot of this machine.
 async fn inventory_answer(
     inventory: &Arc<LocalInventory>,
     tunnel: &PublicTunnel,
+    switches: crate::application::inventory::Switches,
     have: Option<Have>,
 ) -> MgmtResponse {
-    let snapshot = match build_snapshot(inventory, tunnel).await {
+    let snapshot = match build_snapshot(inventory, tunnel, switches).await {
         Ok(snapshot) => snapshot,
         Err(error) => return MgmtResponse::error(format!("{error:#}")),
     };

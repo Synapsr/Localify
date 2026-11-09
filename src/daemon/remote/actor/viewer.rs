@@ -4,16 +4,24 @@
 //! opens with the first request and closes with the last one.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::{Actor, End, Failure, Holder, Key};
 use crate::infrastructure::remote::wire::{
-    AccessWants, ByeReason, Have, PROTO_ACCESS, Purpose, Role, SessionMessage,
+    AccessWants, ByeReason, Control, ControlAction, ControlExpect, ControlService, Have,
+    PROTO_ACCESS, Purpose, Role, SessionMessage,
 };
 
 /// The window a viewer gives each follow.
 pub const WINDOW: u32 = 64 * 1024;
+/// A control expires this long after it is sent, in the target's clock.
+const CONTROL_EXPIRY: Duration = Duration::from_secs(30);
+
+/// The target's clock, as its `hello` gave it, and when it came.
+pub type PeerClock = (time::OffsetDateTime, Instant);
 
 /// What a management socket client asked a target for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +43,19 @@ pub enum TapRequest {
     /// Session protocol 2: ask the target to turn switches on.
     Access {
         wants: AccessWants,
+    },
+    /// Start, stop or restart one service. Its expiry is set when it is
+    /// sent, in the target's clock.
+    Control {
+        action: ControlAction,
+        service: ControlService,
+        profile: Option<String>,
+        request_id: String,
+        expect: ControlExpect,
+    },
+    /// What became of a control sent earlier, by its request id.
+    ControlStatus {
+        request_id: String,
     },
 }
 
@@ -67,9 +88,27 @@ impl Tap {
             )
     }
 
-    fn message(&self, id: &str) -> SessionMessage {
+    fn message(&self, id: &str, clock: Option<&PeerClock>) -> SessionMessage {
         let id = id.to_string();
         match self.request.clone() {
+            TapRequest::Control {
+                action,
+                service,
+                profile,
+                request_id,
+                expect,
+            } => SessionMessage::Control(Box::new(Control {
+                id,
+                action,
+                service,
+                profile,
+                request_id,
+                expect,
+                expires_at: expiry(clock),
+            })),
+            TapRequest::ControlStatus { request_id } => {
+                SessionMessage::ControlStatus { id, request_id }
+            }
             TapRequest::Inventory { watch: true, have } => {
                 SessionMessage::InventoryWatch { id, have }
             }
@@ -103,8 +142,9 @@ impl Tap {
 
     /// The first session version that carries this request.
     fn proto(&self) -> u32 {
-        match self.request {
+        match &self.request {
             TapRequest::Access { .. } => PROTO_ACCESS,
+            TapRequest::Control { expect, .. } if expect.legacy_id.is_some() => PROTO_ACCESS,
             _ => 1,
         }
     }
@@ -137,6 +177,10 @@ impl Tap {
             (SessionMessage::OutputData(data), TapRequest::Follow { .. }) => data.ended,
             (SessionMessage::OutputData(_), TapRequest::Read { .. }) => true,
             (SessionMessage::AccessResult { .. }, TapRequest::Access { .. }) => true,
+            (
+                SessionMessage::ControlResult(_),
+                TapRequest::Control { .. } | TapRequest::ControlStatus { .. },
+            ) => true,
             _ => false,
         }
     }
@@ -160,11 +204,24 @@ fn answer_to(answer: &SessionMessage) -> Option<&str> {
         SessionMessage::InventoryPage { re, .. }
         | SessionMessage::InventoryUnchanged { re, .. } => Some(re),
         SessionMessage::OutputData(data) => Some(&data.re),
-        SessionMessage::Error { re: Some(re), .. } | SessionMessage::AccessResult { re, .. } => {
-            Some(re)
-        }
+        SessionMessage::Error { re: Some(re), .. }
+        | SessionMessage::AccessResult { re, .. }
+        | SessionMessage::ControlProgress { re, .. } => Some(re),
+        SessionMessage::ControlResult(result) => Some(&result.re),
         _ => None,
     }
+}
+
+/// `expiresAt` for a control sent now: the target's clock as its `hello`
+/// gave it, moved on by the time since, plus [`CONTROL_EXPIRY`].
+fn expiry(clock: Option<&PeerClock>) -> String {
+    let now = match clock {
+        Some((then, received)) => *then + received.elapsed(),
+        None => time::OffsetDateTime::now_utc(),
+    };
+    (now + CONTROL_EXPIRY)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 impl Actor {
@@ -301,7 +358,7 @@ impl Actor {
             return self.close_if_unused(key);
         }
         tap.sent = true;
-        let message = tap.message(id);
+        let message = tap.message(id, session.clock.as_ref());
         self.send_message(key, &message);
     }
 

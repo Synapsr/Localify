@@ -417,6 +417,47 @@ pub fn read(dir: &Path, offset: u64, max_bytes: usize) -> Result<StreamRead> {
     read_with(dir, offset, max_bytes, SEGMENT_SIZE)
 }
 
+/// How much of the end of a stream [`tail_lines`] reads.
+const TAIL_BYTES: u64 = 64 * 1024;
+
+/// The last `count` lines of a run's stream, as plain text, within its last
+/// 64 KiB: what a failed start shows.
+pub fn tail_lines(dir: &Path, count: usize) -> Result<Vec<String>> {
+    let (first, total) = extent(dir)?;
+    let mut offset = first.max(total.saturating_sub(TAIL_BYTES));
+    // Started inside a line: its piece is dropped.
+    let mut skipping = offset > 0;
+    let mut lines = std::collections::VecDeque::new();
+    let mut current = String::new();
+    loop {
+        let chunk = read(dir, offset, 16 * 1024)?;
+        for line in chunk.lines {
+            if skipping {
+                skipping = line.cut;
+                continue;
+            }
+            current.push_str(&line.text);
+            if !line.cut {
+                lines.push_back(std::mem::take(&mut current));
+                if lines.len() > count {
+                    lines.pop_front();
+                }
+            }
+        }
+        if chunk.next == offset {
+            break;
+        }
+        offset = chunk.next;
+    }
+    if !current.is_empty() {
+        lines.push_back(current);
+        if lines.len() > count {
+            lines.pop_front();
+        }
+    }
+    Ok(lines.into())
+}
+
 /// How many logical bytes the stream holds, and the first one still kept.
 pub fn extent(dir: &Path) -> Result<(u64, u64)> {
     let extent = Extent::of(dir, SEGMENT_SIZE)?;

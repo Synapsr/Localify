@@ -86,8 +86,8 @@ pub struct LaunchRequest {
     /// `--replace=<runId>`, once its dispatcher stopped it. `None` opens a
     /// new tab.
     pub replaces: Option<RunId>,
-    /// A legacy run's `legacyId`, for a relaunch. The executor does not take
-    /// `--replace-legacy` yet, so the app refuses one with `unsupported`.
+    /// A legacy run's `legacyId`, for a relaunch its dispatcher stopped it
+    /// for: `--replace-legacy`, in a new tab.
     #[serde(default)]
     pub replaces_legacy: Option<String>,
     /// The paired machine that asked: a remote launch, run with

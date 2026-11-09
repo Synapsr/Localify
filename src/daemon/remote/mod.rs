@@ -43,7 +43,9 @@ use self::backoff::{Backoff, Ending, Next, Stop, random_fraction, up_to};
 use self::lease::{LeaseError, LeaseKeeper};
 use self::local::LocalSource;
 use self::machines::{Facts, MachineState, MachineView, RelayState, SessionState};
-pub use self::viewing::{AccessEvent, Asking, FollowEvent, Following, RemoteInventory};
+pub use self::viewing::{
+    AccessEvent, Asking, ControlAsk, ControlEvent, FollowEvent, Following, RemoteInventory,
+};
 use crate::daemon::public_tunnel::Clocks;
 use crate::infrastructure::cloud::api::{CloudClient, RemoteAccount};
 use crate::infrastructure::cloud::credentials::{CloudCredentials, CredentialsStore};
@@ -222,6 +224,9 @@ pub struct RemoteStatus {
     pub retry_at: Option<String>,
     pub settings: TargetSettings,
     pub fingerprint: Option<String>,
+    /// Why background starts run with the daemon's own environment: the
+    /// user's shell environment could not be read.
+    pub shell_environment_error: Option<String>,
 }
 
 /// What the link knows, for the management socket.
@@ -536,6 +541,21 @@ impl RemoteLink {
             retry_at: view.retry_at.clone(),
             settings: self.shared.store.settings().unwrap_or(DEFAULT_SETTINGS),
             fingerprint,
+            shell_environment_error: self.shared.source.shell_environment_failure(),
+        }
+    }
+
+    /// The switches and the app, as this machine's own inventory decides its
+    /// controls with them.
+    pub fn switches(&self) -> crate::application::inventory::Switches {
+        crate::application::inventory::Switches {
+            settings: self
+                .shared
+                .store
+                .settings()
+                .unwrap_or(DEFAULT_SETTINGS)
+                .into(),
+            app: self.shared.source.app().into(),
         }
     }
 

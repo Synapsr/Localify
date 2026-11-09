@@ -128,6 +128,20 @@ impl DesktopApi {
                 "machineId": machine_id,
                 "wants": wants,
             }),
+            RemoteStreamRequest::Control {
+                machine_id,
+                action,
+                service,
+                profile,
+                expect,
+            } => json!({
+                "cmd": "remote_control",
+                "machineId": machine_id,
+                "action": action,
+                "service": service,
+                "profile": profile,
+                "expect": expect,
+            }),
         };
         self.daemon()?.remote_stream(&command).map_err(daemon_error)
     }

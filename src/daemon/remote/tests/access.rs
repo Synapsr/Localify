@@ -271,6 +271,65 @@ async fn allow_turns_on_exactly_the_switches_asked_for() {
 }
 
 /// Access never turns `share` on.
+/// The gate: with the app running on the target, `Allow` turns `control`
+/// on, and the viewer's next snapshot allows controls.
+#[tokio::test]
+async fn the_next_snapshot_after_an_allow_allows_controls() {
+    use crate::application::inventory::{
+        EnvironmentRef, ProfileChecks, ProjectRef, ServiceFacts, ServiceRef,
+    };
+    use crate::daemon::remote::fake_relay::FakeService;
+    use crate::infrastructure::remote::wire::AppPresence;
+
+    let cloud = FakeCloud::start().await;
+    let (a, b) = asker_and_target(&cloud, unlimited()).await;
+    b.source.set_app(AppPresence::Running);
+    b.source.host().state().services = vec![FakeService {
+        facts: ServiceFacts {
+            project: ProjectRef {
+                id: "app".into(),
+                name: "App".into(),
+            },
+            environment: EnvironmentRef {
+                slug: None,
+                name: "Primary".into(),
+                primary: true,
+                branch: None,
+            },
+            service: ServiceRef {
+                id: "web".into(),
+                name: "web".into(),
+                config_rev: "0123456789abcdef".into(),
+            },
+            local_url: "https://web.localify".into(),
+            port: 4100,
+            reachable: Some(false),
+            run: None,
+            public_url: None,
+            profiles: ProfileChecks {
+                start: true,
+                restart: true,
+            },
+        },
+        record_names: None,
+    }];
+    let start = |inventory: &crate::daemon::remote::RemoteInventory| {
+        inventory.items[0]["controls"]["start"].clone()
+    };
+    let before = a.link.inventory("mB").await.unwrap();
+    assert_eq!(start(&before)["code"], "control_disabled");
+
+    let mut events = app(&b);
+    let mut asking = ask(&a, AccessWants::Control).await;
+    let id = request_id(&dialog(&mut events.events).await);
+    b.link.answer_access(&id, true, false).await.unwrap();
+    assert_eq!(answer(&mut asking).await, result(AccessOutcome::Granted));
+
+    let after = a.link.inventory("mB").await.unwrap();
+    assert!(after.rev > before.rev);
+    assert_eq!(start(&after), serde_json::json!({ "allowed": true }));
+}
+
 #[tokio::test]
 async fn a_target_that_does_not_share_refuses_with_not_shared() {
     let cloud = FakeCloud::start().await;

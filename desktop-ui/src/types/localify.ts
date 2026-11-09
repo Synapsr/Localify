@@ -1144,6 +1144,8 @@ export interface RemoteStatusDto {
   settings: RemoteSettingsDto;
   /** This machine's key, as four groups of four hex digits. */
   fingerprint: string | null;
+  /** Why background starts run without the user's shell environment. */
+  shellEnvironmentError: string | null;
 }
 
 export type RemoteMachineState =
@@ -1205,7 +1207,47 @@ export type RemoteStreamRequest =
   | { kind: "pair"; machineId: string }
   | { kind: "watch"; machineId: string }
   | { kind: "follow"; machineId: string; runId: string; offset: number | null }
-  | { kind: "access"; machineId: string; wants: RemoteAccessWants };
+  | { kind: "access"; machineId: string; wants: RemoteAccessWants }
+  /** Unused by the window until PR 4d adds the buttons. */
+  | ({ kind: "control"; machineId: string } & RemoteControlRequest);
+
+/**
+ * A control, as the snapshot showed the service when the person clicked.
+ * Unused by the window until PR 4d.
+ */
+export interface RemoteControlRequest {
+  action: RemoteControlAction;
+  service: { projectId: string; environment: string | null; serviceId: string };
+  /** Start only. Null: the effective default profile. */
+  profile: string | null;
+  expect: { runId: string | null; configRev: string; legacyId?: string };
+}
+
+export type RemoteControlOutcome =
+  | "done"
+  | "starting"
+  | "refused"
+  | "conflict"
+  | "failed"
+  | "unknown";
+
+/**
+ * What `remote_control` streams: `sent`, its progress, then its result. A
+ * lost session is `unknown`, followed by the result `control.status` gives,
+ * or `lost`. Unused by the window until PR 4d.
+ */
+export type RemoteControlEventDto =
+  | { event: "sent"; requestId: string }
+  | { event: "progress"; phase: "dispatched" | "started" }
+  | {
+      event: "result";
+      outcome: RemoteControlOutcome;
+      code: string | null;
+      message: string;
+      runId: string | null;
+    }
+  | { event: "unknown"; code: string; message: string }
+  | { event: "lost"; code: string; message: string };
 
 /** One line of a stream, or its end. */
 export interface RemoteStreamPayload {
@@ -1299,6 +1341,8 @@ export interface RemoteInventoryItemDto {
     startedAt: string;
     profile: string | null;
     profileDanger: boolean;
+    /** A legacy run whose PID is proven: what a relaunch names. */
+    legacyId?: string;
     exit: { at: string; code: number | null } | null;
   } | null;
   process: "running" | "stopped";

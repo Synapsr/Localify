@@ -1757,4 +1757,47 @@ pub enum RemoteStreamRequest {
         machine_id: String,
         wants: RemoteAccessWants,
     },
+    /// Starts, stops or restarts a service on another machine, as this
+    /// machine last saw it, then its progress and result. Closing the
+    /// stream stops listening; the control goes on there. Unused by the
+    /// window until PR 4d adds the buttons.
+    Control {
+        machine_id: String,
+        action: RemoteControlAction,
+        service: RemoteControlService,
+        /// Start only: a launch profile, `None` for the default.
+        #[serde(default)]
+        profile: Option<String>,
+        expect: RemoteControlExpect,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteControlAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// The service a control names, by its ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteControlService {
+    pub project_id: String,
+    /// `None` for the primary checkout.
+    #[serde(default)]
+    pub environment: Option<String>,
+    pub service_id: String,
+}
+
+/// What the snapshot showed when the person clicked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteControlExpect {
+    pub run_id: Option<String>,
+    pub config_rev: String,
+    /// A relaunch: the legacy run the snapshot showed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_id: Option<String>,
 }

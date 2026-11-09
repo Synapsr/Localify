@@ -3,6 +3,7 @@
 //! Viewing, and the PR 3 gate, are in `viewing`.
 
 mod access;
+mod control;
 mod viewing;
 
 use std::sync::Arc;
@@ -161,6 +162,8 @@ fn launch_with(
         })
         .unwrap();
     let source = Arc::new(FakeSource::default());
+    // Where a daemon keeps them: one started again on this folder finds them.
+    source.keep_requests_in(dir.path().join("services").join("requests"));
     let shared: Arc<dyn LocalSource> = source.clone();
     let link = RemoteLink::with_timings(dir.path(), shared, timings);
     // As `LOCALIFY_CLOUD_API` makes a `wrangler dev` trusted.
