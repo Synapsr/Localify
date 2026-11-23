@@ -55,6 +55,33 @@ pub struct PublicUrlAndPassword {
     pub password: Option<String>,
 }
 
+/// A page of a public URL, and the link that signs a browser in and lands on
+/// it: what an agent hands a person to open one exact page.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageLink {
+    /// The page at its public address, `https://<public host><path>`.
+    pub url: String,
+    /// `https://<public host>/__localify/access?next=<path>#<password>`, when
+    /// the URL asks for a password. `None` when it is open to everyone: `url`
+    /// opens by itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_link: Option<String>,
+}
+
+/// Leaves the link out: it carries the password.
+impl fmt::Debug for PageLink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PageLink")
+            .field("url", &self.url)
+            .field(
+                "password_link",
+                &self.password_link.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatedPublicUrl {
@@ -163,6 +190,47 @@ impl<'a> PublicUrls<'a> {
             )
         })?;
         Ok(view(url.clone(), &account, &self.saved_passwords()))
+    }
+
+    /// The link that signs a browser in and opens `page`: a public URL, or a
+    /// local one such as `https://admin.louez.localify/orders/42` that a
+    /// public URL serves. Only the machine that set the password knows it.
+    pub fn link(&self, page: &str) -> Result<PageLink> {
+        let account = self.account()?;
+        let urls = self
+            .api
+            .list_public_urls(&account)
+            .map_err(with_next_step)?;
+        let (host, path) = split_page(page)?;
+        let (url, public_host) = public_host_of(&urls, &host)?.ok_or_else(|| {
+            anyhow!(
+                "No public URL serves {host}. List them with: {cli} public-url list, or create one with: {cli} public-url create <local-domain>",
+                cli = BRANDING.cli_command()
+            )
+        })?;
+        let origin = format!("https://{public_host}");
+        let password_link = match url.protection.mode {
+            ProtectionMode::Public => None,
+            ProtectionMode::Password => {
+                let saved = self.saved_passwords();
+                let password = saved
+                    .get(&url.id)
+                    .and_then(|saved| current_password(url, saved))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{} asks for a password set on another machine, so this machine cannot put it in a link. Give the page and the password, or set a new password here with: {} public-url protect {} (it signs every browser out).",
+                            url.url,
+                            BRANDING.cli_command(),
+                            url.slug
+                        )
+                    })?;
+                Some(password_link(&origin, &path, password))
+            }
+        };
+        Ok(PageLink {
+            url: format!("{origin}{path}"),
+            password_link,
+        })
     }
 
     /// The first free slug that mirrors the local domain's name, as `create`
@@ -407,7 +475,7 @@ fn view(url: PublicUrl, account: &CloudAccount, saved: &SavedPasswords) -> Publi
     let password_link = saved
         .get(&url.id)
         .and_then(|saved| current_password(&url, saved))
-        .map(|password| password_link(&url.url, password));
+        .map(|password| password_link(url.url.trim_end_matches('/'), "/", password));
     PublicUrlView {
         url,
         served_here,
@@ -423,14 +491,84 @@ fn current_password<'s>(url: &PublicUrl, saved: &'s SavedPassword) -> Option<&'s
     .then_some(saved.password.as_str())
 }
 
-/// `https://<host>/__localify/access#<password>`. The fragment never leaves
-/// the browser: the page there reads it and signs in.
-fn password_link(url: &str, password: &str) -> String {
+/// `https://<host>/__localify/access?next=<path>#<password>`, without `next`
+/// for `/`. The fragment never leaves the browser: the page there reads it,
+/// signs in, and lands on `path`.
+fn password_link(origin: &str, path: &str, password: &str) -> String {
+    let next = if path == "/" {
+        String::new()
+    } else {
+        format!("?next={}", encode_uri_component(path))
+    };
     format!(
-        "{}{ACCESS_PATH}#{}",
-        url.trim_end_matches('/'),
+        "{origin}{ACCESS_PATH}{next}#{}",
         encode_uri_component(password)
     )
+}
+
+/// The lowercase host and the path with its query of a page a person or an
+/// agent names: `https://admin.louez.localify/orders/42?tab=1#top` gives
+/// `admin.louez.localify` and `/orders/42?tab=1`. The scheme is optional;
+/// the port and the fragment are dropped.
+fn split_page(page: &str) -> Result<(String, String)> {
+    let page = page.trim();
+    let without_scheme = page
+        .strip_prefix("https://")
+        .or_else(|| page.strip_prefix("http://"))
+        .unwrap_or(page);
+    let without_fragment = without_scheme.split('#').next().unwrap_or_default();
+    let (authority, rest) = match without_fragment.find(['/', '?']) {
+        Some(index) => without_fragment.split_at(index),
+        None => (without_fragment, ""),
+    };
+    let host = authority
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        bail!("Name the page to open, such as https://web.journal.localify/docs.");
+    }
+    let path = if rest.starts_with('/') {
+        rest.to_string()
+    } else {
+        format!("/{rest}")
+    };
+    Ok((host, path))
+}
+
+/// The public URL that serves `host`, and the public host to open: `host`
+/// itself when it is public, or the public name of a local host. A URL made
+/// for that exact local domain wins over a wildcard one above it.
+fn public_host_of<'u>(
+    urls: &'u [PublicUrl],
+    host: &str,
+) -> Result<Option<(&'u PublicUrl, String)>> {
+    if let Some(url) = urls
+        .iter()
+        .find(|url| host_of(&url.url) == host || (url.wildcard && is_environment_of(host, url)))
+    {
+        return Ok(Some((url, host.to_string())));
+    }
+    if let Some(url) = urls.iter().find(|url| url.local_domain == host) {
+        return Ok(Some((url, host_of(&url.url))));
+    }
+    for url in urls.iter().filter(|url| url.wildcard) {
+        let Some(label) = host
+            .strip_suffix(url.local_domain.as_str())
+            .and_then(|rest| rest.strip_suffix('.'))
+        else {
+            continue;
+        };
+        let public_label = PublicSlug::new(&url.slug)?
+            .environment_label(label)
+            .map_err(|error| anyhow!("{host} has no public name: {error}"))?;
+        let url_host = host_of(&url.url);
+        let parent = url_host.split_once('.').map_or("", |(_, parent)| parent);
+        return Ok(Some((url, format!("{public_label}.{parent}"))));
+    }
+    Ok(None)
 }
 
 /// Percent-encodes like JavaScript's `encodeURIComponent`, which the page
@@ -854,6 +992,69 @@ mod tests {
     }
 
     #[test]
+    fn a_page_link_signs_in_on_the_public_host_of_a_local_page_and_lands_on_it() {
+        let world = World::new();
+        let urls = world.urls();
+        urls.create(create("journal.localify", true)).unwrap();
+
+        let page = urls
+            .link("https://web--feature.journal.localify:443/orders/42?tab=a&b=c#top")
+            .unwrap();
+        assert_eq!(
+            page.url,
+            "https://journal-a8f3--web--feature.localify.fyi/orders/42?tab=a&b=c"
+        );
+        assert_eq!(
+            page.password_link.as_deref(),
+            Some(
+                "https://journal-a8f3--web--feature.localify.fyi/__localify/access?next=%2Forders%2F42%3Ftab%3Da%26b%3Dc#four-random-words-here"
+            )
+        );
+
+        for root in ["journal.localify", "https://journal-a8f3.localify.fyi/"] {
+            assert_eq!(
+                urls.link(root).unwrap().password_link.as_deref(),
+                Some(LINK)
+            );
+        }
+        let public = urls.link("journal-a8f3--web.localify.fyi/docs").unwrap();
+        assert_eq!(public.url, "https://journal-a8f3--web.localify.fyi/docs");
+    }
+
+    #[test]
+    fn a_page_link_needs_a_url_that_serves_the_page_and_its_password() {
+        let mut world = World::new();
+        let id = world
+            .urls()
+            .create(create("journal.localify", false))
+            .unwrap()
+            .value
+            .public_url
+            .url
+            .id;
+
+        for page in ["https://shop.localify/", "web.journal.localify", " "] {
+            assert!(world.urls().link(page).is_err(), "{page}");
+        }
+
+        world.passwords = InMemoryPublicUrlPasswords::new();
+        let error = world
+            .urls()
+            .link("journal.localify")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another machine"), "{error}");
+
+        world
+            .urls()
+            .set_protection(&id, ProtectionChoice::Public)
+            .unwrap();
+        let open = world.urls().link("journal.localify/docs").unwrap();
+        assert_eq!(open.url, "https://journal-a8f3.localify.fyi/docs");
+        assert_eq!(open.password_link, None);
+    }
+
+    #[test]
     fn opening_or_removing_a_url_forgets_its_password() {
         let world = World::new();
         let urls = world.urls();
@@ -980,7 +1181,7 @@ mod tests {
     #[test]
     fn the_link_encodes_the_password_like_encode_uri_component() {
         assert_eq!(
-            password_link("https://shop-1b2c.localify.fyi/", "a b#c%d/é&*'()!~._-"),
+            password_link("https://shop-1b2c.localify.fyi", "/", "a b#c%d/é&*'()!~._-"),
             "https://shop-1b2c.localify.fyi/__localify/access#a%20b%23c%25d%2F%C3%A9%26*'()!~._-"
         );
     }

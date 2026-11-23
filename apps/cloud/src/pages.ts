@@ -1,5 +1,6 @@
 // The pages the Worker itself serves on public URLs: small, self-contained
-// HTML with inline CSS and no external assets.
+// HTML with inline CSS and no external assets, in Localify's look: neutral
+// greys, Geist when the visitor has it, a near-black button, light and dark.
 
 /** Where the password form posts, on every protected host. */
 export const ACCESS_PATH = "/__localify/access";
@@ -11,24 +12,52 @@ export const ABUSE_EMAIL = "abuse@localify.dev";
 export const RETRY_AFTER_SECONDS = 60;
 
 const STYLE = `
-:root{color-scheme:light dark;--bg:#f6f6f4;--card:#fff;--text:#1b1b18;--muted:#5d5d57;--line:#d8d8d2;--accent:#1f5eff;--error:#b42318}
-@media (prefers-color-scheme:dark){:root{--bg:#121211;--card:#1c1c1a;--text:#ededea;--muted:#a3a39c;--line:#383834;--accent:#7a9dff;--error:#ff8a80}}
+:root{color-scheme:light dark;--bg:#fafafa;--card:#fff;--text:#171717;--muted:#737373;--line:#e5e5e5;--soft:#f5f5f5;--button:#171717;--button-text:#fafafa;--ring:#3b82f6;--error:#dc2626;--shadow:0 1px 0 rgba(13,13,13,.03),0 24px 48px -24px rgba(13,13,13,.14)}
+@media (prefers-color-scheme:dark){:root{--bg:#0a0a0a;--card:#171717;--text:#fafafa;--muted:#a3a3a3;--line:#262626;--soft:#1f1f1f;--button:#fafafa;--button-text:#171717;--error:#f87171;--shadow:0 1px 0 rgba(0,0,0,.4),0 24px 48px -24px rgba(0,0,0,.6)}}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{width:100%;max-width:380px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
-h1{font-size:1.25rem;margin:0 0 8px}
-p{margin:0 0 16px;color:var(--muted)}
-.host{color:var(--text);font-weight:600;word-break:break-all}
-label{display:block;font-weight:600;margin-bottom:6px}
-input{width:100%;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
-input:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
-button{margin-top:16px;width:100%;font:inherit;font-weight:600;padding:10px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
-.error{color:var(--error);margin:12px 0 0}
-a{color:var(--accent)}
-a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
-footer{margin-top:20px;font-size:.85rem;color:var(--muted)}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:32px 16px;background:var(--bg);color:var(--text);font:15px/1.6 "Geist Variable","Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;letter-spacing:-.01em;color:var(--text)}
+.brand svg{width:20px;height:20px}
+main{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:28px;box-shadow:var(--shadow)}
+.title{position:relative;display:flex;align-items:center;gap:6px}
+h1{margin:0;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-.025em}
+p{margin:12px 0 0;color:var(--muted)}
+strong{color:var(--text);font-weight:600}
+.host{margin:2px 0 0;color:var(--muted);font:13px/1.5 ui-monospace,"Geist Mono",SFMono-Regular,Menlo,monospace;word-break:break-all}
+.help summary{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;color:var(--muted);cursor:pointer;list-style:none}
+.help summary::-webkit-details-marker{display:none}
+.help summary svg{width:16px;height:16px}
+.help summary:hover,.help[open] summary{color:var(--text)}
+.tip{position:absolute;left:0;right:0;top:calc(100% + 10px);z-index:1;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card);box-shadow:var(--shadow);font-size:13px;line-height:1.55}
+.tip p{margin:0}
+.tip p+p{margin-top:6px}
+form{margin-top:20px}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+input{width:100%;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--text)}
+input::placeholder{color:var(--muted)}
+input[aria-invalid="true"]{border-color:var(--error)}
+button{display:block;margin-top:12px;width:100%;font:inherit;font-weight:500;padding:10px 14px;border:0;border-radius:10px;background:var(--button);color:var(--button-text);cursor:pointer;transition:opacity .15s}
+button:hover{opacity:.88}
+input:focus-visible,button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.error{color:var(--error);margin:8px 0 0;font-size:14px}
+a{color:var(--text);text-decoration:underline;text-decoration-color:var(--line);text-decoration-thickness:1.5px;text-underline-offset:4px}
+a:hover{text-decoration-color:currentColor}
+footer{font-size:13px;color:var(--muted)}
 footer a{color:inherit}
+.signing{display:none;align-items:center;gap:12px;color:var(--muted)}
+.spinner{flex:none;width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--text);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spinner{animation:none}}
+[data-signing-in] main>:not(.signing){display:none}
+[data-signing-in] .signing{display:flex}
 `;
+
+/** The Localify mark, drawn inline: the pages load nothing else. */
+const LOGO = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M11.1482 0.0185158C11.1968 0.0158905 11.2455 0.0135133 11.2938 0.011413C14.4354 -0.126765 17.5022 0.99433 19.8139 3.126C21.632 4.79945 22.8742 7.0053 23.3626 9.42776C23.5121 10.1899 23.5596 10.807 23.5933 11.5786C22.2809 11.5971 20.9458 11.5833 19.6304 11.5849C17.613 11.5877 15.4027 11.5998 13.4254 11.1936C11.6061 10.8199 10.2772 10.1075 9.25171 8.5354C8.77168 7.72548 8.49165 6.8926 8.28579 5.97924C8.25282 5.83291 8.20208 5.32793 8.11241 5.27506C8.00004 5.31928 7.96326 5.49565 7.94607 5.60489C7.58277 7.91266 6.44363 9.99929 4.18273 10.9262C2.77989 11.5015 1.51714 11.5418 0 11.5628C0.00588639 8.89663 1.10703 6.04532 2.8665 4.06404C5.10629 1.54196 7.82992 0.266877 11.1482 0.0185158Z"/><path d="M17.3598 12.4284C18.0767 12.3913 18.9906 12.4157 19.7218 12.4159L23.5938 12.4237C23.5145 15.4384 22.3931 18.2794 20.2646 20.4374C18.0543 22.7033 15.0265 23.9867 11.8609 23.9997C8.71918 24.0234 5.69806 22.7914 3.46888 20.5773C1.23371 18.3631 0.099189 15.5683 0.0012207 12.4408C1.56045 12.4485 2.94101 12.5104 4.39083 13.1638C6.40425 14.0511 7.54284 16.0608 7.89937 18.1583C7.92665 18.3189 7.95997 18.6549 8.11465 18.7224C8.20579 18.5903 8.29434 17.9887 8.34038 17.7949C8.61262 16.6489 9.08345 15.484 9.89292 14.6113C11.7205 12.6406 14.8568 12.5312 17.3598 12.4284Z"/></svg>`;
+
+/** A question mark in a circle: the explanation of a page sits behind it. */
+const HELP_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>`;
 
 /** Every page refuses to be framed, except the framed warning (see `framedWarningPage`). */
 function csp(frameAncestors = "'none'"): string {
@@ -48,28 +77,28 @@ const SECURITY_HEADERS: Record<string, string> = {
 /**
  * Signs in with the password a shared link carries after `#`. The fragment
  * never reaches a server, so it is read here, then cleared from the address
- * bar and history before the form posts it.
+ * bar and history before the form posts it. It runs in `<head>`, so the page
+ * shows "Signing in" from its first paint instead of the form. A page brought
+ * back from the history cache shows the form again.
  */
 const SUBMIT_LINK_PASSWORD = `const hash = location.hash.slice(1);
 if (hash) {
   history.replaceState(null, "", location.pathname + location.search);
-  try {
-    const form = document.forms[0];
-    form.password.value = decodeURIComponent(hash);
-    form.submit();
-  } catch {}
-}`;
-
-/**
- * The same for a browser that has not acknowledged the warning: it fills the
- * password in, and the visitor's `Continue` posts it with the acknowledgement.
- */
-const FILL_LINK_PASSWORD = `const hash = location.hash.slice(1);
-if (hash) {
-  history.replaceState(null, "", location.pathname + location.search);
-  try {
-    document.forms[0].password.value = decodeURIComponent(hash);
-  } catch {}
+  const root = document.documentElement;
+  root.dataset.signingIn = "";
+  addEventListener("pageshow", (event) => {
+    if (event.persisted) delete root.dataset.signingIn;
+  });
+  addEventListener("DOMContentLoaded", () => {
+    try {
+      const form = document.forms[0];
+      form.password.value = decodeURIComponent(hash);
+      form.from.value = "link";
+      form.submit();
+    } catch {
+      delete root.dataset.signingIn;
+    }
+  });
 }`;
 
 function page(
@@ -91,23 +120,47 @@ function page(
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
 <style>${STYLE}</style>
-</head>
+${nonce ? `<script nonce="${nonce}">${script}</script>\n` : ""}</head>
 <body>
+<div class="brand">${LOGO}Localify</div>
 <main>
 ${body}
-<footer>Shared with Localify · <a href="mailto:${ABUSE_EMAIL}">Report abuse</a></footer>
 </main>
-${nonce ? `<script nonce="${nonce}">${script}</script>\n` : ""}</body>
+<footer>Shared with Localify · <a href="mailto:${ABUSE_EMAIL}">Report abuse</a></footer>
+</body>
 </html>
 `;
   return new Response(method === "HEAD" ? null : html, { status, headers });
 }
 
-/** What the warning page says (ADR 0026), also on a shared link's page. */
+/**
+ * The heading every page starts with. Its explanation, when it has one, sits
+ * behind a `?` that a click, a tap or the keyboard opens, without scripts.
+ */
+function heading(title: string, help?: string): string {
+  const tip = help
+    ? `<details class="help"><summary aria-label="About this page">${HELP_ICON}</summary><div class="tip">${help}</div></details>`
+    : "";
+  return `<div class="title"><h1>${escapeHtml(title)}</h1>${tip}</div>`;
+}
+
+function hostLine(host: string): string {
+  return `<p class="host">${escapeHtml(host)}</p>`;
+}
+
+/**
+ * What the warning page says (ADR 0026), also on a shared link's page: who
+ * shared it in one line, the rest behind the `?`.
+ */
 function noticeText(host: string, login: string): string {
-  return `<h1>Before you continue</h1>
-<p><span class="host">${escapeHtml(host)}</span> is a development preview, served from a personal computer through Localify by GitHub user <a href="https://github.com/${encodeURIComponent(login)}">${escapeHtml(login)}</a>.</p>
-<p>Continue only if you trust whoever sent you this link. Never enter passwords or payment details for another site here.</p>`;
+  const owner = `<a href="https://github.com/${encodeURIComponent(login)}">${escapeHtml(login)}</a>`;
+  return `${heading(
+    "Before you continue",
+    `<p>This is a development preview, served from a personal computer through Localify by GitHub user ${owner}.</p>
+<p>Never enter passwords or payment details for another site here.</p>`,
+  )}
+${hostLine(host)}
+<p>Shared by ${owner}. Continue only if you trust the sender.</p>`;
 }
 
 export type WarningPageOptions = {
@@ -140,7 +193,7 @@ export function warningPage({
 <form method="post" action="${NOTICE_PATH}">
 <input type="hidden" name="next" value="${escapeHtml(next)}">
 <input type="hidden" name="notice" value="${escapeHtml(token)}">
-<button type="submit">Continue</button>
+<button type="submit" autofocus>Continue</button>
 </form>`,
     method,
   );
@@ -185,7 +238,10 @@ export type PasswordPageOptions = {
   error?: string;
   status?: number;
   method?: string;
-  /** The page a shared link opens: it posts the password the link carries. */
+  /**
+   * The page a shared link opens: it posts the password the link carries,
+   * with no click, warning or not (ADR 0036).
+   */
   fromLink?: boolean;
   /**
    * When this browser has not acknowledged the warning yet: the owner's login
@@ -205,25 +261,27 @@ export function passwordPage({
   notice,
 }: PasswordPageOptions): Response {
   const errorId = error ? ` aria-describedby="password-error" aria-invalid="true"` : "";
-  const intro = notice
+  const text = notice
     ? noticeText(host, notice.login)
-    : `<h1>Password required</h1>
-<p><span class="host">${escapeHtml(host)}</span> is protected. Enter the password its owner shared with you.</p>`;
-  let script: string | undefined;
-  if (fromLink) script = notice ? FILL_LINK_PASSWORD : SUBMIT_LINK_PASSWORD;
+    : `${heading(
+        "Password required",
+        "<p>Its owner protected this public URL. Enter the password they shared with you, or open the link they sent.</p>",
+      )}
+${hostLine(host)}`;
   return page(
     status,
     notice ? "Before you continue" : "Password required",
-    `${intro}
+    `${fromLink ? `<div class="signing" role="status"><span class="spinner" aria-hidden="true"></span><span>Signing in to <strong>${escapeHtml(host)}</strong>…</span></div>\n` : ""}${text}
 <form method="post" action="${ACCESS_PATH}">
 <input type="hidden" name="next" value="${escapeHtml(next)}">
-${notice ? `<input type="hidden" name="notice" value="${escapeHtml(notice.token)}">\n` : ""}<label for="password">Password</label>
-<input id="password" name="password" type="password" autocomplete="current-password" required autofocus${errorId}>
+<input type="hidden" name="from" value="">
+${notice ? `<input type="hidden" name="notice" value="${escapeHtml(notice.token)}">\n` : ""}<label for="password" class="visually-hidden">Password</label>
+<input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password" required autofocus${errorId}>
 ${error ? `<p id="password-error" class="error" role="alert">${escapeHtml(error)}</p>` : ""}
 <button type="submit">Continue</button>
 </form>`,
     method,
-    script,
+    fromLink ? SUBMIT_LINK_PASSWORD : undefined,
   );
 }
 
@@ -232,7 +290,7 @@ export function tooManyRequestsPage(method?: string): Response {
   const response = page(
     429,
     "Too many requests",
-    `<h1>Too many requests</h1>
+    `${heading("Too many requests")}
 <p>The public URLs of this owner received more requests in the last minute than Localify allows. Wait a minute, then reload this page.</p>`,
     method,
   );
@@ -244,7 +302,7 @@ export function notFoundPage(method?: string): Response {
   return page(
     404,
     "No public URL here",
-    `<h1>No public URL here</h1>
+    `${heading("No public URL here")}
 <p>Nothing is shared at this address. Check the link, or ask the person who sent it whether the URL still exists.</p>`,
     method,
   );
@@ -255,8 +313,8 @@ export function removedPage(method?: string): Response {
   return page(
     410,
     "Removed",
-    `<h1>This public URL was removed</h1>
-<p>It was taken offline for breaking the Localify terms. To report abuse, or if you think this is a mistake, write to <a href="mailto:abuse@localify.dev">abuse@localify.dev</a>.</p>`,
+    `${heading("This public URL was removed")}
+<p>It was taken offline for breaking the Localify terms. To report abuse, or if you think this is a mistake, write to <a href="mailto:${ABUSE_EMAIL}">${ABUSE_EMAIL}</a>.</p>`,
     method,
   );
 }
@@ -266,7 +324,7 @@ export function pausedPage(method?: string): Response {
   return page(
     402,
     "Paused",
-    `<h1>This public URL is paused</h1>
+    `${heading("This public URL is paused")}
 <p>Its owner's Localify Cloud plan does not cover it right now. Ask them to check their plan, then reload this page.</p>`,
     method,
   );
@@ -276,7 +334,7 @@ export function offlinePage(method?: string): Response {
   return page(
     503,
     "Offline",
-    `<h1>This public URL is offline</h1>
+    `${heading("This public URL is offline")}
 <p>The computer that serves it is not connected right now. Ask its owner to start Localify on it, then reload this page.</p>`,
     method,
   );
@@ -286,7 +344,7 @@ export function unreachablePage(method?: string): Response {
   return page(
     502,
     "Not reachable",
-    `<h1>Could not reach this public URL</h1>
+    `${heading("Could not reach this public URL")}
 <p>The computer that serves it did not answer. Reload the page in a moment. If it keeps failing, tell its owner.</p>`,
     method,
   );
@@ -296,7 +354,7 @@ export function unavailablePage(method?: string): Response {
   return page(
     503,
     "Unavailable",
-    `<h1>Public URLs are unavailable</h1>
+    `${heading("Public URLs are unavailable")}
 <p>Localify Cloud cannot serve this page right now. Try again in a few minutes.</p>`,
     method,
   );

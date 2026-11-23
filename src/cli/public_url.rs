@@ -145,6 +145,17 @@ pub fn unprotect(reference: &str, yes: bool, json_flag: bool, cloud: &CloudAdapt
     Ok(())
 }
 
+/// The link to one page: it signs a browser in, then lands on that page.
+/// The link alone, so a script or an agent can pass it on as it is.
+pub fn link(page: &str, json_flag: bool, cloud: &CloudAdapters) -> Result<()> {
+    let link = cloud.public_urls().link(page)?;
+    if wants_json(json_flag) {
+        return print_json(&link);
+    }
+    println!("{}", link.password_link.as_deref().unwrap_or(&link.url));
+    Ok(())
+}
+
 /// Serves a URL from this machine, such as after a reinstall or to move it
 /// off a machine that is gone.
 pub fn claim(reference: &str, json_flag: bool, cloud: &CloudAdapters) -> Result<()> {

@@ -1,4 +1,4 @@
-> **Amended.** [ADR 0026](0026-abuse-controls-and-shared-cookies-before-the-public-suffix-list.md) puts a warning page before the password, so a link that carries the password waits for one click.
+> **Amended.** [ADR 0026](0026-abuse-controls-and-shared-cookies-before-the-public-suffix-list.md) puts a warning page before the password, so a link that carries the password waits for one click. [ADR 0036](0036-a-link-with-the-password-signs-in-without-a-click.md) removes that click again.
 
 # Public URLs Are Protected by Default
 

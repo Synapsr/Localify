@@ -373,10 +373,11 @@ localify public-url list
 - **Protected by default.** Each URL asks for a password, generated unless you pass
   `--password`. A browser that enters it stays signed in for 7 days on that host; each
   wildcard host asks once. The link with the password,
-  `https://<slug>.localify.fyi/__localify/access#<password>`, signs a browser in without
-  typing it. The password sits after `#`, so it never reaches a server. The machine
-  that set the password keeps it to give that link again, in the app and in
-  `public-url list --json`. `protect` sets a new password and signs every browser out.
+  `https://<slug>.localify.fyi/__localify/access#<password>`, signs a browser in with no
+  click and no typing. The password sits after `#`, so it never reaches a server. The
+  machine that set the password keeps it to give that link again, in the app and in
+  `public-url list --json`. `localify public-url link https://web.journal.localify/orders/42`
+  gives the link to one page: it signs in on the right public host and lands there. `protect` sets a new password and signs every browser out.
   `unprotect`, or `--public` at creation, opens the URL to everyone.
 - **Wildcard.** `--wildcard` on a project's namespace, such as `journal.localify`,
   reaches every service and worktree under it: `journal--web.localify.fyi` opens
