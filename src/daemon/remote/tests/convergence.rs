@@ -194,13 +194,16 @@ impl Drop for Sandbox {
     }
 }
 
-/// `localify` as `cargo test` builds it, next to this test binary's folder.
+/// `localify` as `cargo test` builds it, in the profile folder above this
+/// test binary: two folders up from `target/debug/deps/` before Rust 1.100,
+/// four up from `target/debug/build/localify/<hash>/out/` since.
 pub(super) fn localify_binary() -> PathBuf {
-    let binary = std::env::current_exe()
-        .ok()
-        .and_then(|test| Some(test.parent()?.parent()?.join("localify")))
-        .filter(|binary| binary.is_file());
-    binary.expect("the localify binary is built: run `cargo test`, which builds it")
+    let test = std::env::current_exe().expect("this test binary has a path");
+    test.ancestors()
+        .skip(1)
+        .map(|folder| folder.join("localify"))
+        .find(|binary| binary.is_file())
+        .expect("the localify binary is built: run `cargo test`, which builds it")
 }
 
 /// Target B's real facts and executor, over the sandbox.
