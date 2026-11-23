@@ -3,6 +3,18 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.9.0 - 2026-11-23
+
+### New
+
+- **Open any page of a public URL already signed in.** A link with the password now
+  signs a browser in with no click, even the first time it opens the URL, and
+  `localify public-url link https://admin.journal.localify/orders/42` gives the link to
+  one exact page. Coding agents get the same through `public_url_link`, so an agent can
+  put you on the page it means from your phone. The password, warning and error pages
+  of public URLs also look like Localify now, in light and dark.
+  [Public URLs](https://github.com/Synapsr/Localify/blob/main/docs/README.md#public-urls)
+
 ## 1.8.0 - 2026-11-10
 
 ### New
