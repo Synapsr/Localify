@@ -103,13 +103,14 @@ async function servePublic(request: Request, env: Env): Promise<Response> {
   }
 
   // Localify's own paths, on every URL. A link shared while the URL had a
-  // password still carries it after `#`, and redirecting to `/#` empties the
-  // fragment, which the browser would carry to the app. The access page shows
-  // the warning itself, so a link that carries the password takes one click.
+  // password still carries it after `#`, and redirecting to `<next>#` empties
+  // the fragment, which the browser would carry to the app. A link that
+  // carries the password signs in and acknowledges the warning at once
+  // (ADR 0036).
   if (url.pathname === ACCESS_PATH) {
     if (site.protected) return handleAccess(request, env, site, host);
     await request.body?.cancel();
-    return redirect("/#");
+    return redirect(`${safeNext(url.searchParams.get("next"), host)}#`);
   }
   if (url.pathname === NOTICE_PATH) return handleNotice(request, env, site, host);
 
@@ -321,11 +322,12 @@ async function hasAccess(request: Request, env: Env, site: Site, host: string): 
 
 /**
  * `GET /__localify/access` is the page a shared link opens, with the password
- * after `#`. Never a redirect: the browser would carry the fragment to the
- * app's page. It posts the password by itself once the warning is
- * acknowledged; before that, it shows the warning and waits for `Continue`,
- * which posts the acknowledgement with the password. `POST` checks the
- * password, sets the cookies, and redirects to `next`.
+ * after `#` and the page to land on in `?next=`. Never a redirect: the browser
+ * would carry the fragment to the app's page. It posts the password by
+ * itself, with the warning's form token when this browser has not
+ * acknowledged the warning yet (ADR 0036). Opened without a password, it
+ * shows the warning's text, or the plain password page once acknowledged.
+ * `POST` checks the password, sets the cookies, and redirects to `next`.
  */
 async function handleAccess(
   request: Request,
@@ -334,21 +336,23 @@ async function handleAccess(
   host: string,
 ): Promise<Response> {
   const method = request.method;
+  const acknowledged =
+    request.headers.has(SKIP_WARNING) || (await hasNoticeCookie(request, env, site, host));
+  // The warning's text and a fresh form token, for a browser that has not
+  // acknowledged the warning.
+  const notice = async () =>
+    acknowledged
+      ? undefined
+      : { login: site.ownerLogin, token: await signNoticeForm(setting(env, "COOKIE_KEY"), host) };
+
   if (method === "GET" || method === "HEAD") {
-    const acknowledged =
-      request.headers.has(SKIP_WARNING) || (await hasNoticeCookie(request, env, site, host));
     return passwordPage({
       host,
-      next: "/",
+      next: safeNext(new URL(request.url).searchParams.get("next"), host),
       status: 200,
       method,
       fromLink: true,
-      notice: acknowledged
-        ? undefined
-        : {
-            login: site.ownerLogin,
-            token: await signNoticeForm(setting(env, "COOKIE_KEY"), host),
-          },
+      notice: await notice(),
     });
   }
   if (method !== "POST") return redirect("/");
@@ -363,17 +367,12 @@ async function handleAccess(
       next: "/",
       status: 429,
       error: "Too many attempts. Wait a minute, then try again.",
+      notice: await notice(),
     });
   }
   const form = await readForm(request);
   if (!form) return plain(413, "The form is too large.");
   const next = safeNext(form.get("next"), host);
-  // The shared link's page posts the warning's `Continue` with the password.
-  // The acknowledgement holds whether or not the password is right, and only
-  // when it comes from this exact host.
-  const notice = (await acknowledgedHere(request, env, host, form.get("notice")))
-    ? await noticeCookie(env, site, host)
-    : null;
 
   const password = form.get("password") ?? "";
   const valid =
@@ -381,23 +380,30 @@ async function handleAccess(
     site.passwordSalt !== null &&
     password !== "" &&
     (await verifyPassword(password, { hash: site.passwordHash, salt: site.passwordSalt }));
-  let response: Response;
-  if (valid) {
-    const value = await signAccess(setting(env, "COOKIE_KEY"), {
-      host,
-      urlId: site.id,
-      version: site.passwordVersion,
-    });
-    response = redirect(next);
-    response.headers.append("set-cookie", accessCookieHeader(value));
-  } else {
-    response = passwordPage({
+  if (!valid) {
+    // The link's page posts by itself, so a wrong password acknowledges
+    // nothing: the page comes back with the warning when it was not seen.
+    return passwordPage({
       host,
       next,
-      error: "That password is not right. Check it and try again.",
+      error:
+        form.get("from") === "link"
+          ? "The password in this link no longer works. Ask for a new link, or enter the password."
+          : "That password is not right. Check it and try again.",
+      notice: await notice(),
     });
   }
-  if (notice) response.headers.append("set-cookie", notice);
+  const value = await signAccess(setting(env, "COOKIE_KEY"), {
+    host,
+    urlId: site.id,
+    version: site.passwordVersion,
+  });
+  const response = redirect(next);
+  response.headers.append("set-cookie", accessCookieHeader(value));
+  // The warning's form token counts only from this exact host.
+  if (await acknowledgedHere(request, env, host, form.get("notice"))) {
+    response.headers.append("set-cookie", await noticeCookie(env, site, host));
+  }
   return response;
 }
 

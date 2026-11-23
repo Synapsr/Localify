@@ -989,6 +989,24 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "public_url_link",
+        description: "Gives the link that opens one page of a public URL already signed in (JSON): passwordLink signs the browser in with the password, with no click, and lands on the page; url is the page's public address. Pass the local page you are working on, such as https://admin.louez.localify/orders/42, or its public URL. Hand the user passwordLink, or url when the URL is open to everyone. Only the machine that set the password can make the link.",
+        params: &[required(
+            "page",
+            Kind::String,
+            "The page to open: a local URL as get_service_url gives it, with its path, or a public https://<slug>.localify.fyi URL.",
+        )],
+        uses_cwd: false,
+        read_only: true,
+        destructive: false,
+        build: |args| {
+            Args::new(&["public-url", "link"])
+                .positional(args.required("page")?)?
+                .flag("--json", true)
+                .done()
+        },
+    },
+    Tool {
         name: "public_url_claim",
         description: "Serves a public URL from this machine instead of the machine that served it, such as one that was reinstalled or is gone.",
         params: &[PUBLIC_URL],

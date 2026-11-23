@@ -1,3 +1,5 @@
+> **Amended.** [ADR 0036](0036-a-link-with-the-password-signs-in-without-a-click.md) lets a link that carries the password sign in and acknowledge the warning without a click.
+
 # Abuse Controls, and Shared Cookies Until the Public Suffix List
 
 Opening public URLs to anyone who pays brings strangers under `localify.fyi`. Localify answers with controls on every public URL, and accepts one risk it cannot remove yet. This amends ADR 0022, which relied on everyone being invited, and ADR 0021, whose links that carry the password signed a browser in without a click.

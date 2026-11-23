@@ -169,6 +169,20 @@ describe("the password", () => {
     expect(machineCalls()).toHaveLength(0);
   });
 
+  it("lands a shared link on the page in ?next=, on this host only", async () => {
+    const cases: [string, string][] = [
+      ["/orders/42?tab=items", "/orders/42?tab=items"],
+      ["https://evil.example/", "/"],
+      ["//evil.example/", "/"],
+    ];
+    for (const [next, expected] of cases) {
+      const query = new URLSearchParams({ next }).toString();
+      const page = await visit(context, `https://${host()}/__localify/access?${query}`);
+      const html = await page.text();
+      expect(html, next).toContain(`name="next" value="${expected.replaceAll("&", "&amp;")}"`);
+    }
+  });
+
   it("redirects only to a path on the same host", async () => {
     const response = await signInWithPassword(host(), "https://evil.example/");
     expect(response.headers.get("location")).toBe("/");
@@ -266,6 +280,8 @@ describe("the password", () => {
       expect(response.status, method).toBe(303);
       expect(response.headers.get("location"), method).toBe("/#");
     }
+    const deep = await visit(context, `https://${host()}/__localify/access?next=%2Forders%2F42`);
+    expect(deep.headers.get("location")).toBe("/orders/42#");
     expect(machineCalls()).toHaveLength(0);
   });
 });
@@ -816,21 +832,25 @@ describe("caching of the app's responses", () => {
 });
 
 describe("a shared link", () => {
-  it("shows the warning with the password filled in, for one click", async () => {
-    const page = await visit(context, `https://${host()}/__localify/access`, {
+  it("signs in by itself on a first visit, with the warning's token, and no click", async () => {
+    const page = await visit(context, `https://${host()}/__localify/access?next=%2Fdocs`, {
       headers: navigation,
     });
     expect(page.status).toBe(200);
     const html = await page.text();
+    // Without the fragment, or without scripts, the page is the warning with
+    // a password field.
     expect(html).toContain("Before you continue");
     expect(html).toContain("teo-goulois");
     expect(html).toContain('href="mailto:abuse@localify.dev"');
     expect(html).toContain('action="/__localify/access"');
+    expect(html).toContain('name="next" value="/docs"');
     expect(html).toMatch(/name="notice" value="\d+\.[0-9a-f]{64}"/);
     expect(html).toContain('name="password"');
+    expect(html).toContain("Signing in to");
     expect(html).toContain("location.hash");
     expect(html).toContain("history.replaceState");
-    expect(html).not.toContain("submit()");
+    expect(html).toContain("form.submit()");
     const nonce = /<script nonce="([0-9a-f-]{36})">/.exec(html)?.[1];
     expect(nonce).toBeDefined();
     expect(page.headers.get("content-security-policy")).toContain(`script-src 'nonce-${nonce}'`);
@@ -839,19 +859,24 @@ describe("a shared link", () => {
     expect(machineCalls()).toHaveLength(0);
   });
 
-  async function postLink(origin: string, notice: string, password = PASSWORD): Promise<Response> {
+  async function postLink(
+    origin: string,
+    notice: string,
+    password = PASSWORD,
+    next = "/",
+  ): Promise<Response> {
     return visit(context, `https://${host()}/__localify/access`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", origin },
-      body: new URLSearchParams({ next: "/", notice, password }).toString(),
+      body: new URLSearchParams({ next, notice, password, from: "link" }).toString(),
     });
   }
 
-  it("sets both cookies on Continue, and then opens the app", async () => {
+  it("sets both cookies, and then opens the app on the page in next", async () => {
     const notice = await formToken(`https://${host()}/__localify/access`);
-    const response = await postLink(`https://${host()}`, notice);
+    const response = await postLink(`https://${host()}`, notice, PASSWORD, "/docs?page=2");
     expect(response.status).toBe(303);
-    expect(response.headers.get("location")).toBe("/");
+    expect(response.headers.get("location")).toBe("/docs?page=2");
     const cookies = response.headers.getSetCookie();
     expect(cookies.map((cookie) => cookie.split("=")[0])).toEqual([ACCESS_COOKIE, NOTICE_COOKIE]);
     const cookie = cookies.map((value) => value.split(";")[0]).join("; ");
@@ -874,16 +899,17 @@ describe("a shared link", () => {
     ]);
   });
 
-  it("keeps the acknowledgement when the password is wrong", async () => {
+  it("acknowledges nothing when the password is wrong, and shows the warning again", async () => {
     const notice = await formToken(`https://${host()}/__localify/access`);
-    const response = await postLink(`https://${host()}`, notice, "wrong");
+    const response = await postLink(`https://${host()}`, notice, "wrong", "/docs");
     expect(response.status).toBe(401);
-    const cookies = response.headers.getSetCookie();
-    expect(cookies).toHaveLength(1);
-    expect(cookies[0]).toMatch(new RegExp(`^${NOTICE_COOKIE}=`));
+    expect(response.headers.getSetCookie()).toEqual([]);
     const html = await response.text();
-    expect(html).toContain("Password required");
-    expect(html).not.toContain('name="notice"');
+    expect(html).toContain("Before you continue");
+    expect(html).toContain("The password in this link no longer works");
+    expect(html).toMatch(/name="notice" value="\d+\.[0-9a-f]{64}"/);
+    expect(html).toContain('name="next" value="/docs"');
+    expect(html).not.toContain("<script");
   });
 
   it("signs in by itself once the warning is acknowledged", async () => {
@@ -896,6 +922,16 @@ describe("a shared link", () => {
     expect(html).toContain("Password required");
     expect(html).not.toContain('name="notice"');
     expect(html).toContain("form.submit()");
+
+    const wrong = await visit(context, `https://${host()}/__localify/access`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+      body: "password=wrong&next=%2F",
+    });
+    const again = await wrong.text();
+    expect(again).toContain("Password required");
+    expect(again).toContain("That password is not right");
+    expect(again).not.toContain('name="notice"');
   });
 });
 

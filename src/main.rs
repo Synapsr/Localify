@@ -660,6 +660,12 @@ enum PublicUrlCommands {
         yes: bool,
     },
 
+    /// Print a link that signs a browser in and opens one page, such as https://admin.journal.localify/orders/42
+    Link {
+        /// The page: a local URL that a public URL serves, or a public URL
+        page: String,
+    },
+
     /// Serve a public URL from this machine instead of the machine that serves it now
     Claim {
         /// The public URL, its slug or its id
@@ -1832,6 +1838,7 @@ fn main() -> Result<()> {
                 PublicUrlCommands::Unprotect { reference, yes } => {
                     cli::public_url::unprotect(&reference, yes, json, &cloud)
                 }
+                PublicUrlCommands::Link { page } => cli::public_url::link(&page, json, &cloud),
                 PublicUrlCommands::Claim { reference } => {
                     cli::public_url::claim(&reference, json, &cloud)
                 }
