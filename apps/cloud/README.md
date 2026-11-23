@@ -46,6 +46,7 @@ Lookups on the public path are cached in each isolate for 10 seconds. A deleted 
 | `src/cookie.ts`, `src/headers.ts`, `src/crypto.ts` | Access and notice cookies, forwarded headers, hashing |
 | `src/pages.ts`, `src/passwords.ts` | The HTML pages (warning, password, errors) and generated passwords |
 | `scripts/admin.ts` | `pnpm cloud:admin`: bans, takedowns, overrides, billing refreshes, and the duplicate subscriptions to refund |
+| `scripts/dashboard.ts`, `scripts/dashboard/` | `pnpm cloud:dashboard`: the read-only overview of every account (see "Dashboard") |
 
 ## Run locally
 
@@ -218,3 +219,40 @@ pnpm cloud:admin override teo-goulois 5 10 team --expires 2027-06-30
 ```
 
 A duplicate Pro subscription is revoked automatically and logged as an error, but never refunded by the Worker. `pnpm cloud:admin duplicates` lists each one with its orders, read live from Polar: refund the orders it marks in Polar's dashboard (Sales → Orders, reason Duplicate), and run it again later for payments that were still pending. It writes nothing.
+
+## Dashboard
+
+`pnpm cloud:dashboard` serves a read-only overview of every account, on this machine:
+
+- headline numbers: users, new ones in the last 7 and 30 days, active and serving machines, live and serving URLs, accounts per plan status, add-on units that count, bans and takedowns;
+- new sign-ups per week;
+- what needs attention: banned and `past_due` accounts, overrides ending within 30 days, and accounts at 80% or more of their URL, serving-machine or signed-in-machine limit;
+- every account in a table to sort and search, with its plan or override, its machines and live URLs against its limits, and its last activity: the latest sign-in, tunnel start, remote key, URL created or deleted, or billing event, since D1 records no visits;
+- each account on its own page, as `cloud:admin show` prints it: ban, override, billing snapshot, entitlement, machines, and each URL with its machine and its serving state.
+
+Plans, overrides and add-ons go through `src/entitlement.ts`, as in the Worker. It reads the production D1 as `CLOUDFLARE_DEPLOY_TOKEN` from Infisical, in one `wrangler d1 execute` call, when a page loads and the last read is more than 30 seconds old. The refresh button reads again, at most every 5 seconds. `--local` reads the D1 of `pnpm cloud:dev` instead.
+
+It only reads. Its database layer ([`scripts/dashboard/db.ts`](scripts/dashboard/db.ts)) refuses before sending anything a statement that is not one plain `SELECT`, no route takes input that reaches SQL, and anything but `GET` and `HEAD` gets `405`. None of its reads selects a token, a password hash, a tunnel or DNS id, a remote key or an ingress port, so none can be served. It has no ban, override, takedown or refresh action: those stay in `pnpm cloud:admin`.
+
+It needs the `PORT` Localify gives it, so start it through Localify. Once, add `apps/cloud` to the repository's Localify project as a service with a domain of its own:
+
+```bash
+localify project add-service --path apps/cloud --domain cloud-dashboard.<project-id>.localify
+```
+
+Then, from `apps/cloud`:
+
+```bash
+localify dev cloud -- pnpm cloud:dashboard              # production D1
+localify dev cloud -- pnpm cloud:dashboard --local      # the D1 of pnpm cloud:dev
+```
+
+To start it again, run the same command with `--replace`: `localify restart` would run the service's own `dev` script, `wrangler dev`.
+
+To open it from a phone, give that domain a public URL. It asks for a generated password, which is what guards the data, so keep the URL protected and never run `public-url unprotect` on it:
+
+```bash
+localify public-url create cloud-dashboard.<project-id>.localify
+```
+
+It answers only for `.localify` hosts and loopback, which a public URL's traffic arrives as. A dedicated D1 token in Infisical, with D1 Read and nothing else, would be safer than the deploy token it reads with today.

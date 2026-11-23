@@ -481,6 +481,8 @@ Refunds are not automated. A duplicate takes a checkout opened from an old link,
 
 A login is the one GitHub gave at the last sign-in, so two accounts can share one; `id:<github-id>` names either of them.
 
+`pnpm cloud:dashboard` shows every account at once, served on the operator's machine. It only reads: its database layer sends nothing but `SELECT` statements, and it has no action to take ([apps/cloud/README.md](../apps/cloud/README.md), "Dashboard").
+
 Reports arrive at `abuse@localify.dev`, linked from every page the Worker serves.
 
 ### Public traffic

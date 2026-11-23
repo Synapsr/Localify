@@ -10,7 +10,8 @@
     "deploy": "node scripts/deploy.mjs",
     "migrate": "node scripts/migrate.mjs",
     "migrate:local": "wrangler d1 migrations apply localify-cloud --local",
-    "admin": "node scripts/admin.ts"
+    "admin": "node scripts/admin.ts",
+    "dashboard": "node scripts/dashboard.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
