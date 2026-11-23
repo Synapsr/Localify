@@ -518,3 +518,54 @@ describe("routes", () => {
     expect(log).toHaveBeenCalled();
   });
 });
+
+describe("wranglerOutputAsync", () => {
+  const original = process.env.PATH;
+  let dir: string;
+
+  beforeEach(async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    dir = mkdtempSync(join(tmpdir(), "fake-wrangler-"));
+    // A wrangler that prints its first argument, or stalls when it is `stall`.
+    writeFileSync(
+      join(dir, "wrangler"),
+      '#!/bin/sh\nif [ "$1" = stall ]; then exec sleep 30; fi\necho "$1"\n',
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${dir}:${original}`;
+  });
+
+  afterEach(async () => {
+    process.env.PATH = original;
+    const { rmSync } = await import("node:fs");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns what wrangler printed", async () => {
+    const { wranglerOutputAsync } = await import("../scripts/infisical.mjs");
+    expect(await wranglerOutputAsync({}, ["hello"])).toBe("hello\n");
+  });
+
+  it("kills a stalled wrangler past its deadline, without blocking the event loop", async () => {
+    const { wranglerOutputAsync } = await import("../scripts/infisical.mjs");
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 20);
+    const started = Date.now();
+    await expect(wranglerOutputAsync({}, ["stall"], { timeoutMs: 300 })).rejects.toThrow(
+      /stopped by SIGKILL/,
+    );
+    clearInterval(timer);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(ticks).toBeGreaterThan(3);
+  });
+
+  it("kills wrangler when the signal aborts", async () => {
+    const { wranglerOutputAsync } = await import("../scripts/infisical.mjs");
+    const controller = new AbortController();
+    const read = wranglerOutputAsync({}, ["stall"], { signal: controller.signal });
+    setTimeout(() => controller.abort(), 100);
+    await expect(read).rejects.toThrow();
+  });
+});

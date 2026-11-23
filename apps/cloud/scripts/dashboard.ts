@@ -27,7 +27,9 @@ if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   process.exit(1);
 }
 
-const handler = createHandler(cachedLoader(wranglerReader(local)), {
+// Stopping kills a read in progress, so a stalled wrangler never holds the exit.
+const reads = new AbortController();
+const handler = createHandler(cachedLoader(wranglerReader(local, reads.signal)), {
   source: local ? "Local D1" : "Production D1",
 });
 const server = createServer((request, response) => {
@@ -46,6 +48,7 @@ server.listen(port, "127.0.0.1", () => {
 });
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    reads.abort();
     server.close(() => process.exit(0));
     server.closeAllConnections();
   });

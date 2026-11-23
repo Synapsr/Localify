@@ -7,7 +7,7 @@
 // CLOUDFLARE_API_TOKEN (Tunnel and DNS rights) never becomes wrangler's
 // identity: it is a secret of the Worker only.
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 /** The `/cloud` values for an Infisical environment, `prod` by default, by key. */
 export function readCloudValues(environment = "prod") {
@@ -80,6 +80,37 @@ export function wranglerOutput(values, args) {
     throw new Error(`wrangler ${args[0] ?? ""} failed:\n${result.stdout ?? ""}`);
   }
   return result.stdout;
+}
+
+/**
+ * `wranglerOutput` without blocking: for a server, which must keep answering
+ * and stopping while wrangler runs. Wrangler is killed past `timeoutMs`, or
+ * when `signal` aborts, and the promise then rejects.
+ */
+export function wranglerOutputAsync(values, args, { timeoutMs, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("wrangler", args, {
+      stdio: ["ignore", "pipe", "inherit"],
+      env: wranglerEnv(values),
+      timeout: timeoutMs,
+      signal,
+      killSignal: "SIGKILL",
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 64 * 1024 * 1024) child.kill("SIGKILL");
+    });
+    child.on("error", reject);
+    child.on("close", (status, killedBy) => {
+      if (status === 0) resolve(stdout);
+      else {
+        const how = killedBy ? `was stopped by ${killedBy}` : `failed with status ${status}`;
+        reject(new Error(`wrangler ${args[0] ?? ""} ${how}:\n${stdout}`));
+      }
+    });
+  });
 }
 
 // `node scripts/infisical.mjs <wrangler args>`, for the migration scripts.
