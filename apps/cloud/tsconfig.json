@@ -13,5 +13,5 @@
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["src", "test", "scripts/admin.ts", "worker-configuration.d.ts", "vitest.config.ts"]
+  "include": ["src", "test", "scripts/admin.ts", "scripts/dashboard.ts", "scripts/dashboard", "worker-configuration.d.ts", "vitest.config.ts"]
 }

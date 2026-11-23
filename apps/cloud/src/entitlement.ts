@@ -61,6 +61,8 @@ const SELECT_ACCOUNTS = `
 
 /** `?1` is the user id. No row for an unknown user. */
 export const ACCOUNT_SQL = `${SELECT_ACCOUNTS} WHERE u.id = ?1`;
+/** Every account, for the operator's dashboard (`scripts/dashboard.ts`). */
+export const EVERY_ACCOUNT_SQL = SELECT_ACCOUNTS;
 
 /** The row `REMOTE_CHECK_SQL` returns: the account, and a JSON array of machine ids. */
 export type RemoteCheckRow = AccountRow & { active_machines: string };
