@@ -138,7 +138,9 @@ impl Server {
             "Localify daemon starting"
         );
 
-        let dns_handle = spawn_dns_server(self.dns_port, self.listeners.lan_access);
+        // Bound before the management socket answers: a daemon that answered
+        // there never exits next because another program took the DNS port.
+        let dns_handle = spawn_dns_server(self.dns_port, self.listeners.lan_access).await?;
         let domain_accesses = self.state.load().domain_access_log();
         let launch_sessions = self.state.load().launch_sessions();
         let inventory = Arc::new(LocalInventory::new(
@@ -220,9 +222,12 @@ impl Server {
     }
 }
 
-fn spawn_dns_server(port: u16, lan_access: bool) -> tokio::task::JoinHandle<Result<()>> {
-    let dns_server = DnsServer::new(port, lan_access);
-    tokio::spawn(async move { dns_server.run().await })
+async fn spawn_dns_server(
+    port: u16,
+    lan_access: bool,
+) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    let dns = DnsServer::new(port, lan_access).bind().await?;
+    Ok(tokio::spawn(dns.serve()))
 }
 
 fn spawn_reload_listener(
