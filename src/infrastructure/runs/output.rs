@@ -954,8 +954,10 @@ mod tests {
             Acquired::Busy
         ));
         drop(held);
+        // Free once every copy of its descriptor is closed: a child another
+        // test forks meanwhile keeps one until it execs.
         assert!(matches!(
-            FinalizeLock::acquire_within(&run, Duration::ZERO).unwrap(),
+            FinalizeLock::acquire_within(&run, Duration::from_secs(10)).unwrap(),
             Acquired::Locked(_)
         ));
 

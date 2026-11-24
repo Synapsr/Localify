@@ -1139,10 +1139,13 @@ mod tests {
 
         assert!(matches!(second, Admission::Running(None)));
         drop(lock);
-        assert!(matches!(
-            store.lock(&key("web")).unwrap(),
-            Admission::Admitted(_)
-        ));
+        // Free once every copy of its descriptor is closed: a child another
+        // test forks meanwhile keeps one until it execs.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(store.lock(&key("web")).unwrap(), Admission::Admitted(_)) {
+            assert!(Instant::now() < deadline, "the lock was never released");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// What an older version recorded for `pid`: the start `ps` printed.

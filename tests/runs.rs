@@ -1160,7 +1160,8 @@ fn a_stop_whose_executor_dies_goes_on_only_under_the_lock() {
             finisher.stop(dir.path(), &recorded_session("boot-a"), true)
         });
         // The executor dies of its SIGTERM; another finisher then takes the lock.
-        let died = wait_until(Duration::from_secs(5), || {
+        // Its journal is written before the signal, which a busy disk delays.
+        let died = wait_until(Duration::from_secs(30), || {
             let signals = table.signals.lock().unwrap();
             signals
                 .iter()
