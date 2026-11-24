@@ -495,10 +495,14 @@ impl<'a> Stopping<'a> {
     }
 
     /// The first Ctrl+C: SIGINT to whoever no terminal reached (see
-    /// [`interrupt_targets`]).
-    fn interrupt(&mut self, now: Instant, scan: &[ProcessInfo]) {
+    /// [`interrupt_targets`]). The tree is scanned again first: a Ctrl+C can
+    /// come in after the loop decided not to scan, and a process the service
+    /// started since the last scan, left out of the SIGINT, would be orphaned
+    /// by the service's exit, out of reach of the stop.
+    fn interrupt(&mut self, now: Instant) {
+        let scan = self.track();
         let terminal_group = terminal_foreground_group();
-        let targets = interrupt_targets(&self.targets_on_interrupt(), scan, terminal_group);
+        let targets = interrupt_targets(&self.targets_on_interrupt(), &scan, terminal_group);
         self.signal(&targets, Signal::Interrupt);
         self.interrupted_since = Some(now);
     }
@@ -619,7 +623,6 @@ fn supervise(
     };
     let mut stopping = Stopping::new(launch, root);
     let mut next_scan = started;
-    let mut scan = Vec::new();
     let status = loop {
         #[cfg(test)]
         drop(stops.poll_gate.lock());
@@ -630,7 +633,7 @@ fn supervise(
         // Every process is scanned only as often as the run's state needs.
         let busy = stopping.stopping() || expiring || stops.stopping();
         if busy || now >= next_scan {
-            scan = stopping.track();
+            stopping.track();
             next_scan = now
                 + if busy {
                     SCAN_WHILE_STOPPING
@@ -654,7 +657,7 @@ fn supervise(
             stops.lose_terminal(&stopping);
         }
         // Before the exit: a service a Ctrl+C just ended leaves its stop to run.
-        respond_to_stop_requests(&mut stopping, stops, now, &scan);
+        respond_to_stop_requests(&mut stopping, stops, now);
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
@@ -671,9 +674,9 @@ fn supervise(
     }
     // The rest is a stop or a cleanup: every SCAN_WHILE_STOPPING.
     let cleanup = loop {
-        let scan = stopping.track();
+        stopping.track();
         let now = Instant::now();
-        respond_to_stop_requests(&mut stopping, stops, now, &scan);
+        respond_to_stop_requests(&mut stopping, stops, now);
         let left = stopping.targets();
         if left.is_empty() {
             break Ok(());
@@ -703,15 +706,10 @@ fn supervise(
 /// Turns pending stop requests into a stop: a Ctrl+C, or a SIGTERM already
 /// forwarded to the service, whose survivors get SIGKILL after the grace
 /// period. A SIGHUP is only forwarded.
-fn respond_to_stop_requests(
-    stopping: &mut Stopping<'_>,
-    stops: &StopRequests,
-    now: Instant,
-    scan: &[ProcessInfo],
-) {
+fn respond_to_stop_requests(stopping: &mut Stopping<'_>, stops: &StopRequests, now: Instant) {
     let presses = stops.presses();
     if presses > 0 && stopping.interrupted_since.is_none() {
-        stopping.interrupt(now, scan);
+        stopping.interrupt(now);
     }
     if stops.terminated.load(Ordering::SeqCst) && stopping.terminated_since.is_none() {
         stopping.terminated_since = Some(now);
