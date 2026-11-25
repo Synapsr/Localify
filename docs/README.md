@@ -377,8 +377,9 @@ localify public-url list
   click and no typing. The password sits after `#`, so it never reaches a server. The
   machine that set the password keeps it to give that link again, in the app and in
   `public-url list --json`. `localify public-url link https://web.journal.localify/orders/42`
-  gives the link to one page: it signs in on the right public host and lands there. `protect` sets a new password and signs every browser out.
-  `unprotect`, or `--public` at creation, opens the URL to everyone.
+  gives the link to one page: it signs in on the right public host and lands there.
+  `protect` sets a new password and signs every browser out. `unprotect`, or `--public`
+  at creation, opens the URL to everyone.
 - **Wildcard.** `--wildcard` on a project's namespace, such as `journal.localify`,
   reaches every service and worktree under it: `journal--web.localify.fyi` opens
   `web.journal.localify`, and `journal--web--feature.localify.fyi` opens
@@ -627,6 +628,7 @@ for debug output. `localify <command> --help` lists the rest.
 | `localify subscribe [--yearly \| --machines N \| --url-packs N]` | Start Pro, or add capacity |
 | `localify billing` | Manage the subscription |
 | `localify public-url create\|list\|remove\|protect\|unprotect\|claim` | Manage public URLs |
+| `localify public-url link <page>` | Print the link that signs a browser in and opens that page |
 | `localify machines [pair\|unpair\|remove\|settings]` | Pair machines and choose what they may do here |
 | `localify services status\|logs\|dev\|stop\|restart ... --machine <m>` | The same on another machine |
 | **Other** | |
