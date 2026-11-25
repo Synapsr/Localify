@@ -3,6 +3,17 @@
 What changes for people using Localify, one section per version. The command line
 and the desktop app share the same version.
 
+## 1.9.1 - 2026-11-25
+
+### Fixed
+
+- `localify dev` started right after a service's run ended now starts it, instead of
+  saying it is already running.
+- Ctrl+C now stops a process the service started just before it, instead of leaving
+  that process running after the service stopped.
+- When another program holds Localify's DNS port, the daemon now refuses to start and
+  names the port, instead of starting and then stopping a moment later.
+
 ## 1.9.0 - 2026-11-23
 
 ### New
