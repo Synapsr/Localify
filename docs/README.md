@@ -882,8 +882,16 @@ curl http://localhost:3000       # for a domain you registered by hand
 
 ### Ports already in use
 
-If the daemon can't start because ports 80, 443 or 1053 are taken, find what holds them,
-then stop it or [change Localify's ports](#configuration):
+When another program holds Localify's DNS port, the daemon doesn't start, and its log
+names the port with a line like
+`Failed to open the DNS port 127.0.0.1:1053. Another program may hold it`:
+
+```bash
+localify logs -n 20
+```
+
+If ports 80, 443 or 1053 are taken, find what holds them, then stop it or
+[change Localify's ports](#configuration):
 
 ```bash
 sudo lsof -i :80

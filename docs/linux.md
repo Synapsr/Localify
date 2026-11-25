@@ -201,12 +201,13 @@ If missing, re-run `localify install`.
 
 ### Port Already in Use
 
-On Linux, check which process is using a port with `ss`:
+On Linux, check which process is using a port with `ss`. Localify's DNS port is UDP as
+well as TCP, so add `-u` for 1053:
 
 ```bash
 sudo ss -tlnp | grep ':80\b'
 sudo ss -tlnp | grep ':443\b'
-sudo ss -tlnp | grep ':1053\b'
+sudo ss -tulnp | grep ':1053\b'
 ```
 
 Common culprits: Apache (`apache2`), nginx, or another
