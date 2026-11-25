@@ -1247,12 +1247,13 @@ pub(crate) struct Admitted {
 /// service's lock.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Takes the service's lock for this launch. A run that is already going is
-/// stopped, as `stop` would, and finalized first when `replace` says so. Only
-/// the run chosen is replaced, the one a person agreed to stop or else the
-/// one seen first: when the service holds another run once the lock is
-/// free, someone else restarted it, and this launch starts nothing, so two
-/// replacing launches never both start. A run of an older version is never
+/// Takes the service's lock for this launch. A run that already ended is
+/// waited for while its executor lets go of the lock. A run that is already
+/// going is stopped, as `stop` would, and finalized first when `replace`
+/// says so. Only the run chosen is replaced, the one a person agreed to stop
+/// or else the one seen first: when the service holds another run once the
+/// lock is free, someone else restarted it, and this launch starts nothing,
+/// so two replacing launches never both start. A run of an older version is never
 /// stopped here. Returns, with the lock, the run this launch takes over: the
 /// one it stopped or was approved to replace, which the record still names.
 /// Only the launch that wins the lock gets it, so only the winner records
@@ -1270,6 +1271,7 @@ pub(crate) fn admit(
         _ => None,
     };
     let mut stopped_at: Option<Instant> = None;
+    let mut ended_at: Option<Instant> = None;
     loop {
         let running = match store.lock(key)? {
             Admission::Admitted(lock) => {
@@ -1317,6 +1319,20 @@ pub(crate) fn admit(
             && *chosen != stopped
         {
             bail!("{}", restarted_by_someone_else(key, &stopped));
+        }
+        if stopped_at.is_none() && store.is_letting_go(&running) {
+            // The run already ended on its own: its executor is letting go of
+            // the lock, and the service is not running any more.
+            let since = *ended_at.get_or_insert_with(Instant::now);
+            if since.elapsed() >= RELEASE_TIMEOUT {
+                bail!(
+                    "'{}' has ended, but its launcher (PID {}) still holds the service's lock. Try again in a moment.",
+                    key.service_id,
+                    running.pid
+                );
+            }
+            thread::sleep(Duration::from_millis(100));
+            continue;
         }
         if let Some(since) = stopped_at {
             // The run just stopped is letting go of the lock.
@@ -2801,6 +2817,55 @@ mod tests {
         assert!(!answer("later\n").0);
         // No answer at all, as from a closed input, is a no.
         assert!(!answer("").0);
+    }
+
+    /// A run that ended on its own, whose executor has yet to let go of the
+    /// service's lock, is not running any more: the next launch waits for the
+    /// lock, starts, and replaces nothing.
+    #[test]
+    fn a_launch_waits_for_a_run_that_ended_to_let_go_of_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunningServiceStore::new(dir.path().to_path_buf());
+        let key = ServiceKey {
+            project_id: "app".into(),
+            environment: None,
+            service_id: "web".into(),
+        };
+        // This test process is the executor.
+        let lock = store.lock(&key).unwrap().admitted();
+        let run_id = RunId::generate().unwrap();
+        store
+            .register(
+                &lock,
+                NewRun {
+                    key: key.clone(),
+                    run_id: run_id.clone(),
+                    url: "https://web.localify".into(),
+                    port: 3000,
+                    origin: ServiceOrigin::Background,
+                    profile: None,
+                    output: Some(RunOutput::Pipe),
+                },
+            )
+            .unwrap();
+        let error = admit(&store, &key, Replace::No, &|| Ok(())).err().unwrap();
+        assert!(error.to_string().contains("is already running"), "{error}");
+
+        // Its end, as the executor records it right before it lets go.
+        run_output::publish_end(
+            &store.run_dir(&run_id),
+            &RunEnd::now(EndReason::Complete, 0),
+        )
+        .unwrap();
+        store.mark_exited(&key, &run_id, Some(3)).unwrap();
+        let letting_go = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            drop(lock);
+        });
+        let admitted = admit(&store, &key, Replace::No, &|| Ok(())).unwrap();
+        letting_go.join().unwrap();
+
+        assert_eq!(admitted.replaces, None);
     }
 
     fn test_service(id: &str, root_path: &str, service_path: Option<&str>) -> ConfiguredService {

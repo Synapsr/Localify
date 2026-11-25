@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use simple_dns::rdata::{A, AAAA, RData};
 use simple_dns::{CLASS, Name, Packet, PacketFlag, QTYPE, Question, RCODE, ResourceRecord, TYPE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -86,7 +86,10 @@ impl DnsServer {
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    /// Binds the DNS sockets. The daemon does this before it answers on its
+    /// management socket, so a port another program took fails its start
+    /// instead of ending a daemon that already answered.
+    pub async fn bind(self) -> Result<BoundDns> {
         let (ipv4_ip, ipv6_ip) = if self.lan_access {
             (Ipv4Addr::UNSPECIFIED, Ipv6Addr::UNSPECIFIED)
         } else {
@@ -95,9 +98,14 @@ impl DnsServer {
         let ipv4_addr = SocketAddr::from((ipv4_ip, self.port));
         let ipv6_addr = SocketAddr::from((ipv6_ip, self.port));
 
-        // Bind UDP sockets
-        let udp_v4 = UdpSocket::bind(ipv4_addr).await?;
-        let tcp_v4 = TcpListener::bind(ipv4_addr).await?;
+        let in_use = || {
+            format!(
+                "Failed to open the DNS port {ipv4_addr}. Another program may hold it: check with lsof -nP -i :{}",
+                self.port
+            )
+        };
+        let udp_v4 = UdpSocket::bind(ipv4_addr).await.with_context(in_use)?;
+        let tcp_v4 = TcpListener::bind(ipv4_addr).await.with_context(in_use)?;
 
         // IPv6 binds may fail on Linux where the IPv4 dual-stack socket already
         // covers both protocols. This is fine — we just skip IPv6-specific listeners.
@@ -119,8 +127,37 @@ impl DnsServer {
             );
         }
 
-        let ttl = self.ttl;
-        let resolver = self.ip_resolver.clone();
+        Ok(BoundDns {
+            udp_v4,
+            tcp_v4,
+            udp_v6,
+            tcp_v6,
+            ttl: self.ttl,
+            resolver: self.ip_resolver,
+        })
+    }
+}
+
+/// The DNS server with its sockets bound, ready to serve.
+pub struct BoundDns {
+    udp_v4: UdpSocket,
+    tcp_v4: TcpListener,
+    udp_v6: Option<UdpSocket>,
+    tcp_v6: Option<TcpListener>,
+    ttl: u32,
+    resolver: Arc<IpResolver>,
+}
+
+impl BoundDns {
+    pub async fn serve(self) -> Result<()> {
+        let Self {
+            udp_v4,
+            tcp_v4,
+            udp_v6,
+            tcp_v6,
+            ttl,
+            resolver,
+        } = self;
 
         tokio::select! {
             r = serve_udp(udp_v4, ttl, resolver.clone()) => r,

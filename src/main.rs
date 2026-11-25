@@ -374,8 +374,9 @@ enum Commands {
     /// This machine's inventory, as JSON, from the daemon (docs/remote-machines.md)
     #[command(hide = true)]
     Inventory {
-        /// The revision already held, `<epoch>:<rev>`: an unchanged snapshot is not sent again
-        #[arg(long, value_name = "EPOCH:REV")]
+        /// The revision already held, `<epoch>:<rev>`: an unchanged snapshot is not sent again.
+        /// An epoch is base64url, so it may start with `-`
+        #[arg(long, value_name = "EPOCH:REV", allow_hyphen_values = true)]
         have: Option<String>,
     },
 
@@ -1902,5 +1903,17 @@ mod tests {
         }
         let error = subscribe(&["--machines", "21"]).err().unwrap().to_string();
         assert!(error.contains("1 to 20"), "{error}");
+    }
+
+    /// One epoch in 64 starts with `-`, as base64url may: it is still the
+    /// revision held, not an option.
+    #[test]
+    fn inventory_reads_a_revision_whose_epoch_starts_with_a_hyphen() {
+        let cli = Cli::try_parse_from(["localify", "inventory", "--have", "-1aB_c:3"]).unwrap();
+
+        let Commands::Inventory { have } = cli.command else {
+            panic!("not the inventory");
+        };
+        assert_eq!(have.as_deref(), Some("-1aB_c:3"));
     }
 }

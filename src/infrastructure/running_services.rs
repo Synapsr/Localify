@@ -28,7 +28,7 @@ use crate::infrastructure::runs::finish::{
     CLEANUP_WAIT, Finish, Finisher, Membership, RunSession, membership,
 };
 use crate::infrastructure::runs::launches::{
-    ExitReason, LaunchExit, LaunchRecords, TEMPORARY_MAX_AGE, reconcile_unresolved,
+    ExitReason, LaunchExit, LaunchRecord, LaunchRecords, TEMPORARY_MAX_AGE, reconcile_unresolved,
     sweep_temporaries,
 };
 use crate::infrastructure::runs::output::{self, plain_lines};
@@ -433,6 +433,23 @@ impl RunningServiceStore {
             _file: file,
             key: key.clone(),
         }))
+    }
+
+    /// Whether `record`'s run is over and only its executor has yet to let go
+    /// of the service's lock: the executor still runs, and its exit is
+    /// recorded, in the service's record or, a moment before that, in its
+    /// launch record. A launch then waits for the lock instead of reporting
+    /// a run that already ended as running.
+    pub fn is_letting_go(&self, record: &RunningService) -> bool {
+        let Some(run_id) = record.run_id() else {
+            return false;
+        };
+        let ended = record.exit.is_some()
+            || matches!(
+                self.launches().read(run_id),
+                Ok(Some(LaunchRecord::Admitted(launch))) if launch.exit.is_some()
+            );
+        ended && record.executor_runs()
     }
 
     /// The next launcher's part in ending the previous run, through the same
@@ -1122,10 +1139,13 @@ mod tests {
 
         assert!(matches!(second, Admission::Running(None)));
         drop(lock);
-        assert!(matches!(
-            store.lock(&key("web")).unwrap(),
-            Admission::Admitted(_)
-        ));
+        // Free once every copy of its descriptor is closed: a child another
+        // test forks meanwhile keeps one until it execs.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(store.lock(&key("web")).unwrap(), Admission::Admitted(_)) {
+            assert!(Instant::now() < deadline, "the lock was never released");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// What an older version recorded for `pid`: the start `ps` printed.
